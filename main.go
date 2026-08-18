@@ -30,7 +30,7 @@ func main() {
 	handshake := flag.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
 	configPath := flag.String("config", "", "path to a session config JSON (see config.example.json); if unset, auto-loads "+defaultSessionConfigPath()+" when present. Explicit -cs-* flags override individual config fields.")
 	noConfig := flag.Bool("no-config", false, "skip loading any session config, even the default file -- for a plain guest/email-flow run when a session config is also present")
-	decodeStream := flag.String("decode-stream", "", "decode a reassembled raw TCP byte stream file (see docsite: Capturing and decoding traffic) and print every SFS2X packet, then exit -- no login, no network connection at all")
+	decodeStream := flag.String("decode-stream", "", "decode a reassembled raw TCP byte stream file (see docs/capturing-and-decoding-traffic.mdx) and print every SFS2X packet, then exit -- no login, no network connection at all")
 	decodeLabel := flag.String("decode-label", "", "prefix label for -decode-stream output lines, e.g. \"c2s\" or \"s2c\" (default: \"stream\")")
 	flag.Parse()
 

@@ -46,7 +46,7 @@ So a full `mail.read` request is schematically `{c:1, a:13, p:{c:"mail.read", r:
 | `0x80` | binary | always set |
 | `0x40` | encrypted | always set — see XOR "encryption" below |
 | `0x20` | compressed | set iff serialized payload > 1024 bytes (zlib deflate, level 9) |
-| `0x10` | useLZ4 (repurposed) | dead on send in this build; on receive the "LZ4" bit actually triggers **Zstandard** decompression, not LZ4 — leftover naming from a migration. **Implemented** — `ReadPacket` (`goclient/packet.go`) previously detected this branch correctly but just returned an error instead of decompressing, which read as connection-closed; now decodes via `github.com/klauspost/compress/zstd`, confirmed live against the server's ~313KB Zstd-compressed init bootstrap push |
+| `0x10` | useLZ4 (repurposed) | dead on send in this build; on receive the "LZ4" bit actually triggers **Zstandard** decompression, not LZ4 — leftover naming from a migration. **Implemented** — `ReadPacket` (`packet.go`) previously detected this branch correctly but just returned an error instead of decompressing, which read as connection-closed; now decodes via `github.com/klauspost/compress/zstd`, confirmed live against the server's ~313KB Zstd-compressed init bootstrap push |
 | `0x08` | bigSized | set iff payload > 65535 bytes → 4-byte length instead of 2 (`BitSwarmManager.WriteBinaryData`, `Smartfox2xLw.decompiled.cs:13563` — the Unity SFS2X SDK this game actually embeds; see the correction note below) |
 | `0x04` | forward | off by default; appends a 2-byte source-shard id |
 

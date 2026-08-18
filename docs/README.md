@@ -3,7 +3,7 @@
 Documentation site for an unofficial, from-the-APK reverse-engineering effort covering *Last War:
 Survival Game*'s (`com.fun.lastwar.gp`) network protocol, crypto, and file formats — assembled for
 interoperability research, i.e. understanding the client-server contract well enough to build a
-compatible, from-scratch client (`goclient/`, in the parent directory).
+compatible, from-scratch client (source at the repository root, one level up from `docs/`).
 
 21 pages, organized to mirror the underlying research: bootstrap/crypto/wire-protocol fundamentals,
 the full command and entity-ID catalogs, per-domain gameplay coverage (city, military, social,
@@ -48,7 +48,7 @@ without notice. A few things matter for keeping it trustworthy over time:
   "confirmed" language just because it sounds more authoritative.
 - Avoid session-relative language ("tonight," "this pass," "just tried") — write as if a reader
   is opening the page months later with no idea when it was authored.
-- When a fix in `goclient/` changes what's true (a new confirmed building type, a corrected
+- When a fix in the Go client (repository root) changes what's true (a new confirmed building type, a corrected
   command, a newly-resolved open question), update the relevant page(s) *and* check
   `open-questions.mdx` / `research-pass.mdx` for anything that now contradicts the change.
 

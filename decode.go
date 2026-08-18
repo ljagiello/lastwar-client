@@ -8,7 +8,7 @@ import (
 )
 
 // DecodeStreamFile reads a reassembled, single-direction raw TCP byte
-// stream (see docsite: "Capturing and decoding traffic") containing
+// stream (see docs/capturing-and-decoding-traffic.mdx) containing
 // back-to-back framed SFS2X packets, and prints each one in human-readable
 // form to stdout. This is the exact same ReadPacket/DecodeObject this
 // client uses on its own live connection (packet.go, sfsobject.go) --

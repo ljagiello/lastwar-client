@@ -53,10 +53,10 @@ Look for the entry to port `17783` with the longest duration and the most frames
 
 ## Step 3 — reassemble
 
-TCP delivers a byte stream, not discrete application messages, and packets can arrive out of order or get retransmitted — so the two directions need reassembling by sequence number before they're decodable. `goclient/tools/reassemble_stream.py` does this:
+TCP delivers a byte stream, not discrete application messages, and packets can arrive out of order or get retransmitted — so the two directions need reassembling by sequence number before they're decodable. `tools/reassemble_stream.py` does this:
 
 ```bash
-python3 goclient/tools/reassemble_stream.py capture.pcap <tcp-stream-index> <client-ip> stream5
+python3 tools/reassemble_stream.py capture.pcap <tcp-stream-index> <client-ip> stream5
 # writes stream5_c2s.bin and stream5_s2c.bin
 ```
 
@@ -67,10 +67,9 @@ This is deliberately not `tshark -z follow,tcp`, which reassembles by arrival or
 The Go client itself can decode a reassembled stream file directly, via `-decode-stream`:
 
 ```bash
-cd goclient
 go build -o lastwar-client .
-./lastwar-client -decode-stream ../stream5_c2s.bin -decode-label c2s
-./lastwar-client -decode-stream ../stream5_s2c.bin -decode-label s2c
+./lastwar-client -decode-stream stream5_c2s.bin -decode-label c2s
+./lastwar-client -decode-stream stream5_s2c.bin -decode-label s2c
 ```
 
 This prints every SFS2X packet in the stream, one line per packet:
@@ -80,7 +79,7 @@ This prints every SFS2X packet in the stream, one line per packet:
 ```
 
 <Tip>
-  **Why this can't drift out of sync.** `-decode-stream` isn't a separate tool with its own copy of the codec — it's a thin wrapper (`goclient/decode.go`) around the exact same `ReadPacket` (`packet.go`) and `DecodeObject` (`sfsobject.go`) the client uses on its own live connection. Any fix or extension to the real codec is automatically reflected the next time you decode a capture, with no manual sync step and no risk of the decoder quietly reading stale logic.
+  **Why this can't drift out of sync.** `-decode-stream` isn't a separate tool with its own copy of the codec — it's a thin wrapper (`decode.go`) around the exact same `ReadPacket` (`packet.go`) and `DecodeObject` (`sfsobject.go`) the client uses on its own live connection. Any fix or extension to the real codec is automatically reflected the next time you decode a capture, with no manual sync step and no risk of the decoder quietly reading stale logic.
 </Tip>
 
 ## Reading the output
