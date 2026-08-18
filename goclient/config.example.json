@@ -1,0 +1,10 @@
+{
+  "ip": "203.0.113.10",
+  "port": 17783,
+  "zone": "your-real-zone-e.g.-APS1234",
+  "gameUid": "your-real-composite-gameUid",
+  "deviceId": "your-real-device-id_n3d",
+  "shumeiBoxId": "your-real-shumei-fingerprint-token",
+  "accessToken": "your-real-access-token-from-a-captured-login",
+  "iosMode": true
+}

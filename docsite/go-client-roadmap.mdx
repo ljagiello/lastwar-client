@@ -1,0 +1,168 @@
+---
+title: "Go client implementation roadmap"
+description: "The recommended build order for a from-scratch Go client, plus a step-by-step guide to building, configuring, and actually running the researcher's own Go implementation."
+---
+
+import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
+
+<LiveVerificationStatus />
+
+Everything documented elsewhere in this dossier translated into a build order. Bootstrap first, core loop second, everything else is additive.
+
+## Phase 1 — Bootstrap (nothing else works without this)
+
+1. `GET getlsu3dversion.php`, extract `resMsg` (RSA pubkey) and the answering host.
+2. Implement the GSL RSA-PKCS1v15 + AES-256-ECB-PKCS7 envelope ([Gate-server RSA+AES handshake](/gate-server-crypto)) — Go has no stdlib ECB mode, write the trivial 16-byte-block loop.
+3. `POST getserverlist.php`, parse `serverList[]`, pick a server, persist `at`/`rt` tokens.
+4. Open a plain TCP socket to `ip:port`. Implement the packet envelope, the length-derived XOR "encryption," zlib compression, and the `SFSObject` codec ([SFS2X wire protocol](/wire-protocol)).
+5. Send SFS `Login` with the ~50-field parameter object ([Identity, login & session](/auth)), including the `SecurityCode`/`OneCode`/`CoreV` MD5 constructions.
+6. Wait for `init.before` → `init` → `init.after`. Capture `chatToken` if chat is needed later.
+7. Start a 4-second `PingPongRequest` heartbeat.
+
+## Phase 2 — Core loop
+
+Build the command dispatch table directly from the extracted `cmd-data` catalog (see [Command reference](/command-reference) for the row schema and how to regenerate it — don't hand-transcribe the ~3,178 rows by hand). Implement, in order: **City/Building** → **Military/Army** (the base-building + troop loop) → **World Map** (needed for march/PVE) → **Alliance + Chat + Mail** (high command-count payoff) → **Hero** → **Shop/Economy**.
+
+## Phase 3 — Defer
+
+Season (754 cmds) and Activity (900 cmds) are recurring/time-limited live-ops content — 54% of the entire protocol surface by command count, and it churns every patch. Implement only if a specific feature is explicitly wanted; treating either as a monolith is not advisable given how fragmented each sub-feature's schema is.
+
+## Crypto primitives checklist
+
+| Primitive | Go path |
+|---|---|
+| RSA PKCS1v15 encrypt | `crypto/rsa.EncryptPKCS1v15` — drop-in |
+| AES-256-ECB-PKCS7 | `crypto/aes` + hand-rolled block loop (stdlib omits ECB deliberately) |
+| MD5-hex-as-key | `hex.EncodeToString(md5.Sum(...))` — exact match |
+| URL-safe base64, no padding | `base64.URLEncoding.WithPadding(base64.NoPadding)` |
+| ChaCha8 (patch obfuscation) | hand-rolled — `x/crypto/chacha20` is hardcoded to 20 rounds |
+| zlib inflate/deflate | `compress/zlib` — stdlib |
+| Zstandard (battle reports, LZ4-flagged packets) | `github.com/klauspost/compress/zstd` |
+| bsdiff/bspatch (table/asset patches) | `github.com/gabstv/go-bsdiff` or similar |
+
+---
+
+## Running the Go client
+
+The roadmap above was actually built — `goclient/` is a from-scratch Go reimplementation of this protocol, live-tested against production (see [Live validation against production](/live-validation) for the full writeup of what's confirmed against live production servers). It's **fully working and live-confirmed** for GSL crypto, SFS2X packet framing (including Zstandard decompression), the SFSObject codec, brand-new-guest-account login, email-verification account binding, reconnecting into an *established* real account's live game state, resource collection across 13 confirmed building types (Farmland, Iron Mine, Gold Mine, Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, and the four Season 6 Spore Factory tiers — 7 more building types are wired in but still unconfirmed, see the building-type table), and a growing set of account-level automations, none of which are building-`uuid`-scoped: the "Armed Truck" idle reward (`lw.pve.idle.reward`), greeting city visitors (`visitor.operate`), bulk-helping alliance members (`al.help.all`), claiming all alliance gifts (`alliance.reward.allreceive`), claiming all mail (`chat.get.system.mails` + `mail.reward.batch`), donating to the alliance's currently-recommended tech (`science.data.refresh` + `al.science.donate`), and both once-a-day VIP claims (`vip.add.login.score`, `vip.get.every.day.reward`) — see [Live validation against production](/live-validation) for the full writeup of each.
+
+<Note>
+  **Not yet general-purpose.** The reconnect path currently needs a session config captured from a real client login (see below) rather than deriving one from scratch. A from-scratch login using `-cs-ios`-equivalent identity from the very first GSL call hasn't been tried yet.
+</Note>
+
+This section walks through going from a clean checkout to a working `-collect` run.
+
+<Steps>
+  <Step title="Build">
+    ```bash
+    go build -o lastwar-client .
+    go test ./...
+    ```
+  </Step>
+  <Step title="Set up a session config (recommended)">
+    Reconnecting into an established account needs several values that can only come from a real client's own login (device ID, access token, ShuMei fingerprint, ...). Rather than typing them on the command line every time, put them in a JSON file:
+
+    ```bash
+    cp config.example.json ~/.lastwar_goclient_session.json
+    chmod 600 ~/.lastwar_goclient_session.json
+    # then edit it with your own real values
+    ```
+
+    `~/.lastwar_goclient_session.json` is auto-loaded on every run if present — no flag needed. To use a different file, pass `-config /path/to/file.json`. Individual `-cs-*` flags still override whatever the config file says, for one-off tests.
+
+    ```json
+    {
+      "ip": "203.0.113.10",
+      "port": 17783,
+      "zone": "your-real-zone",
+      "gameUid": "your-real-composite-gameUid",
+      "deviceId": "your-real-device-id_n3d",
+      "shumeiBoxId": "your-real-shumei-fingerprint-token",
+      "accessToken": "your-real-access-token-from-a-captured-login",
+      "iosMode": true
+    }
+    ```
+
+    **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in, since the SFS2X game socket is plain TCP with no TLS) and decode the `Login` request — see [Capturing and decoding traffic](/capturing-and-decoding-traffic) for the exact, reproducible pipeline. `gameUid`/`ip`/`port`/`zone` also show up in a GSL `getserverlist` response's `serverList[]` entries. The access token is not single-use, but it *is* bound to the platform identity (`iosMode`) it was issued under, and it will eventually need refreshing from a fresh capture.
+
+    <Warning>
+      This file contains live credentials for a real account — keep it out of version control. It's already outside the repo, in your home directory, and `chmod 600`'d above; don't move it into `goclient/` or commit it anywhere.
+    </Warning>
+  </Step>
+  <Step title="Run a collection pass">
+    ```bash
+    # One-time setup above, then everything below just works with no flags.
+
+    # Collect resources from all confirmed buildings, the Armed Truck idle reward, greet visitors,
+    # help alliance members, claim all mail and alliance gifts, donate to the recommended alliance tech,
+    # and claim both daily VIP bonuses:
+    ./lastwar-client -collect
+
+    # Just list buildings without collecting:
+    ./lastwar-client -list-buildings
+    ```
+  </Step>
+</Steps>
+
+### Other ways to run it
+
+```bash
+# Stay connected and issue ad-hoc test commands without re-authenticating:
+mkfifo /tmp/lw_cmd_pipe
+./lastwar-client -interactive /tmp/lw_cmd_pipe &
+echo 'building.production.collect {"uuid":123}' > /tmp/lw_cmd_pipe
+
+# Override specific config fields for a one-off test (e.g. a different captured token):
+./lastwar-client -collect -cs-at <a-different-access-token>
+
+# Brand-new guest account instead (always works, no email or config needed):
+./lastwar-client -list-buildings -no-config
+
+# Bind a guest session to a real account via email verification (only needed once,
+# to obtain a fresh config -- see the dossier for turning that into a session config):
+mkfifo /tmp/lw_code_pipe
+./lastwar-client -email you@example.com -code-pipe /tmp/lw_code_pipe &
+echo 123456 > /tmp/lw_code_pipe
+```
+
+Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, username, gameUid, loginKey) independent of the session config, so repeated guest/email-flow runs present a consistent device to the server. Delete those files to start fully fresh.
+
+### Flags reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `-email` | `""` | Account email to log in with (only needed if no loginKey is on file yet). |
+| `-code-pipe` | `""` | Path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin. |
+| `-collect` | `false` | Collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both daily VIP claims, after login (see [Live validation against production](/live-validation)). |
+| `-list-buildings` | `false` | Print every owned building (id, type, level, queue state) and exit. |
+| `-interactive` | `""` | Stay connected and read ad-hoc test commands from this control FIFO instead of exiting. |
+| `-cs-ip` | `""` | Skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from `accountArr`/`push.account.login.new`). |
+| `-cs-port` | `0` | Port for `-cs-ip`. |
+| `-cs-zone` | `""` | Zone for `-cs-ip`, e.g. `APS999`. |
+| `-cs-gameuid` | `""` | Composite `gameUid` for `-cs-ip`. |
+| `-cs-deviceid` | `""` | Override `deviceId` (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one. |
+| `-cs-shumei` | `""` | Real `shumeiBoxId` anti-fraud fingerprint token, if known. |
+| `-cs-rt` | `""` | If set, first does a GSL `opt=refresh` call with this refresh token to obtain a fresh access token before reconnecting. |
+| `-cs-at` | `""` | Raw access token to send directly as `p.at`, skipping any GSL call entirely (e.g. one captured live from a real client). |
+| `-cs-ios` | `false` | Send an iOS-flavored Login (`packageName=com.lastwar.ios`, matching `packageSign`/`platform`/`pf`) instead of Android — an `at` token is bound to the platform/package it was issued for. |
+| `-handshake` | `false` | Experimental: send the vanilla SFS2X pre-Login Handshake (action `0`) before Login — see `conn.go:DoHandshake`. |
+| `-config` | `""` | Path to a session config JSON (see `config.example.json`); if unset, auto-loads `~/.lastwar_goclient_session.json` when present. Explicit `-cs-*` flags override individual config fields. |
+| `-no-config` | `false` | Skip loading any session config, even the default file — for a plain guest/email-flow run when a session config is also present. |
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `crypto.go` | GSL RSA-PKCS1v15 + AES-256-ECB-PKCS7 request/response envelope |
+| `sfsobject.go` | SFSObject/SFSArray binary codec (encode + decode), recursive pretty-printing |
+| `packet.go` | SFS2X packet framing: header flags, length-derived XOR, zlib compression, Zstandard decompression |
+| `gsl.go` | HTTP bootstrap: check-version, GSL `getserverlist.php` (`opt=new\|login\|fix\|refresh`) |
+| `conn.go` | TCP connection, envelope send/receive, heartbeat |
+| `identity.go` | Persisted device identity + the ~50-field SFS `Login` params object (Android and iOS variants) |
+| `config.go` | Session config file loading (`~/.lastwar_goclient_session.json` / `-config`) |
+| `login.go` | Full login orchestration: guest login, email verification, account binding |
+| `crossserver.go` | Direct role reconnect (`CrossServerLogin` reimplementation) |
+| `buildings.go` | Building list parsing, type-ID table, resource-collection commands |
+| `interactive.go` | Control-FIFO REPL for testing commands against a live session without re-login |
+| `main.go` | CLI entrypoint |
+| `selftest_test.go` | Unit tests for the crypto/codec/framing layers (no network required) |

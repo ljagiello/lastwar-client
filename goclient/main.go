@@ -1,0 +1,229 @@
+package main
+
+import (
+	"flag"
+	"log/slog"
+	"net"
+	"os"
+	"strconv"
+	"time"
+)
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
+	email := flag.String("email", "", "account email to log in with (only needed if no loginKey is on file yet)")
+	codePipe := flag.String("code-pipe", "", "path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin")
+	collect := flag.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, and donating to the recommended alliance tech, after login")
+	listBuildings := flag.Bool("list-buildings", false, "print every owned building (id, type, level, queue state) and exit")
+	interactive := flag.String("interactive", "", "stay connected and read ad-hoc test commands from this control FIFO instead of exiting")
+
+	csIP := flag.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
+	csPort := flag.Int("cs-port", 0, "port for -cs-ip")
+	csZone := flag.String("cs-zone", "", "zone for -cs-ip, e.g. APS1234")
+	csGameUid := flag.String("cs-gameuid", "", "composite gameUid for -cs-ip")
+	csDeviceID := flag.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
+	csShumei := flag.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
+	csRt := flag.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting")
+	csAt := flag.String("cs-at", "", "raw access token to send directly as p.at, skipping any GSL call entirely (e.g. one captured live from a real client)")
+	csIOS := flag.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an `at` token is bound to the platform/package it was issued for")
+	handshake := flag.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
+	configPath := flag.String("config", "", "path to a session config JSON (see config.example.json); if unset, auto-loads "+defaultSessionConfigPath()+" when present. Explicit -cs-* flags override individual config fields.")
+	noConfig := flag.Bool("no-config", false, "skip loading any session config, even the default file -- for a plain guest/email-flow run when a session config is also present")
+	decodeStream := flag.String("decode-stream", "", "decode a reassembled raw TCP byte stream file (see docsite: Capturing and decoding traffic) and print every SFS2X packet, then exit -- no login, no network connection at all")
+	decodeLabel := flag.String("decode-label", "", "prefix label for -decode-stream output lines, e.g. \"c2s\" or \"s2c\" (default: \"stream\")")
+	flag.Parse()
+
+	if *decodeStream != "" {
+		runDecode(*decodeLabel, *decodeStream)
+		return
+	}
+
+	var cfg *SessionConfig
+	var cfgSource string
+	if !*noConfig {
+		cfg, cfgSource = loadEffectiveConfig(*configPath)
+	}
+	if cfg != nil {
+		slog.Info("loaded session config", "path", cfgSource)
+		*csIP = applyOverride(cfg.IP, *csIP)
+		if *csPort == 0 {
+			*csPort = cfg.Port
+		}
+		*csZone = applyOverride(cfg.Zone, *csZone)
+		*csGameUid = applyOverride(cfg.GameUid, *csGameUid)
+		*csDeviceID = applyOverride(cfg.DeviceID, *csDeviceID)
+		*csShumei = applyOverride(cfg.ShumeiBoxId, *csShumei)
+		*csAt = applyOverride(cfg.AccessToken, *csAt)
+		if cfg.IOSMode {
+			*csIOS = true
+		}
+	}
+
+	if *csIP != "" || *csRt != "" {
+		runCrossServerTest(crossServerTestOpts{
+			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
+			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
+			iosMode: *csIOS, interactive: *interactive, handshake: *handshake,
+			collect: *collect, configSavePath: cfgSource,
+		})
+		return
+	}
+
+	result, err := Login(LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake})
+	if err != nil {
+		slog.Error("login failed", "error", err)
+		os.Exit(1)
+	}
+	conn := result.Conn
+	defer conn.Close()
+
+	buildings := result.Buildings
+	visitors := result.Visitors
+	if len(buildings) == 0 {
+		// Login's own retry loop already tried (and logged) 3 attempts at
+		// the `init` push; this is just a last-chance listen (e.g. the
+		// loginKey fast-path, where Login returns immediately without
+		// running that loop) before giving up.
+		slog.Info("fetching building list (push.init.build)")
+		buildings, visitors, err = FetchBuildings(conn, 12*time.Second)
+		if err != nil {
+			slog.Error("fetch buildings failed", "error", err)
+			os.Exit(1)
+		}
+	}
+	slog.Info("got buildings", "count", len(buildings))
+
+	if *listBuildings || !*collect {
+		PrintBuildings(buildings)
+	}
+
+	if *collect {
+		slog.Info("collecting resources")
+		CollectAll(conn, buildings, visitors)
+	}
+
+	if *interactive != "" {
+		RunInteractive(conn, *interactive) // blocks forever
+	}
+
+	slog.Info("client exiting")
+}
+
+type crossServerTestOpts struct {
+	ip, zone, gameUid, deviceID, shumeiBoxId, rt, at, interactive string
+	port                                                          int
+	handshake, iosMode, collect                                   bool
+	configSavePath                                                string // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
+}
+
+// runCrossServerTest exercises DoCrossServerLogin directly, using an
+// already-known role's connection details (captured from a prior
+// account.login.new/push.account.login.new response) instead of running
+// the email flow again. If deviceID is given, it overrides this Go
+// client's own persisted device identity -- e.g. to reuse a real device's
+// identity/fingerprint extracted from its local PlayerPrefs. If rt is
+// given, first refreshes the access token via GSL opt=refresh (using that
+// device identity) before attempting the SFS reconnect.
+func runCrossServerTest(o crossServerTestOpts) {
+	ident, err := loadOrCreateDeviceIdentity()
+	if err != nil {
+		slog.Error("load device identity failed", "error", err)
+		os.Exit(1)
+	}
+	deviceID, airKey := ident.DeviceID, ident.AirKey()
+	if o.deviceID != "" {
+		deviceID = o.deviceID
+		airKey = "lwDid_" + b64OfString(deviceID)
+	}
+	slog.Info("using device identity", "deviceId", deviceID, "airKey", airKey)
+
+	accessTok := o.at
+	ip, port, zone, gameUid := o.ip, o.port, o.zone, o.gameUid
+	if o.rt != "" {
+		httpClient := defaultHTTPClient()
+		cv, gateHost, err := CheckVersion(httpClient)
+		if err != nil {
+			slog.Error("check-version failed", "error", err)
+			os.Exit(1)
+		}
+		pub, err := parseRSAPubKeyFromDER(cv.ResMsg)
+		if err != nil {
+			slog.Error("parse RSA pubkey failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("GSL getserverlist (opt=refresh)")
+		lsr, err := GetServerList(httpClient, gateHost, pub, deviceID, GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
+		if err != nil {
+			slog.Error("GSL refresh failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("GSL refresh response", "code", lsr.Code, "serverListLen", len(lsr.ServerList))
+		if lsr.At != nil {
+			accessTok = lsr.At.Token
+			slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
+		}
+		if len(lsr.ServerList) > 0 {
+			srv := lsr.ServerList[0]
+			ip, port, zone, gameUid = srv.IP, srv.Port, srv.Zone, srv.GameUid
+			slog.Info("server selected", "ip", ip, "port", port, "zone", zone, "gameUid", gameUid)
+		}
+	}
+
+	result, err := DoCrossServerLogin(CrossServerLoginParams{
+		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
+		DeviceID: deviceID, AirKey: airKey,
+		AccessTok: accessTok, ShumeiBoxId: o.shumeiBoxId,
+		Handshake: o.handshake, IOSMode: o.iosMode,
+	})
+	if err != nil {
+		slog.Error("cross-server login failed", "error", err)
+		os.Exit(1)
+	}
+	conn := result.Conn
+	defer conn.Close()
+
+	// A serverInfo redirect (e.g. a real server merge moving this account
+	// to a different zone/host/port) leaves result.Addr/Zone different
+	// from what was actually passed in. Persist the resolved address back
+	// to the session config, if we loaded one, so the next run connects
+	// directly instead of re-following the same redirect every time.
+	if o.configSavePath != "" {
+		if newHost, newPortStr, splitErr := net.SplitHostPort(result.Addr); splitErr == nil {
+			if newPort, atoiErr := strconv.Atoi(newPortStr); atoiErr == nil {
+				if newHost != ip || newPort != port || result.Zone != zone {
+					updated := &SessionConfig{
+						IP: newHost, Port: newPort, Zone: result.Zone,
+						GameUid: gameUid, DeviceID: deviceID,
+						ShumeiBoxId: o.shumeiBoxId, AccessToken: accessTok,
+						IOSMode: o.iosMode,
+					}
+					if err := SaveSessionConfig(updated, o.configSavePath); err != nil {
+						slog.Warn("failed to persist redirected server address to session config", "path", o.configSavePath, "error", err)
+					} else {
+						slog.Info("persisted redirected server address to session config", "path", o.configSavePath, "newIP", newHost, "newPort", newPort, "newZone", result.Zone)
+					}
+				}
+			}
+		}
+	}
+
+	slog.Info("fetching building list (push.init.build)")
+	buildings, visitors, err := FetchBuildings(conn, 15*time.Second)
+	if err != nil {
+		slog.Error("fetch buildings failed", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("got buildings", "count", len(buildings))
+	if o.collect {
+		slog.Info("collecting resources")
+		CollectAll(conn, buildings, visitors)
+	} else {
+		PrintBuildings(buildings)
+	}
+
+	if o.interactive != "" {
+		RunInteractive(conn, o.interactive)
+	}
+	slog.Info("client exiting")
+}

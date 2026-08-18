@@ -1,0 +1,80 @@
+---
+title: "Military, hero & battle"
+description: "Combat resolution is server-authoritative everywhere except one scripted PVE minigame; recovered BattleReport/LwBattleReport proto schemas and the core army/hero/formation commands."
+---
+
+Combat resolution is server-authoritative everywhere except one scripted PVE minigame — the client sends only identity references (hero uuids, formation ids), never stats or an outcome, and the server ships back a full protobuf-encoded action-by-action combat log.
+
+## Server authority, proven
+
+```lua
+-- StartArenaBattleMessage.OnCreate — the entire request:
+self.sfsObj:PutUtfString("target", target)
+self.sfsObj:PutInt("type", type)
+self.sfsObj:PutLong("power", power)        -- client's own number, display only
+self.sfsObj:PutSFSArray("heroes", heroesArray)  -- {index, uuid} — IDENTITY ONLY, no stats
+```
+
+The client cannot send hero level, rank, skill, or equipment — only uuids the server already has authoritative records for. The response contains a full protobuf combat log; the server decides win/loss, damage, and rewards.
+
+<Warning>
+**One confirmed exception**: The scripted "story stage" PVE minigame (`Net.Msgs.Battle.*`) renders a real-time 3D scene locally and then **self-reports the outcome**: `lw.save.pve.record` sends `isWin` directly, `user.finish.pve.level` sends `isSuccess` directly — no server-computed combat log accompanies either. If building a server (not just a client), this is the one subsystem needing its own out-of-band validation.
+</Warning>
+
+## Combat report delivery — two channels
+
+- **Inline** (arena, PVE monster fights): a base64 `battleContent` field on the SFS response itself, chunked into `battleContentArr` if oversized. Decode: base64 → raw protobuf bytes → `protobuf.BattleReport`.
+- **Out-of-band** (world combat, city sieges): the response carries only a `uuid`. Fetch separately:
+
+  ```text
+  GET https://lastwar-fight-report.akamaized.net/report/{uuid}.bin
+  ```
+
+  Check `Content-Encoding: zstd` — BestHTTP doesn't auto-decompress it, the client does it manually. Decode as `protobuf.LwBattleReport` (the richer, per-action-log schema — inferred by naming/structural convention; the exact CDN→proto-type pairing wasn't directly confirmed against a call site).
+
+## `BattleReport.proto` — recovered in full
+
+```proto
+message ArmyUnitInfo { repeated SoldierProto soldiers=1; repeated HeroInfoProto heroes=2; string name=3; ... }
+message FightReport {
+  int64 uuid=1; ReportPlayerInfo selfInfo=2; ReportPlayerInfo otherInfo=3;
+  ArmyResult selfArmyResult=4; ArmyResult otherArmyResult=5; ReportReward reward=6;
+  int32 fightResult=7; repeated BattleEffectGroup otherBattleEffectGroups=8;
+}
+message BattleReport {
+  int32 battleResult=1; int64 startTime=2; int32 startRound=3;
+  BattlePointInfo battlePointInfo=4; repeated FightReport fightReports=5;
+  FightLost fightLost=6; repeated BattleEffectGroup selfBattleEffectGroups=7;
+}
+```
+
+The newer `LwBattleReport.proto` goes further — a genuine per-skill-cast, per-target action log (`FightAction`/`TargetHit`, with hit/miss/crit/damage/shield deltas), strong independent confirmation the server runs a full deterministic battle simulation (RNG included) purely for client-side replay:
+
+```proto
+message TargetHit { int32 index=1; int32 miss=2; int32 crit=3; int32 damage=4; ... }
+message FightAction {
+  int32 id=1; int32 order=2; int32 time=3; int32 casterIndex=4; int32 phase=5;
+  int32 skillId=6; repeated TargetHit targets=7; int32 skillLevel=9; ...
+}
+message LwBattleReport {
+  int64 uuid=1; int32 type=2; int64 battleTime=3; int32 fightResult=5;
+  repeated LwBattlePlayerStat player=6; Reward reward=10; LwBattleDetail detail=12; ...
+}
+```
+
+## Core commands
+
+| cmd | Purpose |
+| --- | --- |
+| `army.add` | Add trained soldiers to garrison |
+| `save.normal.formation.info` | Save which heroes occupy which squad slot |
+| `world.march.formation.new` | Dispatch an army on a march to a target tile |
+| `world.march.change` | Redirect an in-flight march |
+| `find.resource` | Server-side "find nearest" search — no coordinates sent |
+| `find.monster` | Same "find nearest" search, but (unusually for this family) also sends a `pointId` alongside the search criteria |
+| `user.arena.fight` / `arena.battle` | Initiate arena combat |
+| `hero.exp` / `hero.star.up` / `upgrade.hero.rank` | Hero leveling, star-up, rank-up |
+
+<Note>
+**Duplicate-cmd gotcha**: `MsgDefines.HeroRankUpgrade` and `MsgDefines.UpgradeHeroRank` both resolve to the wire string `"upgrade.hero.rank"` — `MsgMap` is a plain table literal, so the **later** assignment in file order silently wins at runtime. `command_catalog.json` preserves both entries since it's a mechanical dump, not a resolved map — when duplicates collide, trust whichever handler class appears last in `MsgMap.lua`.
+</Note>

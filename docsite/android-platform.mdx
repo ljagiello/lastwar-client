@@ -1,0 +1,36 @@
+---
+title: "Android platform layer"
+description: "Permissions, third-party SDK wiring, and the Java-native-C# bridge on Android — none of which gates the SFS2X/HTTP game protocol."
+---
+
+Everything outside the game protocol: permissions, third-party SDK wiring, and the Java↔native↔C# bridge. None of it duplicates or gates the SFS2X/HTTP game protocol — this layer is platform shell, cleanly separable from the client a Go reimplementation needs.
+
+## Why the permissions you wouldn't expect
+
+A war-strategy game asking for `CAMERA`/`RECORD_AUDIO`/calendar access looks suspicious until traced to real, named features:
+
+| Permission | Actual use |
+| --- | --- |
+| `CAMERA` | Avatar/chat photo upload, plus Zendesk support-ticket attachments (when that support SDK is active) |
+| `RECORD_AUDIO` | Tencent GME/TRTC voice chat rooms + short voice-message recording |
+| `READ/WRITE_CALENDAR` | Genuine "remind me before this event" feature — writes to `CalendarContract` |
+
+## Third-party SDK inventory
+
+| Category | SDK |
+| --- | --- |
+| Analytics/attribution | AppsFlyer, Firebase (Analytics/Crashlytics/FCM), ThinkingData (China market) |
+| Anti-fraud | ShuMei (数美) — device fingerprint, heavily Obfuscator-LLVM hardened |
+| Anti-cheat | Tencent ACE ("anogs") — root/inline-hook detection |
+| Voice chat | Tencent GME/TRTC — own BoringSSL TLS stack, unrelated to game protocol |
+| IAP | Google Play Billing **v8.3.0** (supports alt-billing programs) |
+| Customer support | **Two full SDKs bundled** — Zendesk and AIHelp, switched server-side by a remote-config flag, not hardcoded |
+| Ad mediation | **None found** — no AppLovin/ironSource/Unity Ads/AdMob anywhere. Monetization is IAP-only. |
+
+<Warning>
+**Cleartext HTTP, by design.** `usesCleartextTraffic="true"` is set at the manifest level — two FunPlus-owned endpoints (`analyse-aps.readygo.tech` push-analytics beacons, `upload-img-aps.readygo.tech/get_apk_ver.php` a side-loaded self-update check) are called over plain HTTP. Neither gates gameplay; both are safe to skip for a Go client.
+</Warning>
+
+## The JNI split for anti-cheat is worth knowing
+
+`libanogs.so` (Tencent ACE) has a full Java wrapper class (`com.gamesafe.ano.AnoSdk`) that turns out to be dead code — **C# calls into the native library directly via `[DllImport("anogs")]` P/Invoke**, bypassing Java entirely. Its detection/report data appears to travel over a local Unix pipe to Tencent's own backend, not the FunPlus game server's wire protocol.

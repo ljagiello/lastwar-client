@@ -1,0 +1,23 @@
+---
+title: "Open-questions research pass"
+description: "Results of an 8-agent parallel research pass, one agent per open question, each reporting an honest verdict rather than a reassuring one."
+---
+
+import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
+
+<LiveVerificationStatus />
+
+An 8-agent parallel research pass, one agent per open question listed on [Open questions & further work](/open-questions), each given full codebase context and told to dig as deep as reasonably possible and report an honest verdict rather than a reassuring one.
+
+| Question | Verdict | Confidence |
+|---|---|---|
+| March recall-home encoding | **Resolved** | High |
+| `WorldPointInfo.proto` transport | **Resolved** | High |
+| Four "unrecoverable" proto schemas | **Resolved** (18 recovered) | High |
+| `libxlua.so` crypto helpers | **Resolved** | High |
+| `GetABTestTableName` routing | **Resolved** | High |
+| Season vs. Activity boundary | **Resolved** (97% measured accuracy) | High |
+| Missing `init` push | **Resolved** — unimplemented Zstd decompression | High |
+| Established-account reconnect block | **Resolved** — token/identity mismatch, not anti-fraud | High |
+
+Full findings with complete file:line citations for every claim are folded into [Open questions & further work](/open-questions) rather than duplicated here. The two previously-"narrowed" items were both closed by that live-traffic follow-up run: a Zstd-decompression fix (`goclient/packet.go`) unblocked the init push, and an iOS-identity fix (`goclient/identity.go`) unblocked the reconnect — see [Open questions & further work](/open-questions) and [Live validation against production](/live-validation).

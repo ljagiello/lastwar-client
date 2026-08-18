@@ -1,0 +1,81 @@
+---
+title: "Startup, version-check & hot-update"
+description: "The 18-state cold-start machine and the three independently-versioned hot-update payloads it downloads and patches."
+---
+
+Cold start walks an 18-state machine from splash screen to a live game connection. Three independently-versioned payloads — asset bundles, the Lua bundle, and the C# hot-update assemblies — are checked and patched separately, from a single version-check HTTP response.
+
+## State machine (cold start, first launch)
+
+| # | State | Does |
+|---|-------|------|
+| 1 | `Logo` | Splash screen |
+| 2 | `Permission` | OS permission + jailbreak checks |
+| 3 | `CheckResVersion` | **Version check** — races N hosts in parallel, first success wins |
+| 4–5 | `DownloadManifest` / `DownloadUpdate` | Downloads/patches asset bundles, table data, and the Lua bundle |
+| 6 | `LoadDataTable` | Loads config tables + localization into memory |
+| 7 | `GetServerList` | **GSL request** — RSA+AES hybrid handshake ([Gate-server RSA+AES handshake](/gate-server-crypto)), only if no cached server |
+| 9 | `ConnectGame` | Opens the SFS2X TCP/WS connection to the chosen `ip:port` |
+| 10 | `Login` | SFS2X `Login` request (see [Identity, login & session](/auth)) |
+| 12 | `LoadScene` → `EnterGame` | Loads the actual game scene |
+
+A returning user with a cached, still-valid `ip/port/zone` skips straight from step 6 to step 9 — the RSA+AES GSL dance only runs on first launch or when the cache is stale/rejected.
+
+## Check-version endpoint
+
+```text
+GET {host}/gameservice/getlsu3dversion.php
+?packageName=com.fun.lastwar.gp&platform=...&appVersion=...
+&gm=0&server=&uid=&deviceId=&table_env=...&buildId=...
+&returnJson=1&unityVersion=440
+```
+
+Host list (first success wins, ~5% of devices A/B-bucketed to an `ea-` variant by `GrayUtils.GetPercentageFromMd5`: `MD5(deviceId)` read as a little-endian uint64, `mod 100 + 1 <= 5`):
+
+```text
+https://lastwar-serverlist-cf.lastwarapp.net
+https://lastwar-serverlist-us-aws-ali.lastwargame.com
+https://lastwar-serverlist-us-gcp-ali.lastwargame.com
+```
+
+Whichever host answers becomes the base URL for every subsequent call in this bootstrap (`getserverlist.php`, `getnotice.php`, `probe.php`) — there is no separate "gate server" discovery step.
+
+| Response field | Meaning |
+|---|---|
+| `resMsg` | Base64 DER RSA public key (no PEM armor) — feeds the GSL crypto, see [Gate-server RSA+AES handshake](/gate-server-crypto). **Not hardcoded**, delivered fresh every check. |
+| `updateType` | `0`=none, `1`/`3`=optional, `2`=force-update (blocking dialog) |
+| `hotUpdateMsg` | `;`-separated `name,version,crc,size` — asset-bundle manifest versions |
+| `lwfile2` | Version descriptor specifically for the Lua bundle |
+| `table_version` | `version,size,md5[,crc][;patch chain]` for the game-data table archive |
+| `client_config` | Server-pushed feature-flag bitset (`ClientSwitch.IsOn(N)` gates throughout the client) |
+
+## Hot-update transport & patch format
+
+Three independently-versioned payloads, compared via the fields above and patched separately:
+
+- **Asset bundles** (incl. C# `.mdl` assemblies) — standard Unity `AssetBundle`, tracked by the `dllres` manifest.
+- **Lua bundle** — one flat `LWLF` file, not wrapped in an AssetBundle at all.
+- **Data tables** — the plain-ZIP `table_*.data` archive.
+
+Downloaded patches/replacements may be wrapped in a lightweight on-disk XOR obfuscation (not real confidentiality — key material is hardcoded client-side) built on a **reduced-round ChaCha** stream cipher: 8 rounds (4 double-rounds) instead of standard ChaCha20, IETF layout, detected by a short (3–6 byte) magic-prefix swap:
+
+| Plain magic | Wrapped magic | Content |
+|---|---|---|
+| `50 4B 03 04` (`PK··`) | `CHAC` | table `.data` ZIP |
+| `42 5A 68` (`BZh`) | `PRB` | bzip2 (Lua bundle package) |
+| `42 53 44 49 46 46` (`BSDIFF`) | `PURBDP` | bsdiff patch |
+
+Key/nonce are derived once from hardcoded dummy constants via two self-referential ChaCha8 passes (reproduced independently in Python and confirmed reproducible):
+
+```text
+_key   = 83aa6a90bdfb210e4742405500db2c0c80b30776f6441df7cd1504f830ad1f2b
+_nonce = 2122232425262728292a2b2c
+```
+
+## CDN
+
+```text
+https://lastwar-cdn.akamaized.net/hotupdate/     (primary)
+https://lastwar-cdn.lastwarapp.net/hotupdate/    (fallback)
+https://cdn.lastwar.com/hotupdate/               (fallback)
+```

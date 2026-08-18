@@ -1,0 +1,58 @@
+---
+title: "Gate-server RSA+AES handshake"
+description: "How the GSL (Gate Server List) HTTP exchange's hybrid RSA+AES-ECB envelope encryption works, and how to reproduce it in Go."
+---
+
+The "GSL" (Gate Server List) HTTP exchange is wrapped in a hybrid RSA+AES scheme. It looks like textbook envelope encryption at a glance — but the AES mode is ECB, not CBC, which turns out to make the whole thing simpler to reproduce, not harder.
+
+<Warning>
+  **Correction made during analysis.** The C# source sets `Mode = (CipherMode)2`. It's tempting to assume that's CBC — it's not. `System.Security.Cryptography.CipherMode`'s real ordinals are `CBC=1, ECB=2, OFB=3, CFB=4, CTS=5`. **`(CipherMode)2` is ECB.** This was confirmed both by reading the enum and behaviorally: encrypting the same plaintext twice with the same key produces byte-identical ciphertext (the ECB signature), and decryption succeeds regardless of which unrelated cipher instance performs it — impossible under CBC. There is no IV because ECB has none to give.
+</Warning>
+
+## Sequence
+
+1. Client generates a random 20-character salt (from an 84-char alphabet, non-cryptographic `System.Random` — the exact PRNG doesn't matter to the server, only the resulting bytes do).
+2. Salt is **RSA-PKCS1v1.5-encrypted** against the server's public key (delivered fresh every check-version response as base64 DER, no PEM armor) → base64 → URL-safe → this is the `uuid` POST field.
+3. The AES key is derived as `ASCII(lowercase_hex(MD5(salt)))` — 32 ASCII bytes, **not** the raw 16-byte MD5 digest.
+4. The request body (form-encoded device/session fields) is **AES-256-ECB-PKCS7** encrypted with that key → base64 → URL-safe → the `data` POST field. (Effective key size is 256 bits despite the source visually setting `KeySize = 128` — .NET's `Key` setter silently overrides it based on the 32-byte key length actually assigned.)
+5. Response: if the top-level JSON has a non-empty `bin` field, decrypt it the same way (same salt-derived key) and re-parse as the same response shape.
+
+| Parameter | Value |
+|---|---|
+| RSA padding | PKCS#1 v1.5 (OAEP explicitly disabled) |
+| RSA key source | `resMsg` field, base64 DER `SubjectPublicKeyInfo`, delivered per-session |
+| AES algorithm | AES-256 (RijndaelManaged, effective 256-bit key) |
+| AES mode / padding | **ECB** / PKCS7 — not CBC |
+| AES key derivation | `ASCII(hex(MD5(salt)))` — 32 ASCII bytes used directly as the key |
+| AES IV | None — ECB has no IV concept |
+| Encoding | base64 → URL-safe (`+`→`-`, `/`→`_`, strip `=`) |
+
+## Go implementation
+
+```go
+// 1. Parse resMsg as a DER SubjectPublicKeyInfo directly — no PEM step needed in Go
+pub, _ := x509.ParsePKIXPublicKey(derBytes)
+rsaPub := pub.(*rsa.PublicKey)
+
+// 2. Random 20-char salt, any charset/CSPRNG is fine
+salt := randString(20)
+
+// 3. uuid field
+ct, _ := rsa.EncryptPKCS1v15(rand.Reader, rsaPub, []byte(salt))
+uuid := urlSafeB64NoPad(ct)
+
+// 4. AES key
+sum := md5.Sum([]byte(salt))
+key := []byte(hex.EncodeToString(sum[:]))   // 32 ASCII bytes, NOT the raw digest
+
+// 5. data field — AES-256-ECB-PKCS7 (Go's stdlib has no ECB mode;
+//    loop block.Encrypt() once per 16 bytes — ECB has no chaining)
+data := urlSafeB64NoPad(aesECBEncryptPKCS7(formBody, key))
+
+// POST {gate}/gameservice/getserverlist.php  body: uuid=...&data=...
+// response.bin, if present: aesECBDecryptPKCS7(urlSafeB64Decode(bin), key)
+```
+
+<Note>
+  **Same key/AES-ECB scheme, reused elsewhere.** The identical `AESDecrypt` function is reused with a hardcoded key `7a7611b0efc334a7cc229fe5d89c5997` to decrypt a server-pushed Lua snippet that's fed directly to `eval`-equivalent (`GameEntry.Lua.Env.DoString`). Elsewhere the same client also uses a properly-chained AES-CBC-with-explicit-IV helper for a Zendesk webchat URL — so the ECB choice for GSL is a deliberate (if weak) design decision for that one path, not a general "forgot the IV" bug.
+</Note>

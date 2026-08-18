@@ -1,0 +1,287 @@
+---
+title: "Live validation against production"
+description: "Live packet-capture testing against real production servers and a real account confirms the protocol and codec work end-to-end, and traces the root cause of the Zstd decompression bug, the SFSObject array-decode bugs, and the token-identity-mismatch reconnect fix."
+---
+
+import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
+
+<LiveVerificationStatus />
+
+Everything documented elsewhere in this dossier up to this point was static analysis of a client the researcher owns — accurate, but unverified against a real server. This section documents what happened when the roadmap in [Go client implementation roadmap](/go-client-roadmap) was actually built (`goclient/`, a from-scratch Go reimplementation) and driven against the real production servers for a real account. It corrects a few static-analysis guesses, confirms most of them exactly, and documents one open problem static analysis alone could never have found.
+
+## What's proven end-to-end
+
+| Flow | Result |
+|---|---|
+| GSL RSA+AES envelope, SFS2X packet framing, SFSObject codec | **Confirmed** byte-for-byte against production — decrypted a real server-list response, parsed a real structured error object |
+| Brand-new device → auto-created guest account | **Confirmed** works unconditionally, reproduced a dozen+ times with different synthetic device IDs |
+| Guest → real account via email verification | **Confirmed** end-to-end against a real account: `account.login.send.verify.code` → real email arrives in seconds → `account.login.new` with the code → server returns the account's full session data |
+| Reconnect into an *established* account's live game state (`CrossServerLogin`, triggered by picking a role after email bind) | **Confirmed** works cleanly once the `Login` request's identity fields (`packageName`, `packageSign`, `platform`, `pf`, `appVersion`, `versionCode`, `ta`, ...) match the access token's real issuing identity — see the reconnect wall below |
+| Resource-collection commands (`building.production.collect`, `building.camp.collect`) | **Confirmed** dozens of successful collections live across 13 confirmed building types, plus the separate account-level "Armed Truck" idle reward (`lw.pve.idle.reward`) — see the building-type table and the Armed Truck section below |
+| Greeting city visitors (`visitor.operate`) | **Confirmed** live end-to-end — real business-logic response observed, not yet a successful reward payload — see the Visitors section below |
+| Bulk-helping alliance members (`al.help.all`) | **Confirmed** live — real, well-formed response (`{allianceId}`), safe to call unconditionally — see the Alliance automation section below |
+| Marking all mail read and claiming rewards (`chat.get.system.mails` + `mail.read.status.betch` + `mail.reward.batch`) | **Confirmed** live — pagination correctly walked a full 350-entry mailbox and marked it all read; a bug that skipped read-marking for reward-less mail was found and fixed — see the Mail section below |
+| Claiming all alliance gifts (`alliance.reward.allreceive`) | **Confirmed** live for both the Regular and Premium tabs — real, well-formed responses (`receiveResult`) — see the Alliance automation section below |
+| Donating to the recommended alliance tech (`science.data.refresh` + `al.science.donate`) | **Confirmed** live end-to-end — correctly discovered the recommended `scienceId` from the full tree and got a real, well-formed cooldown response back — see the Alliance tech donation section below |
+| Both once-a-day VIP claims (`vip.add.login.score`, `vip.get.every.day.reward`) | **Confirmed** live — real "already claimed today" responses (`errorCode=120289`) on an account that had already claimed both manually, confirming the daily gate is real and server-enforced |
+| Following a `serverInfo` zone-migration redirect (real server merge, not a test scenario) | **Confirmed** live — reconnected across a real `APS783` → `APS8092` merge with zero manual intervention after the fix; three distinct bugs found and fixed along the way — see "A real server merge exposed three real redirect-following bugs" below |
+
+## The reconnect wall
+
+Picking a role from `accountArr` (after email verification) does a full reconnect, not a session continuation — decompiled precisely from `UI/UISetting/UIRoleLogin/View/UIRoleLoginView.lua:OnClickLogin`:
+
+```lua
+function UIRoleLoginView:OnClickLogin()
+  CS.AccountCredentialManager.ClearAll()
+  CS.AccountCredentialManager.SetServerNetInfo(self.param.ip, self.param.port, self.param.zone, 0)
+  CS.AccountCredentialManager.SetLoginKey(self.param.loginKey)
+  CS.AccountCredentialManager.SetUID(self.param.gameUid)
+  CS.AccountCredentialManager.Save()
+  EventManager:GetInstance():Broadcast(EventId.SwitchAccount, self.param.gameUid)
+  SFSNetwork.SendMessage(MsgDefines.UserCleanPost)
+end
+```
+
+This triggers the `CrossServerLogin` FSM state (`Assembly-CSharp.decompiled.cs:108752-108812`), which dials the role's own `ip:port` **directly — no second GSL HTTP call** — and sends the same base SFS `Login` request. This was reimplemented exactly and tested with every plausible field combination:
+
+| # | `un` | `p.at` | `shumeiBoxId` | Result |
+|---|---|---|---|---|
+| 1 | `""` | GSL token (`opt=login`) | `""` | `ec=28, ep=[E011]` |
+| 2 | composite gameUid | GSL token (`opt=login`) | `""` | `ec=28, ep=[E005]` |
+| 3 | composite gameUid | *omitted* (matches decompiled `CrossServerLogin` exactly) | `""` | `ec=28, ep=[E011]` |
+| 4 | composite gameUid | **real, GSL-validated token** (`opt=refresh` with a real device's refresh token) | **real ShuMei fingerprint**, extracted from a genuine prior login | `ec=28, ep=[E005]` |
+
+Row 4 is the load-bearing result. `/Applications/Last War.app` (the iOS build, installed locally via Mac Catalyst) had previously logged into the exact same real account — its sandboxed PlayerPrefs equivalent (`~/Library/Containers/<uuid>/Data/Library/Preferences/com.lastwar.ios.plist`) contained a real device ID, a real refresh token, and a cached ShuMei device-fingerprint token. Feeding all three through the Go client — plus a fresh, GSL-validated access token obtained by actually exchanging that refresh token — still got rejected identically to a fully synthetic identity.
+
+<Warning>
+  **Reading the result.** The rejection doesn't depend on any field this client can construct or replay — not `un`, not `at`, not `shumeiBoxId`, not even a genuine previously-accepted device fingerprint's token value. It only fires for accounts with real history; the byte-identical guest path never triggers it. Most likely explanation: the real credentials were issued for the iOS bundle (`com.lastwar.ios`) while this client presents as the Android build (`com.fun.lastwar.gp`), and ShuMei fingerprints are very likely bound to the specific app/package that generated them — not something further trial-and-error on field values is likely to fix.
+</Warning>
+
+## Solved: a field-by-field identity mismatch, not anti-fraud
+
+**Confirmed.** The guess above was exactly right, and it's now proven rather than inferred. The proof came from a live packet capture, not more trial-and-error on field values: `tcpdump` against the locally installed `/Applications/Last War.app` (the real iOS / Mac Catalyst build), captured while manually logging into the exact same real account through the actual app UI. Because the SFS2X game socket is plain TCP with no TLS, this captured cleartext-after-XOR application data directly — no interception layer needed. The captured `Login` request was decoded field by field using the client's own codec and byte-diffed against what the Go client itself was encoding for the same fields — see [Capturing and decoding traffic](/capturing-and-decoding-traffic) for the exact, reproducible version of this pipeline.
+
+First proof point, before touching the Go client's login path at all: replaying the captured `Login` packet **byte-for-byte, raw, over a fresh TCP connection** succeeded cleanly. That settles something earlier hypotheses left open — reconnecting was never blocked by session locking, token single-use, or anti-fraud in the way row 4 above seemed to suggest. The same access token, reused verbatim, worked fine when replayed on this second, fresh connection — ruling out session locking and token single-use as blockers in this test. Whether it remains valid across a third or further reconnects wasn't separately tested.
+
+The field diff showed the actual gate: an access token is bound to the exact `packageName`/`platform`/`appVersion`/`versionCode` identity it was issued under, and the Go client had been hardcoding an Android identity unconditionally — even when replaying a token issued to a real iOS session. Fixing `goclient/identity.go`'s `BuildLoginParams` to match the token's real issuing identity got a live reconnect working **through the Go client's own from-scratch SFS2X implementation**, not the raw-replay hack. The fix: an `IOSMode` boolean that switches `packageName` to `com.lastwar.ios`, `packageSign` to `SHA1(packageName)` (confirmed this formula generalizes correctly to iOS too — it matches the captured value exactly), `platform` to `"0"`, `pf` to `AppStore`, `appVersion` to `1.0.344`, `versionCode` to `786`; adds the previously entirely-missing `dataConfigMd5` and the iOS-only `idfa`/`idfv`/`phone_native_screen` fields; drops the Android-only `AndroidID`/`IMEI`/`google_available` fields and makes `country`/`suggestCountry`/`timeoffset`/`gcmRegisterId`/`referrer` genuinely conditional on an empty `uid` instead of unconditional; and, critically, populates `ta` with the real captured analytics blob instead of an empty placeholder object. `goclient/crossserver.go` and `goclient/main.go` picked up `-cs-ios` and `-cs-at` flags to drive this path.
+
+Live result: `Login` OK, followed immediately by a correctly Zstd-decoded `init` push containing the account's full real state — **162 real buildings** on this account.
+
+## A real server merge exposed three real redirect-following bugs
+
+<Warning>
+  **Symptom, confirmed live:** a session config that had worked for weeks started logging in "successfully" — `Login OK`, no `ec` error — while every single command after that timed out identically: `push.init.build` never arrived, and every hand-sent command got `i/o timeout`. Not one specific action failing; *everything* after login, uniformly.
+</Warning>
+
+Root cause: the account's zone had been migrated server-side (a routine live-game server merge, `APS783` → `APS8092`, entirely different host and port) mid-session. The old connection was still *accepted* at the login step, but the account genuinely no longer lived there — so nothing past that point could ever succeed. The server actually says this happens, directly in the `Login` response's `serverInfo` field — the client just wasn't reading it.
+
+Three separate, real bugs, not one:
+
+1. **`DoCrossServerLogin` had zero `serverInfo` handling at all.** The other login path (`Login`/`waitForInitPush`) had a redirect check; the session-config-driven cross-server path — the one actually used day to day — didn't check for it at all.
+2. **The check that *did* exist was structurally unreachable.** It lived inside a `for attempt := 1; attempt <= maxLoginAttempts; attempt++` loop capped at 1 (deliberately — retrying on a *timeout* had been live-tested as actively harmful, see above). Go's `continue` in a C-style `for` loop still runs the post-statement before re-checking the condition, so hitting the redirect branch just silently exited the loop instead of retrying. It had never been exercised against a real redirect before this.
+3. **Once both were fixed and actually reachable, the check itself was looking in the wrong place.** `serverInfo` isn't a top-level field of the `Login` response — it's nested one level down, under `p`: `{p: {eu_state, serverInfo: {ip, port, zone, ...}}, rs, zn, un, pi, rl, id}`. Confirmed by testing against the real redirect payload: reading `env.Content.Get("serverInfo")` directly, as both the original code and the decompiled `LoginMessage.CSHandleResponse` call site alone would suggest, found nothing.
+
+A fourth thing surfaced immediately once the redirect actually started firing: `serverInfo.port` decodes as a **UTF string**, not a numeric SFS type — `GetInt("port")` silently returned `0`, resolving the redirect address to `host:0` and failing to connect. Every other numeric-looking field in the same object (`id`, for instance) is a real number; this one specifically isn't.
+
+The fix: both login paths now follow the redirect (close the stale connection, redial the new address, resend `Login` with the new zone) up to a small bounded hop count; `findServerInfo` checks the nested location (falling back to top-level, in case a different response shape ever puts it there); `getIntFlexible` reads `port` as a number or falls back to parsing its string form. `goclient/crossserver.go`'s `DoCrossServerLogin` also now persists the resolved address back into the session config file after a redirect, so the *next* run connects directly instead of re-following the same redirect every single time.
+
+Confirmed live, full loop: reconnecting with the stale `APS783` config correctly received and followed the redirect to `APS8092`'s real host and port, logged in cleanly, loaded all 163 buildings, and — on the very next run — connected straight to the new address with no redirect needed at all, because the config had been rewritten in place.
+
+<Info>
+  **This isn't a one-time fixed state — the account has genuinely moved zones more than once since.** A later capture showed the base `Login` targeting `APS783` again with no redirect needed, meaning the account either moved back or the merge target changed a second time. The fix here isn't "resolved to APS8092" — it's "follows whatever `serverInfo` says, every time," which is the only version of this that stays correct across further merges without more manual intervention.
+</Info>
+
+## The complete `Login` params field list ([Identity, login & session](/auth) was a partial reconstruction)
+
+`LoginMessage.CSSetData` (`Assembly-CSharp.decompiled.cs:122440-122598`), read in full, in call order:
+
+```text
+_id, netType, ta, distinct_id, phone_screen, configVersion
+  -- only if uid (args[0]) is empty (brand-new device):
+  country, suggestCountry, timeoffset, gcmRegisterId, referrer
+AndroidID, IMEI, psh, mt, deviceId, airKey, cmdBaseTime,
+SecurityCode = MD5(cmdBaseTime + "4d1c383ccbedf3d98320d6ea06d8dedc" + uid),
+OneCode, CoreV, googlePlay, androidDid, googleName, deeplinkParams, pfId,
+dataConfigMd5 (only if non-empty), google_available, fromCountry, packageName,
+packageSign, platform="1" (hardcoded in this decompiled Android assembly -- not confirmed to hold "both platforms": the live iOS capture used for the reconnect fix above required platform="0", so this literal is almost certainly baked in per-platform build rather than shared), lat=0, device_string, pf,
+firebaseId, afuid, phone_model, configNumber=0, gaid, osVersion, parseRegisterId,
+gameUid = uid (SAME string object as `un`, not independently derived), appVersion,
+resVersion="0", versionCode, lang, serverId = zone.Substring(3), gmLogin=0,
+KCPMode="0", forbidden_froce_merge=1, shumeiBoxId, simOp, simOpName,
+delete_account_status, isUseLz4 (only if NetPacketConst.useNewPacket && useZStd)
+at (only if AccountCredentialManager.AuthTokens.at is non-empty)
+```
+
+`un` and `p["gameUid"]` are proven the literal same string object in every call site — no divergence possible. `rt`/`loginKey`/`attime`/`rttime` are read **only** at the GSL HTTP layer to pick `opt=`; none are ever placed in the SFS `Login` request. `pw` is always `""` at this layer regardless of new/returning.
+
+## `ec`/`ep` vs `errorMessage` — two distinct error channels
+
+`ec`/`ep` (`Smartfox2xLw.decompiled.cs:5627/5629`) are SFS2X's own built-in protocol error fields, not app-level ones. `ec=28` is SFS2X's generic custom-error passthrough (`SFSErrorCodes.errorsByCode[28] = "{0}"`) — it fires when the server's Zone Login Event Handler throws a rejection carrying an arbitrary string, which shows up as `ep[0]`. Observed live: `"E002"`, `"E005"`, `"E011"`. `E011` maps client-side to `ClearAccessToken()` (despite firing even when `p.at` is omitted entirely — so the name isn't a literal description of the server check); `E005` maps to a generic, uncategorized "login_error" bucket unlike every neighboring documented code.
+
+## The real post-login bootstrap: bare `init`, not `push.init.build`
+
+`push.init.build` exists and is wired but never fired once across roughly a dozen live sessions. The actual all-in-one bootstrap is the bare `init` push (`InitMessage.HandleMessage`), which fans one payload out to essentially every data manager in one shot:
+
+```lua
+local HandleMessage = function(self, t)
+  print("[PushInit] lua PushInit")
+  ...
+  DataCenter.BuildManager:InitData(t)          -- buildings come from HERE: t.building_new
+  DataCenter.ProductLineManager:HandleInit(t)
+  DataCenter.AccountManager:InitData(t)
+  ...
+```
+
+<Check>
+  **Resolved: a silent Zstd decompression bug, not rate-limiting.** The `init` push was never actually missing — it was arriving and being silently discarded. `packet.go`'s `ReadPacket` already correctly *detected* the server's Zstandard-compressed frames (header bits `0x20` compressed + `0x10`, the `useLZ4` flag repurposed as "useZstd"), but simply returned an error instead of decompressing — decompression was never implemented. Every read loop waiting on the post-login `init` push treated that error exactly like a closed connection: no crash, nothing that read as a decode error, just silence indistinguishable from "the push never came." That's the entire mystery this investigation originally chased — the `Handshake` experiments, the active-pull `login.init` attempt, the longer timeouts, the 3-attempt reconnect loop — none of it could have worked, because none of it touched the real bug. Confirmed via live capture: the server's init bootstrap push is roughly 313KB of Zstd-compressed data on the wire. The fix was a real decoder (`github.com/klauspost/compress/zstd`, a shared lazily-initialized `zstd.Decoder`, `DecodeAll`) dropped into the compressed branch of `ReadPacket`. Getting that 313KB payload to then parse correctly surfaced two further bugs in `sfsobject.go`'s array-tag decoding — see the root-cause section below. Once both were fixed, `init` arrived cleanly on the very first login in every post-fix login tested; no reconnect loop or active-pull workaround was ever actually needed, and the mechanism built to chase this symptom has since been reverted and disabled.
+</Check>
+
+## Building type IDs — corrected, authoritative mapping
+
+The authoritative source is `Global_EnumType.lua`'s `BuildingTypes` table (`lua_raw/2815_Global_EnumType.luac`, decompiled on demand) — every building's internal dev codename and numeric ID, no positional inference needed. Cross-referenced against the shipped English locale strings (`assets/locale/23405/en.bin` — gzip-compressed, decompresses to ~37,400 flat length-prefixed key/value string pairs) for the canonical player-facing display name, since the internal codename and shown name frequently differ:
+
+<table>
+  <thead>
+    <tr><th>Display name</th><th>Internal enum name</th><th>Building ID</th><th>Collect command</th><th>Collects</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Farmland</td><td><code>LW_BUILD_FARMLAND</code></td><td>10201000</td><td rowspan="13"><code>building.production.collect</code> <code>&#123;uuid&#125;</code></td><td>Food</td></tr>
+    <tr><td>Iron Mine</td><td><code>LW_BUILD_QUARRY</code></td><td>10202000</td><td>Iron</td></tr>
+    <tr><td>Gold Mine</td><td><code>LW_BUILD_GOLD_MILL</code></td><td>10207000</td><td>Gold</td></tr>
+    <tr><td>Smelter</td><td><code>LW_BUILD_SMELTERY</code></td><td>10209000</td><td>Refined metal</td></tr>
+    <tr><td>Material Workshop</td><td><code>LW_BUILD_MATERIALS_WORKERSHOP</code></td><td>10211000</td><td>Refined material</td></tr>
+    <tr><td>Training Base</td><td><code>LW_BUILD_TRAINING_CENTER</code></td><td>10210000</td><td>Training points (item <code>8001</code>)</td></tr>
+    <tr><td>Oil Well</td><td><code>LW_BUILD_PETROLEUM</code></td><td>10221000</td><td>Petroleum</td></tr>
+    <tr><td>Drone Parts Workshop</td><td><code>LW_BUILD_TACTICAL_COMPONENT</code></td><td>10233000</td><td>Drone Parts (item <code>7038</code>)</td></tr>
+    <tr><td>Component Factory</td><td><code>LW_BUILD_SQUAD_EQUIP_FACTORY</code></td><td>10214000</td><td>Item <code>630011</code></td></tr>
+    <tr><td>Spore Factory I</td><td><code>LW_BUILD_SEASON6_QUARTZ_FACTORY1</code></td><td>842000</td><td>Obsidian</td></tr>
+    <tr><td>Spore Factory II</td><td><code>LW_BUILD_SEASON6_QUARTZ_FACTORY2</code></td><td>843000</td><td>Obsidian</td></tr>
+    <tr><td>Spore Factory III</td><td><code>LW_BUILD_SEASON6_QUARTZ_FACTORY3</code></td><td>844000</td><td>Obsidian</td></tr>
+    <tr><td>Spore Factory IV</td><td><code>LW_BUILD_SEASON6_QUARTZ_FACTORY4</code></td><td>845000</td><td>Obsidian</td></tr>
+    <tr><td>Tactical Center</td><td><code>LW_BUILD_TACTICAL_CENTER</code></td><td>10143000</td><td rowspan="6"><code>building.production.collect</code> <code>&#123;uuid&#125;</code> — command pairing confirmed valid (never <code>E000001</code> "Building type error"), but every attempt across multiple full collection runs got <code>errorCode=602026</code> "in production, please be patient." All 6 sit at <code>lv=1</code> with no <code>prodST</code>/<code>prodT</code>/<code>prodStatus</code>/<code>prodET</code> fields at all — unlike every building above, which all have that data populated. Read as: never yet activated, not merely slow. No "start production" command was found for any of them. Kept wired in on the theory the pairing is real and something (an explicit start action, a tech/unlock prerequisite) just hasn't happened on this account yet — treat as unconfirmed until one actually returns <code>status=1</code>.</td><td rowspan="6">Unconfirmed</td></tr>
+    <tr><td>Armament Institute</td><td>(not in the sampled enum names; ID confirmed via locale + live test)</td><td>10227000</td></tr>
+    <tr><td>Truck Station I</td><td><code>LW_BUILD_TRUCK_STATION_1</code></td><td>10138000</td></tr>
+    <tr><td>Truck Station II</td><td><code>LW_BUILD_TRUCK_STATION_2</code></td><td>10139000</td></tr>
+    <tr><td>Truck Station III</td><td><code>LW_BUILD_TRUCK_STATION_3</code></td><td>10140000</td></tr>
+    <tr><td>Truck Station IV</td><td><code>LW_BUILD_TRUCK_STATION_4</code></td><td>10141000</td></tr>
+    <tr><td>Tactical Institute</td><td><code>LW_BUILD_DOMINATOR_TRAIN</code></td><td>10235000</td><td><code>building.production.collect</code> <code>&#123;uuid&#125;</code> — got <code>errorCode=602026</code> on first live test, but unlike the 6 above, its raw <code>building_new</code> data has real <code>prodST</code>/<code>prodStatus=1</code>/<code>prodET</code> timestamps — genuinely not due yet, not dormant. Best-positioned of the unconfirmed group to flip to confirmed on a later run.</td><td>Unconfirmed (active timer)</td></tr>
+  </tbody>
+</table>
+
+<Info>
+  **"Armed Truck" is not in this table.** It was originally guessed to be `Scene/LWHummerScene` (a driving/combat minigame — still true, but unrelated), then guessed again to be Truck Station above (a real but wrong lead — the name matched suggestively, but zero collections ever succeeded on it). It's neither: "Armed Truck" turned out not to be a building at all. See [Armed Truck: an account-level idle reward, not a building](#armed-truck-an-account-level-idle-reward-not-a-building) below for what it actually is, confirmed via a live packet capture of the real game client.
+</Info>
+
+**Correction from earlier static analysis:** Training Base was previously placed on `building.camp.collect`, reasoned as troop training rather than a `ProductLineManager` type. Live testing disproves this directly — `building.camp.collect` against a real Training Base `uuid` returns `errorCode=E000001`, `"Building type error"`. Reading the actual handler, `2944_Net_Msgs_BuildingCampCollectMessage.lua`, shows `building.camp.collect` only covers three building types: Military Camp (`LW_BUILD_MILITARY_CAMP`, 10103000), Smith Shop (`LW_BUILD_SMITH_SHOP`, 10101000), and Tactical Chip Factory (`LW_BUILDING_TACTICAL_CHIP_FACTORY`, 10232000) — not Training Base. `LW_BUILD_TRAINING_CENTER` is in fact listed inside `2067_DataCenter_ProductLine_ProductLineManager.lua`, the same module that owns `building.production.collect`, and sending that command against a real Training Base `uuid` was confirmed live to work immediately, granting item `id 8001`. Training Base belongs with the other production-line buildings after all — the table above is corrected accordingly.
+
+**"Spore Factory" was also previously documented as non-permanent, uncollectible seasonal content — also corrected.** The four Season 6 tiers (`LW_BUILD_SEASON6_QUARTZ_FACTORY1`-`4`, internal codenames left over from an earlier season's reskinned content) are real, currently-active, collectible buildings on a real account, confirmed live via `building.production.collect` against each of their four real `uuid`s.
+
+**Four more building types beyond the original six were confirmed live in a follow-up pass:** Oil Well, Drone Parts Workshop, Tactical Center, and Armament Institute. All four accept `building.production.collect` (in the one wrong-type case actually tested — Training Base sent to `building.camp.collect`, see above — the server returned `errorCode=E000001`, not `602026`; that single precedent is what's relied on below to read a `602026` response from Tactical Center or Armament Institute as confirming the pairing is correct even though their timers hadn't completed — a wrong-type request was never directly tried against `building.production.collect` itself). At the time, the requested names "Tactical Institute" and "Component Factory" had no exact 1:1 locale match found by static analysis, so `Armament Institute` and `Drone Parts Workshop` were used as closest-guess stand-ins. **That guess was wrong — see the correction below.** Both Tactical Center and Armament Institute responded live with `errorCode=602026` ("in production, please be patient") rather than completing a collection — confirming the command pairing is correct, but their actual resource payout has still never been directly observed. They're kept in the client as real, separately-confirmed-pairing buildings in their own right.
+
+**A further four Truck Station tiers were added in a later pass, on the same "command pairing looks real" basis as Tactical Center/Armament Institute — also still unconfirmed.** These were found while chasing "Armed Truck" specifically: `SHAKE_COLLECT_TRUCK_RES` (a setting key dedicated to trucks, parallel to the general `SHAKE_COLLECT_RES`) and `BuildBubbleType.TruckReady`/`TruckReward`/`TruckTravelling` (modeling a dispatch-travel-collect lifecycle) both looked like promising matches for "Armed Truck." All four `LW_BUILD_TRUCK_STATION_1`-`4` exist on the real account and accept `building.production.collect` without an `E000001` type-mismatch — but, like Tactical Center and Armament Institute, every attempt across multiple full `-collect` runs got `602026`, never a real collection. This lead turned out to be a dead end for "Armed Truck" specifically (see below) — the buildings are kept wired in only because the command pairing still looks genuinely valid, not because they're confirmed to do anything.
+
+<Check>
+  **The "Tactical Institute"/"Component Factory" naming guess above was wrong — corrected via a live packet capture of the real game client tapping both buildings directly.** The uuids the real client sent to `building.production.collect` resolved to `bId=10214000` (`LW_BUILD_SQUAD_EQUIP_FACTORY`) and `bId=10235000` (`LW_BUILD_DOMINATOR_TRAIN`) — neither matches Drone Parts Workshop or Armament Institute. Both are locale-confirmed: `10214000`'s `building.lua` row names it via loc-key `2000574` = "Component Factory"; `10235000`'s name loc-key resolves directly to "Tactical Institute" (its description: "Produces items for Overlord training levels" — the same "Overlord" idle-reward track from `lw.pve.idle.reward`). Finding the second one took extra digging: a naive lookup of the key `building_name_10235000` in the flat length-prefixed locale key/value store initially returned nothing at all. The key and its value were actually still there, just merged into an adjacent malformed entry by a parser desync a few bytes earlier in the stream (a length byte that happened to also be valid ASCII, throwing off alignment until the parser resynced) — re-scanning for the substring rather than an exact key match recovered it.
+
+  **Component Factory (10214000) is now genuinely confirmed** — a real `status=1` collection (item `630011`) on first live test. **Tactical Institute (10235000)** got `errorCode=602026` on its first test, but unlike Tactical Center/Armament Institute/Truck Station, its raw `building_new` data carries real `prodST`/`prodStatus=1`/`prodET` timestamps — a genuinely active production cycle, not a dormant one. Drone Parts Workshop and Armament Institute remain in the client too — they're real buildings with their own confirmed-valid pairings, just not what these two names actually meant.
+</Check>
+
+Confirmed live, end to end: two separate full `-collect` runs against the real account (before the Truck Station tiers existed in the client) produced 38 and 39 successful collections (out of 41 attempts each) across what were then the **12 confirmed building types** — the original six, Oil Well, Drone Parts Workshop, and the four Spore Factory tiers all completed real collections with resource deltas visible in the live `push.resource.info` / `push.resource.item.update` server pushes (food, iron, gold, refined metal, refined material, training points, petroleum, Drone Parts, and obsidian all observed increasing). The remaining attempts in both runs correctly got `errorCode=602026`, `"In production please be patient"`, for buildings whose production timer hadn't finished yet (including every attempt on Tactical Center and Armament Institute) — expected, correct server behavior, not a client error. Component Factory's later confirmation (above) brings the current total to **13 confirmed building types**.
+
+## Armed Truck: an account-level idle reward, not a building
+
+<Check>
+  **Resolved.** "Armed Truck" is not a building at all, and not `Scene/LWHummerScene` (a genuinely separate real-time driving/combat minigame, confirmed to have zero associated network commands anywhere in the ~3,178-command catalog — its rewards, if any, would require actually playing a timed 3D session, not a request/response call). It's also not `LW_BUILD_TRUCK_STATION` above, despite that being a real, suggestively-named lead. Confirmed via a live packet capture of the actual game client: "Armed Truck" is one of two independent tracks (the other is "Overlord") in a dedicated **idle/AFK reward panel**, collected through a single account-level command with no building `uuid` involved at all: `lw.pve.idle.reward`, with an `action` field — `0` peeks at the accumulated pool without claiming it, `1` claims it.
+</Check>
+
+The real client's own captured traffic called `action=0`, then `action=1`, then `action=0` again — peek, claim, refresh. Replaying the same three-call sequence through this Go client got the identical shape of result:
+
+```
+lw.pve.idle.reward {action: 0}  ->  reward=[{type=1, value=18636}, {type=20, value=18636}, {type=31, value=11849}, {type=27, value={num=176628, id=8001}}], dominatorReward=[]
+lw.pve.idle.reward {action: 1}  ->  reward=[{total=1824399742, type=1, ...}, {total=1342422740, type=20, ...}, {total=818689169, type=31, ...}, {type=27, value={addNum=176628, itemId=8001, number=672979884, ...}}]
+lw.pve.idle.reward {action: 0}  ->  reward=[]
+```
+
+The `action=1` response is the load-bearing evidence, not just an echo of the peek: it includes real post-collection account `total` values for each resource, and the immediate follow-up `action=0` peek showed the pool reset to genuinely empty — proving the claim actually drained a real accumulated reward, not that the command merely succeeded superficially. `dominatorReward` (the "Overlord" track) was empty in this particular capture, so its claim payload shape wasn't directly observed, but the same `action=1` call is expected to cover both tracks together since they share one panel and one command.
+
+Wired into the Go client as `CollectIdleReward` (`goclient/buildings.go`), called automatically at the start of every `-collect` run, independent of the building-uuid loop since this command needs no `uuid` at all.
+
+## Visitors: delivered free in `init`, greeted with `visitor.operate`
+
+<Check>
+  **Confirmed live.** City visitors — the `?`-bubble NPCs that occasionally appear near the base — need no separate discovery request at all. They're delivered as a sibling field of `building_new` in the same bare `init` bootstrap push (see [The real post-login bootstrap](#the-real-post-login-bootstrap-bare-init-not-push-init-build) above): `visitor={addNum, maxNum, list=[{uid, eventId, startTime, type, extendInfo, visitorId}, ...]}`. `maxNum` was observed live as `5`. Greeting one is `visitor.operate {uid, operate: 1}` — confirmed via a live packet capture of the real game client tapping two visitors in its city, one `visitor.operate` call per tap.
+</Check>
+
+Replaying the same request shape through this Go client, against the one visitor the real client's own session had left ungreeted, got a real, well-formed business-logic response rather than a protocol error or an "unknown command":
+
+```
+visitor.operate {uid: 1389862050553073568, operate: 1}  ->  errorCode=visitor_err_coming, errorMsg="visitor not started"
+```
+
+That single response is more informative than it looks. Cross-referencing the three visitors present in that capture's `init` payload, this was the most-recently-arrived of the three (`eventId=2005`, the newest `startTime`) — the real client had greeted the other two (`eventId=2002` and `eventId=2001`, both older) and left this one alone. Read together: visitors apparently go through an arrival delay/animation window after showing up before they're actually greetable, and `visitor_err_coming` is the server's real, typed way of saying "not yet." This confirms the full path end to end — parsing visitors out of `init`, building the request, round-tripping it, decoding a real typed response — but a **successful** greet's reward payload has still not been directly observed, since no visitor was in a greetable state during either capture.
+
+Wired into the Go client as `GreetVisitors` (`goclient/visitors.go`), called automatically on every `-collect` run alongside `CollectIdleReward`, for the same reason: no building `uuid` involved.
+
+## Alliance automation: help-all and gift claiming, both true bulk commands
+
+<Check>
+  **Confirmed live**, both via real packet captures of the actual game client. Unlike mail (below), neither of these needs per-item uids at all — both are genuine "do everything of this kind" bulk commands, closer in shape to the Armed Truck idle reward than to mail claiming.
+</Check>
+
+**Helping alliance members** (`al.help.all`) bulk-completes every pending alliance-member help request (construction/research speedups other members asked for) in one call. Reading the request-construction Lua directly (`extracted/lua_decompiled/4368_Net_Msgs_Alliance_AlHelpAllMessage.lua`) shows the wire request carries exactly one field, `cmdBaseTime` — everything else the UI passes in (`helpBtnPos`, `toPos`, `isOnlyDisperse`, `isOnlyShowDiff`) is purely local animation state, never sent. The real client sent an absolute Unix-epoch-milliseconds value; replaying the same shape through this Go client with a live `time.Now().UnixMilli()` got a real response echoing the account's own `allianceId` back with no error. The Lua handler shows this call is unconditional and safe even with nothing pending — it's a no-op success, not an error, in that case.
+
+**Claiming alliance gifts** (`alliance.reward.allreceive`) is the "Claim All" button on the Alliance Gifts panel, and needs only a `type` field. The panel has two independently-claimed tabs; reading the handler's own tip-string branch (`extracted/lua_decompiled/4428_Net_Msgs_Alliance_AllianceReceiveAllGiftMessage.lua`) pins the mapping exactly: `type == 1` shows locale key `alliance_system025` ("Premium Alliance Gifts"), everything else shows `alliance_system024` ("Regular Alliance Gifts") — so `type=1` is Premium, `type=2` is Regular. Only Regular was actually packet-captured live (the tips banner afterward read "2 Regular Alliance Gifts were claimed," confirming `type=2`); `type=1` for Premium is included on the strength of that same code branch, not independently packet-captured. Replaying both through this Go client got real, well-formed responses for each: `{type=1, receiveResult=0}` and `{type=2, receiveResult=0}` — `receiveResult=0` means nothing was pending at test time (the account had just been cleared manually moments before), not an error.
+
+Wired into the Go client as `HelpAllianceMembers` and `ClaimAllianceGifts` (`goclient/alliance.go`), both called automatically on every `-collect` run.
+
+## Alliance tech donation: bulk tree discovery, then one targeted donate
+
+<Check>
+  **Confirmed live**, end to end, through this Go client. Unlike help-all and gift claiming above, this isn't a single blanket "do everything" call — donating requires first discovering which one tech (out of dozens) is currently marked "Recommended" by the alliance, then targeting that specific `scienceId`. Both steps are confirmed with real evidence, not just static analysis.
+</Check>
+
+**Discovery** uses `science.data.refresh` — no parameters at all — which returns the account's *entire* alliance tech tree in one response: every `scienceId` with its `currentPro`/`needPro` donation progress and a `state` field. A live call returned ~45 entries; exactly one had `state=1`, every other had `state=0`. That one entry's progress, `currentPro=4951850`/`needPro=8000000`, matched the "4.9M/8.0M" bar shown under the thumbs-up-badged "Senior Scientist" tech in the real game UI at essentially the same moment — confirming `state=1` is the recommended-tech flag. (`al.science.recommend {scienceId, state}` is the real client's own way of *setting* this — an alliance-officer action, matching the "Cancel Recommend" button seen in the UI — but nothing here ever calls it; this only reads the current value.)
+
+**Donation** is `al.science.donate {scienceId, option: 1}` — confirmed via a real packet capture of the actual game client tapping the free (coin-cost) donate button. `option`'s exact range of valid values wasn't determined (only `1` was ever observed, for a successful donation), so `1` is reused as-is rather than guessed at.
+
+**"Holding the donate button longer adds a multiplier in the UI"** turned out to be pure client-side behavior, not a server feature. Reading both donate messages' request-construction Lua directly (`extracted/lua_decompiled/4380_Net_Msgs_Alliance_AlScienceDonateMessage.lua` and `..._AlScienceGoldDonateMessage.lua`) — neither has a count/times/multiplier field on the wire. Holding the button just fires the same single-donation request repeatedly while held; the "multiplier" is a running visual counter on the client, not a batched call. That distinction matters because the free donate path is real-rate-limited server-side: `al.science.refreshNum` (also confirmed live) returned `maxNum=30` (donations per day) gated by `refreshTimeBlock=1200000` — a 20-minute cooldown between individual donations. The gem-cost "Unlimited Attempts" path (`al.science.donate.gold {scienceId}`, no `option` field) has no such cooldown — `useGoldNum`/`maxGoldNum` both came back as `999999999` — but spends real premium currency per use, so it's deliberately not wired into automatic collection.
+
+Live-tested through this Go client end to end: `science.data.refresh` correctly found `scienceId=10011900` as the recommended tech, and `al.science.donate` against it returned a real, well-formed response — `errorCode=120471, "Donate science CD time is not finish"` — the expected cooldown error, since the real account had just donated minutes earlier in the same capture. That confirms the full discovery-then-donate path end to end, even though this particular attempt was correctly blocked by a real, working rate limit rather than a client bug.
+
+Wired into the Go client as `DonateRecommendedAllianceTech` (`goclient/alliance.go`), called automatically on every `-collect` run — one free donation attempt toward whatever the alliance currently has recommended, silently and correctly declining if the cooldown hasn't expired yet.
+
+## Mail: claimable, but scoped per category with string-GUID uids
+
+<Check>
+  **Confirmed live**, via a real packet capture of the actual game client tapping "Claim All" across several mailbox category tabs (Alliance, Event, Season). Two things this contradicted from a naive read of the command catalog: mail uids are **string GUIDs** (e.g. `1f9f236259ff4ae285bf5b20bdac2586`), unlike every other uuid this project deals with (buildings, visitors — all int64s); and claiming is scoped **per category** (`type`), not global — the real client sent one `mail.reward.batch` call per tab, each with only that tab's mail uids and that tab's `type` (observed live: `3`, `4`, and `9` for three different tabs — the exact type↔tab-name mapping wasn't determined, and doesn't need to be, since this just groups by whatever `type` each mail object already reports).
+</Check>
+
+Discovery uses `chat.get.system.mails`, paginated via the response's `more`/`lastUid`/`lastMailTime` fields — following the real client's own request shape (`extracted/lua_decompiled/5018_Net_Msgs_Mail_MailGetMutiMessage.lua`: `clientseq`, `time`, `count`, `firstCmd`, `isAll`). One real gap: the captured request already had a non-empty `clientseq`/`time` matching a specific already-known mail uid, because the real client was mid-session with a warm local mail cache built from a long history of `push.mail` notifications — the true cold-start values were never directly observed. This Go client sends `time: 0`, `clientseq: ""` on its first call (still with `firstCmd: "YES"`, exactly as captured), on the theory that's the correct "give me everything" cold-start shape. That theory held up well in testing: a fresh call returned **326 real mailbox entries** across multiple paginated pages, not just a handful — but whether that's genuinely the account's full history or just a large recent window hasn't been independently verified against the real client.
+
+Each mail object reports `uid`, `type`, and `rewardStatus` — `rewardStatus == 0` is read as "has an unclaimed reward," matched by direct observation (the one fresh mail seen in a `push.chat.get.system.mails` push had `rewardStatus=0` and real embedded reward data, and had not yet been claimed by the user's actions in that capture).
+
+<Warning>
+  **Bug, found and fixed: marking mail as read and claiming its reward are two genuinely independent actions, not one paired step.** An earlier version of `ClaimAllMail` only sent `mail.read.status.betch` for mail that *also* had an unclaimed reward — silently never touching notification-only mail (alliance markers, battle reports, and similar) that never carries a reward at all. In practice this meant those mail categories' unread badges never cleared, no matter how many times `-collect` ran, since the function never sent a read-status call for them.
+
+  A follow-up live capture caught the real client doing exactly the opposite: tapping "Claim All" on a Regular-category tab (all battle reports, no gift icons visible in the UI) sent `mail.read.status.betch` for all 21 visible mail uids, but **no** matching `mail.reward.batch` call at all. Reading `Net.Msgs.Mail.MailReadStatusBatchMessage`'s own request-construction Lua confirms why this split is safe: the wire request needs only `uids`, no `type` at all — unlike the reward claim below, marking mail as read isn't scoped by category, so every discovered mail can be marked read in one pass regardless of type. `ClaimAllMail` now does exactly that: marks every mail returned by `ListMail` as read (batched, 100 uids per call), independent of reward status, then separately groups only the reward-bearing mail by `type` and claims it the same way as before.
+</Warning>
+
+Claiming a reward replays the real client's own confirmed request shape per category: `mail.reward.batch {uids, type}`, grouped by whatever `type` each reward-bearing mail object reports.
+
+Wired into the Go client as `ClaimAllMail` (`goclient/mail.go`), called automatically on every `-collect` run. Live-tested end to end after the fix: a full mailbox of 350 real entries, correctly paginated across 4 pages, all successfully marked read in one run. The reward-claim call itself (`mail.reward.batch`) still hasn't been exercised against a genuinely unclaimed reward — this account's mailbox had nothing left unclaimed at every test so far, since the real client had already cleared it manually. It'll get real exercise the next time mail with an actual reward is sitting in the inbox when `-collect` runs.
+
+## Root cause: packet-decode bugs, not protocol or anti-fraud gates
+
+Both of the "blocked" results elsewhere in this section trace back to the same live packet capture, even though they turned out to be mechanically distinct bugs. The capture: `tcpdump` against the locally installed `/Applications/Last War.app` (the real iOS / Mac Catalyst build) while manually logging into the same real account through the actual app UI. Since the SFS2X game socket is plain TCP with no TLS, this recorded cleartext-after-XOR application data directly — no TLS interception needed. The same `packet.go`/`sfsobject.go` the Go client already used decoded the capture directly — see [Capturing and decoding traffic](/capturing-and-decoding-traffic) for the full reproducible pipeline.
+
+Decoding that one real session did two things at once: it surfaced the real `Login` request's exact field values, byte-diffed against the Go client's own encoding (which is what led directly to the identity-mismatch fixes above), and it handed the decoder a real ~313KB Zstd-compressed `init` payload to chew on — which is what exposed both the missing Zstd path in `packet.go` and two SFSObject array-decode bugs in `sfsobject.go`. None of the small packets decoded earlier in this research happened to exercise those code paths, so both bugs sat latent until something this size and this well-populated came through.
+
+`packet.go`'s `ReadPacket` had always correctly detected the compressed frames (header bits `0x20` + `0x10`, the `useLZ4` flag repurposed as "useZstd") but simply errored instead of decompressing — never implemented. Every read loop waiting on `init` silently treated that error as connection-closed. The fix: a real Zstd decoder (`github.com/klauspost/compress/zstd`, a shared lazily-initialized `zstd.Decoder`, `DecodeAll`).
+
+Getting that decompressed payload to parse correctly then surfaced two bugs in `sfsobject.go`'s array-tag decode switch. **(a)** `LONG_ARRAY` (tag 13), `FLOAT_ARRAY` (tag 14), `DOUBLE_ARRAY` (tag 15), `BOOL_ARRAY` (tag 9), and `SHORT_ARRAY` (tag 11) weren't implemented at all — only `BYTE_ARRAY`/`INT_ARRAY`/`UTF_STRING_ARRAY` existed, because those were the only array types any previously-decoded (small) packet ever happened to contain. Fixed by implementing all five against the decompiled Unity SDK's `BinDecode_BOOL_ARRAY`/`SHORT_ARRAY`/`LONG_ARRAY`/`FLOAT_ARRAY`/`DOUBLE_ARRAY` functions — each a 2-byte (`i16`) count plus N big-endian elements, via a shared `GetTypedArraySize` helper. **(b)** `BYTE_ARRAY` (tag 10) specifically had a real length-prefix bug: it read the same 2-byte count as every other array type, but the real Unity SDK's `BinDecode_BYTE_ARRAY` doesn't go through `GetTypedArraySize` at all — it calls a bare 4-byte (`i32`) `ReadInt` instead. That's a genuine SFS2X wire-format asymmetry, not an implementation guess, confirmed by reading the decompiled function directly. It silently corrupted decoding partway through any packet containing a real byte-array value, which — like the missing array types — never happened to matter until this payload.
+
+<Check>
+  **Net effect.** Once both fixes landed, `init` arrived cleanly on the *first* login attempt in every post-fix login tested — no reconnect loop, no active-pull `login.init`, no extended timeout ever needed. The three-attempt-reconnect-plus-active-pull mechanism built earlier in this investigation to chase the missing-`init` symptom was solving the wrong problem; it's been reverted and disabled (max login attempts reduced back to 1), especially since repeated reconnect attempts against a stale or identity-mismatched token were themselves tripping `E005`/`E011` — meaning even "reconnect gets blocked after one attempt" was downstream of the same identity-mismatch root cause above, not a separate rate-limit or session-lock mechanism. No rate-limiting, no session-lock, no already-connected gate was ever found to exist anywhere in this path.
+</Check>
+
+**What's still open:** this is a proven-working recipe, not a fully general one yet. The `ta` analytics-JSON field's exact minimal required content is unconfirmed — only that the full real captured blob works; whether the server validates specific sub-fields inside it (a zone matching the top-level zone, a device id matching the top-level `deviceId`, ...) or just requires it to be non-trivially populated was never isolated, and a fresh captured token will need its own fresh `ta` capture, since it carries session-specific fields like a game-session id. This was also proven via the direct cross-server-test path with one specific captured access token — a from-scratch login using the iOS identity mode from the very start, including the GSL HTTP call, hasn't been tried yet, and neither has the mirror case: matching an *Android*-issued token's real identity fields for an Android-flavored reconnect.

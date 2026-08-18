@@ -1,0 +1,83 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Last War",
+  "colors": {
+    "primary": "#16A34A",
+    "light": "#07C983",
+    "dark": "#15803D"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "pages": [
+      {
+        "group": "Front Matter",
+        "pages": [
+          "index",
+          "methodology"
+        ]
+      },
+      {
+        "group": "Bootstrap & Transport",
+        "pages": [
+          "bootstrap",
+          "gate-server-crypto",
+          "wire-protocol",
+          "auth"
+        ]
+      },
+      {
+        "group": "Protocol Surface",
+        "pages": [
+          "command-reference",
+          "entity-id-reference"
+        ]
+      },
+      {
+        "group": "Gameplay Domains",
+        "pages": [
+          "city-building",
+          "military-battle",
+          "alliance-chat-mail",
+          "shop-iap",
+          "world-map"
+        ]
+      },
+      {
+        "group": "Client Internals",
+        "pages": [
+          "lua-architecture",
+          "data-tables",
+          "android-platform",
+          "native-binaries"
+        ]
+      },
+      {
+        "group": "Building the Client",
+        "pages": [
+          "go-client-roadmap",
+          "capturing-and-decoding-traffic",
+          "live-validation",
+          "open-questions",
+          "research-pass"
+        ]
+      }
+    ]
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "claude",
+      "perplexity",
+      "mcp",
+      "cursor",
+      "vscode"
+    ]
+  }
+}

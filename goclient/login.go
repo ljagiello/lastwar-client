@@ -1,0 +1,502 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"slices"
+	"strings"
+	"time"
+)
+
+// LoginResult carries everything a caller needs after a successful login:
+// the live connection and the account snapshot from push.account.login.new
+// (when the email-code path ran) or the base login response otherwise.
+type LoginResult struct {
+	Conn      *GameConn
+	Ident     *deviceIdentity
+	Account   *SFSObject // push.account.login.new params, if the email path ran (nil on loginKey fast-path)
+	Buildings []Building // populated if the `init` bootstrap push arrived during login (see waitForInitPush)
+	Visitors  []Visitor  // populated alongside Buildings, from the same `init` push (see waitForInitPush)
+}
+
+// LoginOptions configures how Login authenticates.
+type LoginOptions struct {
+	Email     string // required unless a LoginKey is already persisted
+	CodePipe  string // FIFO path to read the email verification code from; "" reads stdin
+	Handshake bool   // experimental: send the vanilla SFS2X pre-Login Handshake (see conn.go:DoHandshake)
+}
+
+// Login runs the full bootstrap: HTTP check-version, GSL getserverlist,
+// SFS2X TCP connect, base zone login, and -- unless a persisted loginKey
+// lets GSL resolve the account directly -- the email verification-code
+// flow. Returns a live, authenticated connection with heartbeat running.
+func Login(opts LoginOptions) (*LoginResult, error) {
+	httpClient := defaultHTTPClient()
+
+	slog.Info("check-version: fetch RSA pubkey and pick gate host")
+	cv, gateHost, err := CheckVersion(httpClient)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("gate host", "gateHost", gateHost)
+	slog.Info("check-version response", "updateType", cv.UpdateType, "resMsgLen", len(cv.ResMsg))
+
+	pub, err := parseRSAPubKeyFromDER(cv.ResMsg)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("RSA pubkey", "bits", rsaModulusBitLen(pub))
+
+	ident, err := loadOrCreateDeviceIdentity()
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("device identity", "deviceId", ident.DeviceID)
+	slog.Info("air key", "airKey", ident.AirKey())
+	slog.Info("persisted state", "username", ident.Username, "gameUid", ident.GameUid, "loginKey", redact(ident.LoginKey))
+
+	// dossier §02.2's opt table, refined empirically:
+	//   loginKey known  -> opt=login (fastest, resolves the real account directly)
+	//   gameUid known, no loginKey -> opt=fix
+	//   neither known -> opt=new (brand new device)
+	opt := GSLOpt{Opt: "new"}
+	switch {
+	case ident.LoginKey != "":
+		opt = GSLOpt{Opt: "login", LoginKey: ident.LoginKey}
+	case ident.GameUid != "":
+		opt = GSLOpt{Opt: "fix"}
+	}
+	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt)
+	lsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, opt, "", ident.GameUid)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("GSL getserverlist response", "code", lsr.Code, "serverListLen", len(lsr.ServerList), "lastLoggedServer", lsr.LastLoggedServer)
+	if len(lsr.ServerList) == 0 {
+		return nil, fmt.Errorf("no servers returned")
+	}
+	for _, s := range lsr.ServerList {
+		slog.Info("state server", "id", s.ID, "name", s.Name, "ip", s.IP, "port", s.Port, "zone", s.Zone, "gameUid", s.GameUid, "status", s.Status)
+	}
+	accessTok := ""
+	if lsr.At != nil {
+		accessTok = lsr.At.Token
+		slog.Info("access token acquired", "tokenLen", len(accessTok))
+	}
+
+	stateSrv := lsr.ServerList[0]
+	zone := stateSrv.Zone
+	gameUid := stateSrv.GameUid
+	if gameUid != "" && gameUid != ident.GameUid {
+		if err := ident.SaveGameUid(gameUid); err != nil {
+			slog.Warn("failed to persist gameUid", "error", err)
+		}
+	}
+	addr := fmt.Sprintf("%s:%d", firstHost(stateSrv.IP), stateSrv.Port)
+	serverID := strings.TrimPrefix(zone, "APS")
+
+	// Steps 3-5 (dial, login, wait-for-init) were originally a retry loop
+	// mirroring the real client's own recovery from a missing `init` push
+	// (report 15's init_push_missing_after_login finding -- PushInitState,
+	// Assembly-CSharp.decompiled.cs:18808-18853, LoginTryCount<3: a hard
+	// timeout then a full reconnect, up to 3 attempts). Tested live and
+	// disabled: ANY reconnect attempt on this server -- with un="",
+	// composite un, fresh access token, stale access token, any
+	// combination -- reliably fails with ec=28/E011 or E005, even for a
+	// brand-new guest that connected once seconds earlier. Reconnecting
+	// doesn't recover a missing init; it just turns a working session
+	// into a broken one. maxLoginAttempts is kept at 1 (no retry) with a
+	// single longer wait window instead. The serverInfo{ip,port,zone,uid}
+	// shard-redirect check (LoginMessage.CSHandleResponse,
+	// Assembly-CSharp.decompiled.cs:122613-122624) is kept, and its own
+	// `attempt--` guards it from being throttled by maxLoginAttempts --
+	// confirmed live and genuinely necessary, not just theoretical: a
+	// session config captured against one zone kept "successfully"
+	// logging in weeks later after a real server merge moved the account
+	// to a different zone/host/port entirely, while every subsequent
+	// command timed out because the old connection no longer served this
+	// account at all. This redirect field is exactly how the server says
+	// so -- see the matching, more detailed writeup on
+	// DoCrossServerLogin in crossserver.go, which had the same gap.
+	const maxLoginAttempts = 1
+	const maxRedirectHops = 3
+	const initPushTimeout = 45 * time.Second
+
+	var conn *GameConn
+	var buildings []Building
+	var visitors []Visitor
+	gotInit := false
+	redirectHops := 0
+
+	for attempt := 1; attempt <= maxLoginAttempts; attempt++ {
+		if attempt > 1 {
+			slog.Info("retry", "attempt", attempt, "maxAttempts", maxLoginAttempts)
+		}
+		slog.Info("step 3: open SFS2X TCP connection")
+		slog.Info("dialing", "addr", addr, "zone", zone)
+		conn, err = DialGame(addr, 10*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		conn.StartHeartbeat(4*time.Second, time.Now())
+		slog.Info("connected")
+
+		if opts.Handshake {
+			slog.Info("step 3b: SFS2X Handshake (experimental, see conn.go:DoHandshake)")
+			hsResp, err := conn.DoHandshake(10 * time.Second)
+			if err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("handshake: %w", err)
+			}
+			slog.Info("handshake OK", "response", hsResp.String())
+		}
+
+		slog.Info("step 4: SFS zone login")
+		// NOTE: per LoginMessage.CSSetData (Assembly-CSharp.decompiled.cs:
+		// 122420+), `un` should be AccountCredentialManager.ServerInfo.uid
+		// -- GSL's composite `gameUid` -- once known. Empirically that's
+		// backwards for the base zone Login on THIS server: sending a
+		// non-empty `un`/`p.gameUid` reliably gets ec=28/E005 (or E011),
+		// reproducibly, even for a low-value guest identity that has
+		// simply connected once before -- not just for an established
+		// real account. `un=""` (letting the server resolve identity from
+		// deviceId/airKey alone) is the only combination that has ever
+		// worked, in every test run tonight. Best guess:
+		// AccountCredentialManager.SetUID is only actually called from the
+		// role-picker flow (UIRoleLoginView.OnClickLogin) in real play,
+		// not populated automatically from a plain GSL response the way
+		// this dossier's static reading assumed -- so ServerInfo.uid is
+		// genuinely empty at this call site in normal operation too.
+		loginParams := BuildLoginParams(LoginParamsInput{
+			FutureID:  1,
+			DeviceID:  ident.DeviceID,
+			AirKey:    ident.AirKey(),
+			GameUid:   "",
+			AccessTok: accessTok,
+			ServerID:  serverID,
+		})
+		loginContent := NewSFSObject()
+		loginContent.PutUtfString("zn", zone)
+		loginContent.PutUtfString("un", "")
+		loginContent.PutUtfString("pw", "")
+		loginContent.PutSFSObject("p", loginParams)
+		if err := conn.SendEnvelope(controllerSystem, actionLogin, loginContent); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		slog.Info("login request sent, waiting for response", "un", gameUid, "at", redact(accessTok))
+
+		env, err := waitFor(conn, 15*time.Second, func(e *Envelope) bool {
+			return e.Controller == controllerSystem && e.Action == actionLogin
+		})
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		if ec, ok := env.Content.Get("ec"); ok {
+			conn.Close()
+			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s", ec.Val, env.Content.String())
+		}
+		slog.Info("login OK", "response", env.Content.String())
+		if un := env.Content.GetString("un"); un != "" && un != ident.Username {
+			if err := ident.SaveUsername(un); err != nil {
+				slog.Warn("failed to persist username", "error", err)
+			} else {
+				slog.Info("persisted username for future runs", "username", un)
+			}
+		}
+
+		if siObj := findServerInfo(env.Content); siObj != nil && siObj.GetString("ip") != "" {
+			redirectHops++
+			if redirectHops > maxRedirectHops {
+				conn.Close()
+				return nil, fmt.Errorf("login: too many serverInfo redirects (>%d), last addr=%s zone=%s", maxRedirectHops, addr, zone)
+			}
+			newAddr := fmt.Sprintf("%s:%d", firstHost(siObj.GetString("ip")), getIntFlexible(siObj, "port"))
+			newZone := siObj.GetString("zone")
+			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddr, "newZone", newZone, "oldAddr", addr, "oldZone", zone)
+			conn.Close()
+			addr = newAddr
+			if newZone != "" {
+				zone = newZone
+				serverID = strings.TrimPrefix(zone, "APS")
+			}
+			// A redirect is a deterministic server instruction, not a
+			// flaky timeout -- don't let it consume the one real
+			// init-push-timeout retry attempt maxLoginAttempts guards
+			// (see the comment above this loop for why that's kept at
+			// 1 and not bumped up casually).
+			attempt--
+			continue
+		}
+
+		slog.Info("step 5: waiting for init push sequence")
+		conn.conn.SetReadDeadline(time.Time{})
+		buildings, visitors, gotInit = waitForInitPush(conn, initPushTimeout)
+		if gotInit {
+			slog.Info("got init push", "buildings", len(buildings))
+			break
+		}
+		slog.Error("no init push within timeout", "timeoutMs", initPushTimeout.Milliseconds())
+		if attempt < maxLoginAttempts {
+			conn.Close()
+			// A same-identity reconnect right after a just-closed
+			// connection got E011/E005 in testing, even for a brand-new
+			// guest -- reusing the same `at` access token across two
+			// separate TCP sessions is the leading suspect (SFS2X access
+			// tokens are commonly single-use per connection). Fetch a
+			// fresh one via GSL before redialing rather than reusing the
+			// stale one.
+			slog.Info("fetching fresh access token before reconnecting (suspected single-use-per-connection)")
+			freshOpt := opt
+			if ident.GameUid != "" {
+				freshOpt = GSLOpt{Opt: "fix"}
+			}
+			freshLsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, freshOpt, "", ident.GameUid)
+			if err != nil {
+				slog.Error("GSL refresh failed; reconnecting with stale token anyway", "error", err)
+			} else if freshLsr.At != nil {
+				accessTok = freshLsr.At.Token
+				slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
+			}
+		}
+	}
+	if !gotInit {
+		slog.Warn("giving up on init after all attempts; continuing anyway, building list may be empty")
+	}
+
+	result := &LoginResult{Conn: conn, Ident: ident, Buildings: buildings, Visitors: visitors}
+
+	if opt.Opt == "login" {
+		// GSL already resolved the real account via loginKey; the base
+		// SFS login above logged us in directly. Nothing more to do.
+		slog.Info("fast-path login via loginKey complete, skipping email verification")
+		return result, nil
+	}
+
+	if opts.Email == "" {
+		// No email and no loginKey: stay on the guest identity the base
+		// zone Login above already created. A guest is a fully playable
+		// account at the SFS/game level, just with no real progress --
+		// fine for exercising game mechanics without touching a real
+		// account or going through email verification.
+		slog.Info("no -email given; staying on guest identity (no account binding)")
+		return result, nil
+	}
+
+	slog.Info("step 6: request email verify code")
+	sendCodeParams := NewSFSObject()
+	sendCodeParams.PutUtfString("mail", opts.Email)
+	sendCodeParams.PutUtfString("lang", "en")
+	if err := conn.SendExtension("account.login.send.verify.code", sendCodeParams); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	slog.Info("sent account.login.send.verify.code", "email", opts.Email)
+
+	msg, err := waitForCmd(conn, 15*time.Second, "account.login.send.verify.code", "push.account.send.verify.code")
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if ec, ok := msg.Params.Get("errorCode"); ok {
+		conn.Close()
+		return nil, fmt.Errorf("SEND-CODE FAILED: errorCode=%v full=%s", ec.Val, msg.Params.String())
+	}
+	slog.Info("server accepted", "response", msg.Params.String())
+	slog.Info("verification code should now be arriving", "email", opts.Email)
+
+	slog.Info("step 7: waiting for verification code")
+	var code string
+	if opts.CodePipe != "" {
+		slog.Info("waiting for a writer on code pipe", "codePipe", opts.CodePipe)
+		code = readCodeFromPipe(opts.CodePipe)
+	} else {
+		slog.Info("feed the 6-digit code on stdin")
+		code = readCodeFromStdin()
+	}
+	slog.Info("got code", "code", code)
+
+	slog.Info("step 8: complete login with account.login.new (type=0, mail+code)")
+	finishParams := NewSFSObject()
+	finishParams.PutInt("type", 0)
+	finishParams.PutUtfString("mail", opts.Email)
+	finishParams.PutUtfString("verifyCode", code)
+	finishParams.PutUtfString("pf", "market_global")
+	finishParams.PutUtfString("deviceId", ident.DeviceID)
+	finishParams.PutUtfString("airKey", ident.AirKey())
+	if err := conn.SendExtension("account.login.new", finishParams); err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	ackMsg, err := waitForCmd(conn, 15*time.Second, "account.login.new")
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if ec, ok := ackMsg.Params.Get("errorCode"); ok {
+		conn.Close()
+		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED: errorCode=%v full=%s", ec.Val, ackMsg.Params.String())
+	}
+	slog.Info("ack", "response", ackMsg.Params.String())
+
+	// The direct response above is just a terse {success=true} ack; the
+	// actual account data (gameUid, loginKey, accountArr, ...) arrives
+	// separately as a push.account.login.new push.
+	msg2, err := waitForCmd(conn, 15*time.Second, "push.account.login.new")
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if ec, ok := msg2.Params.Get("errorCode"); ok {
+		conn.Close()
+		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED (push): errorCode=%v full=%s", ec.Val, msg2.Params.String())
+	}
+	slog.Info("login success", "response", msg2.Params.String())
+	result.Account = msg2.Params
+
+	if lk := msg2.Params.GetString("loginKey"); lk != "" {
+		if err := ident.SaveLoginKey(lk); err != nil {
+			slog.Warn("failed to persist loginKey", "error", err)
+		} else {
+			slog.Info("persisted loginKey for future fast logins")
+		}
+	}
+	if gu := msg2.Params.GetString("gameUid"); gu != "" {
+		_ = ident.SaveGameUid(gu)
+	}
+	if un := msg2.Params.GetString("gameUserName"); un != "" {
+		_ = ident.SaveUsername(un)
+	}
+
+	return result, nil
+}
+
+func redact(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 8 {
+		return "***"
+	}
+	return s[:4] + "..." + s[len(s)-4:]
+}
+
+// waitForInitPush waits for the bare `init` bootstrap push (report 14 §5:
+// the real post-login init, not push.init.build), sending `login.init` --
+// a real, currently-registered active-pull command exempted from the
+// "must be logged in" gate for exactly this window
+// (Assembly-CSharp.decompiled.cs:109304, 121428, 122381-122419) -- partway
+// through the wait as a fallback, in case the push itself never arrives
+// (report 15's init_push_missing_after_login finding #2). Returns the
+// parsed building list, the parsed visitor list, and whether `init` was
+// actually seen.
+func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visitor, bool) {
+	deadline := time.Now().Add(timeout)
+	sentActivePull := false
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, nil, false
+		}
+		if !sentActivePull && remaining < timeout/2 {
+			sentActivePull = true
+			slog.Info("halfway through init-wait window; sending login.init as active-pull fallback")
+			req := NewSFSObject()
+			req.PutInt("_id", 2)
+			req.PutUtfString("dataConfigMd5", "")
+			if err := conn.SendExtension("login.init", req); err != nil {
+				slog.Error("login.init send failed", "error", err)
+			}
+		}
+		conn.conn.SetReadDeadline(time.Now().Add(remaining))
+		env, err := conn.ReadEnvelope()
+		if err != nil {
+			return nil, nil, false
+		}
+		msg, ok := env.AsExtension()
+		if !ok {
+			continue
+		}
+		if msg.Cmd == "init" {
+			return ParseInitBuildings(msg.Params), ParseInitVisitors(msg.Params), true
+		}
+		slog.Debug("skipped push while waiting for init", "cmd", msg.Cmd, "params", msg.Params.String())
+	}
+}
+
+// waitFor reads envelopes until pred matches or timeout elapses, logging
+// everything it skips past along the way.
+func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (*Envelope, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("timed out waiting for matching envelope")
+		}
+		conn.conn.SetReadDeadline(time.Now().Add(remaining))
+		env, err := conn.ReadEnvelope()
+		if err != nil {
+			return nil, err
+		}
+		if pred(env) {
+			return env, nil
+		}
+		if msg, ok := env.AsExtension(); ok {
+			slog.Debug("skipped push while waiting", "cmd", msg.Cmd, "params", msg.Params.String())
+		}
+	}
+}
+
+// waitForCmd waits for an extension message whose cmd matches any of wantCmds.
+func waitForCmd(conn *GameConn, timeout time.Duration, wantCmds ...string) (*ExtensionMessage, error) {
+	env, err := waitFor(conn, timeout, func(e *Envelope) bool {
+		msg, ok := e.AsExtension()
+		if !ok {
+			return false
+		}
+		return slices.Contains(wantCmds, msg.Cmd)
+	})
+	if err != nil {
+		return nil, err
+	}
+	msg, _ := env.AsExtension()
+	return msg, nil
+}
+
+func readCodeFromStdin() string {
+	return readCodeFrom(os.Stdin)
+}
+
+// readCodeFromPipe opens a FIFO for reading -- this blocks until a writer
+// opens the other end, which is exactly what we want: the process can sit
+// here idle (heartbeat still running in the background) until the code is
+// written to the pipe from a separate shell command.
+func readCodeFromPipe(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		slog.Error("open code pipe", "path", path, "error", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+	return readCodeFrom(f)
+}
+
+func readCodeFrom(r io.Reader) string {
+	reader := bufio.NewReader(r)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && line == "" {
+			slog.Error("input closed without a code", "error", err)
+			os.Exit(1)
+		}
+		code := strings.TrimSpace(line)
+		if code != "" {
+			return code
+		}
+	}
+}

@@ -1,0 +1,51 @@
+---
+title: "Open questions & further work"
+description: "Live tracker of every open question flagged during the client-building effort, and its current resolution status."
+---
+
+import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
+
+<LiveVerificationStatus />
+
+Flagged honestly rather than papered over. Of the original 8 open items, an 8-agent dedicated research pass (see [Open-questions research pass](/research-pass)) closed 6 outright, and live testing against production (see [Live validation against production](/live-validation)) closed the remaining 2 — this section tracks the current state.
+
+## Status at a glance
+
+This table exists so a future update can change just the relevant row without rewriting the rest of the page. Every item below is currently resolved — there are no genuinely open items remaining. If a future finding reopens one, update its row and status here rather than adding a separate list.
+
+| Item | Status | Resolved via |
+|---|---|---|
+| Enum numeric values (`BuildingTypes`, ...) | **Resolved** | [Live testing](/live-validation) |
+| Server enforcement of ShuMei/ACE anti-cheat data on login | **Resolved** | [Live testing](/live-validation) |
+| Missing post-login `init` push | **Resolved** | [Live testing](/live-validation) |
+| Established-account reconnect block | **Resolved** | [Live testing](/live-validation) |
+| March "recall home" encoding | **Resolved** | [Research pass](/research-pass) |
+| `WorldPointInfo.proto`'s actual transport | **Resolved** | [Research pass](/research-pass) |
+| Four "unrecoverable" proto schemas | **Resolved** (18 recovered) | [Research pass](/research-pass) |
+| `libxlua.so`'s `CalcChatSign`/AES/MD5 helpers | **Resolved** | [Research pass](/research-pass) |
+| `PlayerInfo:GetABTestTableName` | **Resolved** | [Research pass](/research-pass) |
+| Season vs. Activity domain boundary | **Resolved** (97% measured accuracy) | [Research pass](/research-pass) |
+
+## Resolved by live testing
+
+See [Live validation against production](/live-validation) for full methodology.
+
+- ~~**Enum numeric values** (`BuildingTypes`, ...)~~ — **Resolved** the authoritative `BuildingTypes` table lives in `Global_EnumType.lua`, giving every building's internal codename and numeric ID directly. See the [Game entity ID reference](/entity-id-reference) for the full extraction across buildings/monsters/units/heroes/resources/items.
+- ~~**Whether the server enforces ShuMei/ACE anti-cheat data on login**~~ — **Resolved** yes, but conditionally: enforced (and reproducibly blocking) when reconnecting to an account with real history; not enforced at all for new-guest-account creation. Full test matrix in [Live validation against production](/live-validation).
+- ~~**The missing post-login `init` push**~~ — **Resolved** none of the three previously-identified leads were the cause. The real bug: `packet.go`'s `ReadPacket` already correctly detected the server's Zstandard-compressed packets (header bits `0x20` compressed + `0x10` useLZ4-repurposed-as-Zstd) but decompression itself was never implemented — it just returned an error, which every read loop indistinguishably treated as "connection closed." Fixed by adding a real Zstd decoder (`github.com/klauspost/compress/zstd`, a shared lazily-initialized `zstd.Decoder`) in that same branch. The post-login init push turned out to be ~313KB of Zstd-compressed `SFSObject` data on the wire; decoding it surfaced two further binary-codec bugs in `sfsobject.go`: `LONG_ARRAY`/`FLOAT_ARRAY`/`DOUBLE_ARRAY`/`BOOL_ARRAY`/`SHORT_ARRAY` (tags 9, 11, 13, 14, 15) were simply unimplemented, and `BYTE_ARRAY` (tag 10) was decoded with the wrong length-prefix width (i16 instead of the real i32), silently corrupting decode of any packet containing one — see the corrected wire-format table in [SFS2X wire protocol](/wire-protocol). Once both were fixed, the init push arrived cleanly on the very first attempt: no reconnect loop, no active-pull `login.init`, no extended timeout needed. The three-attempt-reconnect-plus-active-pull mechanism built earlier to chase this symptom was unnecessary and has been reverted (max login attempts back to 1).
+- ~~**The established-account reconnect block**~~ — **Resolved** not anti-fraud, not device fingerprinting, not session locking. Captured live traffic from the real iOS/Mac-Catalyst app (`/Applications/Last War.app`) via `tcpdump` against the same account, decoded the Login packet field by field (the SFS2X game socket is plain TCP, no TLS), and confirmed by a byte-for-byte raw replay that the same access token works cleanly across repeated connections — it is not single-use, and there is no rate-limit or already-connected mechanism. The actual gate: a token is bound to the exact `packageName`/`platform`/`appVersion`/`versionCode` identity it was issued under, and `goclient` hardcoded an Android identity unconditionally even when replaying an iOS-issued token. Fixed in `goclient/identity.go` (`BuildLoginParams` gained an `IOSMode` switch covering `packageName`, `packageSign` — confirmed still `SHA1(packageName)` on iOS too — `platform`, `pf`, `appVersion`, `versionCode`, the iOS-only `idfa`/`idfv`/`phone_native_screen` fields, removal of Android-only fields, and populating `ta` with real captured content instead of an empty placeholder), plus `goclient/crossserver.go` and new `-cs-ios`/`-cs-at` flags in `goclient/main.go`. A real reconnect through the Go client's own from-scratch SFS2X implementation then succeeded cleanly: Login OK, followed immediately by a correctly Zstd-decoded init push showing the account's 162 real buildings. Caveat: the exact minimal required content of `ta` wasn't isolated — only that the full real captured blob works; a different token would need its own fresh capture, since session-specific fields live inside it.
+
+## Resolved by a dedicated research pass
+
+See [Open-questions research pass](/research-pass) for full findings and citations.
+
+- ~~**March "recall home" encoding**~~ — **Resolved** not a coordinate sentinel — it's the literal enum constant `MarchTargetType.BACK_HOME = 3` (`Global_EnumType.lua:3945`), sent in the ordinary `target` field of `world.march.change` (the same command used to redirect a march anywhere), with `path` set back to the player's home-city tile. Full call chain traced from the UI button through to the wire request.
+- ~~**`WorldPointInfo.proto`'s actual transport**~~ — **Resolved** the "no confirmed call site" framing was outdated: `world.get.new` and `world.get.block`'s response field `points` (an array of raw byte blobs) is decoded via `WorldPointInfo.Parser.ParseFrom` in `WorldPointManager.ParseWorldGetBlock`, feeding the ~30 concrete point-type classes that render the world map. A second, nested call site decodes march destination points the same way.
+- ~~**Four unrecoverable proto schemas**~~ — **Resolved** all four (`ScoreProgressInfo`, `WorldCityRankMail`, `LwScoutReport`, `ShieldInfo`) were fully recoverable, and not where prior analysis stopped looking — see the callout below.
+- ~~**`libxlua.so`'s `CalcChatSign`/AES/MD5 helpers**~~ — **Resolved** the "no call site" claim was a tooling false-negative (this environment's `grep` is `ugrep`, which silently skips binary files without `-a`). The real call site was already sitting in report 06 (`ChatNetManager:InitWebSocketInst`, an alternate native-transport branch). Direct ARM64 disassembly of the native function (it ships unstripped, with symbols) confirms it's exactly `MD5(MD5(appId+uid) + timestamp)` — plain, unkeyed, textbook MD5, byte-identical to the already-known C# formula. Proprietary-crypto risk downgraded from "unknown" to confirmed **none**.
+- ~~**`PlayerInfo:GetABTestTableName`**~~ — **Resolved** not a hash or local computation — it's a single server-pushed integer, `monopoly_ab`, delivered in the post-login `Init` payload's `user` object. Each value (1, 2, 3, 5, 6, 7, 8, 9, 10, 13, 16, 18 in this build) is a reserved slot for one named A/B test; the function's `Is<TestName>B()` checks compare against it directly. A reimplementation cannot derive this offline — it must be read from a real login response.
+- ~~**Season vs. Activity domain boundary**~~ — **Resolved** (accuracy-measured, not just re-asserted): a genuine random sample of 100 commands (50 Season, 50 Activity) checked against actual handler code came back **97% label-defensible**. The 3 confirmed misclassifications aren't random noise — they're all cases where a single feature's sibling commands got torn across both domains because the classifier operates per-command/per-folder rather than per-`DataCenter`-manager (e.g. the Desert Storm fishing minigame's 8 commands split ~50/50 because one cmd string happened to contain `"fish.pond"`, a substring the classifier's ordered rule list catches before the generic `"season"` fallback).
+
+<Check>
+  **Bonus finding: 18 proto schemas recovered, not just 4.** The "unrecoverable" verdict on the four proto schemas stopped at "not in the Lua bundle" without checking two other places they actually live. Three of the four (`ScoreProgressInfo`, `ShieldInfo`, `LwScoutReport`) turned out to have full `Google.Protobuf`-generated C# classes in `Assembly-CSharp.decompiled.cs`, each embedding its complete compiled `FileDescriptorProto` as a base64 blob. All four — `WorldCityRankMail` included, which has zero C# presence at all — are also physically shipped as Unity `TextAsset`s inside a custom-packed AssetBundle blob (`assets/AssetBundles/BundleFragment0.bytes`, 525MB, indexed by a name→offset table also in the APK). Locating and extracting that bundle's `gameres_main_dir_proto` entry recovered **all 18** `.proto.bytes` files the client ships (not just the 4 originally sought) as serialized `FileDescriptorSet` binaries — decoded to human-readable `.proto` text and cross-validated field-for-field against the independently-recovered C# descriptors. Both the raw binaries and decoded schemas are saved at `extracted/recovered_protos/*.proto` / `*.decoded.txt`.
+</Check>

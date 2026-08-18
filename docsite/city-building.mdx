@@ -1,0 +1,78 @@
+---
+title: "City & building"
+description: "The base-building loop: two distinct queue systems, the building-id encoding scheme, core commands, and the two-part resource economy."
+---
+
+import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
+
+<LiveVerificationStatus />
+
+The base-building loop: two architecturally distinct "queue" systems that share a confusing name, a building-id encoding worth knowing, and a resource economy that's really two separate systems.
+
+## Two "queues" — don't conflate them
+
+- **Build-queue slots** (`BuildQueueManager`) — the small number of concurrent construction slots a player has. A building upgrade occupies one until it finishes.
+- **Production queue** (`QueueDataManager`) — a generic per-item timer reused by farming, pasture barns, troop training, hospital healing, and research alike. Same wire schema across all of them.
+
+## Building ID encoding
+
+Game-data rows are keyed `id = base_type_id + level`, where `base_type_id` is always a multiple of `BuildLevelCap = 1000`. So `bId=10100000, lv=5` → row id `10100005`.
+
+## Core commands
+
+<table>
+  <thead>
+    <tr><th>cmd</th><th>Purpose</th><th>Key request fields</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>free.building.place.new</code></td>
+      <td>Place a new building</td>
+      <td><code>buildingId, pointId, itemUuid?, robotUuid</code></td>
+    </tr>
+    <tr>
+      <td><code>free.building.up.new</code></td>
+      <td>Start an upgrade (occupies a queue slot)</td>
+      <td><code>uuid, upLevel, gold, workerUuid, robotUuid</code></td>
+    </tr>
+    <tr>
+      <td><code>free.building.upgrade.finish</code></td>
+      <td>Instantly finish (premium currency)</td>
+      <td><code>uuid</code></td>
+    </tr>
+    <tr>
+      <td><code>queue.finish</code> / <code>.batch</code></td>
+      <td>Instantly finish production item(s)</td>
+      <td><code>uuid</code> / <code>queueList[]</code></td>
+    </tr>
+    <tr>
+      <td><code>building.camp.training</code></td>
+      <td>Start camp production (soldiers/equip/chips)</td>
+      <td><code>uuid, type, sLevel, sNum, itemId</code> (<code>"id;count|id;count|..."</code> encoded string, not a true array)</td>
+    </tr>
+    <tr>
+      <td><code>building.camp.collect</code></td>
+      <td>Collect finished camp output (Military Camp, Smith Shop, Tactical Chip Factory — NOT Training Base, despite the name)</td>
+      <td><code>uuid</code></td>
+    </tr>
+    <tr>
+      <td><code>building.production.collect</code></td>
+      <td>Collect finished production-line building output — 13 confirmed building types live with real resource collection (Farmland, Iron Mine, Gold Mine, Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, and the four Season 6 Spore Factory tiers), plus 7 more (Tactical Center, Armament Institute, Tactical Institute, and 4 Truck Station tiers) wired in but still unconfirmed — see [Live validation against production](/live-validation). Not to be confused with account-level (non-building, no building `uuid`) commands also documented there: `lw.pve.idle.reward` (collects "Armed Truck"), `visitor.operate` (greets city visitors), `al.help.all`, `alliance.reward.allreceive`, and mail claiming.</td>
+      <td><code>uuid</code></td>
+    </tr>
+    <tr>
+      <td><code>worker.assign.all</code> / <code>assign.single.building</code></td>
+      <td>Assign idle workers to production slots</td>
+      <td><code>buildingUuid?</code></td>
+    </tr>
+    <tr>
+      <td><code>ub.store.upgrade</code></td>
+      <td>Pre-stock resources toward a pending upgrade</td>
+      <td><code>bUuid, resources&#123;&#125;, items&#123;&#125;</code></td>
+    </tr>
+  </tbody>
+</table>
+
+## Resource economy — two systems
+
+**12 base resources** (`oil, metal, money, electricity, water, pvePoint, wood, people, dragonHonorScore, obsidian, flint, petroleum`) arrive embedded in most responses and standalone via `push.resource.info`. Separately, **"resource items"** — a keyed bag of stackable goods (soldiers-as-items, crafting materials) — sync via `push.resource.item.update` / `user.get.all.resource.items`. There is no `get.storage.info` command; storage capacity is a client-computed sum over a stream of server-pushed effect deltas (`push.effect.change`), not a directly queryable value.

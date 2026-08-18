@@ -1,0 +1,60 @@
+---
+title: "Alliance, chat & mail"
+description: "How alliance management and mail ride the main SFS2X socket while real-time chat text runs over a separate, independently-authenticated JSON WebSocket."
+---
+
+import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
+
+<LiveVerificationStatus />
+
+"Chat" is actually two independent subsystems. Real-time message text never touches the main game socket at all — it rides a second, JSON-over-WebSocket connection with its own auth, its own server discovery, and its own message-signing scheme.
+
+## Two chat channels
+
+| | SFS socket (main connection) | Chat WebSocket (dedicated) |
+| --- | --- | --- |
+| Carries | Moderation (ban/lock), room admin, "share to chat" (attachments/cards), player search | **Actual message text**, room join, history/pagination, read receipts |
+| Format | Binary SFSObject | JSON text frames |
+| Auth | Piggybacks the main session | `chatToken` from the SFS `init` push + a signed per-connection header |
+| Discovery | n/a | Separate HTTP bootstrap, MD5-signed request |
+
+Sending an alliance/world chat message: `cmd="chat.room"` on the WebSocket, **not** the SFS-side `al.msg`/`chat.country` commands (those are for sharing a rich attachment/card into a room, no free-text field). Every message is signed:
+
+```text
+sign = MD5(uid + json(sortedRecursively(params)) + sendTime + connectionSign)
+frame = {"cmd": cmd, "params": params, "sendTime": sendTime, "sign": sign}
+```
+
+The alliance room id is **not** a deterministic function of the alliance id — it must be fetched via `common.chat.room.id` on the main SFS socket before you can `room.joinMulti` on the WebSocket.
+
+## Core Alliance commands
+
+| cmd | Purpose |
+| --- | --- |
+| `al.create` / `al.dismiss` / `al.leave` | Alliance lifecycle |
+| `al.apply` / `al.acceptapply` / `al.refuseapply` | Join requests (open alliances auto-join on apply) |
+| `al.invite` / `al.acceptinvite` | Direct invites (via mail) |
+| `al.kick` / `al.setrank` | Membership & rank management (kicks are rate-limited) |
+| `alliance.declare.war.create` | Declare war on a target city |
+| `al.call.help` / `al.show.help` | Mutual-aid: rally-assist build/queue speedups |
+| `al.help.all` | Bulk-completes every pending member help request in one call — **confirmed live**, only field on the wire is `cmdBaseTime` (a Long, current epoch-ms; everything else the UI passes locally never reaches the server). Safe to call with nothing pending — a no-op success, not an error. See [Live validation against production](/live-validation#alliance-automation-help-all-and-gift-claiming-both-true-bulk-commands). |
+| `alliance.reward.list` / `alliance.reward.allreceive` | Alliance Gifts panel: list, and "Claim All" for one `type` (`1` = Premium, `2` = Regular — both need claiming separately, **confirmed live** for both) — needs only `type`, no per-gift uids. See [Live validation against production](/live-validation#alliance-automation-help-all-and-gift-claiming-both-true-bulk-commands). |
+| `science.data.refresh` | Returns the account's *entire* alliance tech tree in one no-parameter call — every `scienceId` with donation progress and a `state` field. **Confirmed live**: exactly one entry had `state=1` (every other had `0`), matching the real UI's thumbs-up-badged "Recommended" tech via its progress numbers. See [Live validation against production](/live-validation#alliance-tech-donation-bulk-tree-discovery-then-one-targeted-donate). |
+| `al.science.donate` / `al.science.donate.gold` | Donate to one alliance tech's research — `.donate` costs a resource (**confirmed live**, rate-limited to `maxNum=30`/day with a 20-minute cooldown between uses, per `al.science.refreshNum`), `.donate.gold` costs gems with no cooldown (`useGoldNum`/`maxGoldNum` both `999999999`). Neither has a batch/count field — "hold to donate repeatedly" is a client-side auto-repeat of single-donation calls, not a server-side multiplier. |
+| `al.science.recommend` | Alliance-officer action: marks/unmarks one `scienceId` as the alliance's currently-Recommended tech (the "Cancel Recommend" button). Read the current value via `science.data.refresh`'s `state` field instead — there's no dedicated "get recommended" request. |
+
+## Core Mail commands
+
+| cmd | Purpose |
+| --- | --- |
+| `mail.read` | Read one mail — `{uid: mailId, type, toUser: senderUid}` |
+| `chat.get.system.mails` | List/sync the mailbox, paginated (`clientseq`/`time`/`count`/`firstCmd`/`isAll` in, `more`/`lastUid`/`lastMailTime` out). Response arrives as a separate push, `push.chat.get.system.mails`, not inline. **Confirmed live**: a cold-start call (`time: 0`, empty `clientseq`) correctly paginated a full 350-entry mailbox across 4 pages. |
+| `mail.delete` / `.batch` | Delete mail |
+| `mail.read.status.betch` | Mark mail read — needs only `uids` (comma-separated string GUIDs), no `type`, so it's global across every mailbox category in one call. **Confirmed live**, and genuinely independent of whether the mail has a reward: a real capture showed the actual client sending this with no matching `mail.reward.batch` call at all for a reward-less category (battle reports). Don't gate this on reward status — see the note in [Live validation against production](/live-validation#mail-claimable-but-scoped-per-category-with-string-guid-uids). |
+| `mail.reward` / `.batch` | Claim attachment reward. Gotcha, **confirmed live**: mail uids are string GUIDs, not the int64s every other uuid in this project uses, and the batch claim is scoped per mailbox category (`type`) — one call per category, not one global call. See [Live validation against production](/live-validation#mail-claimable-but-scoped-per-category-with-string-guid-uids). |
+| `mail.send` | Send mail (1:1 or alliance-wide) |
+| `get.fight.report.detail` | Pull a full battle report — mail is the delivery mechanism for combat reports |
+
+## Government ("Kingdom") system
+
+A cross-alliance elected-leadership layer on top of the world map: `choose.king`, `kingdom.position.appoint`/`.apply`/`.resign`, `cross.throne.*` (14 commands for a cross-server king-of-the-hill tournament). Ordinary SFS commands, no separate channel.

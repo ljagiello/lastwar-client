@@ -1,0 +1,94 @@
+---
+title: "Capturing and decoding traffic"
+description: "The exact, reproducible pipeline behind every live-confirmed finding in this dossier: capture real client traffic, find the right TCP stream, reassemble it, and decode it with the same codec the Go client runs on its own connection."
+---
+
+import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
+
+<LiveVerificationStatus />
+
+Every "confirmed live via a real packet capture" claim in [Live validation against production](/live-validation) and elsewhere in this dossier was produced by the same four-step pipeline. This page is that pipeline, written down once, so reproducing or extending any of those findings doesn't require re-deriving it from scratch.
+
+It works at all because the SFS2X game socket is **plain TCP with no TLS**. Capturing it is exactly as simple as capturing any other unencrypted traffic — no certificate pinning to defeat, no interception proxy, no MITM setup. `tcpdump` against the real app while it plays through the same network interface as the analysis machine is sufficient.
+
+## Step 1 — capture
+
+Run `tcpdump` against the known game/CDN hosts and the SFS2X port, then launch and use the real app (`/Applications/Last War.app` on macOS, or the equivalent iOS/Android install) while it's running:
+
+```bash
+sudo tcpdump -i any -w capture.pcap \
+  'host 104.17.133.15 or host 104.17.132.15 or host 172.65.210.24 or \
+   host 3.33.246.23 or host 15.197.233.176 or host 34.145.128.94 or \
+   port 19292 or port 17783 or port 6088 or port 25092'
+```
+
+The host list is every server IP this project has seen the client actually talk to (GSL HTTP endpoints, CDN, and SFS2X game servers); the port list catches every SFS2X game port seen across captures so far. Keep the filter broad — a capture with some irrelevant traffic in it costs nothing at the decode step, but a filter that's too narrow silently drops the packets you actually need.
+
+<Info>
+  **Why the host list has held up better than the port list.** An account can get moved to a different zone server-side — confirmed live via a real server merge that moved this project's account from zone `APS783` to `APS8092` with an entirely different port (`17783` → `25092`) mid-session (see [Live validation against production](/live-validation#a-real-server-merge-exposed-three-real-redirect-following-bugs) for the client-side fix this required). The *port* is zone-specific and will drift every time this happens — there's no way to keep it current in a static list. The *host* IPs above turned out to be shared CDN/infra-level addresses rather than zone-specific ones: the post-merge zone's actual game-server host (`lastwar-game-cf.lastwarapp.net`) resolved to `172.65.210.24`, already on this list. Since the filter is a flat OR, `host 172.65.210.24` alone captured the new zone's traffic on its new port without the port list needing to know about it. That's not guaranteed to hold forever — if you're capturing after your own account has moved zones and traffic isn't showing up, re-resolve the current game-server hostnames (they're in a login response's `serverInfo` field, or already-resolved in your session config after a redirect) and add any genuinely new IP to the host list.
+</Info>
+
+**Give it real time.** A rushed capture is the single most common failure mode: the real client's own SFS2X connection can churn through its login/bootstrap burst in under a second, so if you start `tcpdump`, immediately open the app, do one thing, and stop — you'll likely capture only the bootstrap burst and miss the actual action you were trying to observe. Let the app fully settle into its main screen (10–15 seconds after login) before doing anything you actually want captured, and let it sit a few seconds after before closing.
+
+## Step 2 — find the right TCP stream
+
+A single capture typically contains several TCP streams: the real game session, plus a handful of short-lived "losing" connection attempts (the client races several GSL-provided candidate hosts and keeps only one). List them by duration and packet count:
+
+```bash
+tshark -r capture.pcap -q -z conv,tcp
+```
+
+Look for the entry to port `17783` with the longest duration and the most frames — that's the real session. The "losing" race candidates are easy to spot: they show up as ~10-12 total frames and well under a second of duration. Note that entry's:
+
+- **TCP stream index** — get it with:
+  ```bash
+  tshark -r capture.pcap -Y "tcp.port==17783 && ip.addr==<server-ip>" -T fields -e tcp.stream | sort -u
+  # (use ipv6.addr instead of ip.addr if the session went over IPv6, which is common)
+  ```
+- **Client IP** — the *other* address in that conversation (not the server's). Both change on every capture — a device on Wi-Fi commonly gets a fresh IPv6 address each session — so this step can't be skipped or cached from a previous run.
+
+<Warning>
+  If the real session's duration looks suspiciously short (a handful of seconds), the capture likely missed the actual action — see Step 1's timing note. Re-capture with more time before and after the action rather than trying to work with a too-short stream.
+</Warning>
+
+## Step 3 — reassemble
+
+TCP delivers a byte stream, not discrete application messages, and packets can arrive out of order or get retransmitted — so the two directions need reassembling by sequence number before they're decodable. `goclient/tools/reassemble_stream.py` does this:
+
+```bash
+python3 goclient/tools/reassemble_stream.py capture.pcap <tcp-stream-index> <client-ip> stream5
+# writes stream5_c2s.bin and stream5_s2c.bin
+```
+
+This is deliberately not `tshark -z follow,tcp`, which reassembles by arrival order rather than sequence number — a real capture's out-of-order and retransmitted segments can silently corrupt that reassembly. Reassembling by sequence number and de-overlapping retransmitted segments avoids that.
+
+## Step 4 — decode
+
+The Go client itself can decode a reassembled stream file directly, via `-decode-stream`:
+
+```bash
+cd goclient
+go build -o lastwar-client .
+./lastwar-client -decode-stream ../stream5_c2s.bin -decode-label c2s
+./lastwar-client -decode-stream ../stream5_s2c.bin -decode-label s2c
+```
+
+This prints every SFS2X packet in the stream, one line per packet:
+
+```text
+[c2s] #233 @offset 25561: {c=1, a=13, p={c=al.science.donate, r=-1, p={scienceId=10011900, option=1, _id=229}}}
+```
+
+<Tip>
+  **Why this can't drift out of sync.** `-decode-stream` isn't a separate tool with its own copy of the codec — it's a thin wrapper (`goclient/decode.go`) around the exact same `ReadPacket` (`packet.go`) and `DecodeObject` (`sfsobject.go`) the client uses on its own live connection. Any fix or extension to the real codec is automatically reflected the next time you decode a capture, with no manual sync step and no risk of the decoder quietly reading stale logic.
+</Tip>
+
+## Reading the output
+
+Each decoded line is one SFS2X extension-call envelope: `c` is the SFSObject's top-level wrapper (`1` = extension call, `0` = system/heartbeat), `a` is the sub-action, and `p` holds the actual payload — for extension calls, `p.c` is the command name and `p.p` is its params object. Client→server calls almost always carry `_id`, an ever-incrementing per-connection request id; the matching server response echoes the same `_id`. See [Wire protocol](/wire-protocol) for the full packet-envelope and SFSObject binary format this output is decoded from, and [Command reference](/command-reference) for what a given `p.c` command name actually does.
+
+## Known limitation: some captures stop decoding partway through
+
+Server→client decoding has, on several real captures this session, stopped partway through with either a `DecodeObject error: expected top-level tag 18 (SFS_OBJECT), got ...` or a `zstd decode: ...` error, well before the end of the file — most often right around the same point in the bootstrap-burst response sequence, but not always at an identical byte offset. Client→server decoding has not shown this problem in any capture so far.
+
+This has not been root-caused. The working theory is a rare edge case in Step 3's reassembly (a reordering or overlap pattern the current de-overlap logic doesn't handle correctly) rather than a bug in the decoder itself, since `-decode-stream` uses the identical codec the live Go client relies on for its own connection, and that connection has not shown equivalent corruption. When this happens, everything captured before the error point is still valid and usable — this has been enough, in every case so far, to confirm a request's exact shape from the client→server side even when the matching server→client response fell past the cutoff. Confirming a response's exact shape in that situation instead requires replaying the same request live through the Go client itself (e.g. via `-interactive`) and reading its response directly, which sidesteps the capture-decode path entirely.

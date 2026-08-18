@@ -30,3 +30,14 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# goclient build output (compiled with `go build .` / cross-compiled for deployment) --
+# extensionless on macOS/Linux, so the *.exe pattern above doesn't catch these
+/goclient/lastwar-client
+/goclient/lastwar-client-*
+
+# Session config / device identity -- these belong in the user's home directory
+# (~/.lastwar_goclient_*), never in the repo. This is a defensive backstop, not the
+# real safeguard, in case one ever ends up here by mistake.
+*.lastwar_goclient_session.json
+config.local.json

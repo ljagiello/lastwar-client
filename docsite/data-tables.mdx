@@ -1,0 +1,37 @@
+---
+title: "Game data tables"
+description: "The shape, container format, and categorized index of the 1,279 balance/config Lua data tables shipped alongside the client."
+---
+
+1,279 balance/config tables, each a data-only Lua module compiled from what is clearly a spreadsheet pipeline — positional row arrays, a column-index descriptor, and a string-interning pool for repeated values.
+
+## Table shape
+
+```lua
+T.index = { id = {1,"number"}, cost_resource = {19,"string",true} }  -- field -> {col, type, isLinked?}
+T.data  = { [10100000] = {10100000, "135104", ..., "30030;200|30031;200", ...} }
+T.vExt  = { "1;30|14;30", ... }   -- interned strings, referenced by 1-based index when isLinked
+T.link  = { [1]={9,512025}, [2]={512026,535161} }  -- split-table partition ranges, for the largest tables
+```
+
+Only 4 field types exist across the entire 1,279-table corpus: `string`, `number`, `array`, `table`. Compound values are packed strings, almost universally `id;count` pairs joined by `|`. Very large tables (world monster spawns, army data) are physically split across sibling files, resolved via the `link` range table.
+
+## Container & versioning
+
+A plain ZIP, one flat-namespace entry per table name — the odd `.data` extension is misleading; `unzip -l` works on it directly. Local version manifest, one line: `version,size,md5,timestamp`, matching the filename `table_{version}_{md5}.data`. Table updates are tracked and patched (bsdiff) fully independently of the Lua bundle and asset bundles.
+
+## Categorized index (1,279 tables)
+
+| Group | Count | Examples |
+| --- | ---: | --- |
+| `lw_*` — core "live" gameplay tables | 601 | heroes, army, monsters, buildings, seasons (dominated by `lw_monster*` split-table fan-out, 304 files) |
+| `activity_*` — live-ops events | 124 | boxopen, hunter, easter_egg, dig |
+| `aps_*` — A/B variant family | 52 | factory, pve waves, heroes rank |
+| `season*` (non-`lw_`) | 46 | landmine, pass, reward_group |
+| `build*`/`city*`/`scene*` | 38 | building, city_car, construction_queue |
+| `monster`/`pve`/`battle` related | 63 | boss_stage_reward, monster_refresh |
+| shop/pay/gold related | 23 | goldbrick_and_price, import_vip_pay |
+| alliance\* | 26 | alliance_resource, alliance_task |
+| misc / long tail | 257 | daily_quest, government, chat_room, calendar, and a profanity-filter word list |
+
+These rows sum to 1,230, not the full 1,279 — they're the dominant categories, not an exhaustive partition. The remaining ~49 tables (hero/troop/army data, resource/economy, rank/leaderboard, guide/novice-flow, item/artifact, and a few UI/language tables) weren't individually bucketed.
