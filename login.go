@@ -356,7 +356,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		conn.Close()
 		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED (push): errorCode=%v full=%s", ec.Val, msg2.Params.String())
 	}
-	slog.Info("login success", "response", msg2.Params.String())
+	// Not msg2.Params.String() -- the full response carries loginKey (and
+	// accountArr) in cleartext, and String() does no field-level redaction.
+	slog.Info("login success", "gameUid", msg2.Params.GetString("gameUid"), "loginKey", redact(msg2.Params.GetString("loginKey")))
 	result.Account = msg2.Params
 
 	if lk := msg2.Params.GetString("loginKey"); lk != "" {

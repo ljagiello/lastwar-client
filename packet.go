@@ -12,6 +12,15 @@ import (
 
 const compressionThreshold = 1024
 
+// maxFrameSize bounds any length-prefixed allocation in ReadPacket. The
+// connection is plain TCP with no TLS, and the on-wire "encryption" is only
+// a reversible length-keyed XOR (obfuscation, not confidentiality -- see
+// xorCrypt), so length/uncompressedLen are effectively server/on-path
+// controlled: an unbounded make([]byte, length) is a trivial multi-GB OOM
+// vector. 64MiB is comfortably above the ~313KB real init payload this
+// protocol has ever been observed sending.
+const maxFrameSize = 64 << 20 // 64 MiB
+
 // zstd.NewReader is expensive; the docs recommend a single shared decoder
 // reused across calls. DecodeAll is safe for concurrent use.
 var zstdDecoder = func() *zstd.Decoder {
@@ -131,6 +140,9 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 		}
 		length = uint32(binary.BigEndian.Uint16(lb[:]))
 	}
+	if length > maxFrameSize {
+		return nil, fmt.Errorf("frame body too large: %d bytes (max %d)", length, maxFrameSize)
+	}
 
 	var uncompressedLen uint32
 	hasZstdLen := header&hdrCompressed != 0 && header&hdrUseLZ4 != 0
@@ -140,6 +152,9 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 			return nil, fmt.Errorf("read uncompressed length: %w", err)
 		}
 		uncompressedLen = binary.BigEndian.Uint32(lb[:])
+		if uncompressedLen > maxFrameSize {
+			return nil, fmt.Errorf("uncompressed length too large: %d bytes (max %d)", uncompressedLen, maxFrameSize)
+		}
 	}
 
 	body := make([]byte, length)

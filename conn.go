@@ -150,6 +150,22 @@ func (e *Envelope) AsExtension() (*ExtensionMessage, bool) {
 	return &ExtensionMessage{Cmd: cmd, Params: params}, true
 }
 
+// logCommandResult logs a collect/claim command's response at a severity
+// that actually reflects whether it succeeded, instead of unconditionally
+// at Info. The server signals failure via an `errorCode` field on Params
+// (login.go's account-login path already checks this); every collect/claim
+// call site in buildings.go/mail.go/alliance.go/vip.go/visitors.go used to
+// skip the check entirely and log every response -- including a routine
+// "in production, please be patient" cooldown rejection -- as if it were a
+// real success.
+func logCommandResult(label string, msg *ExtensionMessage) {
+	if ec, has := msg.Params.Get("errorCode"); has {
+		slog.Warn(label+" failed", "cmd", msg.Cmd, "errorCode", ec.Val, "response", msg.Params.String())
+		return
+	}
+	slog.Info(label, "cmd", msg.Cmd, "response", msg.Params.String())
+}
+
 // DoHandshake sends the vanilla SFS2X pre-Login Handshake request
 // (HandshakeRequest.KEY_API="api", KEY_CLIENT_TYPE="cl") and waits for the
 // response. Confirmed present in this game's own decompiled SDK

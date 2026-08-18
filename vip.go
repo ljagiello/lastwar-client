@@ -33,7 +33,7 @@ func ClaimVIPDailyLoginScore(conn *GameConn) {
 		slog.Error("vip daily login score no response", "error", err)
 		return
 	}
-	slog.Info("vip daily login score response", "response", msg.Params.String())
+	logCommandResult("vip daily login score response", msg)
 }
 
 // ClaimVIPDailyFreebie sends `vip.get.every.day.reward` -- confirmed live
@@ -63,5 +63,5 @@ func ClaimVIPDailyFreebie(conn *GameConn) {
 		slog.Error("vip daily freebie no response", "error", err)
 		return
 	}
-	slog.Info("vip daily freebie response", "response", msg.Params.String())
+	logCommandResult("vip daily freebie response", msg)
 }

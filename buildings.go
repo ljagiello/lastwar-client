@@ -351,7 +351,7 @@ func CollectIdleReward(conn *GameConn) {
 		slog.Error("idle reward peek no response", "error", err)
 		return
 	}
-	slog.Info("idle reward available", "response", msg.Params.String())
+	logCommandResult("idle reward available", msg)
 
 	claim := NewSFSObject()
 	claim.PutInt("action", 1)
@@ -364,7 +364,7 @@ func CollectIdleReward(conn *GameConn) {
 		slog.Error("idle reward claim no response", "error", err)
 		return
 	}
-	slog.Info("idle reward collected", "response", msg.Params.String())
+	logCommandResult("idle reward collected", msg)
 }
 
 // CollectAll finds every instance of every confirmed resource-producing
@@ -412,6 +412,6 @@ func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) {
 			slog.Error("collect no response", "error", err)
 			continue
 		}
-		slog.Info("collect response", "response", msg.Params.String())
+		logCommandResult("collect "+BuildingNameOf(b.BId()), msg)
 	}
 }

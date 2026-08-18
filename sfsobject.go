@@ -267,12 +267,29 @@ func (r *sfsReader) readByte() (byte, error) {
 }
 
 func (r *sfsReader) readBytes(n int) ([]byte, error) {
+	if n < 0 {
+		return nil, fmt.Errorf("sfsobject: negative byte count: %d", n)
+	}
 	if r.remaining() < n {
 		return nil, fmt.Errorf("sfsobject: unexpected EOF reading %d bytes (have %d)", n, r.remaining())
 	}
 	b := r.data[r.pos : r.pos+n]
 	r.pos += n
 	return b, nil
+}
+
+// readArrayCount reads a 2-byte element count for a fixed-element-type array
+// and rejects a negative value (a flipped top bit in a corrupted or hostile
+// packet) instead of letting it flow into make() and panic the process.
+func (r *sfsReader) readArrayCount() (int16, error) {
+	n, err := r.readInt16()
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("sfsobject: array negative size: %d", n)
+	}
+	return n, nil
 }
 
 func (r *sfsReader) readInt16() (int16, error) {
@@ -369,7 +386,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		return SFSValue{tag, string(b)}, nil
 	case sfsBoolArray:
-		n, err := r.readInt16()
+		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}
@@ -403,7 +420,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		return SFSValue{tag, append([]byte(nil), b...)}, nil
 	case sfsShortArray:
-		n, err := r.readInt16()
+		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}
@@ -417,7 +434,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		return SFSValue{tag, out}, nil
 	case sfsIntArray:
-		n, err := r.readInt16()
+		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}
@@ -431,7 +448,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		return SFSValue{tag, out}, nil
 	case sfsLongArray:
-		n, err := r.readInt16()
+		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}
@@ -445,7 +462,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		return SFSValue{tag, out}, nil
 	case sfsFloatArray:
-		n, err := r.readInt16()
+		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}
@@ -459,7 +476,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		return SFSValue{tag, out}, nil
 	case sfsDoubleArray:
-		n, err := r.readInt16()
+		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}
@@ -473,7 +490,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		return SFSValue{tag, out}, nil
 	case sfsUtfStringArray:
-		n, err := r.readInt16()
+		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}

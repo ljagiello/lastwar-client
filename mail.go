@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -147,7 +148,7 @@ func ClaimAllMail(conn *GameConn) {
 			slog.Error("mail read-status no response", "error", err)
 			continue
 		}
-		slog.Info("mail read-status response", "batchStart", i, "batchSize", end-i, "response", readMsg.Params.String())
+		logCommandResult(fmt.Sprintf("mail read-status response (batch %d, size %d)", i, end-i), readMsg)
 	}
 	slog.Info("marked mail as read", "count", len(allUIDs))
 
@@ -175,6 +176,6 @@ func ClaimAllMail(conn *GameConn) {
 			slog.Error("mail reward-batch no response", "error", err)
 			continue
 		}
-		slog.Info("mail reward-batch response", "type", mailType, "response", msg.Params.String())
+		logCommandResult(fmt.Sprintf("mail reward-batch response (type %d)", mailType), msg)
 	}
 }

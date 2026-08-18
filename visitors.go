@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -99,6 +100,6 @@ func GreetVisitors(conn *GameConn, visitors []Visitor) {
 			slog.Error("visitor greet no response", "error", err)
 			continue
 		}
-		slog.Info("visitor greet response", "response", msg.Params.String())
+		logCommandResult(fmt.Sprintf("visitor greet response (uid %d)", v.Uid()), msg)
 	}
 }

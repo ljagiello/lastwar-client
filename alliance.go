@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -40,7 +41,7 @@ func HelpAllianceMembers(conn *GameConn) {
 		slog.Error("alliance help-all no response", "error", err)
 		return
 	}
-	slog.Info("alliance help-all response", "response", msg.Params.String())
+	logCommandResult("alliance help-all response", msg)
 }
 
 // ClaimAllianceGifts sends `alliance.reward.allreceive` -- confirmed live
@@ -77,7 +78,7 @@ func ClaimAllianceGifts(conn *GameConn) {
 			slog.Error("alliance gift claim no response", "type", giftType, "error", err)
 			continue
 		}
-		slog.Info("alliance gift claim response", "type", giftType, "response", msg.Params.String())
+		logCommandResult(fmt.Sprintf("alliance gift claim response (type %d)", giftType), msg)
 	}
 }
 
@@ -175,5 +176,5 @@ func DonateRecommendedAllianceTech(conn *GameConn) {
 		slog.Error("alliance tech donate no response", "error", err)
 		return
 	}
-	slog.Info("alliance tech donate response", "scienceId", recommendedID, "response", donateMsg.Params.String())
+	logCommandResult(fmt.Sprintf("alliance tech donate response (scienceId %d)", recommendedID), donateMsg)
 }
