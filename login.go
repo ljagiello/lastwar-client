@@ -224,6 +224,22 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 				zone = newZone
 				serverID = strings.TrimPrefix(zone, "APS")
 			}
+			// Same suspected single-use-per-connection risk as the init-push-timeout retry path
+			// below: this closes the connection and redials a brand-new TCP session, so refresh
+			// the access token before reconnecting rather than carrying the old one forward
+			// unverified.
+			slog.Info("fetching fresh access token before following serverInfo redirect (suspected single-use-per-connection)")
+			freshOpt := opt
+			if ident.GameUid != "" {
+				freshOpt = GSLOpt{Opt: "fix"}
+			}
+			freshLsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, freshOpt, "", ident.GameUid)
+			if err != nil {
+				slog.Error("GSL refresh failed; following redirect with stale token anyway", "error", err)
+			} else if freshLsr.At != nil {
+				accessTok = freshLsr.At.Token
+				slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
+			}
 			// A redirect is a deterministic server instruction, not a
 			// flaky timeout -- don't let it consume the one real
 			// init-push-timeout retry attempt maxLoginAttempts guards
@@ -399,13 +415,15 @@ func redact(s string) string {
 // actually seen.
 func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visitor, bool) {
 	deadline := time.Now().Add(timeout)
+	halfway := time.Now().Add(timeout / 2)
 	sentActivePull := false
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return nil, nil, false
 		}
-		if !sentActivePull && remaining < timeout/2 {
+
+		if !sentActivePull && !time.Now().Before(halfway) {
 			sentActivePull = true
 			slog.Info("halfway through init-wait window; sending login.init as active-pull fallback")
 			req := NewSFSObject()
@@ -415,9 +433,25 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 				slog.Error("login.init send failed", "error", err)
 			}
 		}
-		conn.conn.SetReadDeadline(time.Now().Add(remaining))
+
+		// Before the active pull has been sent, cap this read's deadline at the halfway point
+		// (not the full remaining window) so a totally silent server still interrupts the read
+		// in time to re-check the halfway condition above and actually send login.init -- a
+		// single read deadlined at the full window would time the whole function out first, and
+		// the active-pull fallback this exists for would never fire.
+		readUntil := deadline
+		if !sentActivePull && halfway.Before(readUntil) {
+			readUntil = halfway
+		}
+		conn.conn.SetReadDeadline(readUntil)
 		env, err := conn.ReadEnvelope()
 		if err != nil {
+			if !sentActivePull && time.Now().Before(deadline) {
+				// This read was deliberately capped at the halfway point, not the real
+				// deadline -- a timeout here just means "time to send the active pull," not
+				// "give up."
+				continue
+			}
 			return nil, nil, false
 		}
 		msg, ok := env.AsExtension()

@@ -150,6 +150,15 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		}
 		slog.Info("login OK", "response", env.Content.String())
 
+		// Note: unlike login.go's equivalent redirect path (which fetches a fresh access token
+		// before redialing, on the documented suspicion that a token is single-use-per-connection),
+		// this path reuses p.AccessTok unchanged across the closed-and-redialed connection.
+		// DoCrossServerLogin is deliberately GSL-free (see the doc comment above) -- it has no
+		// httpClient/RSA pubkey/gateHost in scope to refresh a token with, so fixing this
+		// properly means threading those through CrossServerLoginParams and every caller. Not
+		// done here; this is a known, live-unverified gap -- if a serverInfo redirect on this
+		// path starts failing with ec=28/E011 after the redial, this reused token is the first
+		// thing to suspect.
 		if siObj := findServerInfo(env.Content); siObj != nil && siObj.GetString("ip") != "" {
 			newAddr := fmt.Sprintf("%s:%d", firstHost(siObj.GetString("ip")), getIntFlexible(siObj, "port"))
 			newZone := siObj.GetString("zone")

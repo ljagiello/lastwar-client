@@ -1,10 +1,5 @@
 package main
 
-import (
-	"log/slog"
-	"time"
-)
-
 // ClaimVIPDailyLoginScore sends `vip.add.login.score` -- confirmed live via
 // a real packet capture of the actual game client's VIP screen "Collect"
 // action on the daily login-streak bonus (200 VIP points/day at VIP12,
@@ -22,18 +17,10 @@ import (
 // errorMsg="no score" -- not a protocol error, so it's safe to call
 // unconditionally on every run and let the server say no when there's
 // nothing left to claim.
-func ClaimVIPDailyLoginScore(conn *GameConn) {
+func ClaimVIPDailyLoginScore(conn *GameConn) error {
 	const cmd = "vip.add.login.score"
-	if err := conn.SendExtension(cmd, NewSFSObject()); err != nil {
-		slog.Error("vip daily login score send failed", "error", err)
-		return
-	}
-	msg, err := waitForCmd(conn, 8*time.Second, cmd)
-	if err != nil {
-		slog.Error("vip daily login score no response", "error", err)
-		return
-	}
-	logCommandResult("vip daily login score response", msg)
+	_, err := sendAndWait(conn, "vip daily login score response", cmd, NewSFSObject())
+	return err
 }
 
 // ClaimVIPDailyFreebie sends `vip.get.every.day.reward` -- confirmed live
@@ -52,16 +39,8 @@ func ClaimVIPDailyLoginScore(conn *GameConn) {
 // client, got a real, well-formed response -- errorCode=120289,
 // errorMsg="no reward" -- the same error code family as the login score
 // above, so it's likewise safe to call unconditionally on every run.
-func ClaimVIPDailyFreebie(conn *GameConn) {
+func ClaimVIPDailyFreebie(conn *GameConn) error {
 	const cmd = "vip.get.every.day.reward"
-	if err := conn.SendExtension(cmd, NewSFSObject()); err != nil {
-		slog.Error("vip daily freebie send failed", "error", err)
-		return
-	}
-	msg, err := waitForCmd(conn, 8*time.Second, cmd)
-	if err != nil {
-		slog.Error("vip daily freebie no response", "error", err)
-		return
-	}
-	logCommandResult("vip daily freebie response", msg)
+	_, err := sendAndWait(conn, "vip daily freebie response", cmd, NewSFSObject())
+	return err
 }

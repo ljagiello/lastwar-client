@@ -100,7 +100,10 @@ func main() {
 
 	if *collect {
 		slog.Info("collecting resources")
-		CollectAll(conn, buildings, visitors)
+		if err := CollectAll(conn, buildings, visitors); err != nil {
+			slog.Error("collect run had failures", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	if *interactive != "" {
@@ -136,7 +139,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		deviceID = o.deviceID
 		airKey = "lwDid_" + b64OfString(deviceID)
 	}
-	slog.Info("using device identity", "deviceId", deviceID, "airKey", airKey)
+	slog.Info("using device identity", "deviceIdLen", len(deviceID), "airKeyLen", len(airKey))
 
 	accessTok := o.at
 	ip, port, zone, gameUid := o.ip, o.port, o.zone, o.gameUid
@@ -217,7 +220,10 @@ func runCrossServerTest(o crossServerTestOpts) {
 	slog.Info("got buildings", "count", len(buildings))
 	if o.collect {
 		slog.Info("collecting resources")
-		CollectAll(conn, buildings, visitors)
+		if err := CollectAll(conn, buildings, visitors); err != nil {
+			slog.Error("collect run had failures", "error", err)
+			os.Exit(1)
+		}
 	} else {
 		PrintBuildings(buildings)
 	}

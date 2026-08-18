@@ -1,9 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 )
 
 // Visitor is a city visitor NPC ("greet visitors") -- confirmed live via a
@@ -81,25 +81,19 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 // GreetVisitors sends `visitor.operate {uid, operate: 1}` for every
 // currently-present visitor, matching the real client's own captured
 // per-tap behavior (see the Visitor doc comment above).
-func GreetVisitors(conn *GameConn, visitors []Visitor) {
+func GreetVisitors(conn *GameConn, visitors []Visitor) error {
 	if len(visitors) == 0 {
 		slog.Info("no visitors to greet")
-		return
+		return nil
 	}
+	var errs []error
 	for _, v := range visitors {
 		slog.Info("attempting visitor greet", "uid", v.Uid(), "eventId", v.EventId(), "visitorId", v.VisitorId())
 		params := NewSFSObject()
 		params.PutLong("uid", v.Uid())
 		params.PutInt("operate", 1)
-		if err := conn.SendExtension("visitor.operate", params); err != nil {
-			slog.Error("visitor greet send failed", "error", err)
-			continue
-		}
-		msg, err := waitForCmd(conn, 8*time.Second, "visitor.operate")
-		if err != nil {
-			slog.Error("visitor greet no response", "error", err)
-			continue
-		}
-		logCommandResult(fmt.Sprintf("visitor greet response (uid %d)", v.Uid()), msg)
+		_, err := sendAndWait(conn, fmt.Sprintf("visitor greet response (uid %d)", v.Uid()), "visitor.operate", params)
+		errs = append(errs, err)
 	}
+	return errors.Join(errs...)
 }

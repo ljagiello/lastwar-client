@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -338,33 +339,20 @@ func collectCmdFor(bId int32) (cmd string, ok bool) {
 // account `total` values for each resource, and a follow-up action=0
 // call showed `reward=[]`, proving the accumulated pool was actually
 // drained, not just echoed back.
-func CollectIdleReward(conn *GameConn) {
+func CollectIdleReward(conn *GameConn) error {
 	const cmd = "lw.pve.idle.reward"
 	peek := NewSFSObject()
 	peek.PutInt("action", 0)
-	if err := conn.SendExtension(cmd, peek); err != nil {
-		slog.Error("idle reward peek send failed", "error", err)
-		return
+	if _, err := sendAndWait(conn, "idle reward available", cmd, peek); err != nil {
+		return err
 	}
-	msg, err := waitForCmd(conn, 8*time.Second, cmd)
-	if err != nil {
-		slog.Error("idle reward peek no response", "error", err)
-		return
-	}
-	logCommandResult("idle reward available", msg)
 
 	claim := NewSFSObject()
 	claim.PutInt("action", 1)
-	if err := conn.SendExtension(cmd, claim); err != nil {
-		slog.Error("idle reward claim send failed", "error", err)
-		return
+	if _, err := sendAndWait(conn, "idle reward collected", cmd, claim); err != nil {
+		return err
 	}
-	msg, err = waitForCmd(conn, 8*time.Second, cmd)
-	if err != nil {
-		slog.Error("idle reward claim no response", "error", err)
-		return
-	}
-	logCommandResult("idle reward collected", msg)
+	return nil
 }
 
 // CollectAll finds every instance of every confirmed resource-producing
@@ -378,40 +366,42 @@ func CollectIdleReward(conn *GameConn) {
 // and the two once-per-day VIP claims (see ClaimVIPDailyLoginScore and
 // ClaimVIPDailyFreebie) -- none of the eight is building-uuid-scoped, so
 // none can go through the same per-building loop below.
-func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) {
-	CollectIdleReward(conn)
-	GreetVisitors(conn, visitors)
-	ClaimAllMail(conn)
-	HelpAllianceMembers(conn)
-	ClaimAllianceGifts(conn)
-	DonateRecommendedAllianceTech(conn)
-	ClaimVIPDailyLoginScore(conn)
-	ClaimVIPDailyFreebie(conn)
+func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) error {
+	var errs []error
+	errs = append(errs, CollectIdleReward(conn))
+	errs = append(errs, GreetVisitors(conn, visitors))
+	errs = append(errs, ClaimAllMail(conn))
+	errs = append(errs, HelpAllianceMembers(conn))
+	errs = append(errs, ClaimAllianceGifts(conn))
+	errs = append(errs, DonateRecommendedAllianceTech(conn))
+	errs = append(errs, ClaimVIPDailyLoginScore(conn))
+	errs = append(errs, ClaimVIPDailyFreebie(conn))
 
-	var toCollect []Building
-	for _, b := range buildings {
-		if _, ok := collectCmdFor(b.BId()); ok {
-			toCollect = append(toCollect, b)
-		}
-	}
+	toCollect := collectibleBuildings(buildings)
 	if len(toCollect) == 0 {
 		slog.Info("no matching collectible buildings found on this account")
-		return
 	}
 	for _, b := range toCollect {
 		cmd, _ := collectCmdFor(b.BId())
 		slog.Info("attempting collect", "name", BuildingNameOf(b.BId()), "uuid", b.Uuid(), "buildingLevel", b.Level(), "cmd", cmd)
 		params := NewSFSObject()
 		params.PutLong("uuid", b.Uuid())
-		if err := conn.SendExtension(cmd, params); err != nil {
-			slog.Error("collect send failed", "error", err)
-			continue
+		if _, err := sendAndWait(conn, "collect "+BuildingNameOf(b.BId()), cmd, params); err != nil {
+			errs = append(errs, err)
 		}
-		msg, err := waitForCmd(conn, 8*time.Second, cmd)
-		if err != nil {
-			slog.Error("collect no response", "error", err)
-			continue
-		}
-		logCommandResult("collect "+BuildingNameOf(b.BId()), msg)
 	}
+	return errors.Join(errs...)
+}
+
+// collectibleBuildings filters buildings down to the ones collectCmdFor recognizes -- pulled out
+// of CollectAll as a standalone, network-free function so it can be unit tested without a live
+// connection.
+func collectibleBuildings(buildings []Building) []Building {
+	var out []Building
+	for _, b := range buildings {
+		if _, ok := collectCmdFor(b.BId()); ok {
+			out = append(out, b)
+		}
+	}
+	return out
 }

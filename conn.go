@@ -39,7 +39,15 @@ type GameConn struct {
 	wmu    sync.Mutex
 
 	stopHeartbeat chan struct{}
+	closeOnce     sync.Once
 }
+
+// writeTimeout bounds every socket write via SendEnvelope. Without it, a
+// half-open connection can block Write indefinitely while holding wmu --
+// which also wedges the heartbeat goroutine (it shares the same mutex),
+// turning a stalled connection into a silent, unbounded hang instead of a
+// surfaced error.
+const writeTimeout = 10 * time.Second
 
 func DialGame(addr string, timeout time.Duration) (*GameConn, error) {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
@@ -56,10 +64,11 @@ func DialGame(addr string, timeout time.Duration) (*GameConn, error) {
 }
 
 func (c *GameConn) Close() error {
-	if c.stopHeartbeat != nil {
-		close(c.stopHeartbeat)
-		c.stopHeartbeat = nil
-	}
+	c.closeOnce.Do(func() {
+		if c.stopHeartbeat != nil {
+			close(c.stopHeartbeat)
+		}
+	})
 	return c.conn.Close()
 }
 
@@ -79,7 +88,11 @@ func (c *GameConn) SendEnvelope(controller byte, action int16, content *SFSObjec
 
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	if err := c.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
 	_, err = c.conn.Write(packet)
+	c.conn.SetWriteDeadline(time.Time{})
 	return err
 }
 
@@ -150,20 +163,65 @@ func (e *Envelope) AsExtension() (*ExtensionMessage, bool) {
 	return &ExtensionMessage{Cmd: cmd, Params: params}, true
 }
 
-// logCommandResult logs a collect/claim command's response at a severity
-// that actually reflects whether it succeeded, instead of unconditionally
-// at Info. The server signals failure via an `errorCode` field on Params
-// (login.go's account-login path already checks this); every collect/claim
-// call site in buildings.go/mail.go/alliance.go/vip.go/visitors.go used to
-// skip the check entirely and log every response -- including a routine
-// "in production, please be patient" cooldown rejection -- as if it were a
-// real success.
+// benignErrorCodes are server errorCode values documented (in the callers' own doc comments) as
+// a normal, well-formed "nothing to do right now" outcome rather than a real failure: a
+// production cooldown, an already-claimed daily reward, a visitor that hasn't arrived yet.
+// Logged at Warn (still worth seeing) but not treated as a failure for aggregation/exit-code
+// purposes, so a routine daily re-run doesn't make -collect's exit code permanently noisy.
+var benignErrorCodes = map[string]bool{
+	"602026":             true, // buildings.go: "In production, please be patient."
+	"120289":             true, // vip.go: "no score"/"no reward" -- already claimed today
+	"visitor_err_coming": true, // visitors.go: visitor not yet arrived/greetable
+}
+
+// logCommandResult logs a collect/claim command's response at a severity that reflects whether
+// it actually succeeded: Info on success, Warn on a recognized/expected failure
+// (benignErrorCodes), Error on anything else.
 func logCommandResult(label string, msg *ExtensionMessage) {
-	if ec, has := msg.Params.Get("errorCode"); has {
-		slog.Warn(label+" failed", "cmd", msg.Cmd, "errorCode", ec.Val, "response", msg.Params.String())
+	ec, has := msg.Params.Get("errorCode")
+	if !has {
+		slog.Info(label, "cmd", msg.Cmd, "response", msg.Params.String())
 		return
 	}
-	slog.Info(label, "cmd", msg.Cmd, "response", msg.Params.String())
+	code := fmt.Sprintf("%v", ec.Val)
+	if benignErrorCodes[code] {
+		slog.Warn(label+" no-op (expected)", "cmd", msg.Cmd, "errorCode", ec.Val, "response", msg.Params.String())
+		return
+	}
+	slog.Error(label+" failed", "cmd", msg.Cmd, "errorCode", ec.Val, "response", msg.Params.String())
+}
+
+const defaultCmdTimeout = 8 * time.Second
+
+// sendAndWait sends a command and waits for its response, logging the outcome via
+// logCommandResult and returning an error if the send/wait itself failed or the response
+// carried a non-benign errorCode. This is the single dedup point for the near-identical
+// send+wait+log block that used to be copy-pasted at (almost) every collect/claim call site
+// across this file and buildings.go/mail.go/alliance.go/vip.go/visitors.go. waitCmds defaults
+// to [sendCmd]; pass an explicit value when the response arrives under a different command name
+// (e.g. mail.go's push.chat.get.system.mails).
+func sendAndWait(conn *GameConn, label, sendCmd string, params *SFSObject, waitCmds ...string) (*ExtensionMessage, error) {
+	if err := conn.SendExtension(sendCmd, params); err != nil {
+		slog.Error(label+" send failed", "cmd", sendCmd, "error", err)
+		return nil, err
+	}
+	if len(waitCmds) == 0 {
+		waitCmds = []string{sendCmd}
+	}
+	msg, err := waitForCmd(conn, defaultCmdTimeout, waitCmds...)
+	if err != nil {
+		slog.Error(label+" no response", "cmd", sendCmd, "error", err)
+		return nil, err
+	}
+	logCommandResult(label, msg)
+	if ec, has := msg.Params.Get("errorCode"); has {
+		code := fmt.Sprintf("%v", ec.Val)
+		if benignErrorCodes[code] {
+			return msg, nil
+		}
+		return msg, fmt.Errorf("%s: errorCode=%v", label, ec.Val)
+	}
+	return msg, nil
 }
 
 // DoHandshake sends the vanilla SFS2X pre-Login Handshake request
@@ -213,12 +271,13 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 // verification code).
 func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 	c.stopHeartbeat = make(chan struct{})
+	stopCh := c.stopHeartbeat // snapshot: avoids racing Close()'s concurrent access to the field
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-c.stopHeartbeat:
+			case <-stopCh:
 				return
 			case <-ticker.C:
 				pp := NewSFSObject()

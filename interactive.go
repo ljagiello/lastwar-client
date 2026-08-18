@@ -64,14 +64,17 @@ func handleInteractiveLine(conn *GameConn, line string) {
 			return
 		}
 		for k, v := range raw {
-			putJSONValue(params, k, v)
+			if !putJSONValue(params, k, v) {
+				slog.Error("aborting send: unsupported param value, would send incomplete params", "cmd", cmd, "key", k)
+				return
+			}
 		}
 	}
 
 	slog.Info("sending command", "cmd", cmd, "params", params.String())
 	if err := conn.SendExtension(cmd, params); err != nil {
-		slog.Error("send failed", "error", err)
-		return
+		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", err)
+		os.Exit(1)
 	}
 
 	msg, err := waitForCmd(conn, 8*time.Second, cmd, "push."+cmd)
@@ -82,7 +85,7 @@ func handleInteractiveLine(conn *GameConn, line string) {
 	slog.Info("received response", "cmd", msg.Cmd, "params", msg.Params.String())
 }
 
-func putJSONValue(o *SFSObject, key string, v any) {
+func putJSONValue(o *SFSObject, key string, v any) bool {
 	switch val := v.(type) {
 	case string:
 		o.PutUtfString(key, val)
@@ -95,8 +98,11 @@ func putJSONValue(o *SFSObject, key string, v any) {
 			o.PutDouble(key, f)
 		} else {
 			slog.Error("unparseable JSON number", "key", key, "value", val.String())
+			return false
 		}
 	default:
 		slog.Error("unsupported JSON value type", "key", key, "type", fmt.Sprintf("%T", v))
+		return false
 	}
+	return true
 }

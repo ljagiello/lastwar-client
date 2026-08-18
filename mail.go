@@ -1,10 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 )
 
 // Mail is one inbox entry. Confirmed live via a real packet capture of the
@@ -51,10 +51,11 @@ func (m Mail) HasUnclaimedReward() bool { return m.RewardStatus() == 0 }
 // insofar as it returns real mail (see CollectAll's live test), but
 // whether it truly returns the account's FULL history or just a recent
 // window has not been independently verified against the real client.
-func ListMail(conn *GameConn) []Mail {
+func ListMail(conn *GameConn) ([]Mail, error) {
 	const reqCmd = "chat.get.system.mails"
 	const pushCmd = "push.chat.get.system.mails"
 	const maxPages = 20
+	const mailListPageSize = 100
 
 	var all []Mail
 	clientseq := ""
@@ -65,19 +66,14 @@ func ListMail(conn *GameConn) []Mail {
 		params := NewSFSObject()
 		params.PutUtfString("clientseq", clientseq)
 		params.PutLong("time", reqTime)
-		params.PutInt("count", 100)
+		params.PutInt("count", mailListPageSize)
 		params.PutBool("isAll", true)
 		if first {
 			params.PutUtfString("firstCmd", "YES")
 		}
-		if err := conn.SendExtension(reqCmd, params); err != nil {
-			slog.Error("list mail send failed", "error", err)
-			return all
-		}
-		msg, err := waitForCmd(conn, 8*time.Second, pushCmd)
+		msg, err := sendAndWait(conn, fmt.Sprintf("list mail (page %d)", page), reqCmd, params, pushCmd)
 		if err != nil {
-			slog.Error("list mail no response", "error", err)
-			return all
+			return all, err
 		}
 		v, ok := msg.Params.Get("msg")
 		if ok {
@@ -102,7 +98,7 @@ func ListMail(conn *GameConn) []Mail {
 		reqTime = msg.Params.GetLong("lastMailTime")
 		first = false
 	}
-	return all
+	return all, nil
 }
 
 // ClaimAllMail lists the account's mail (see ListMail), marks every mail
@@ -123,12 +119,17 @@ func ListMail(conn *GameConn) []Mail {
 // OnCreate confirms the wire request needs only `uids`, no `type` -- so
 // every discovered mail can be marked read in one pass regardless of
 // category, unlike the reward claim below.
-func ClaimAllMail(conn *GameConn) {
-	mail := ListMail(conn)
+func ClaimAllMail(conn *GameConn) error {
+	mail, err := ListMail(conn)
+	if err != nil {
+		return fmt.Errorf("list mail: %w", err)
+	}
 	if len(mail) == 0 {
 		slog.Info("no mail found")
-		return
+		return nil
 	}
+
+	var errs []error
 
 	allUIDs := make([]string, len(mail))
 	for i, m := range mail {
@@ -139,43 +140,36 @@ func ClaimAllMail(conn *GameConn) {
 		end := min(i+readBatchSize, len(allUIDs))
 		readParams := NewSFSObject()
 		readParams.PutUtfString("uids", strings.Join(allUIDs[i:end], ","))
-		if err := conn.SendExtension("mail.read.status.betch", readParams); err != nil {
-			slog.Error("mail read-status send failed", "error", err)
-			continue
-		}
-		readMsg, err := waitForCmd(conn, 8*time.Second, "mail.read.status.betch")
-		if err != nil {
-			slog.Error("mail read-status no response", "error", err)
-			continue
-		}
-		logCommandResult(fmt.Sprintf("mail read-status response (batch %d, size %d)", i, end-i), readMsg)
+		_, err := sendAndWait(conn, fmt.Sprintf("mail read-status (batch %d, size %d)", i, end-i), "mail.read.status.betch", readParams)
+		errs = append(errs, err)
 	}
 	slog.Info("marked mail as read", "count", len(allUIDs))
 
-	byType := make(map[int32][]string)
-	for _, m := range mail {
-		if m.HasUnclaimedReward() {
-			byType[m.Type()] = append(byType[m.Type()], m.Uid())
-		}
-	}
+	byType := groupUnclaimedByType(mail)
 	if len(byType) == 0 {
 		slog.Info("no unclaimed mail rewards found", "totalMail", len(mail))
-		return
+		return errors.Join(errs...)
 	}
 	for mailType, uids := range byType {
 		slog.Info("claiming mail reward", "type", mailType, "count", len(uids))
 		rewardParams := NewSFSObject()
 		rewardParams.PutUtfString("uids", strings.Join(uids, ","))
 		rewardParams.PutInt("type", mailType)
-		if err := conn.SendExtension("mail.reward.batch", rewardParams); err != nil {
-			slog.Error("mail reward-batch send failed", "error", err)
-			continue
-		}
-		msg, err := waitForCmd(conn, 8*time.Second, "mail.reward.batch")
-		if err != nil {
-			slog.Error("mail reward-batch no response", "error", err)
-			continue
-		}
-		logCommandResult(fmt.Sprintf("mail reward-batch response (type %d)", mailType), msg)
+		_, err := sendAndWait(conn, fmt.Sprintf("mail reward-batch (type %d)", mailType), "mail.reward.batch", rewardParams)
+		errs = append(errs, err)
 	}
+	return errors.Join(errs...)
+}
+
+// groupUnclaimedByType buckets mail with an unclaimed reward by its type field -- pulled out of
+// ClaimAllMail as a standalone, network-free function so it can be unit tested without a live
+// connection.
+func groupUnclaimedByType(mail []Mail) map[int32][]string {
+	byType := make(map[int32][]string)
+	for _, m := range mail {
+		if m.HasUnclaimedReward() {
+			byType[m.Type()] = append(byType[m.Type()], m.Uid())
+		}
+	}
+	return byType
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 )
 
@@ -33,6 +34,11 @@ func defaultSessionConfigPath() string {
 
 // LoadSessionConfig reads a SessionConfig from path.
 func LoadSessionConfig(path string) (*SessionConfig, error) {
+	if fi, err := os.Stat(path); err == nil {
+		if mode := fi.Mode().Perm(); mode&0077 != 0 {
+			slog.Warn("session config file is more permissive than 0600 -- it holds a real access token", "path", path, "mode", mode)
+		}
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

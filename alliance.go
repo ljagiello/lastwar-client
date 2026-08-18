@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -28,20 +29,12 @@ import (
 // generic "helped" tip even when nothing was actually pending, so it's
 // safe to call on every run regardless of whether any help requests
 // currently exist.
-func HelpAllianceMembers(conn *GameConn) {
+func HelpAllianceMembers(conn *GameConn) error {
 	const cmd = "al.help.all"
 	params := NewSFSObject()
 	params.PutLong("cmdBaseTime", time.Now().UnixMilli())
-	if err := conn.SendExtension(cmd, params); err != nil {
-		slog.Error("alliance help-all send failed", "error", err)
-		return
-	}
-	msg, err := waitForCmd(conn, 8*time.Second, cmd)
-	if err != nil {
-		slog.Error("alliance help-all no response", "error", err)
-		return
-	}
-	logCommandResult("alliance help-all response", msg)
+	_, err := sendAndWait(conn, "alliance help-all response", cmd, params)
+	return err
 }
 
 // ClaimAllianceGifts sends `alliance.reward.allreceive` -- confirmed live
@@ -64,22 +57,21 @@ func HelpAllianceMembers(conn *GameConn) {
 // and a non-empty `reward`; nothing in the handler treats calling this
 // with zero pending gifts of a given type as an error, so it's safe to
 // call both types unconditionally on every run.
-func ClaimAllianceGifts(conn *GameConn) {
+const (
+	allianceGiftPremium int32 = 1
+	allianceGiftRegular int32 = 2
+)
+
+func ClaimAllianceGifts(conn *GameConn) error {
 	const cmd = "alliance.reward.allreceive"
-	for _, giftType := range []int32{1, 2} {
+	var errs []error
+	for _, giftType := range []int32{allianceGiftPremium, allianceGiftRegular} {
 		params := NewSFSObject()
 		params.PutInt("type", giftType)
-		if err := conn.SendExtension(cmd, params); err != nil {
-			slog.Error("alliance gift claim send failed", "type", giftType, "error", err)
-			continue
-		}
-		msg, err := waitForCmd(conn, 8*time.Second, cmd)
-		if err != nil {
-			slog.Error("alliance gift claim no response", "type", giftType, "error", err)
-			continue
-		}
-		logCommandResult(fmt.Sprintf("alliance gift claim response (type %d)", giftType), msg)
+		_, err := sendAndWait(conn, fmt.Sprintf("alliance gift claim response (type %d)", giftType), cmd, params)
+		errs = append(errs, err)
 	}
+	return errors.Join(errs...)
 }
 
 // DonateRecommendedAllianceTech finds whichever alliance tech is currently
@@ -124,42 +116,25 @@ func ClaimAllianceGifts(conn *GameConn) {
 // unlimited) but spends real premium currency per use, so it's
 // deliberately left out rather than auto-spending gems without being
 // asked.
-func DonateRecommendedAllianceTech(conn *GameConn) {
+func DonateRecommendedAllianceTech(conn *GameConn) error {
 	const refreshCmd = "science.data.refresh"
-	if err := conn.SendExtension(refreshCmd, NewSFSObject()); err != nil {
-		slog.Error("alliance tech tree fetch send failed", "error", err)
-		return
-	}
-	msg, err := waitForCmd(conn, 8*time.Second, refreshCmd)
+	msg, err := sendAndWait(conn, "alliance tech tree fetch", refreshCmd, NewSFSObject())
 	if err != nil {
-		slog.Error("alliance tech tree fetch no response", "error", err)
-		return
+		return err
 	}
 	v, ok := msg.Params.Get("allianceScience")
 	if !ok {
 		slog.Info("no alliance tech tree data returned")
-		return
+		return nil
 	}
 	arr, ok := v.Val.(*SFSArray)
 	if !ok {
-		return
+		return nil
 	}
-	var recommendedID int32
-	found := false
-	for _, item := range arr.items {
-		tech, ok := item.Val.(*SFSObject)
-		if !ok {
-			continue
-		}
-		if tech.GetInt("state") == 1 {
-			recommendedID = tech.GetInt("scienceId")
-			found = true
-			break
-		}
-	}
+	recommendedID, found := findRecommendedTech(arr)
 	if !found {
 		slog.Info("no alliance tech is currently recommended")
-		return
+		return nil
 	}
 
 	const donateCmd = "al.science.donate"
@@ -167,14 +142,22 @@ func DonateRecommendedAllianceTech(conn *GameConn) {
 	params := NewSFSObject()
 	params.PutInt("scienceId", recommendedID)
 	params.PutInt("option", 1)
-	if err := conn.SendExtension(donateCmd, params); err != nil {
-		slog.Error("alliance tech donate send failed", "error", err)
-		return
+	_, err = sendAndWait(conn, fmt.Sprintf("alliance tech donate response (scienceId %d)", recommendedID), donateCmd, params)
+	return err
+}
+
+// findRecommendedTech scans an allianceScience array for the state==1 entry -- pulled out of
+// DonateRecommendedAllianceTech as a standalone, network-free function so it can be unit tested
+// without a live connection.
+func findRecommendedTech(arr *SFSArray) (scienceId int32, found bool) {
+	for _, item := range arr.items {
+		tech, ok := item.Val.(*SFSObject)
+		if !ok {
+			continue
+		}
+		if tech.GetInt("state") == 1 {
+			return tech.GetInt("scienceId"), true
+		}
 	}
-	donateMsg, err := waitForCmd(conn, 8*time.Second, donateCmd)
-	if err != nil {
-		slog.Error("alliance tech donate no response", "error", err)
-		return
-	}
-	logCommandResult(fmt.Sprintf("alliance tech donate response (scienceId %d)", recommendedID), donateMsg)
+	return 0, false
 }
