@@ -824,9 +824,18 @@ func (c *recordingConn) SetWriteDeadline(time.Time) error { return nil }
 
 // scriptedNetErrConn serves pre-recorded bytes (typically produced via recordingConn above, wired
 // through a real SendExtension call so the bytes are genuinely wire-format-correct) for as many
-// Read calls as it takes to drain them, then permanently flips to returning fakeNetError (borrowed
-// from buildings_orchestration_test.go's fakeNetErrConn/fakeNetError/fakeNetAddr -- same package,
-// so directly visible here) for every Read call after that.
+// Read calls as it takes to drain them, then permanently flips to returning fakeNetError{}
+// (borrowed from buildings_orchestration_test.go's fakeNetErrConn/fakeNetError/fakeNetAddr -- same
+// package, so directly visible here) for every Read call after that.
+//
+// fakeNetError{} (the zero value, timeout: false) is a genuine connection-level failure
+// (Timeout()==false) -- see fakeNetError's own doc comment (buildings_orchestration_test.go) for
+// why that's the right default here: a permanently-dead connection, not a transient per-action
+// timeout, so a bare scriptedNetErrConn is exactly what the "should still abort" tests need (e.g.
+// TestClaimAllMailAbortsRemainingBatchesOnNetError). A Timeout()==true net.Error sandwiched
+// between otherwise-successful responses (needed by the round-21 "must NOT abort" tests below) is
+// beyond what this single-permanently-dead-tail shape can express -- see sequencedConn further
+// down for that.
 //
 // This is what lets TestClaimAllMailAbortsRemainingBatchesOnNetError below script "the ListMail
 // round trip succeeds, then the connection goes dead" without either (a) a live net.Pipe server
@@ -875,12 +884,99 @@ func (c *scriptedNetErrConn) SetDeadline(time.Time) error      { return nil }
 func (c *scriptedNetErrConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *scriptedNetErrConn) SetWriteDeadline(time.Time) error { return nil }
 
+// connTurn is one scripted step for sequencedConn below: either a chunk of pre-recorded response
+// bytes (served for as many Read calls as it takes to drain, exactly like scriptedNetErrConn's
+// single chunk) or, if err is non-nil, a single error returned in place of bytes.
+type connTurn struct {
+	bytes []byte
+	err   error
+}
+
+// encodeResponse builds the exact wire-format bytes SendExtension/EncodeObject produce for a canned
+// cmd/resp pair, the same recordingConn-based technique TestClaimAllMailAbortsRemainingBatchesOnNetError
+// and friends already use for scriptedNetErrConn's single chunk -- factored out here because
+// sequencedConn below needs several independently-encoded chunks, not just one.
+func encodeResponse(t *testing.T, cmd string, resp *SFSObject) []byte {
+	t.Helper()
+	rec := &recordingConn{}
+	recorder := &GameConn{conn: rec}
+	if err := recorder.SendExtension(cmd, resp); err != nil {
+		t.Fatalf("build canned %s response: %v", cmd, err)
+	}
+	return rec.buf.Bytes()
+}
+
+// sequencedConn generalizes scriptedNetErrConn to a sequence of turns, each either real
+// response bytes or an error, consumed strictly in order. scriptedNetErrConn alone can only script
+// "N real responses, then permanently dead" -- it cannot put a transient per-action failure in the
+// MIDDLE of an otherwise-successful sequence. sequencedConn exists specifically for the round-21
+// regression tests below, which need exactly that: e.g. "list-mail succeeds, read-status batch 1
+// fails with a Timeout()==true net.Error, read-status batch 2 succeeds, both reward-claim batches
+// succeed" -- proving a per-action timeout doesn't abort the batch loops it sits inside, unlike a
+// genuine (non-timeout) net.Error. Writes always succeed and are counted, same as scriptedNetErrConn.
+type sequencedConn struct {
+	mu     sync.Mutex
+	turns  []connTurn
+	writes int
+}
+
+func (c *sequencedConn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for len(c.turns) > 0 {
+		turn := &c.turns[0]
+		if turn.err != nil {
+			c.turns = c.turns[1:]
+			return 0, turn.err
+		}
+		if len(turn.bytes) == 0 {
+			c.turns = c.turns[1:]
+			continue
+		}
+		n := copy(p, turn.bytes)
+		turn.bytes = turn.bytes[n:]
+		return n, nil
+	}
+	// Ran out of scripted turns -- a correctly-behaving ClaimAllMail should never issue more
+	// requests than a test scripted for, so this only fires when a test's own expectations are
+	// wrong; io.EOF mirrors recordingConn's unread-from-Read stub.
+	return 0, io.EOF
+}
+
+func (c *sequencedConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	c.writes++
+	c.mu.Unlock()
+	return len(p), nil
+}
+
+func (c *sequencedConn) writeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
+}
+
+func (c *sequencedConn) Close() error                     { return nil }
+func (c *sequencedConn) LocalAddr() net.Addr              { return fakeNetAddr{} }
+func (c *sequencedConn) RemoteAddr() net.Addr             { return fakeNetAddr{} }
+func (c *sequencedConn) SetDeadline(time.Time) error      { return nil }
+func (c *sequencedConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *sequencedConn) SetWriteDeadline(time.Time) error { return nil }
+
 // TestClaimAllMailAbortsRemainingBatchesOnNetError is the round-17 regression test for Fix 1:
 // ClaimAllMail's read-status batch loop (mail.go) must check for a net.Error and break instead of
 // attempting every remaining batch, mirroring CollectAll's identical check in buildings.go (see
 // TestCollectAllAbortsRemainingActionsOnNetError, buildings_orchestration_test.go). It must also
 // skip the reward-claim loop entirely once that happens, rather than attempting it against an
 // already-known-dead connection.
+//
+// Round-21 update: scriptedNetErrConn's permanent post-drain failure is fakeNetError{} -- the zero
+// value, timeout: false -- which per the round-21 fix to fakeNetError (buildings_orchestration_test.go)
+// is a genuine non-timeout connection-level failure, exactly what "should still abort" needs. A prior
+// version of this test relied on fakeNetError{} meaning Timeout()==true, which -- per the round-21
+// fix to ClaimAllMail itself -- is no longer grounds for an abort at all; see
+// TestClaimAllMailReadStatusContinuesAfterTimeout below for that (now fakeNetError{timeout: true})
+// case's own coverage. Only a genuine, non-timeout net.Error still aborts the remaining batches.
 //
 // Unlike TestCollectAllAbortsRemainingActionsOnNetError, this can't just hand ClaimAllMail a
 // fakeNetErrConn whose every Read fails from the very first call: ClaimAllMail's first network
@@ -890,7 +986,8 @@ func (c *scriptedNetErrConn) SetWriteDeadline(time.Time) error { return nil }
 // same-type unclaimed-reward mail entries -- enough that batchByCountAndBytes' readBatchSize=100
 // item cap splits them into two read-status batches, 100 then 50, and would likewise split the
 // reward-claim loop's one distinct type into two batches if that loop were ever reached), and every
-// Read after that (i.e., every batch call, in either loop) fails immediately with a net.Error.
+// Read after that (i.e., every batch call, in either loop) fails immediately with a non-timeout
+// net.Error.
 //
 // If the fix fires correctly, exactly 2 writes happen: the ListMail request, then the first (and
 // only) read-status batch request, which fails and breaks the loop before batch 2 is ever
@@ -934,8 +1031,8 @@ func TestClaimAllMailAbortsRemainingBatchesOnNetError(t *testing.T) {
 		t.Fatal("ClaimAllMail() = nil, want a non-nil error (the read-status batch call fails with a net.Error)")
 	}
 	var netErr net.Error
-	if !errors.As(err, &netErr) {
-		t.Errorf("ClaimAllMail() error = %v, want it to wrap a net.Error (the failure that triggered the abort)", err)
+	if !errors.As(err, &netErr) || netErr.Timeout() {
+		t.Errorf("ClaimAllMail() error = %v, want it to wrap a non-timeout net.Error (the failure that triggered the abort)", err)
 	}
 	if got := fake.writeCount(); got != 2 {
 		t.Errorf("fake connection saw %d writes, want exactly 2 (list-mail request + first read-status batch only -- ClaimAllMail should have aborted before read-status batch 2 or any reward-claim batch)", got)
@@ -954,7 +1051,12 @@ func TestClaimAllMailAbortsRemainingBatchesOnNetError(t *testing.T) {
 //
 // An ordinary decoded errorCode failure (not a net.Error) on ListMail must still fall through to
 // process any partial mail normally -- that's TestClaimAllMailProcessesPartialMailOnListPageFailure's
-// existing coverage above, deliberately left unchanged by this fix.
+// existing coverage above, deliberately left unchanged by this fix. Since the round-21 fix, the same
+// is now true of a Timeout()==true net.Error on ListMail -- see
+// TestClaimAllMailProcessesPartialMailOnListPageTimeout below -- so this test relies on
+// scriptedNetErrConn's default permanent failure, fakeNetError{} (the zero value, timeout: false --
+// per the round-21 fix to fakeNetError, buildings_orchestration_test.go), to keep proving the
+// genuinely-dead-connection case.
 //
 // Uses recordingConn/scriptedNetErrConn the same way TestClaimAllMailAbortsRemainingBatchesOnNetError
 // does, but scripted the other way around: page 1 of chat.get.system.mails gets a real, valid canned
@@ -997,8 +1099,8 @@ func TestClaimAllMailSkipsReadStatusOnListMailNetError(t *testing.T) {
 		t.Fatal("ClaimAllMail() = nil, want a non-nil error (page 2's list-mail round trip fails with a net.Error)")
 	}
 	var netErr net.Error
-	if !errors.As(err, &netErr) {
-		t.Errorf("ClaimAllMail() error = %v, want it to wrap a net.Error (the ListMail failure that triggered the skip)", err)
+	if !errors.As(err, &netErr) || netErr.Timeout() {
+		t.Errorf("ClaimAllMail() error = %v, want it to wrap a non-timeout net.Error (the ListMail failure that triggered the skip)", err)
 	}
 	if got := fake.writeCount(); got != 2 {
 		t.Errorf("fake connection saw %d writes, want exactly 2 (page-1 and page-2 chat.get.system.mails requests only -- ClaimAllMail should have skipped straight to returning after ListMail's own net.Error, without issuing any read-status batch call)", got)
@@ -1262,7 +1364,13 @@ func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing
 // ListMail round trip and the single read-status batch genuinely succeed before the reward-claim
 // loop is ever reached. Every Read after those two responses are exhausted -- i.e. the response to
 // the very first reward-claim batch request, regardless of which type it belongs to -- fails
-// immediately with a net.Error.
+// immediately with a net.Error. As with the other scriptedNetErrConn-based tests above, this relies
+// on the default permanent failure being fakeNetError{} (the zero value, timeout: false -- per the
+// round-21 fix to fakeNetError, buildings_orchestration_test.go): since the round-21 fix to
+// ClaimAllMail, a Timeout()==true net.Error here would NOT abort the loop at all, so this test's own
+// genuinely-dead-connection scenario needs a non-timeout failure to still exercise the labeled break
+// -- the Timeout()==true/no-abort case for this exact loop is covered separately by
+// TestClaimAllMailRewardLoopContinuesAfterTimeout below.
 //
 // If the labeled break fires correctly, exactly 3 writes happen: the list-mail request, the
 // read-status batch request, and the first type's reward-claim batch request -- which fails and
@@ -1300,10 +1408,189 @@ func TestClaimAllMailNetErrorOnFirstTypeAbortsSecondType(t *testing.T) {
 		t.Fatal("ClaimAllMail() = nil, want a non-nil error (the first type's reward-claim batch fails with a net.Error)")
 	}
 	var netErr net.Error
-	if !errors.As(err, &netErr) {
-		t.Errorf("ClaimAllMail() error = %v, want it to wrap a net.Error (the failure that triggered the rewardLoop abort)", err)
+	if !errors.As(err, &netErr) || netErr.Timeout() {
+		t.Errorf("ClaimAllMail() error = %v, want it to wrap a non-timeout net.Error (the failure that triggered the rewardLoop abort)", err)
 	}
 	if got := fake.writeCount(); got != 3 {
 		t.Errorf("fake connection saw %d writes, want exactly 3 (list-mail + read-status batch + first type's reward-claim batch only -- a net.Error on the first mail type's reward batch must abort the SECOND, not-yet-started type too, not just the first type's remaining batches)", got)
+	}
+}
+
+// TestClaimAllMailProcessesPartialMailOnListPageTimeout is the round-21 regression test for the
+// ListMail-net.Error check right after the ListMail call in ClaimAllMail (mail.go, Fix site 1): a
+// Timeout()==true net.Error -- sendAndWait's ordinary "no response within defaultCmdTimeout"
+// outcome -- must NOT be treated as proof the connection is dead. Before the round-21 fix, this
+// check fired on ANY net.Error, so a single slow page-2 response would make ClaimAllMail skip
+// straight to returning, discarding page 1's already-collected mail (see
+// TestClaimAllMailSkipsReadStatusOnListMailNetError's own non-timeout coverage of the still-should-
+// skip case this must NOT regress).
+//
+// Uses sequencedConn to script page 1 succeeding with one unclaimed-reward mail entry
+// (more=true, queuing page 2), then page 2's response failing with fakeNetError{timeout: true}
+// (borrowed directly from buildings_orchestration_test.go -- Timeout()==true, standing in for an
+// ordinary slow response), followed by genuinely successful read-status and reward-claim batch
+// responses for that one already-collected mail entry.
+//
+// If the fix holds, ClaimAllMail falls through past the ListMail timeout and still attempts both
+// the read-status and reward-claim batches for page 1's mail, so exactly 4 writes happen: the
+// page-1 and page-2 chat.get.system.mails requests, one mail.read.status.betch request, and one
+// mail.reward.batch request. A reverted fix would stop at exactly 2 writes (page 1 + page 2 only),
+// identical to TestClaimAllMailSkipsReadStatusOnListMailNetError's writeCount -- the two tests
+// together prove the site now distinguishes Timeout()==true from a genuine net.Error.
+func TestClaimAllMailProcessesPartialMailOnListPageTimeout(t *testing.T) {
+	page1Resp := NewSFSObject()
+	arr := NewSFSArray()
+	arr.AddSFSObject(newTestMailObj("uid-1", 3, 0)) // rewardStatus=0: unclaimed reward
+	page1Resp.PutSFSArray("msg", arr)
+	page1Resp.PutBool("more", true)
+	page1Resp.PutUtfString("lastUid", "uid-1")
+	page1Resp.PutLong("lastMailTime", 555)
+
+	readResp := NewSFSObject()
+	readResp.PutBool("success", true)
+
+	rewardResp := NewSFSObject()
+	rewardResp.PutBool("success", true)
+
+	fake := &sequencedConn{turns: []connTurn{
+		{bytes: encodeResponse(t, "push.chat.get.system.mails", page1Resp)},
+		{err: fakeNetError{timeout: true}}, // page 2: Timeout()==true, standing in for an ordinary slow response
+		{bytes: encodeResponse(t, "mail.read.status.betch", readResp)},
+		{bytes: encodeResponse(t, "mail.reward.batch", rewardResp)},
+	}}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := ClaimAllMail(client)
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (page 2's list-mail round trip times out)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Errorf("ClaimAllMail() error = %v, want it to wrap a Timeout()==true net.Error (the page-2 timeout that must NOT have aborted the run)", err)
+	}
+	if got := fake.writeCount(); got != 4 {
+		t.Errorf("fake connection saw %d writes, want exactly 4 (page-1 + page-2 list-mail, plus the read-status and reward-claim batches for page 1's already-collected mail -- a Timeout()==true net.Error on ListMail must not skip them)", got)
+	}
+}
+
+// TestClaimAllMailReadStatusContinuesAfterTimeout is the round-21 regression test for the
+// read-status batch loop's net.Error check in ClaimAllMail (mail.go, Fix site 2): a
+// Timeout()==true net.Error on one batch must NOT abort the remaining read-status batches, and
+// must NOT skip the reward-claim loop afterward (readAbortedByNetErr must stay false). Before the
+// round-21 fix, this check fired on ANY net.Error, so one slow read-status response would abort
+// every other independent batch/loop still pending -- exactly the bug
+// TestClaimAllMailAbortsRemainingBatchesOnNetError's own non-timeout scenario must still catch.
+//
+// Uses 101 same-type unclaimed-reward mail entries -- enough that batchByCountAndBytes'
+// readBatchSize=100 item cap splits both the read-status loop and the reward-claim loop into two
+// batches each (100 then 1), mirroring TestClaimAllMailItemCountBatching's fixture shape. Scripted
+// via sequencedConn: list-mail succeeds, read-status batch 1 (100 uids) fails with a
+// Timeout()==true net.Error, read-status batch 2 (1 uid) succeeds, and both reward-claim batches
+// succeed.
+//
+// If the fix holds, all 5 requests are attempted (list-mail + 2 read-status batches + 2
+// reward-claim batches), so exactly 5 writes happen. A reverted fix would break out of the
+// read-status loop after batch 1's timeout (skipping read-status batch 2) and skip the
+// reward-claim loop entirely, showing up as writeCount()==2.
+func TestClaimAllMailReadStatusContinuesAfterTimeout(t *testing.T) {
+	const total = 101
+	const mailType = int32(7)
+	var mails []*SFSObject
+	for i := 0; i < total; i++ {
+		mails = append(mails, newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
+	}
+	listResp := NewSFSObject()
+	arr := NewSFSArray()
+	for _, mo := range mails {
+		arr.AddSFSObject(mo)
+	}
+	listResp.PutSFSArray("msg", arr)
+	listResp.PutBool("more", false)
+
+	readSuccess := NewSFSObject()
+	readSuccess.PutBool("success", true)
+
+	rewardSuccess := NewSFSObject()
+	rewardSuccess.PutBool("success", true)
+
+	fake := &sequencedConn{turns: []connTurn{
+		{bytes: encodeResponse(t, "push.chat.get.system.mails", listResp)},
+		{err: fakeNetError{timeout: true}},                                // read-status batch 1 (100 uids): Timeout()==true
+		{bytes: encodeResponse(t, "mail.read.status.betch", readSuccess)}, // read-status batch 2 (1 uid)
+		{bytes: encodeResponse(t, "mail.reward.batch", rewardSuccess)},    // reward-claim batch 1 (100 uids)
+		{bytes: encodeResponse(t, "mail.reward.batch", rewardSuccess)},    // reward-claim batch 2 (1 uid)
+	}}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := ClaimAllMail(client)
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (read-status batch 1 times out)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Errorf("ClaimAllMail() error = %v, want it to wrap a Timeout()==true net.Error (read-status batch 1's timeout)", err)
+	}
+	if got := fake.writeCount(); got != 5 {
+		t.Errorf("fake connection saw %d writes, want exactly 5 (list-mail + both read-status batches + both reward-claim batches -- a Timeout()==true net.Error on read-status batch 1 must not abort batch 2 or skip the reward-claim loop)", got)
+	}
+}
+
+// TestClaimAllMailRewardLoopContinuesAfterTimeout is the round-21 regression test for the
+// reward-claim loop's labeled net.Error break in ClaimAllMail (mail.go, Fix site 3): a
+// Timeout()==true net.Error on one mail type's reward-claim batch must NOT trigger `break
+// rewardLoop` -- the outer loop must still visit every other still-unprocessed type in byType.
+// Before the round-21 fix, this check fired on ANY net.Error, so one slow reward-claim response
+// would abort every other type's reward claim too -- exactly the bug
+// TestClaimAllMailNetErrorOnFirstTypeAbortsSecondType's own non-timeout scenario must still catch
+// (that test now relies on scriptedNetErrConn's default fakeNetError{} (timeout: false) to keep
+// proving the genuinely-dead-connection case).
+//
+// Two distinct unclaimed-reward mail types (3 and 9), one mail entry each, so each type's
+// reward-claim loop is exactly one batch. Both types send their request under the identical cmd
+// name "mail.reward.batch" (mail.go's ClaimAllMail), so sequencedConn's turns don't need to know
+// which type Go's randomized map iteration visits first: whichever reward-claim batch request
+// arrives first gets the Timeout()==true error turn, and whichever arrives second gets the success
+// turn.
+//
+// If the labeled break correctly requires !netErr.Timeout(), all 4 requests are attempted
+// (list-mail + read-status + both types' reward-claim batches), so exactly 4 writes happen. A
+// reverted fix would abort the whole rewardLoop after the first type's timeout, leaving the second
+// type's batch never attempted -- showing up as writeCount()==3, identical to
+// TestClaimAllMailNetErrorOnFirstTypeAbortsSecondType's own (correct, non-timeout) writeCount.
+func TestClaimAllMailRewardLoopContinuesAfterTimeout(t *testing.T) {
+	listResp := NewSFSObject()
+	arr := NewSFSArray()
+	arr.AddSFSObject(newTestMailObj("t3-a", 3, 0)) // rewardStatus=0: unclaimed
+	arr.AddSFSObject(newTestMailObj("t9-a", 9, 0)) // rewardStatus=0: unclaimed
+	listResp.PutSFSArray("msg", arr)
+	listResp.PutBool("more", false)
+
+	readSuccess := NewSFSObject()
+	readSuccess.PutBool("success", true)
+
+	rewardSuccess := NewSFSObject()
+	rewardSuccess.PutBool("success", true)
+
+	fake := &sequencedConn{turns: []connTurn{
+		{bytes: encodeResponse(t, "push.chat.get.system.mails", listResp)},
+		{bytes: encodeResponse(t, "mail.read.status.betch", readSuccess)},
+		{err: fakeNetError{timeout: true}},                             // first type's reward-claim batch (whichever type is visited first): Timeout()==true
+		{bytes: encodeResponse(t, "mail.reward.batch", rewardSuccess)}, // second type's reward-claim batch
+	}}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := ClaimAllMail(client)
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (the first type's reward-claim batch times out)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Errorf("ClaimAllMail() error = %v, want it to wrap a Timeout()==true net.Error (the first type's reward-claim timeout)", err)
+	}
+	if got := fake.writeCount(); got != 4 {
+		t.Errorf("fake connection saw %d writes, want exactly 4 (list-mail + read-status + both types' reward-claim batches -- a Timeout()==true net.Error on the first type's batch must not abort the second, not-yet-started type)", got)
 	}
 }

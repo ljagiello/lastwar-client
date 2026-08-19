@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -287,6 +288,72 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), fakeToken) {
 			t.Errorf("GetServerList error leaks the raw response body: %v", err)
+		}
+	})
+
+	t.Run("bin field fails PKCS7 padding after decrypt", func(t *testing.T) {
+		// Recover the AES key the same way the "decrypted plaintext type-mismatched" subtest below
+		// does, but instead of encrypting a well-formed (if type-mismatched) reply, encrypt one
+		// block directly with mismatched padding bytes -- reproducing a tampered/corrupted "bin"
+		// field that passes base64+block-alignment but fails PKCS7 unpadding. This is the one
+		// decode/decrypt-failure path (gsl.go's "decrypt GSL response" branch) none of this test
+		// function's other subtests reach: they all either fail before decryption or fail the
+		// subsequent JSON decode of otherwise-valid decrypted plaintext.
+		priv, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("generate RSA key: %v", err)
+		}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse form: %v", err)
+				return
+			}
+			saltCT, err := urlSafeB64Decode(r.FormValue("uuid"))
+			if err != nil {
+				t.Errorf("decode uuid field: %v", err)
+				return
+			}
+			salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT)
+			if err != nil {
+				t.Errorf("rsa decrypt salt: %v", err)
+				return
+			}
+			key := md5HexKey(string(salt))
+			block, err := aes.NewCipher(key)
+			if err != nil {
+				t.Errorf("aes.NewCipher: %v", err)
+				return
+			}
+			bs := block.BlockSize()
+
+			// One block of plaintext embedding fakeToken, followed by bytes that are NOT valid
+			// PKCS7 padding for this key (last byte looks like a plausible pad length, but the
+			// preceding "padding" bytes don't match it -- see
+			// TestPkcs7UnpadRejectsMismatchedPaddingBytes in selftest_test.go for the same shape
+			// applied directly to pkcs7Unpad).
+			plain := make([]byte, bs)
+			copy(plain, fakeToken)
+			plain[bs-4] = 5
+			plain[bs-3] = 4
+			plain[bs-2] = 4
+			plain[bs-1] = 4
+
+			ct := make([]byte, bs)
+			block.Encrypt(ct, plain)
+			fmt.Fprintf(w, `{"bin":%q}`, urlSafeB64Encode(ct))
+		}))
+		defer server.Close()
+
+		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		if err == nil {
+			t.Fatal("GetServerList: expected a decrypt error, got nil")
+		}
+		if !strings.Contains(err.Error(), "decrypt GSL response") {
+			t.Errorf("GetServerList error = %q, want it to mention the decrypt-GSL-response branch", err)
+		}
+		if strings.Contains(err.Error(), fakeToken) {
+			t.Errorf("GetServerList error leaks the raw ciphertext/decrypted response: %v", err)
 		}
 	})
 

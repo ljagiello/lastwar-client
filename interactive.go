@@ -78,8 +78,29 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 }
 
 func handleInteractiveLine(conn *GameConn, line string) {
-	cmd, rest, _ := strings.Cut(line, " ")
+	cmd, rest, found := strings.Cut(line, " ")
 	rest = strings.TrimSpace(rest)
+
+	if !found && strings.Contains(cmd, "{") {
+		// No space was found at all, and what strings.Cut left us in cmd contains a '{':
+		// almost certainly a JSON params blob glued onto the command name with no
+		// separating space (e.g. "cmd.name{\"uuid\":123}", or even bare "{\"uuid\":123}"
+		// with no command prefix), not a legitimate bare command -- this tool's command
+		// names are plain dot-separated identifiers (see the flat-scalar-only command
+		// format documented above) and never contain '{' themselves. Left unchecked, cmd
+		// here is the *entire* raw line and would be sent as a literal SFS2X command name
+		// with empty params, with no error until the far less obvious "no matching
+		// response within 8s" several seconds later -- the "if rest != \"\"" JSON-decode
+		// block below never even runs, since rest is always "" in this case. Don't echo
+		// cmd/line itself in the log -- same "do not echo the raw text" reasoning as the
+		// JSON-decode-error branch below: the glued-on JSON could contain a credential
+		// value the operator meant to pass as params. The part before the first '{' is
+		// safe to log, though (it can't contain JSON content), and is a useful hint at
+		// what the operator likely meant to send.
+		likelyCmd, _, _ := strings.Cut(cmd, "{")
+		slog.Error("bad JSON params", "cmd", likelyCmd, "error", fmt.Errorf("missing space between command name and JSON params"))
+		return
+	}
 
 	params := NewSFSObject()
 	if rest != "" {

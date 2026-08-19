@@ -582,18 +582,23 @@ func TestCollectAllAggregatesErrorsWithoutShortCircuiting(t *testing.T) {
 	}
 }
 
-// fakeNetErrConn is a minimal net.Conn whose every Read fails with a fakeNetError -- a genuine
-// connection-level failure (Timeout()==true), standing in for what a real silently-dead/blackholed
-// TCP connection's eventual read-deadline expiry would produce, as opposed to a well-formed response
+// fakeNetErrConn is a minimal net.Conn whose every Read fails with a fakeNetError. By default
+// (timeout: false, the zero value -- what every bare fakeNetErrConn{} literal across this package's
+// other _test.go files gets) that's a genuine connection-level failure (Timeout()==false), standing
+// in for what a real dead/reset/blackholed TCP connection would produce. Set timeout: true instead to
+// simulate sendAndWait's ordinary "no matching response within defaultCmdTimeout" per-call outcome
+// (Timeout()==true, confirmed by TestWaitForTimeout in conn_wait_test.go) -- a normal, expected
+// timeout on an otherwise-healthy connection. Either way this is as opposed to a well-formed response
 // carrying a decoded (possibly non-benign) errorCode. Writes succeed and are counted, so a test can
 // prove exactly how many requests were sent before CollectAll's net.Error early-abort (buildings.go)
-// fired.
+// fired -- or, for the timeout:true case, prove it did NOT fire and every action still ran.
 type fakeNetErrConn struct {
-	mu     sync.Mutex
-	writes int
+	mu      sync.Mutex
+	writes  int
+	timeout bool // Timeout() of the fakeNetError every Read fails with; see the doc comment above.
 }
 
-func (c *fakeNetErrConn) Read([]byte) (int, error) { return 0, fakeNetError{} }
+func (c *fakeNetErrConn) Read([]byte) (int, error) { return 0, fakeNetError{timeout: c.timeout} }
 
 func (c *fakeNetErrConn) Write(b []byte) (int, error) {
 	c.mu.Lock()
@@ -621,26 +626,44 @@ func (fakeNetAddr) Network() string { return "fake" }
 func (fakeNetAddr) String() string  { return "fake" }
 
 // fakeNetError implements net.Error directly (error + Timeout() + the deprecated-but-still-required
-// Temporary()), simulating a genuine connection-level failure rather than a decoded errorCode
-// business-logic failure -- the same distinction FetchBuildings' own net.Error check (buildings.go)
-// already makes, and login.go's waitForInitPush/TestWaitForTimeout (conn_wait_test.go) already rely
-// on for the same purpose.
-type fakeNetError struct{}
+// Temporary()), simulating either of the two kinds of net.Error CollectAll's (and FetchBuildings',
+// ClaimAllMail's, GreetVisitors', ClaimAllianceGifts') early-abort checks care about -- the
+// distinction is entirely carried by the timeout field:
+//
+//   - timeout: false (the zero value -- what a bare fakeNetError{} literal gets, including every
+//     direct `fakeNetError{}` use elsewhere in this package's other _test.go files) is a genuine
+//     connection-level failure: connection reset, broken pipe, DNS failure, TLS error, etc. This is
+//     the ONLY kind of net.Error that should still trigger an early abort of remaining independent
+//     actions -- every subsequent action really is doomed to fail the same way.
+//   - timeout: true is sendAndWait's ordinary "no matching response within defaultCmdTimeout (8s)"
+//     outcome (confirmed by TestWaitForTimeout in conn_wait_test.go) -- a normal, expected timeout on
+//     one action's response on an otherwise-healthy connection. It must NOT abort remaining actions.
+type fakeNetError struct {
+	timeout bool
+}
 
-func (fakeNetError) Error() string   { return "fake net.Error: simulated dead connection" }
-func (fakeNetError) Timeout() bool   { return true }
-func (fakeNetError) Temporary() bool { return false }
+func (e fakeNetError) Error() string {
+	if e.timeout {
+		return "fake net.Error: simulated per-action response timeout"
+	}
+	return "fake net.Error: simulated dead connection"
+}
+func (e fakeNetError) Timeout() bool   { return e.timeout }
+func (e fakeNetError) Temporary() bool { return false }
 
 // TestCollectAllAbortsRemainingActionsOnNetError is the round-16 regression test for CollectAll's
 // (buildings.go) net.Error early-abort. TestCollectAllAggregatesErrorsWithoutShortCircuiting above
 // proves ordinary decoded errorCode failures must NOT short-circuit the run; this test proves the
-// opposite must happen for a genuine connection-level failure, mirroring FetchBuildings' own
-// errors.As-against-net.Error check.
+// opposite must happen for a genuine (non-timeout) connection-level failure, mirroring
+// FetchBuildings' own errors.As-against-net.Error check.
 //
-// The fake connection's Read always fails with fakeNetError, so CollectAll's very first sub-action
-// -- CollectIdleReward's initial peek call -- fails immediately with a wrapped net.Error, before it
-// ever gets to its own second (claim) call. Only that one request should ever be sent: if CollectAll
-// didn't break early, GreetVisitors would be a no-op (visitors is nil) but ClaimAllMail,
+// timeout: false makes the fake connection's every Read fail with a fakeNetError standing in for a
+// genuine dead connection (Timeout()==false; round-21 fix -- see fakeNetError's doc comment above for
+// why Timeout()==true must NOT trigger this same abort, covered instead by
+// TestCollectAllContinuesRemainingActionsOnNetErrorTimeout below). So CollectAll's very first
+// sub-action -- CollectIdleReward's initial peek call -- fails immediately with a wrapped net.Error,
+// before it ever gets to its own second (claim) call. Only that one request should ever be sent: if
+// CollectAll didn't break early, GreetVisitors would be a no-op (visitors is nil) but ClaimAllMail,
 // HelpAllianceMembers, ClaimAllianceGifts, DonateRecommendedAllianceTech, both VIP claims, and the
 // one collectible building below would each still attempt a real request of their own.
 //
@@ -648,7 +671,7 @@ func (fakeNetError) Temporary() bool { return false }
 // old flat sequence of unconditional `errs = append(errs, ...)` calls makes this test fail with
 // writeCount() == 9 (one per fixed sub-action plus the one building collect) instead of 1.
 func TestCollectAllAbortsRemainingActionsOnNetError(t *testing.T) {
-	fake := &fakeNetErrConn{}
+	fake := &fakeNetErrConn{timeout: false}
 	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
 
 	buildings := []Building{newTestBuilding(501, BuildingFarmland, 2)}
@@ -664,5 +687,48 @@ func TestCollectAllAbortsRemainingActionsOnNetError(t *testing.T) {
 	}
 	if got := fake.writeCount(); got != 1 {
 		t.Errorf("fake connection saw %d writes, want exactly 1 (only CollectIdleReward's first request -- CollectAll should have aborted before any other sub-action or building collect)", got)
+	}
+}
+
+// TestCollectAllContinuesRemainingActionsOnNetErrorTimeout is the round-21 regression test for the
+// fix to CollectAll's net.Error early-abort (buildings.go): a net.Error whose Timeout() is true is
+// sendAndWait's ordinary "no matching response within defaultCmdTimeout (8s)" outcome (confirmed by
+// TestWaitForTimeout in conn_wait_test.go) -- a normal, expected timeout on one action's response on
+// an otherwise-healthy connection, not evidence the connection is dead. It must NOT abort the
+// remaining independent actions, exactly like TestCollectAllAggregatesErrorsWithoutShortCircuiting
+// already proves for an ordinary decoded errorCode failure.
+//
+// timeout: true makes the fake connection's every Read fail with a fakeNetError whose Timeout() is
+// true, so every one of CollectAll's 8 fixed sub-actions (visitors is nil, so GreetVisitors is a
+// no-op) fails the same way in turn. If CollectAll incorrectly still broke early on this net.Error,
+// only CollectIdleReward's first request would ever be sent; with the round-21 fix, every sub-action
+// runs and gets a chance to write its own request(s) to the wire.
+//
+// Mutation check: reverting the !netErr.Timeout() guard in buildings.go back to the old bare
+// errors.As(err, &netErr) check makes this test fail with writeCount() == 1 instead of > 1, and the
+// aggregated error would then read as CollectIdleReward's lone failure instead of mentioning multiple
+// simulated per-action timeouts.
+func TestCollectAllContinuesRemainingActionsOnNetErrorTimeout(t *testing.T) {
+	fake := &fakeNetErrConn{timeout: true}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := CollectAll(client, nil, nil)
+
+	if err == nil {
+		t.Fatal("CollectAll() = nil, want a non-nil error (the fake connection's every Read fails)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Errorf("CollectAll() error = %v, want it to still wrap a net.Error (every sub-action failed the same way)", err)
+	}
+	if !netErr.Timeout() {
+		t.Errorf("CollectAll() error = %v, want the wrapped net.Error's Timeout() to be true", err)
+	}
+	// CollectIdleReward issues one request per attempt, so if it alone ran that would also produce
+	// writeCount() == 1 -- indistinguishable from an incorrect early-abort on just that one action.
+	// Asserting > 1 confirms sub-actions past CollectIdleReward (GreetVisitors is skipped: visitors
+	// is nil) were actually attempted, not just that CollectIdleReward ran once.
+	if got := fake.writeCount(); got <= 1 {
+		t.Errorf("fake connection saw %d writes, want more than 1 (every one of CollectAll's fixed sub-actions should have been attempted, not just the first)", got)
 	}
 }

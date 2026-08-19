@@ -219,22 +219,38 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 // net.Error abort -- the connection is already known-dead at that point, so there is no reason to
 // attempt any reward-claim batch at all. An ordinary decoded errorCode failure (not a net.Error)
 // must still NOT abort either loop -- see TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError.
+//
+// Bug fixed here (round 21): the round-17 net.Error check above was too broad. sendAndWait's
+// ordinary "no matching response within defaultCmdTimeout (8s)" outcome IS ITSELF a net.Error with
+// Timeout()==true (confirmed by conn_wait_test.go's TestWaitForTimeout) -- an expected, benign
+// outcome on a perfectly healthy connection, not evidence anything is wrong. Treating it the same
+// as a genuine connection-level failure (reset, broken pipe, DNS failure, TLS error -- all
+// Timeout()==false) meant one slow response on ANY single batch aborted every other independent
+// batch/type still waiting to be processed. All three net.Error checks below now additionally
+// require !netErr.Timeout(): only a non-timeout net.Error still means the connection is known-dead
+// and aborts the remaining work; a timeout net.Error falls through and is recorded in errs like any
+// other per-action failure, exactly like FetchBuildings' own internal wait loop already treats
+// Timeout()==true as the benign "stop waiting, move on" case (buildings.go) -- same distinction,
+// opposite polarity, since this is a sequence of independent actions rather than one single wait.
 func ClaimAllMail(conn *GameConn) error {
 	var errs []error
 
 	mail, err := ListMail(conn)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list mail: %w", err))
-		// A net.Error here means the underlying connection is already known-dead -- ListMail's
-		// own pagination loop hit it mid-fetch (see ListMail's doc comment: it returns whatever
-		// mail it already collected before the failure, not nil). Whatever partial `mail` it
-		// handed back is deliberately NOT processed in that case: proceeding into the read-status
-		// batch loop below would just burn one more defaultCmdTimeout issuing a batch against a
-		// connection already known to be dead, mirroring the readAbortedByNetErr skip further
-		// down. An ordinary decoded errorCode failure (not a net.Error) must still fall through to
-		// process any partial mail normally -- see TestClaimAllMailProcessesPartialMailOnListPageFailure.
+		// A NON-TIMEOUT net.Error here means the underlying connection is already known-dead --
+		// ListMail's own pagination loop hit it mid-fetch (see ListMail's doc comment: it returns
+		// whatever mail it already collected before the failure, not nil). Whatever partial `mail`
+		// it handed back is deliberately NOT processed in that case: proceeding into the
+		// read-status batch loop below would just burn one more defaultCmdTimeout issuing a batch
+		// against a connection already known to be dead, mirroring the readAbortedByNetErr skip
+		// further down. A net.Error with Timeout()==true -- sendAndWait's ordinary "no response
+		// within defaultCmdTimeout" outcome -- is NOT evidence of a dead connection and, like an
+		// ordinary decoded errorCode failure, must still fall through to process any partial mail
+		// normally -- see TestClaimAllMailProcessesPartialMailOnListPageFailure and
+		// TestClaimAllMailProcessesPartialMailOnListPageTimeout.
 		var netErr net.Error
-		if errors.As(err, &netErr) {
+		if errors.As(err, &netErr) && !netErr.Timeout() {
 			return errors.Join(errs...)
 		}
 	}
@@ -267,11 +283,13 @@ func ClaimAllMail(conn *GameConn) error {
 	offset := 0
 	readFailed := false
 	// readAbortedByNetErr tracks whether the loop below stopped early because a batch failed with
-	// a net.Error (the underlying connection is known-dead), as opposed to running out of batches
-	// normally or stopping only after an ordinary decoded errorCode failure (which must NOT abort
-	// the loop -- see CollectAll's identical distinction in buildings.go). When true, the
-	// reward-claim loop further down is skipped entirely: attempting it against an already-dead
-	// connection would just burn one more defaultCmdTimeout per remaining batch for no benefit.
+	// a NON-TIMEOUT net.Error (the underlying connection is known-dead), as opposed to running out
+	// of batches normally or stopping only after an ordinary decoded errorCode failure or a
+	// Timeout()==true net.Error (sendAndWait's ordinary "no response within defaultCmdTimeout"
+	// outcome), neither of which must abort the loop -- see CollectAll's identical distinction in
+	// buildings.go. When true, the reward-claim loop further down is skipped entirely: attempting
+	// it against an already-dead connection would just burn one more defaultCmdTimeout per
+	// remaining batch for no benefit.
 	readAbortedByNetErr := false
 	for _, batch := range batchByCountAndBytes(allUIDs, readBatchSize, maxUIDsBytes) {
 		readParams := NewSFSObject()
@@ -283,7 +301,7 @@ func ClaimAllMail(conn *GameConn) error {
 		errs = append(errs, err)
 		offset += len(batch)
 		var netErr net.Error
-		if errors.As(err, &netErr) {
+		if errors.As(err, &netErr) && !netErr.Timeout() {
 			readAbortedByNetErr = true
 			break
 		}
@@ -321,12 +339,17 @@ rewardLoop:
 			errs = append(errs, err)
 			offset += len(batch)
 			var netErr net.Error
-			if errors.As(err, &netErr) {
-				// The connection is known-dead: stop this type's remaining batches AND every
-				// other still-unprocessed type in byType, same reasoning as the read-status loop
-				// above and CollectAll's net.Error early-abort (buildings.go). A labeled break is
-				// used (rather than a flag checked at the top of the outer loop) since this needs
-				// to exit both the inner batch loop and the outer per-type loop in one step.
+			if errors.As(err, &netErr) && !netErr.Timeout() {
+				// A NON-TIMEOUT net.Error means the connection is known-dead: stop this type's
+				// remaining batches AND every other still-unprocessed type in byType, same
+				// reasoning as the read-status loop above and CollectAll's net.Error early-abort
+				// (buildings.go). A labeled break is used (rather than a flag checked at the top
+				// of the outer loop) since this needs to exit both the inner batch loop and the
+				// outer per-type loop in one step. A Timeout()==true net.Error (sendAndWait's
+				// ordinary "no response within defaultCmdTimeout" outcome) is NOT evidence of a
+				// dead connection and falls through with err already appended to errs above, same
+				// as an ordinary decoded errorCode failure -- see
+				// TestClaimAllMailRewardLoopContinuesAfterTimeout.
 				break rewardLoop
 			}
 		}

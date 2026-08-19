@@ -482,14 +482,21 @@ func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) error 
 	// independent (none scoped to any other's outcome), so an ordinary decoded business-logic
 	// errorCode failure in one must not stop the rest from running -- every error, regardless of
 	// kind, still gets appended to errs rather than returned immediately, same as before this
-	// loop existed. A net.Error is a different kind of failure though: it means the underlying
-	// TCP connection itself is known-dead (e.g. silently blackholed, no RST), so every subsequent
-	// action in this list is already doomed to independently burn a full defaultCmdTimeout before
-	// failing the exact same way. FetchBuildings (above) already distinguishes this class of
-	// failure via errors.As against net.Error; the loop below mirrors that exact check and breaks
-	// early the first time it fires, instead of pointlessly waiting out every remaining action's
-	// timeout in turn. The error that triggered the break is still appended to errs first, so the
-	// caller's aggregated error still reports what actually happened.
+	// loop existed. A net.Error whose Timeout() is true is just as ungated: it's sendAndWait's
+	// ordinary "no matching response within defaultCmdTimeout (8s)" outcome (confirmed by
+	// TestWaitForTimeout in conn_wait_test.go), a normal, expected timeout on one action's
+	// response, not evidence the connection is dead -- it too gets appended to errs and the loop
+	// moves on to the next action. Only a net.Error whose Timeout() is false -- connection reset,
+	// broken pipe, DNS failure, TLS error, etc. -- means the underlying TCP connection itself is
+	// actually known-dead, so every subsequent action in this list is already doomed to
+	// independently burn a full defaultCmdTimeout before failing the exact same way. FetchBuildings
+	// (above) already distinguishes this class of failure via errors.As against net.Error (there,
+	// Timeout()==true is the benign case since it's waiting for one thing rather than sequencing
+	// independent actions); the loop below applies the same distinction with the opposite polarity
+	// and breaks early only the first time a genuine non-timeout net.Error fires, instead of
+	// pointlessly waiting out every remaining action's timeout in turn. The error that triggered
+	// the break is still appended to errs first, so the caller's aggregated error still reports
+	// what actually happened.
 	actions := []func() error{
 		func() error { return CollectIdleReward(conn) },
 		func() error { return GreetVisitors(conn, visitors) },
@@ -520,7 +527,7 @@ func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) error 
 		err := action()
 		errs = append(errs, err)
 		var netErr net.Error
-		if errors.As(err, &netErr) {
+		if errors.As(err, &netErr) && !netErr.Timeout() {
 			break
 		}
 	}

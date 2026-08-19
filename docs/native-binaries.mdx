@@ -32,7 +32,10 @@ Only 1.8 MB — small for a Unity IL2CPP binary, and for good reason: it contain
         empty/synthetic values are accepted without issue for a brand-new guest account; reconnecting into an
         <em> established</em> account initially looked ShuMei-gated but turned out to be an unrelated
         <code>packageName</code>/<code>platform</code>/<code>appVersion</code> identity mismatch against the access
-        token — fixed, reconnect now works, and no ShuMei-specific block was ever found
+        token — fixed, reconnect worked at the time against the code as it then shipped (a later security fix
+        replaced part of the request with placeholders, and whether reconnect still succeeds is now an open
+        question — see [Live validation against production](/live-validation)), and no ShuMei-specific block was
+        ever found
       </td>
     </tr>
     <tr>
@@ -77,5 +80,5 @@ Only 1.8 MB — small for a Unity IL2CPP binary, and for good reason: it contain
 </table>
 
 <Warning>
-**Bottom line — updated after live testing, see [Live validation against production](/live-validation).** Static analysis alone said nothing here blocks impersonation, and live testing against production confirms it fully: nothing blocks a pure Go client from **creating and driving new guest accounts**, from **completing the email-verification bind** of a guest session to a real account, or from **reconnecting into an already-established account's live game state** — all three work end-to-end, repeatedly, against the real account used for testing. The reconnect step initially looked like a genuine protocol-level session gate (reproducibly rejected, even replaying that account's own genuine device credentials from a real prior login), but turned out to be a `packageName`/`platform`/`appVersion`/`versionCode` identity mismatch against the access token, not a security check — see [Live validation against production](/live-validation) for the full methodology and test matrix.
+**Bottom line — updated after live testing, see [Live validation against production](/live-validation).** Static analysis alone said nothing here blocks impersonation, and live testing against production confirms it fully for guest accounts: nothing blocks a pure Go client from **creating and driving new guest accounts** or from **completing the email-verification bind** of a guest session to a real account — both work end-to-end, repeatedly, against the real account used for testing. **Reconnecting into an already-established account's live game state** also worked end-to-end at the time it was tested, but that test used the `ta` analytics blob's real captured device/anti-fraud sub-fields; a later security fix (see [Live validation against production](/live-validation)) replaced those sub-fields with placeholders, and whether reconnect still succeeds against the code as it ships today is an open, unconfirmed question, not a proven-working recipe. The reconnect step initially looked like a genuine protocol-level session gate (reproducibly rejected, even replaying that account's own genuine device credentials from a real prior login), but turned out to be a `packageName`/`platform`/`appVersion`/`versionCode` identity mismatch against the access token, not a security check — see [Live validation against production](/live-validation) for the full methodology, test matrix, and the current state of the reconnect open question.
 </Warning>

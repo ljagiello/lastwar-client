@@ -544,6 +544,169 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 	}
 }
 
+// TestLoginEmailVerificationPathWarnsOnPersistFailure is this round's regression test for the
+// two SaveGameUid/SaveUsername calls at the very end of Login()'s email-verification success
+// path (immediately after the push.account.login.new push arrives), which used to silently
+// discard their errors via bare "_ = ident.SaveGameUid(gu)" / "_ = ident.SaveUsername(un)" --
+// unlike every other SaveGameUid/SaveUsername/SaveLoginKey call site in login.go (including
+// SaveLoginKey three lines above this same block), all of which check the error and slog.Warn on
+// failure. A state-file write failure here (disk full, unwritable home dir, permission change
+// mid-run) would previously vanish with no trace even though the login itself still succeeded.
+//
+// The failure is injected by replacing the gameUid/username state files with directories --
+// the same "put a directory where the state file is expected" technique
+// TestSaveStateFileLeavesTargetUntouchedOnFailedWrite and
+// TestLoadOrCreateDeviceIdentityDoesNotClobberOnReadFailure (identity_test.go) use to force a
+// real, root-proof rename failure without relying on permission bits -- but timed, from inside
+// the fake server's handler, to appear only right before the push.account.login.new push is
+// sent: strictly after loadOrCreateDeviceIdentity's own read of these same two paths at the top
+// of Login() (which must see them absent/empty, or this would instead exercise the read-failure
+// path identity_test.go already covers) and strictly before Login() reaches the
+// SaveGameUid/SaveUsername calls the push triggers. mkdirResults reports the Mkdir outcomes back
+// to the test goroutine rather than calling T methods from the handler goroutine directly --
+// unsafe here per startFakeGameServer's own doc comment, since the handler goroutine can outlive
+// the test.
+func TestLoginEmailVerificationPathWarnsOnPersistFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const testEmail = "player@example.com"
+	const testCode = "654321"
+	const wantGameUid = "real-uid-1"
+	const wantUsername = "RealPlayer"
+
+	pipePath := mkfifoT(t, t.TempDir(), "code.pipe")
+
+	mkdirResults := make(chan error, 2)
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+			return
+		}
+
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		ack := NewSFSObject()
+		ack.PutBool("success", true)
+		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
+			return
+		}
+
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		finishAck := NewSFSObject()
+		finishAck.PutBool("success", true)
+		if err := server.SendExtension("account.login.new", finishAck); err != nil {
+			return
+		}
+
+		// Swap in directories where the gameUid/username state files are expected. This runs
+		// strictly after loadOrCreateDeviceIdentity's own read of these same paths (long since
+		// completed, at the very top of Login(), before this connection was even dialed) and
+		// strictly before the SaveGameUid/SaveUsername calls the push below triggers.
+		mkdirResults <- os.Mkdir(gameUidStatePath(), 0700)
+		mkdirResults <- os.Mkdir(usernameStatePath(), 0700)
+
+		push := NewSFSObject()
+		push.PutUtfString("loginKey", "test-login-key")
+		push.PutUtfString("gameUid", wantGameUid)
+		push.PutUtfString("gameUserName", wantUsername)
+		_ = server.SendExtension("push.account.login.new", push)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	go func() {
+		f, err := os.OpenFile(pipePath, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(testCode + "\n")
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{Email: testEmail, CodePipe: pipePath})
+
+	slog.SetDefault(orig)
+
+	// The persist failure is a robustness warning, not a fatal error -- the SFS zone login and
+	// email verification themselves fully succeeded, so Login() must still return success.
+	if err != nil {
+		t.Fatalf("Login: %v, want success (a SaveGameUid/SaveUsername persist failure must only warn, not fail the login)", err)
+	}
+	defer result.Conn.Close()
+
+	// Confirm the fake server's own Mkdir calls actually succeeded (test setup), so a failure
+	// below is known to come from the SaveGameUid/SaveUsername warnings under test, not from the
+	// directories never having been put in place at all.
+	for i := 0; i < 2; i++ {
+		select {
+		case mkErr := <-mkdirResults:
+			if mkErr != nil {
+				t.Fatalf("test setup: mkdir state path: %v", mkErr)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("fake server never reported its Mkdir results")
+		}
+	}
+
+	if result.Ident == nil {
+		t.Fatal("result.Ident = nil")
+	}
+	// The in-memory identity is still updated even though the on-disk persist failed --
+	// SaveGameUid/SaveUsername set the struct field before attempting the write.
+	if result.Ident.GameUid != wantGameUid {
+		t.Errorf("Ident.GameUid = %q, want %q", result.Ident.GameUid, wantGameUid)
+	}
+	if result.Ident.Username != wantUsername {
+		t.Errorf("Ident.Username = %q, want %q", result.Ident.Username, wantUsername)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "failed to persist gameUid") {
+		t.Errorf("Login()'s logged output is missing a \"failed to persist gameUid\" warning for the failed SaveGameUid call:\n%s", logged)
+	}
+	if !strings.Contains(logged, "failed to persist username") {
+		t.Errorf("Login()'s logged output is missing a \"failed to persist username\" warning for the failed SaveUsername call:\n%s", logged)
+	}
+
+	// Both warnings must actually be logged at slog.Warn level via the "error" attribute (the
+	// same shape as every sibling SaveGameUid/SaveUsername/SaveLoginKey warning in login.go),
+	// not just happen to contain the right substring some other way.
+	if !strings.Contains(logged, "level=WARN") {
+		t.Errorf("Login()'s logged output is missing a WARN-level line for the persist failures:\n%s", logged)
+	}
+
+	// Confirm the state paths are still directories, untouched by the failed save attempts --
+	// same untouched-on-failure contract TestSaveStateFileLeavesTargetUntouchedOnFailedWrite
+	// proves for saveStateFile in isolation.
+	if fi, statErr := os.Stat(gameUidStatePath()); statErr != nil || !fi.IsDir() {
+		t.Errorf("gameUid state path is no longer a directory after the failed SaveGameUid call (statErr=%v)", statErr)
+	}
+	if fi, statErr := os.Stat(usernameStatePath()); statErr != nil || !fi.IsDir() {
+		t.Errorf("username state path is no longer a directory after the failed SaveUsername call (statErr=%v)", statErr)
+	}
+}
+
 // TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey proves the push.account.login.new
 // errorCode-present branch doesn't leak the response's cleartext loginKey into the returned
 // error (and therefore into main.go's slog.Error("login failed", ...) call site) -- a real,

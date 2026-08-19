@@ -167,10 +167,17 @@ func TestGreetVisitorsAggregatesErrorsAndSkipsBenign(t *testing.T) {
 // batch-of-sub-actions loop. fakeNetErrConn, fakeNetError, and fakeNetAddr are all package-level
 // (buildings_orchestration_test.go) and reused here as-is.
 //
-// The fake connection's Read always fails with fakeNetError, so GreetVisitors' very first
-// `visitor.operate` call fails immediately with a wrapped net.Error. Only that one request should
-// ever be sent: if GreetVisitors didn't break early, it would go on to attempt every remaining
-// visitor in the (maxNum-capped, see the Visitor doc comment in visitors.go) list in turn.
+// Updated in round 21: fakeNetErrConn/fakeNetError now carry a `timeout` field distinguishing a
+// genuine dead connection (timeout: false, the zero value used here) from sendAndWait's ordinary
+// per-action timeout (timeout: true, see TestGreetVisitorsDoesNotAbortOnTimeoutNetError below) --
+// only the former should still abort the remaining visitors, per GreetVisitors' corrected doc
+// comment in visitors.go.
+//
+// The fake connection's Read always fails with a non-timeout fakeNetError, so GreetVisitors' very
+// first `visitor.operate` call fails immediately with a wrapped, non-timeout net.Error. Only that
+// one request should ever be sent: if GreetVisitors didn't break early, it would go on to attempt
+// every remaining visitor in the (maxNum-capped, see the Visitor doc comment in visitors.go) list in
+// turn.
 //
 // Mutation check: reverting GreetVisitors' net.Error break in visitors.go back to the old flat
 // `errs = append(errs, err)`-only loop makes this test fail with writeCount() == 3 instead of 1.
@@ -192,8 +199,50 @@ func TestGreetVisitorsAbortsRemainingVisitorsOnNetError(t *testing.T) {
 	var netErr net.Error
 	if !errors.As(err, &netErr) {
 		t.Errorf("GreetVisitors() error = %v, want it to wrap a net.Error (the failure that triggered the break)", err)
+	} else if netErr.Timeout() {
+		t.Errorf("GreetVisitors() error wraps a net.Error with Timeout()==true, want the non-timeout fake used by this test")
 	}
 	if got := fake.writeCount(); got != 1 {
 		t.Errorf("fake connection saw %d writes, want exactly 1 (only the first visitor's request -- GreetVisitors should have aborted before attempting the other two)", got)
+	}
+}
+
+// TestGreetVisitorsDoesNotAbortOnTimeoutNetError is the round-21 regression test proving the other
+// half of the fix: an ordinary per-visitor sendAndWait timeout is ITSELF a net.Error with
+// Timeout()==true (see conn_wait_test.go's TestWaitForTimeout) on an otherwise healthy connection,
+// and must NOT trigger GreetVisitors' early-abort -- it should fall through into errs exactly like a
+// decoded errorCode failure, and the loop should continue on to every remaining visitor.
+//
+// It reuses fakeNetErrConn/fakeNetError (buildings_orchestration_test.go) with timeout: true, so
+// every Read fails with a Timeout()==true net.Error -- the shape of an ordinary per-action timeout,
+// as opposed to TestGreetVisitorsAbortsRemainingVisitorsOnNetError above's default (timeout: false)
+// dead-connection case.
+//
+// Mutation check: reverting GreetVisitors' `!netErr.Timeout()` condition in visitors.go back to a
+// bare `errors.As(err, &netErr)` makes this test fail with writeCount() == 1 instead of 3, and the
+// aggregated error would no longer contain three joined net.Error failures.
+func TestGreetVisitorsDoesNotAbortOnTimeoutNetError(t *testing.T) {
+	fake := &fakeNetErrConn{timeout: true}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	visitors := []Visitor{
+		newTestVisitor(4001, 2001, 6),
+		newTestVisitor(4002, 2002, 6),
+		newTestVisitor(4003, 2003, 6),
+	}
+
+	err := GreetVisitors(client, visitors)
+
+	if err == nil {
+		t.Fatal("GreetVisitors() = nil, want a non-nil error (the fake connection's every Read fails)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Errorf("GreetVisitors() error = %v, want it to wrap a net.Error", err)
+	} else if !netErr.Timeout() {
+		t.Errorf("GreetVisitors() error wraps a net.Error with Timeout()==false, want the Timeout()==true fake used by this test")
+	}
+	if got := fake.writeCount(); got != 3 {
+		t.Errorf("fake connection saw %d writes, want exactly 3 (a Timeout()==true net.Error must not abort the remaining visitors)", got)
 	}
 }

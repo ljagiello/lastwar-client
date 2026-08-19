@@ -472,10 +472,14 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		}
 	}
 	if gu := msg2.Params.GetString("gameUid"); gu != "" {
-		_ = ident.SaveGameUid(gu)
+		if err := ident.SaveGameUid(gu); err != nil {
+			slog.Warn("failed to persist gameUid", "error", err)
+		}
 	}
 	if un := msg2.Params.GetString("gameUserName"); un != "" {
-		_ = ident.SaveUsername(un)
+		if err := ident.SaveUsername(un); err != nil {
+			slog.Warn("failed to persist username", "error", err)
+		}
 	}
 
 	return result, nil

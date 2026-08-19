@@ -223,3 +223,99 @@ func TestHandleInteractiveLineAbortsOnTrailingGarbageAfterJSON(t *testing.T) {
 		t.Errorf("expected a \"bad JSON params\" log entry for trailing garbage after a well-formed JSON value, got:\n%s", logged)
 	}
 }
+
+// TestHandleInteractiveLineAbortsOnMissingSpaceBeforeJSON covers a case that falls through both
+// of the above malformed-input checks entirely: strings.Cut(line, " ") requires a literal space
+// between the command name and its JSON params, so a line where that space was dropped (a JSON
+// params blob glued directly onto the command name, e.g. "cmd.name{\"uuid\":123}") makes Cut
+// report "not found" and hand back the *entire* line as cmd, with rest == "". Since rest is
+// empty, the "if rest != \"\"" JSON-decode block never runs at all -- not even the dec.Decode
+// error path TestHandleInteractiveLineDoesNotLeakRawParamsOnJSONParseError exercises -- so
+// without the fix, handleInteractiveLine would silently send the whole mangled line as a literal
+// SFS2X command name with empty params. As in TestHandleInteractiveLineAbortsOnUnsupportedValue,
+// running this over a net.Pipe-backed GameConn with nobody reading on the other end turns "did it
+// still send" into a clean timeout failure instead of a hang.
+func TestHandleInteractiveLineAbortsOnMissingSpaceBeforeJSON(t *testing.T) {
+	client, _ := newPipeGameConnPair(t)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// No space at all between the command name and the JSON params.
+		handleInteractiveLine(client, `cmd.name{"uuid":123}`)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleInteractiveLine did not return promptly -- it likely sent the mangled line as a literal command despite the missing space")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "bad JSON params") {
+		t.Errorf("expected a \"bad JSON params\" log entry for a missing space before JSON params, got:\n%s", logged)
+	}
+	if strings.Contains(logged, `cmd.name{"uuid":123}`) {
+		t.Errorf("interactive log output leaks the raw glued command+JSON line verbatim:\n%s", logged)
+	}
+}
+
+// TestHandleInteractiveLineSendsBareCommandWithNoSpace is the flip side of
+// TestHandleInteractiveLineAbortsOnMissingSpaceBeforeJSON: a line that's just a command name with
+// no JSON params and, consequently, no space at all (e.g. "some.command") must still be sent
+// as-is, unaffected by the missing-space check above -- that check is scoped to lines containing
+// '{', per this tool's own documented flat-scalar-only command format where bare commands with
+// no params are legitimate and don't need a trailing space to be valid.
+func TestHandleInteractiveLineSendsBareCommandWithNoSpace(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	type got struct {
+		cmd    string
+		params *SFSObject
+	}
+	gotCh := make(chan got, 1)
+	go func() {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok {
+			return
+		}
+		gotCh <- got{msg.Cmd, msg.Params}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendExtension(msg.Cmd, resp)
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleInteractiveLine(client, `some.command`)
+	}()
+
+	var g got
+	select {
+	case g = <-gotCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never received the Extension call for a bare, space-less command")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleInteractiveLine did not return after receiving its reply")
+	}
+
+	if g.cmd != "some.command" {
+		t.Errorf("Cmd = %q, want some.command", g.cmd)
+	}
+	if n := len(g.params.keys); n != 0 {
+		t.Errorf("params has %d entries, want 0 for a bare command with no JSON", n)
+	}
+}

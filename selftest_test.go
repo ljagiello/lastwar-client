@@ -103,6 +103,65 @@ func TestPkcs7UnpadRejectsPadLenAboveBlockSize(t *testing.T) {
 	}
 }
 
+// TestPkcs7UnpadRejectsMismatchedPaddingBytes covers pkcs7Unpad's byte-by-byte padding-match
+// validation loop (the `for _, b := range data[len(data)-padLen:]` check in crypto.go), which
+// TestPkcs7UnpadRejectsPadLenAboveBlockSize above does not exercise: that test only forces a
+// rejection via the padLen>blockSize bound, never reaching the loop at all. Here the last byte is
+// a perfectly plausible pad length (4, well within the 16-byte block size) so both earlier bound
+// checks pass, but an earlier "padding" byte doesn't match it (...\x05\x04\x04\x04 instead of the
+// correct ...\x04\x04\x04\x04) -- exactly the shape a corrupted/tampered ciphertext block would
+// produce after AES decryption. Encrypting this crafted plaintext directly (bypassing pkcs7Pad, as
+// the sibling test above does) and decrypting via aesECBDecryptPKCS7 reproduces it verbatim for
+// pkcs7Unpad to reject.
+func TestPkcs7UnpadRejectsMismatchedPaddingBytes(t *testing.T) {
+	key := md5HexKey("test-salt-value-1234")
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	bs := block.BlockSize()
+
+	plain := make([]byte, bs)
+	copy(plain, []byte("corrupted block!"))
+	// Last 4 bytes: 0x05, 0x04, 0x04, 0x04 -- the final byte claims padLen=4 (valid: >0, <=
+	// len(data), <=blockSize), but the byte just before the last 3 doesn't match 4, so the
+	// padding-match loop must reject it.
+	plain[bs-4] = 5
+	plain[bs-3] = 4
+	plain[bs-2] = 4
+	plain[bs-1] = 4
+
+	ct := make([]byte, bs)
+	block.Encrypt(ct, plain)
+
+	if _, err := aesECBDecryptPKCS7(ct, key); err == nil {
+		t.Fatalf("expected error for mismatched padding bytes, got nil")
+	}
+}
+
+// TestAESECBDecryptPKCS7RejectsBadCiphertextLength covers aesECBDecryptPKCS7's ciphertext-length
+// guard (crypto.go: `len(ciphertext) == 0 || len(ciphertext)%bs != 0`), which has zero existing
+// test coverage (grep confirms): a corrupted/truncated "bin" field from the server, or one that's
+// simply not block-aligned, must be rejected with a clear error rather than being handed to
+// block.Decrypt at a length it doesn't support (which would panic).
+func TestAESECBDecryptPKCS7RejectsBadCiphertextLength(t *testing.T) {
+	key := md5HexKey("test-salt-value-1234")
+
+	t.Run("empty ciphertext", func(t *testing.T) {
+		if _, err := aesECBDecryptPKCS7(nil, key); err == nil {
+			t.Fatalf("expected error for empty ciphertext, got nil")
+		}
+	})
+
+	t.Run("length not a multiple of block size", func(t *testing.T) {
+		// 17 bytes: one full AES block (16) plus one stray byte.
+		ct := make([]byte, 17)
+		if _, err := aesECBDecryptPKCS7(ct, key); err == nil {
+			t.Fatalf("expected error for non-block-aligned ciphertext length, got nil")
+		}
+	})
+}
+
 func TestPacketRoundTripSmall(t *testing.T) {
 	body := []byte("small payload, no compression")
 	packet, err := EncodePacket(body)
