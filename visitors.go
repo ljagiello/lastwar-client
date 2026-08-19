@@ -47,6 +47,12 @@ type Visitor struct {
 func (v Visitor) Uid() int64       { return v.Raw.GetLong("uid") }
 func (v Visitor) EventId() int32   { return v.Raw.GetInt("eventId") }
 func (v Visitor) VisitorId() int32 { return v.Raw.GetInt("visitorId") }
+
+// StartTime has no caller today, but it's kept: it's the field that
+// distinguishes a still-arriving visitor (visitor_err_coming, see the
+// Visitor doc comment above) from one actually greetable, so a future
+// GreetVisitors could use it to skip a doomed operate call instead of
+// discovering "not started yet" from the server's error response.
 func (v Visitor) StartTime() int64 { return v.Raw.GetLong("startTime") }
 
 // ParseInitVisitors extracts the current visitor list from the bare `init`

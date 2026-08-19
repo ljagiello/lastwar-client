@@ -185,26 +185,6 @@ func EncodeObject(o *SFSObject) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// EncodeArray mirrors EncodeObject for a top-level SFSArray. No external
-// caller uses this today, but it's kept symmetric with EncodeObject (same
-// error-instead-of-panic contract) so internal/future callers get the same
-// safety for free.
-func EncodeArray(a *SFSArray) ([]byte, error) {
-	var buf bytes.Buffer
-	buf.WriteByte(sfsArrayType)
-	n, err := int16Count(len(a.items), "items")
-	if err != nil {
-		return nil, err
-	}
-	writeInt16(&buf, n)
-	for _, v := range a.items {
-		if err := writeTaggedValue(&buf, v); err != nil {
-			return nil, err
-		}
-	}
-	return buf.Bytes(), nil
-}
-
 func writeTaggedValue(buf *bytes.Buffer, v SFSValue) error {
 	buf.WriteByte(v.Type)
 	return writeValuePayload(buf, v)
@@ -759,6 +739,12 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 }
 
 // DecodeObject parses a self-describing SFSObject blob (leading tag byte 18).
+//
+// Every real caller (conn.go, decode.go) hands this an exact-length frame body, so any bytes left
+// over after the top-level object is fully decoded mean the encode/decode walk desynced somewhere
+// -- the same class of silent misalignment the sfsByteArray count-width bug caused before it was
+// caught (see the comment on that case above). Rather than risk repeating that, an unconsumed
+// remainder is treated as a decode error instead of being silently accepted.
 func DecodeObject(data []byte) (*SFSObject, error) {
 	r := &sfsReader{data: data}
 	tag, err := r.readByte()
@@ -771,6 +757,9 @@ func DecodeObject(data []byte) (*SFSObject, error) {
 	v, err := r.readValuePayload(tag)
 	if err != nil {
 		return nil, err
+	}
+	if rem := r.remaining(); rem > 0 {
+		return nil, fmt.Errorf("sfsobject: %d trailing bytes after decoded object", rem)
 	}
 	return v.Val.(*SFSObject), nil
 }

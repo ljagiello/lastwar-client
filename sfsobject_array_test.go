@@ -336,6 +336,37 @@ func TestGetIntGetLongCoercion(t *testing.T) {
 	}
 }
 
+// TestDecodeObjectRejectsTrailingBytes proves DecodeObject errors instead of silently ignoring
+// leftover bytes after a well-formed top-level object -- every real caller (conn.go, decode.go)
+// hands DecodeObject an exact-length frame body, so a trailing remainder means the encode/decode
+// walk desynced somewhere, the same class of silent misalignment the sfsByteArray count-width bug
+// caused before it was caught (see the comment on that case in sfsobject.go).
+func TestDecodeObjectRejectsTrailingBytes(t *testing.T) {
+	o := NewSFSObject()
+	o.PutUtfString("key", "value")
+	encoded, err := EncodeObject(o)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	// A well-formed encoding decodes cleanly on its own.
+	if _, err := DecodeObject(encoded); err != nil {
+		t.Fatalf("unexpected error decoding well-formed object: %v", err)
+	}
+
+	// Appending arbitrary trailing bytes must now be rejected instead of silently truncated-but-
+	// successful.
+	withGarbage := append(append([]byte(nil), encoded...), 0xDE, 0xAD, 0xBE)
+	_, err = DecodeObject(withGarbage)
+	if err == nil {
+		t.Fatal("expected an error for trailing bytes after a well-formed object, got nil")
+	}
+	wantMsg := "sfsobject: 3 trailing bytes after decoded object"
+	if err.Error() != wantMsg {
+		t.Fatalf("error = %q, want %q", err.Error(), wantMsg)
+	}
+}
+
 // TestDecodedNodeCountRejected proves the maxDecodedNodes ceiling catches breadth-driven
 // amplification that maxNestDepth alone does not: this payload is only 2 levels deep (far under
 // maxNestDepth=64) but its outer*inner fan-out crosses maxDecodedNodes in total leaf count -- the

@@ -300,6 +300,12 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	if opt.Opt == "login" {
 		// GSL already resolved the real account via loginKey; the base
 		// SFS login above logged us in directly. Nothing more to do.
+		if opts.Email != "" {
+			slog.Warn("ignoring -email because a loginKey is already persisted (fast-path login skips email verification)")
+		}
+		if opts.CodePipe != "" {
+			slog.Warn("ignoring -code-pipe because a loginKey is already persisted (fast-path login skips email verification)")
+		}
 		slog.Info("fast-path login via loginKey complete, skipping email verification")
 		return result, nil
 	}
@@ -310,6 +316,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		// account at the SFS/game level, just with no real progress --
 		// fine for exercising game mechanics without touching a real
 		// account or going through email verification.
+		if opts.CodePipe != "" {
+			slog.Warn("ignoring -code-pipe because -email is not set (guest identity flow doesn't use email verification, so there's no code to pipe in)")
+		}
 		slog.Info("no -email given; staying on guest identity (no account binding)")
 		return result, nil
 	}

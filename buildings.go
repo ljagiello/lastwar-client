@@ -158,11 +158,10 @@ type Building struct {
 	Raw *SFSObject
 }
 
-func (b Building) Uuid() int64        { return b.Raw.GetLong("uuid") }
-func (b Building) BId() int32         { return b.Raw.GetInt("bId") }
-func (b Building) Level() int32       { return b.Raw.GetInt("lv") }
-func (b Building) PointId() int32     { return b.Raw.GetInt("pId") }
-func (b Building) LastCollect() int64 { return b.Raw.GetLong("lCT") }
+func (b Building) Uuid() int64    { return b.Raw.GetLong("uuid") }
+func (b Building) BId() int32     { return b.Raw.GetInt("bId") }
+func (b Building) Level() int32   { return b.Raw.GetInt("lv") }
+func (b Building) PointId() int32 { return b.Raw.GetInt("pId") }
 
 // requirePresentField reports whether o has field, logging a Warn with the raw entry (for
 // diagnosability) and returning false if it's missing -- shared by every list-parsing code path
