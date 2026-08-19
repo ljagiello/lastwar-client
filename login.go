@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -233,8 +235,11 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			// the access token before reconnecting rather than carrying the old one forward
 			// unverified.
 			slog.Info("fetching fresh access token before following serverInfo redirect (suspected single-use-per-connection)")
-			freshOpt := opt
-			if ident.GameUid != "" {
+			freshOpt := GSLOpt{Opt: "new"}
+			switch {
+			case ident.LoginKey != "":
+				freshOpt = GSLOpt{Opt: "login", LoginKey: ident.LoginKey}
+			case ident.GameUid != "":
 				freshOpt = GSLOpt{Opt: "fix"}
 			}
 			freshLsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, freshOpt, "", ident.GameUid)
@@ -428,7 +433,9 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 		conn.conn.SetReadDeadline(readUntil)
 		env, err := conn.ReadEnvelope()
 		if err != nil {
-			if !sentActivePull && time.Now().Before(deadline) {
+			var netErr net.Error
+			isTimeout := errors.As(err, &netErr) && netErr.Timeout()
+			if isTimeout && !sentActivePull && time.Now().Before(deadline) {
 				// This read was deliberately capped at the halfway point, not the real
 				// deadline -- a timeout here just means "time to send the active pull," not
 				// "give up."

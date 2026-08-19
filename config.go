@@ -90,6 +90,9 @@ func loadEffectiveConfig(explicitPath string) (*SessionConfig, string) {
 	if path == "" {
 		path = defaultSessionConfigPath()
 		if _, err := os.Stat(path); err != nil {
+			if !os.IsNotExist(err) {
+				slog.Warn("default session config path exists but could not be stat'd; continuing without it", "path", path, "error", err)
+			}
 			return nil, ""
 		}
 	}
@@ -97,7 +100,7 @@ func loadEffectiveConfig(explicitPath string) (*SessionConfig, string) {
 	if err != nil {
 		if explicitPath != "" {
 			// An explicitly-requested config is fatal if unreadable.
-			fmt.Fprintf(os.Stderr, "load session config %s: %v\n", path, err)
+			slog.Error("load session config failed", "path", path, "error", err)
 			os.Exit(1)
 		}
 		// The default path is silent when the file is simply absent (an

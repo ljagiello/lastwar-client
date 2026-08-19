@@ -181,3 +181,40 @@ func TestNestingDepthRejected(t *testing.T) {
 		t.Fatal("expected an error for excessive nesting depth, got nil (this would have risked a stack overflow before the depth-limit fix)")
 	}
 }
+
+func TestByteArrayRejectsNegativeCount(t *testing.T) {
+	negOne := int32(-1)
+	var buf []byte
+	buf = binary.BigEndian.AppendUint32(buf, uint32(negOne))
+	r := &sfsReader{data: buf}
+	if _, err := r.readValuePayload(sfsByteArray); err == nil {
+		t.Fatal("expected an error for a negative byte-array count, got nil")
+	}
+}
+
+func TestGetIntGetLongCoercion(t *testing.T) {
+	o := NewSFSObject()
+	o.PutByte("b", 7)
+	o.PutShort("s", 8)
+	o.PutInt("i", 9)
+	o.PutLong("l", 10)
+
+	if got := o.GetInt("b"); got != 7 {
+		t.Errorf("GetInt(byte field) = %d, want 7", got)
+	}
+	if got := o.GetInt("s"); got != 8 {
+		t.Errorf("GetInt(short field) = %d, want 8", got)
+	}
+	if got := o.GetInt("l"); got != 10 {
+		t.Errorf("GetInt(long field) = %d, want 10", got)
+	}
+	if got := o.GetLong("b"); got != 7 {
+		t.Errorf("GetLong(byte field) = %d, want 7", got)
+	}
+	if got := o.GetLong("s"); got != 8 {
+		t.Errorf("GetLong(short field) = %d, want 8", got)
+	}
+	if got := o.GetLong("i"); got != 9 {
+		t.Errorf("GetLong(int field) = %d, want 9", got)
+	}
+}

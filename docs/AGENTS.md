@@ -1,7 +1,3 @@
-> **First-time setup**: Customize this file for your project. Prompt the user to customize this file for their project.
-> For Mintlify product knowledge (components, configuration, writing standards),
-> install the Mintlify skill: `npx skills add https://mintlify.com/docs`
-
 # Documentation project instructions
 
 ## About this project
@@ -19,6 +15,7 @@
 - **`goclient`** — the researcher's from-scratch Go reimplementation of the protocol; its source lives at the repository root (`identity.go`, `main.go`, ...), one level up from `docs/`. Use the lowercase, no-space form (`goclient` hardcoded...) when naming the actual codebase/package in prose, and "Go client" (capitalized, two words) in ordinary prose ("a Go client needs to...").
 - **"confirmed live" / "live-tested"** — reserved for claims verified by actually round-tripping traffic against production servers. Keep this distinct from **"static-analysis-only"** claims (recovered from decompiled Lua/C# but never exercised against a real server). Never upgrade a static-analysis claim into unqualified "confirmed" language — the server can change, so point-in-time hedges are load-bearing, not decoration.
 - **"the real account" / "a real account"** — the researcher's own production game account used for live-validation testing, as distinct from a freshly auto-created "guest account." Don't call it a "test account" — that phrasing has been normalized away in favor of "real account" for consistency.
+- **"dossier §NN" / "report NN" / `reports/` / `extracted/`** — leftover pointers into a private, pre-Mintlify predecessor research document and source-extraction directory that were never shipped with this repo. Source code comments (and a little page prose) still cite these (e.g. "dossier §04", "report 15 §5", `extracted/lua_decompiled/...`) as historical provenance for a claim -- they can't be resolved to anything in this repo or docs site, and that's expected; treat them as "this was cross-checked against material outside this repo," not as a broken link to fix.
 
 ## Style preferences
 

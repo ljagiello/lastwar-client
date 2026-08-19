@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -151,6 +152,7 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 			return nil, fmt.Errorf("persist device id: %w", err)
 		}
 	}
+	warnIfLoosePermissions(loginKeyStatePath())
 	readTrimmed := func(path string) string {
 		if b, err := os.ReadFile(path); err == nil {
 			return strings.TrimSpace(string(b))
@@ -163,6 +165,20 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 		GameUid:  readTrimmed(gameUidStatePath()),
 		LoginKey: readTrimmed(loginKeyStatePath()),
 	}, nil
+}
+
+// warnIfLoosePermissions logs a warning if path exists and is readable/writable by group or
+// other -- mirrors the equivalent check config.go's LoadSessionConfig already does for the
+// session config file, applied here to the persisted loginKey, which is just as sensitive (a
+// loginKey alone is sufficient to log back into the real account via opt=login).
+func warnIfLoosePermissions(path string) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if mode := fi.Mode().Perm(); mode&0077 != 0 {
+		slog.Warn("state file is more permissive than 0600", "path", path, "mode", mode)
+	}
 }
 
 func (d *deviceIdentity) SaveLoginKey(key string) error {

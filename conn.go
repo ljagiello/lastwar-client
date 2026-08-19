@@ -174,28 +174,60 @@ var benignErrorCodes = map[string]bool{
 	"visitor_err_coming": true, // visitors.go: visitor not yet arrived/greetable
 }
 
-// logCommandResult logs a collect/claim command's response at a severity that reflects whether
-// it actually succeeded: Info on success, Warn on a recognized/expected failure
-// (benignErrorCodes), Error on anything else.
-func logCommandResult(label string, msg *ExtensionMessage) {
+// commandOutcome classifies a collect/claim response into one of three buckets: a real success,
+// a benign no-op (an expected cooldown/already-claimed/not-yet-arrived errorCode, or a status=0
+// response with no errorCode at all -- buildings.go's own doc comments treat status=1, not just
+// errorCode-absence, as the real proof a collection succeeded), or a genuine failure.
+type commandOutcome int
+
+const (
+	outcomeSuccess commandOutcome = iota
+	outcomeBenign
+	outcomeFailure
+)
+
+// classifyResponse determines a response's outcome and, for a benign or real failure, the
+// errorCode (empty string for the status=0-with-no-errorCode benign case). This is the single
+// place both logCommandResult and sendAndWait derive their behavior from, so the two can never
+// drift out of sync with each other.
+func classifyResponse(msg *ExtensionMessage) (commandOutcome, string) {
 	ec, has := msg.Params.Get("errorCode")
 	if !has {
-		slog.Info(label, "cmd", msg.Cmd, "response", msg.Params.String())
-		return
+		if msg.Params.Has("status") && msg.Params.GetInt("status") == 0 {
+			return outcomeBenign, ""
+		}
+		return outcomeSuccess, ""
 	}
 	code := fmt.Sprintf("%v", ec.Val)
 	if benignErrorCodes[code] {
-		slog.Warn(label+" no-op (expected)", "cmd", msg.Cmd, "errorCode", ec.Val, "response", msg.Params.String())
-		return
+		return outcomeBenign, code
 	}
-	slog.Error(label+" failed", "cmd", msg.Cmd, "errorCode", ec.Val, "response", msg.Params.String())
+	return outcomeFailure, code
+}
+
+// logCommandResult logs a collect/claim command's response at a severity that reflects whether
+// it actually succeeded: Info on success, Warn on a recognized/expected failure, Error on
+// anything else.
+func logCommandResult(label string, msg *ExtensionMessage) {
+	switch outcome, code := classifyResponse(msg); outcome {
+	case outcomeSuccess:
+		slog.Info(label, "cmd", msg.Cmd, "response", msg.Params.String())
+	case outcomeBenign:
+		if code != "" {
+			slog.Warn(label+" no-op (expected)", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.String())
+		} else {
+			slog.Warn(label+" no-op (status=0, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.String())
+		}
+	case outcomeFailure:
+		slog.Error(label+" failed", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.String())
+	}
 }
 
 const defaultCmdTimeout = 8 * time.Second
 
 // sendAndWait sends a command and waits for its response, logging the outcome via
-// logCommandResult and returning an error if the send/wait itself failed or the response
-// carried a non-benign errorCode. This is the single dedup point for the near-identical
+// logCommandResult and returning an error if the send/wait itself failed or classifyResponse
+// says the response was a genuine failure. This is the single dedup point for the near-identical
 // send+wait+log block that used to be copy-pasted at (almost) every collect/claim call site
 // across this file and buildings.go/mail.go/alliance.go/vip.go/visitors.go. waitCmds defaults
 // to [sendCmd]; pass an explicit value when the response arrives under a different command name
@@ -214,12 +246,8 @@ func sendAndWait(conn *GameConn, label, sendCmd string, params *SFSObject, waitC
 		return nil, err
 	}
 	logCommandResult(label, msg)
-	if ec, has := msg.Params.Get("errorCode"); has {
-		code := fmt.Sprintf("%v", ec.Val)
-		if benignErrorCodes[code] {
-			return msg, nil
-		}
-		return msg, fmt.Errorf("%s: errorCode=%v", label, ec.Val)
+	if outcome, code := classifyResponse(msg); outcome == outcomeFailure {
+		return msg, fmt.Errorf("%s: errorCode=%v", label, code)
 	}
 	return msg, nil
 }
@@ -290,7 +318,8 @@ func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 				pp := NewSFSObject()
 				pp.PutLong("clientTime", time.Since(start).Milliseconds())
 				if err := c.SendEnvelope(controllerSystem, actionPingPong, pp); err != nil {
-					slog.Error("heartbeat send failed", "error", err)
+					slog.Error("heartbeat send failed -- closing connection", "error", err)
+					c.Close()
 					return
 				}
 			}

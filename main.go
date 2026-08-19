@@ -2,9 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +16,7 @@ func main() {
 	email := flag.String("email", "", "account email to log in with (only needed if no loginKey is on file yet)")
 	codePipe := flag.String("code-pipe", "", "path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin")
 	collect := flag.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both once-a-day VIP claims, after login")
-	listBuildings := flag.Bool("list-buildings", false, "print every owned building (id, type, level, queue state); the process still exits after -collect/-list-buildings finish unless -interactive is also set")
+	listBuildings := flag.Bool("list-buildings", false, "print every owned building (id, type, level); the process still exits after -collect/-list-buildings finish unless -interactive is also set")
 	interactive := flag.String("interactive", "", "stay connected and read ad-hoc test commands from this control FIFO instead of exiting")
 
 	csIP := flag.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
@@ -23,7 +25,7 @@ func main() {
 	csGameUid := flag.String("cs-gameuid", "", "composite gameUid for -cs-ip")
 	csDeviceID := flag.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := flag.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
-	csRt := flag.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting")
+	csRt := flag.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- the refresh response's server list also REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid")
 	csAt := flag.String("cs-at", "", "raw access token to send directly as p.at, skipping any GSL call entirely (e.g. one captured live from a real client)")
 	csIOS := flag.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an `at` token is bound to the platform/package it was issued for")
 	handshake := flag.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
@@ -32,7 +34,13 @@ func main() {
 	decodeStream := flag.String("decode-stream", "", "decode a reassembled raw TCP byte stream file (see docs/capturing-and-decoding-traffic.mdx) and print every SFS2X packet, then exit -- no login, no network connection at all")
 	decodeLabel := flag.String("decode-label", "", "prefix label for -decode-stream output lines, e.g. \"c2s\" or \"s2c\" (default: \"stream\")")
 	logLevel := flag.String("log-level", "info", "log verbosity: debug, info, warn, or error")
+	version := flag.Bool("version", false, "print build info and exit")
 	flag.Parse()
+
+	if *version {
+		printVersion()
+		return
+	}
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(*logLevel)})))
 
@@ -44,6 +52,9 @@ func main() {
 	})
 
 	if *decodeStream != "" {
+		if *collect || *listBuildings || *interactive != "" || *email != "" || *csIP != "" || *csRt != "" {
+			slog.Warn("ignoring all other flags because -decode-stream is set (no login or network connection happens in this mode)")
+		}
 		runDecode(*decodeLabel, *decodeStream)
 		return
 	}
@@ -76,6 +87,9 @@ func main() {
 	if *csIP != "" || *csRt != "" {
 		if *email != "" {
 			slog.Warn("ignoring -email because -cs-ip/-cs-rt is set (cross-server reconnect doesn't use the email flow)")
+		}
+		if *codePipe != "" {
+			slog.Warn("ignoring -code-pipe because -cs-ip/-cs-rt is set (cross-server reconnect doesn't use the email flow)")
 		}
 		runCrossServerTest(crossServerTestOpts{
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
@@ -149,6 +163,29 @@ func parseLogLevel(s string) slog.Level {
 	}
 }
 
+// printVersion prints build/VCS info from the Go toolchain's embedded build metadata (populated
+// automatically when built with VCS stamping enabled, the default for "go build" inside a git
+// checkout -- no ldflags or build-time flags needed).
+func printVersion() {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		fmt.Println("lastwar-client (build info unavailable)")
+		return
+	}
+	revision, dirty := "unknown", ""
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = " (modified)"
+			}
+		}
+	}
+	fmt.Printf("lastwar-client %s%s (go %s)\n", revision, dirty, info.GoVersion)
+}
+
 type crossServerTestOpts struct {
 	ip, zone, gameUid, deviceID, shumeiBoxId, rt, at, interactive string
 	port                                                          int
@@ -195,7 +232,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 		lsr, err := GetServerList(httpClient, gateHost, pub, deviceID, GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
 		if err != nil {
 			slog.Error("GSL refresh failed", "error", err)
-			os.Exit(1)
+			// Exit code 2 marks authentication/session failures specifically -- see the matching comment in main() above.
+			os.Exit(2)
 		}
 		slog.Info("GSL refresh response", "code", lsr.Code, "serverListLen", len(lsr.ServerList))
 		if lsr.At != nil {

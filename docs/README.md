@@ -5,7 +5,7 @@ Survival Game*'s (`com.fun.lastwar.gp`) network protocol, crypto, and file forma
 interoperability research, i.e. understanding the client-server contract well enough to build a
 compatible, from-scratch client (source at the repository root, one level up from `docs/`).
 
-21 pages, organized to mirror the underlying research: bootstrap/crypto/wire-protocol fundamentals,
+22 pages, organized to mirror the underlying research: bootstrap/crypto/wire-protocol fundamentals,
 the full command and entity-ID catalogs, per-domain gameplay coverage (city, military, social,
 economy, world), client-internals (Lua, data tables, Android/native layers), and — the most
 load-bearing section — [live validation against production](./live-validation.mdx), which documents

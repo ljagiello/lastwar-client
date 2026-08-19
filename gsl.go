@@ -52,9 +52,10 @@ func (f *flexString) UnmarshalJSON(b []byte) error {
 }
 func (f flexString) String() string { return string(f) }
 
-// CheckVersion races the known gate hosts and returns the first successful
-// response along with which host answered (that host becomes the base URL
-// for every subsequent GSL call -- dossier §02.1).
+// CheckVersion tries the known gate hosts in order (NOT concurrently, despite earlier wording --
+// this is a plain sequential fallback: each host gets the full httpClient timeout before moving
+// to the next) and returns the first successful response along with which host answered (that
+// host becomes the base URL for every subsequent GSL call -- dossier §02.1).
 func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error) {
 	q := url.Values{}
 	q.Set("packageName", packageName)

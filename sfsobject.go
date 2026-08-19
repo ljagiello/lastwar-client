@@ -171,7 +171,7 @@ func (a *SFSArray) AddSFSObject(val *SFSObject) { a.add(SFSValue{sfsObjectType, 
 func EncodeObject(o *SFSObject) []byte {
 	var buf bytes.Buffer
 	buf.WriteByte(sfsObjectType)
-	writeInt16(&buf, int16(len(o.keys)))
+	writeInt16(&buf, int16Count(len(o.keys), "keys"))
 	for _, k := range o.keys {
 		writeUtfString(&buf, k)
 		v := o.values[k]
@@ -183,7 +183,7 @@ func EncodeObject(o *SFSObject) []byte {
 func EncodeArray(a *SFSArray) []byte {
 	var buf bytes.Buffer
 	buf.WriteByte(sfsArrayType)
-	writeInt16(&buf, int16(len(a.items)))
+	writeInt16(&buf, int16Count(len(a.items), "items"))
 	for _, v := range a.items {
 		writeTaggedValue(&buf, v)
 	}
@@ -221,14 +221,14 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) {
 		writeUtfString(buf, v.Val.(string))
 	case sfsObjectType:
 		inner := v.Val.(*SFSObject)
-		writeInt16(buf, int16(len(inner.keys)))
+		writeInt16(buf, int16Count(len(inner.keys), "keys"))
 		for _, k := range inner.keys {
 			writeUtfString(buf, k)
 			writeTaggedValue(buf, inner.values[k])
 		}
 	case sfsArrayType:
 		inner := v.Val.(*SFSArray)
-		writeInt16(buf, int16(len(inner.items)))
+		writeInt16(buf, int16Count(len(inner.items), "items"))
 		for _, iv := range inner.items {
 			writeTaggedValue(buf, iv)
 		}
@@ -241,8 +241,21 @@ func writeInt16(buf *bytes.Buffer, v int16) { binary.Write(buf, binary.BigEndian
 func writeInt32(buf *bytes.Buffer, v int32) { binary.Write(buf, binary.BigEndian, v) }
 func writeInt64(buf *bytes.Buffer, v int64) { binary.Write(buf, binary.BigEndian, v) }
 
+// int16Count converts a length to int16 for a wire count field, panicking (matching
+// writeValuePayload's existing panic-on-unsupported-type precedent) instead of silently wrapping
+// into a wrong count if the value is ever too large to represent.
+func int16Count(n int, what string) int16 {
+	if n > 32767 {
+		panic(fmt.Sprintf("sfsobject: too many %s to encode (%d, max 32767)", what, n))
+	}
+	return int16(n)
+}
+
 func writeUtfString(buf *bytes.Buffer, s string) {
 	b := []byte(s)
+	if len(b) > 65535 {
+		panic(fmt.Sprintf("sfsobject: string too long to encode (%d bytes, max 65535)", len(b)))
+	}
 	writeUint16(buf, uint16(len(b)))
 	buf.Write(b)
 }

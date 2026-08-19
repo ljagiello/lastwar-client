@@ -109,9 +109,15 @@ func ClaimAllianceGifts(conn *GameConn) error {
 // donate path this function uses is rate-limited server-side (confirmed
 // live via `al.science.refreshNum`: `maxNum=30` per day, gated by a
 // `refreshTimeBlock=1200000` -- 20 minutes -- cooldown between individual
-// donations), so only one attempt makes sense per `-collect` run; it will
-// legitimately fail with a cooldown error if run again too soon, which is
-// expected and not treated as fatal here. The gem-cost path has no such
+// donations), so only one attempt makes sense per `-collect` run. It will
+// legitimately fail with a cooldown error if run again too soon; this is
+// expected, but -- unlike the analogous building/VIP/visitor cooldowns
+// (see conn.go's benignErrorCodes) -- this specific errorCode has not yet
+// been captured and added to that allowlist, so today it DOES surface as
+// a real Error-level failure and contributes to -collect's exit code,
+// rather than being treated as benign. Capture the real errorCode from a
+// live cooldown response and add it to benignErrorCodes to close this gap.
+// The gem-cost path has no such
 // cooldown (`useGoldNum`/`maxGoldNum` both came back as 999999999, i.e.
 // unlimited) but spends real premium currency per use, so it's
 // deliberately left out rather than auto-spending gems without being
@@ -155,9 +161,13 @@ func findRecommendedTech(arr *SFSArray) (scienceId int32, found bool) {
 		if !ok {
 			continue
 		}
-		if tech.GetInt("state") == 1 {
-			return tech.GetInt("scienceId"), true
+		if tech.GetInt("state") != 1 {
+			continue
 		}
+		if !tech.Has("scienceId") {
+			continue
+		}
+		return tech.GetInt("scienceId"), true
 	}
 	return 0, false
 }

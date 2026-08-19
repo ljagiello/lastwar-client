@@ -168,6 +168,11 @@ Two things worth checking after setup, not just once but as ongoing habits:
   `"level":"ERROR"` and checking *when* errors started (not just whether any exist) is what
   actually catches this — see `docs/live-validation.mdx`'s serverInfo-redirect section for a
   real example of a failure that looked identical on every single run once it started.
+- **Exit code 2 means the session itself is stale, not a transient blip.** Login/auth failures
+  (both the plain-login and cross-server-reconnect paths) exit `2` specifically, distinct from
+  the generic exit `1` used for other failures -- a cron wrapper can check `$?` directly and
+  know to recapture a fresh session (see "Session config" above) without needing to grep the log
+  at all.
 
 ## Files
 

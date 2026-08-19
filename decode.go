@@ -29,13 +29,11 @@ func DecodeStreamFile(label, path string) error {
 		start := len(data) - r.Len()
 		body, err := ReadPacket(r)
 		if err != nil {
-			remaining := r.Len()
 			if errors.Is(err, io.EOF) {
 				fmt.Printf("[%s] reached end of stream cleanly after %d packets (%d bytes consumed of %d)\n", label, n, start, len(data))
 				break
 			}
-			fmt.Printf("[%s] #%d @offset %d: ReadPacket error: %v (remaining %d bytes) -- stream may be truncated or corrupt\n", label, n, start, err, remaining)
-			return fmt.Errorf("stream truncated or corrupt at offset %d: %w", start, err)
+			return fmt.Errorf("stream truncated or corrupt at offset %d (remaining %d bytes): %w", start, r.Len(), err)
 		}
 		n++
 		obj, err := DecodeObject(body)
