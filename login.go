@@ -61,8 +61,9 @@ func gslOptFor(ident *deviceIdentity) GSLOpt {
 // os.Exit(1) }` pre-flight check on the cross-server login path (which validates the CLI-supplied
 // initial port only -- it does not, and cannot, cover this function's mid-login serverInfo
 // redirect call site below, where the port comes from the server at runtime). Without this guard,
-// a redirect payload with a missing or unparseable `port` field -- gsl.go's getIntFlexible
-// silently returns 0 for either case rather than erroring -- would sail through and produce a
+// a redirect payload with a missing, unparseable, or out-of-range `port` field -- gsl.go's
+// getIntFlexible returns 0 for all three cases rather than erroring (warning for the latter two as
+// of round 32, but still returning 0 either way, not erroring) -- would sail through and produce a
 // "host:0" address instead of a clear error, same failure class as the empty-host case above.
 //
 // Used at two call sites in this file: the initial dial address built from GSL's server list, and

@@ -735,6 +735,110 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 	}
 }
 
+// TestLoginWarnsOnWrongTypedPersistenceFields is the round-32 regression test for the
+// TESTING-RIGOR finding that login.go's four warnIfWrongTypedField diagnostics on its
+// persistence-read fields (the base-zone Login response's "un", and push.account.login.new's
+// "loginKey"/"gameUid"/"gameUserName") had zero regression-test coverage -- confirmed via mutation
+// (commenting out all four calls, the full suite still passed). Sends all four fields with the
+// wrong SFS type (PutInt instead of PutUtfString) and asserts all four diagnostics fire, while
+// Login() itself still completes successfully (a wrong-typed field degrades to "nothing to
+// persist" for that field, not a fatal error) with none of the four fields actually persisted.
+func TestLoginWarnsOnWrongTypedPersistenceFields(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const testEmail = "player@example.com"
+	const testCode = "654321"
+
+	pipePath := mkfifoT(t, t.TempDir(), "code.pipe")
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		resp.PutInt("un", 111) // wrong-typed: a real "un" is always a UTF string, never a number
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+			return
+		}
+
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		ack := NewSFSObject()
+		ack.PutBool("success", true)
+		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
+			return
+		}
+
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		finishAck := NewSFSObject()
+		finishAck.PutBool("success", true)
+		if err := server.SendExtension("account.login.new", finishAck); err != nil {
+			return
+		}
+
+		// All three push fields wrong-typed too.
+		push := NewSFSObject()
+		push.PutInt("loginKey", 222)
+		push.PutInt("gameUid", 333)
+		push.PutInt("gameUserName", 444)
+		_ = server.SendExtension("push.account.login.new", push)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	go func() {
+		f, err := os.OpenFile(pipePath, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(testCode + "\n")
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{Email: testEmail, CodePipe: pipePath})
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("Login: %v (a wrong-typed persistence field must not be fatal -- it degrades to \"nothing to persist\" for that field)", err)
+	}
+	defer result.Conn.Close()
+
+	logged := buf.String()
+	for _, field := range []string{"un", "loginKey", "gameUid", "gameUserName"} {
+		if !strings.Contains(logged, "field="+field) {
+			t.Errorf("expected a wrong-typed warning mentioning field=%s, got log:\n%s", field, logged)
+		}
+	}
+
+	if result.Ident.LoginKey != "" {
+		t.Errorf("Ident.LoginKey = %q, want \"\" (wrong-typed loginKey must not be persisted)", result.Ident.LoginKey)
+	}
+	if result.Ident.GameUid != "" {
+		t.Errorf("Ident.GameUid = %q, want \"\" (wrong-typed gameUid must not be persisted)", result.Ident.GameUid)
+	}
+	if result.Ident.Username != "" {
+		t.Errorf("Ident.Username = %q, want \"\" (wrong-typed gameUserName must not be persisted)", result.Ident.Username)
+	}
+}
+
 // TestLoginEmailVerificationPathWarnsOnPersistFailure is this round's regression test for the
 // two SaveGameUid/SaveUsername calls at the very end of Login()'s email-verification success
 // path (immediately after the push.account.login.new push arrives), which used to silently

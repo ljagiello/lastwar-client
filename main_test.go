@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -101,11 +102,12 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 		args             []string
 		wantCode         int
 		wantStderrSubstr string // empty = no stderr content assertion, just the exit code
+		wantJSON         bool   // true = also assert stderr is a single well-formed JSON log line (not raw plain text)
 	}{
-		{"long help flag exits 0", []string{"-help"}, 0, ""},
-		{"short help flag exits 0", []string{"-h"}, 0, ""},
-		{"unrecognized flag exits 1", []string{"-this-flag-does-not-exist"}, 1, ""},
-		{"malformed flag value exits 1", []string{"-cs-port=not-a-number"}, 1, ""},
+		{"long help flag exits 0", []string{"-help"}, 0, "", false},
+		{"short help flag exits 0", []string{"-h"}, 0, "", false},
+		{"unrecognized flag exits 1", []string{"-this-flag-does-not-exist"}, 1, "", false},
+		{"malformed flag value exits 1", []string{"-cs-port=not-a-number"}, 1, "", false},
 		{
 			// This is the regression case for this round's Fix 1: Go's flag package stops parsing
 			// at the first non-'-'-prefixed token and silently stashes everything after it as
@@ -116,8 +118,14 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 			// "-collect"). It's safe to drive through the real main() here, with no fake servers or
 			// HOME override, because the new check exits before any network/login/config-loading
 			// code runs -- same as every other case in this table.
+			//
+			// wantJSON: true is the round-32 regression assertion -- this diagnostic used to bypass
+			// slog entirely via a bare fmt.Fprintf, and this same substring check would have passed
+			// identically against either the old plain-text output or the new JSON one, so it alone
+			// never actually caught the bug. Asserting the stderr line is well-formed JSON is what
+			// would have caught it.
 			"stray positional argument exits 1 with a clear error instead of silently launching a real run",
-			[]string{"collect"}, 1, "unexpected argument(s): collect",
+			[]string{"collect"}, 1, "unexpected argument(s)", true,
 		},
 		{
 			// Regression case for this round's Fix 1 (the MAJOR finding): flag.FlagSet.Parse's
@@ -140,6 +148,7 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 			// in the log line, so a substring straight out of the %q-formatted portion of the
 			// message wouldn't match the raw escaped bytes actually written to stderr.
 			"-email never got a real value of its own and instead swallowed -collect off the command line",
+			true,
 		},
 	}
 
@@ -167,6 +176,19 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 			}
 			if c.wantStderrSubstr != "" && !strings.Contains(stderr.String(), c.wantStderrSubstr) {
 				t.Errorf("subprocess stderr = %s\nwant it to contain %q", stderr.String(), c.wantStderrSubstr)
+			}
+			// wantJSON: proves the diagnostic actually went through slog's JSON handler, not a bare
+			// fmt.Fprintf to stderr -- see the stray-positional-argument case's own comment above for
+			// why a plain substring check alone (matched by either plain-text or JSON output) would
+			// not have caught the round-32 regression this specifically guards against.
+			if c.wantJSON {
+				line := strings.TrimSpace(stderr.String())
+				var parsed map[string]any
+				if err := json.Unmarshal([]byte(line), &parsed); err != nil {
+					t.Errorf("subprocess stderr is not well-formed JSON (want a single slog JSON log line, not raw plain text): %v\nstderr=%s", err, stderr.String())
+				} else if parsed["level"] != "ERROR" {
+					t.Errorf(`subprocess stderr JSON "level" = %v, want "ERROR"; stderr=%s`, parsed["level"], stderr.String())
+				}
 			}
 		})
 	}

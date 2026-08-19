@@ -518,3 +518,30 @@ func TestDecodedNodeCountRejectedForPrimitiveArrays(t *testing.T) {
 		t.Fatal("expected an error once a primitive array's decoded element count pushes the total over maxDecodedNodes, got nil (this would allow ~8x Go-heap amplification within the existing wire-frame cap via many cheap-on-the-wire primitive-array fields)")
 	}
 }
+
+// TestSFSObjectAccessorsOnNilReceiverDoNotPanic is the round-32 regression test for the NIT finding
+// that Has/Get/GetString/GetInt/GetLong lacked the nil-receiver guard StringRedacted/EncodeObject/
+// writeValuePayload already apply elsewhere in this file -- a bare `var o *SFSObject; o.GetString(
+// "x")` used to panic with a nil-pointer dereference. Currently unreachable in practice (the sole
+// helper that can hand back a nil *SFSObject, gsl.go's findServerInfo, is nil-checked at both its
+// current call sites), but the guard costs nothing and closes the inconsistency against a future
+// call site that isn't as careful.
+func TestSFSObjectAccessorsOnNilReceiverDoNotPanic(t *testing.T) {
+	var o *SFSObject
+
+	if got := o.Has("x"); got != false {
+		t.Errorf("nil.Has(...) = %v, want false", got)
+	}
+	if v, ok := o.Get("x"); ok || v != (SFSValue{}) {
+		t.Errorf("nil.Get(...) = (%v, %v), want (zero value, false)", v, ok)
+	}
+	if got := o.GetString("x"); got != "" {
+		t.Errorf("nil.GetString(...) = %q, want \"\"", got)
+	}
+	if got := o.GetInt("x"); got != 0 {
+		t.Errorf("nil.GetInt(...) = %d, want 0", got)
+	}
+	if got := o.GetLong("x"); got != 0 {
+		t.Errorf("nil.GetLong(...) = %d, want 0", got)
+	}
+}

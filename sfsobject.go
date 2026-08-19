@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"unicode/utf8"
 )
 
 // SFS2X SFSDataType tags, per the reverse-engineered wire format (see dossier §04).
@@ -98,18 +99,40 @@ func (o *SFSObject) PutSFSObject(key string, val *SFSObject) {
 }
 func (o *SFSObject) PutSFSArray(key string, val *SFSArray) { o.put(key, SFSValue{sfsArrayType, val}) }
 
-// Has reports whether key is present in the decoded object.
-func (o *SFSObject) Has(key string) bool { _, ok := o.values[key]; return ok }
+// Has reports whether key is present in the decoded object. A nil receiver reports false rather
+// than panicking, matching StringRedacted/EncodeObject/writeValuePayload's existing nil-guard
+// pattern elsewhere in this file (round 32: this accessor and its siblings below were the one
+// remaining inconsistency -- currently unreachable in practice, since the sole helper that can hand
+// back a nil *SFSObject, gsl.go's findServerInfo, is nil-checked at both its call sites, but adding
+// the guard costs nothing and closes the asymmetry against a future call site that doesn't).
+func (o *SFSObject) Has(key string) bool {
+	if o == nil {
+		return false
+	}
+	_, ok := o.values[key]
+	return ok
+}
 
-// Get returns the raw SFSValue stored under key, and whether it was present.
-func (o *SFSObject) Get(key string) (SFSValue, bool) { v, ok := o.values[key]; return v, ok }
+// Get returns the raw SFSValue stored under key, and whether it was present. A nil receiver
+// returns the zero SFSValue and false rather than panicking -- see Has's own doc comment.
+func (o *SFSObject) Get(key string) (SFSValue, bool) {
+	if o == nil {
+		return SFSValue{}, false
+	}
+	v, ok := o.values[key]
+	return v, ok
+}
 
 // GetString reads a field as string, returning "" if the field is absent or its concrete decoded
 // Go type isn't string -- the same "treat as absent/zero-value" fallback GetInt/GetLong use for a
 // wrong-typed field, not a panic or an error. Both sfsUtfString and sfsText wire tags decode to
 // Go's plain string type (see the decode switch below), so there is no further wire-tag-level
-// distinction to make here.
+// distinction to make here. A nil receiver also returns "" rather than panicking -- see Has's own
+// doc comment.
 func (o *SFSObject) GetString(key string) string {
+	if o == nil {
+		return ""
+	}
 	if v, ok := o.values[key]; ok {
 		if s, ok := v.Val.(string); ok {
 			return s
@@ -156,6 +179,9 @@ func (o *SFSObject) GetString(key string) string {
 // TestGetIntRejectsOutOfInt32RangeLong (sfsobject_array_test.go) for the regression coverage proving
 // the wrap no longer happens.
 func (o *SFSObject) GetInt(key string) int32 {
+	if o == nil {
+		return 0
+	}
 	if v, ok := o.values[key]; ok {
 		switch n := v.Val.(type) {
 		case int32:
@@ -179,6 +205,9 @@ func (o *SFSObject) GetInt(key string) int32 {
 // GetLong's native return type, so every accepted narrower type widens into it without any
 // possibility of overflow -- see GetInt's own doc comment above for why ITS int64 case needs one.
 func (o *SFSObject) GetLong(key string) int64 {
+	if o == nil {
+		return 0
+	}
 	if v, ok := o.values[key]; ok {
 		switch n := v.Val.(type) {
 		case int64:
@@ -700,7 +729,12 @@ func formatSFSValueRedacted(v SFSValue, fb *formatBudget) string {
 		}
 		if s, ok := val.(string); ok {
 			allowed, ranOut := fb.chargeUpTo(len(s))
-			out := sanitizeForTerminal(s[:allowed])
+			// truncateAtRuneBoundary, not a raw s[:allowed] byte-index slice: chargeUpTo counts
+			// bytes, so a budget cutoff landing mid-rune of a multi-byte UTF-8 string (round-32
+			// fix) would otherwise emit an invalid, truncated byte sequence into StringRedacted()'s
+			// output -- login.go's redact() was already hardened for the identical byte-vs-rune
+			// bug shape (see its own doc comment); this sibling truncation path never was.
+			out := sanitizeForTerminal(truncateAtRuneBoundary(s, allowed))
 			if ranOut && fb.noteTruncation() {
 				out += " " + formatTruncatedMarker
 			}
@@ -802,6 +836,30 @@ func primitiveArrayLen(val interface{}) (int, bool) {
 		return len(a), true
 	}
 	return 0, false
+}
+
+// truncateAtRuneBoundary returns s truncated to at most maxBytes bytes, walking the cutoff
+// backward (never forward -- this must never exceed the caller's budget) to the nearest valid
+// UTF-8 rune-start boundary at or before maxBytes, instead of slicing at a raw byte index that
+// could land mid-rune. Used by formatSFSValueRedacted's default case (round 32 fix) for its bare-
+// string truncation: chargeUpTo's returned budget is denominated in bytes, and a cutoff landing
+// mid-rune of a multi-byte UTF-8 string (e.g. a CJK field value) would otherwise leave an invalid,
+// truncated byte sequence in StringRedacted()'s output -- the identical bug shape login.go's
+// redact() was already hardened against (see its own doc comment) for the same underlying reason
+// (sensitiveSFSKeys covers fields that can legitimately carry multi-byte UTF-8, e.g. googleName/
+// mail). If s is already valid UTF-8 (the normal case for a decoded sfsUtfString/sfsText field),
+// the result is always valid UTF-8 too.
+func truncateAtRuneBoundary(s string, maxBytes int) string {
+	if maxBytes >= len(s) {
+		return s
+	}
+	if maxBytes <= 0 {
+		return ""
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }
 
 // primitiveArrayPrefix formats val's first n elements the same way Go's default fmt.Sprintf("%v",

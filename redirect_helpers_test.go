@@ -167,6 +167,17 @@ func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
 			t.Errorf("expected a Warn mentioning the non-numeric string, got:\n%s", logged)
 		}
 	})
+	// Round-32 regression: round 30 added the out-of-int32-range numeric-string guard itself
+	// (TestGetIntFlexibleRejectsOutOfInt32RangeString above), but that guard silently returned 0
+	// with zero diagnostic until this round -- round 31's own doc comment enumerating the newly-
+	// diagnosed anomaly cases for this function omitted this one, even though it's exactly as
+	// anomalous as the non-numeric-string case immediately above.
+	t.Run("out-of-range numeric string warns", func(t *testing.T) {
+		logged := run(t, func(o *SFSObject) { o.PutUtfString("port", "4294967301") }) // 1<<32 + 5
+		if !strings.Contains(logged, "out-of-int32-range") {
+			t.Errorf("expected a Warn mentioning the out-of-range numeric string, got:\n%s", logged)
+		}
+	})
 	t.Run("wrong Go type warns", func(t *testing.T) {
 		logged := run(t, func(o *SFSObject) { o.PutBool("port", true) })
 		if !strings.Contains(logged, "wrong-typed") {

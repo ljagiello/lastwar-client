@@ -88,13 +88,18 @@ func main() {
 	// if "collect" were never there at all. Left unchecked, that's a real trap: the single most
 	// likely real-world cause is an operator typo'ing a flag without its leading dash (e.g. `collect`
 	// instead of `-collect`), and today that silently proceeds into a full guest-login run instead of
-	// catching what's almost certainly a mistake. The level-configured slog handler isn't installed
-	// yet at this point (that happens further below, after the -version short-circuit, once
-	// -log-level has actually been parsed -- only the placeholder JSON handler from the very top of
-	// main() is live so far), so this reports via stderr directly, matching parseLogLevel's own
-	// fmt.Fprintf-to-stderr convention for the same reason.
+	// catching what's almost certainly a mistake.
+	//
+	// Round 32 fix: this used to bypass slog entirely and print via a bare fmt.Fprintf, on the
+	// claim that the level-configured slog handler wasn't installed yet at this point -- but the
+	// PLACEHOLDER JSON handler (main()'s very first statement, before any flag is even declared) is
+	// already live here, exactly as parseLogLevel's own round-31 fix (a few lines below in this same
+	// file) established for the identical situation. detectSwallowedFlagValue's diagnostic
+	// (elsewhere in this file, reachable at this same point in main()'s execution) already uses
+	// slog.Error correctly for a fatal flag-parsing-time error -- this now matches that precedent
+	// instead of the stale fmt.Fprintf-to-stderr convention parseLogLevel no longer follows either.
 	if fs.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "unexpected argument(s): %s (missing a leading '-' on a flag? see -help)\n", strings.Join(fs.Args(), " "))
+		slog.Error("unexpected argument(s) (missing a leading '-' on a flag? see -help)", "args", strings.Join(fs.Args(), " "))
 		os.Exit(1)
 	}
 

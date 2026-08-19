@@ -286,6 +286,14 @@ func findServerInfo(content *SFSObject) *SFSObject {
 // both functions' own doc comments cite this function's port-string precedent as the reason that
 // distinction matters, but the precedent itself was never given the matching diagnostic. Added
 // below, without changing either success path's existing behavior at all.
+//
+// Round 32 fix: round 31's enumeration of anomaly cases above omitted a THIRD one that already
+// existed in this function at the time: the out-of-int32-range numeric string case round 30's own
+// fix (above) guards against. That branch still silently returned 0 with zero diagnostic, exactly
+// as anomalous as the two round 31 did add warnings for -- an out-of-range "port" string is just
+// as real an anomaly as a non-numeric one, and was indistinguishable in the logs from a merely-
+// absent field. Now warns here too, using the same message shape as its non-numeric-string sibling
+// immediately below.
 func getIntFlexible(o *SFSObject, key string) int32 {
 	if n := o.GetInt(key); n != 0 {
 		return n
@@ -293,6 +301,8 @@ func getIntFlexible(o *SFSObject, key string) int32 {
 	if s := o.GetString(key); s != "" {
 		if n, err := strconv.Atoi(s); err == nil {
 			if n < math.MinInt32 || n > math.MaxInt32 {
+				slog.Warn("serverInfo redirect: field present as an out-of-int32-range numeric string, falling back to 0",
+					"key", key, "value", s)
 				return 0
 			}
 			return int32(n)

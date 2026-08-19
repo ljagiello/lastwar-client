@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestStringRedactedMasksSensitiveKeys is the codec-layer regression test for the round-11
@@ -1336,4 +1337,36 @@ func TestStringRedactedFormatBudgetBoundary(t *testing.T) {
 			t.Errorf("StringRedacted() output contains key %q, the one key past the cap -- it must be the first (and only) key dropped by truncation at the cap+1 boundary: %.300s", droppedKey, got)
 		}
 	})
+}
+
+// TestStringRedactedTruncatesLargeStringAtRuneBoundary is the round-32 regression test for the
+// MINOR finding that formatSFSValueRedacted's bare-string truncation path (round 29's proportional-
+// budget-charging fix) sliced at a raw byte offset with no UTF-8 rune-boundary awareness, so a
+// format-budget cutoff landing mid-rune of a multi-byte UTF-8 string emitted an invalid, truncated
+// byte sequence into StringRedacted()'s output -- reachable via decode.go's -decode-stream tool,
+// which prints StringRedacted()'s output through a raw, non-escaping fmt.Printf. login.go's
+// redact() was already hardened for the identical byte-vs-rune bug shape; this sibling truncation
+// path never was, until truncateAtRuneBoundary (sfsobject.go).
+//
+// Uses a 3-byte-per-rune CJK character (making a byte-boundary/rune-boundary mismatch highly
+// likely for most cutoff points) and a field long enough to guarantee the shared format budget
+// runs out mid-string, then asserts the output is valid UTF-8 throughout.
+func TestStringRedactedTruncatesLargeStringAtRuneBoundary(t *testing.T) {
+	const runeCount = maxFormattedNodes // 3 bytes/rune -- guarantees exceeding the byte budget
+	longValue := strings.Repeat("中", runeCount)
+
+	o := NewSFSObject()
+	o.PutUtfString("nickname", longValue) // an ordinary, non-sensitive field name
+
+	got := o.StringRedacted()
+
+	if !strings.Contains(got, formatTruncatedMarker) {
+		t.Fatalf("StringRedacted() on a %d-rune string did not truncate -- expected the visible %q marker in the output (%d bytes)", runeCount, formatTruncatedMarker, len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("StringRedacted() output is not valid UTF-8 -- the format-budget cutoff landed mid-rune of the multi-byte value:\n%q", got)
+	}
+	if strings.Contains(got, "�") {
+		t.Errorf("StringRedacted() output contains the UTF-8 replacement character, suggesting a corrupted rune sequence:\n%q", got)
+	}
 }
