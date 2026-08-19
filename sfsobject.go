@@ -204,6 +204,40 @@ var sensitiveSFSKeys = map[string]bool{
 	"afuid":       true,
 	"firebaseId":  true,
 	"distinct_id": true,
+	// gcmRegisterId/parseRegisterId are push-notification device tokens (Android FCM/legacy GCM
+	// and Parse push, respectively) -- confirmed real fields identity.go's BuildLoginParams
+	// constructs (PutUtfString("gcmRegisterId", ...) / PutUtfString("parseRegisterId", ...)).
+	// Same actionable-device-targeting risk class as firebaseId above, and the same "only ever
+	// sent as an empty-string placeholder by this Go client today, but a real captured
+	// non-Go-client login decoded via -decode-stream would leak it" reasoning applies.
+	"gcmRegisterId":   true,
+	"parseRegisterId": true,
+	// googleName is a Google account display name -- confirmed real field identity.go's
+	// BuildLoginParams constructs (PutUtfString("googleName", "")). More directly PII than a
+	// device/tracking identifier: it's a real person's name, not just an identifier for one.
+	"googleName": true,
+	// mt sits in the same field cluster per docs/live-validation.mdx's "complete Login params
+	// field list" (`AndroidID, IMEI, psh, mt, deviceId, airKey, ...`) -- undocumented meaning, but
+	// the same "not yet leaking from this Go client's own placeholder traffic, but a real captured
+	// non-Go-client login decoded via -decode-stream would leak it" reasoning already applied to
+	// its neighbors applies here too. Confirmed real field identity.go constructs
+	// (PutUtfString("mt", "")).
+	"mt": true,
+	// simOp/simOpName/phone_model/osVersion/phone_screen/phone_native_screen round out the
+	// device/carrier-identifier cluster for full consistency with the rationale above -- all
+	// confirmed real fields identity.go's BuildLoginParams constructs (PutUtfString calls for
+	// each).
+	"simOp":               true,
+	"simOpName":           true,
+	"phone_model":         true,
+	"osVersion":           true,
+	"phone_screen":        true,
+	"phone_native_screen": true,
+	// SecurityCode/OneCode/CoreV/packageSign/psh were considered and deliberately excluded: per
+	// docs/auth.mdx, they're reproducible MD5/SHA1 hashes over non-secret/publicly-extractable
+	// inputs (cmdBaseTime, gameUid, packageName, a hardcoded salt, and -- for psh specifically --
+	// the APK's own signing-cert DER bytes, which are themselves not secret) rather than live
+	// bearer tokens or PII, so this decision doesn't need re-deriving next round.
 }
 
 // StringRedacted is *SFSObject's safe-to-log dump (and, since String()/GoString() delegate to this
@@ -287,20 +321,43 @@ func formatSFSValueRedacted(v SFSValue) string {
 	}
 }
 
-// redactSFSValue masks a sensitive-keyed field's value. Every known sensitive key
-// (sensitiveSFSKeys) carries a plain string on the wire in every case this repo has decoded; a
-// non-string value under one of those keys would be unexpected. A primitive array (one of the 8
-// types readValuePayload's array-tag cases decode into -- []bool/[]byte/[]int16/[]int32/[]int64/
-// []float32/[]float64/[]string) still gets masked explicitly below, since formatSFSValueRedacted's
-// fallback for those types is the same naive fmt.Sprintf("%v", val) String() uses -- printing the
-// raw slice contents with no redaction at all, defeating this function's whole point. An *SFSArray
-// (the wrapper type sfsArrayType decodes into, as opposed to a primitive array) also gets masked
-// explicitly below, for the same reason one level deeper: formatSFSValueRedacted's own *SFSArray
-// case recurses via formatSFSValueRedacted (not redactSFSValue) on each item, so a raw scalar item
-// inside the array would lose the "sensitive" context and print via the naive fmt.Sprintf("%v",
-// val) default -- no current PutSFSArray call site puts a sensitive key's value in an *SFSArray of
-// scalars, but a future decoded server response could represent a sensitive field that way. Any
-// other non-string, non-array shape falls back to the ordinary safe recursive formatter.
+// redactSFSValue masks a sensitive-keyed field's value. It is FAIL-CLOSED by design: every shape
+// it doesn't explicitly recognize as safe falls through to a fixed "[REDACTED]" placeholder rather
+// than to any formatter that might print real content, so a future SFSValue shape this repo adds
+// (or a value shape this function's author didn't anticipate for a given key) is masked by default
+// instead of leaking.
+//
+// Every known sensitive key (sensitiveSFSKeys) carries a plain string on the wire in every case
+// this repo has decoded; a non-string value under one of those keys would be unexpected, but is
+// still masked -- this closes the gap where a sensitive key's value reached via PutInt/PutLong/
+// PutBool/PutDouble/PutByte/PutShort (any scalar Go type other than string) used to fall through
+// to the final fallback, which used to be formatSFSValueRedacted(v) -- the ORDINARY, non-redacting
+// recursive formatter, whose own default case is the naive fmt.Sprintf("%v", val) -- printing the
+// raw scalar in full cleartext.
+//
+// A primitive array (one of the 8 types readValuePayload's array-tag cases decode into --
+// []bool/[]byte/[]int16/[]int32/[]int64/[]float32/[]float64/[]string) still gets masked explicitly
+// below, since formatSFSValueRedacted's fallback for those types is the same naive
+// fmt.Sprintf("%v", val) String() uses -- printing the raw slice contents with no redaction at all.
+//
+// An *SFSArray (the wrapper type sfsArrayType decodes into, as opposed to a primitive array) also
+// gets masked explicitly below, for the same reason one level deeper: formatSFSValueRedacted's own
+// *SFSArray case recurses via formatSFSValueRedacted (not redactSFSValue) on each item, so a raw
+// scalar item inside the array would lose the "sensitive" context and print via the naive
+// fmt.Sprintf("%v", val) default -- no current PutSFSArray call site puts a sensitive key's value
+// in an *SFSArray of scalars, but a future decoded server response could represent a sensitive
+// field that way. A nil *SFSArray (e.g. PutSFSArray(sensitiveKey, (*SFSArray)(nil))) is checked
+// explicitly too: the type assertion below succeeds (ok=true) for a nil pointer of the right
+// dynamic type, so without this check, `arr.items` would dereference a nil pointer and panic.
+//
+// A *SFSObject also gets masked explicitly below -- blanket, by field count, mirroring the
+// *SFSArray case's style exactly -- rather than delegating to formatSFSValueRedacted, whose own
+// *SFSObject case calls the NESTED object's own StringRedacted(). That would only re-check the
+// nested object's OWN key names against sensitiveSFSKeys, completely losing the fact that the
+// OUTER key was already known-sensitive -- so a secret sitting under an ordinary-looking sub-key
+// name inside that nested object (e.g. {loginKey: {value: "the-real-secret"}}) would print in
+// full. A nil *SFSObject is checked explicitly for the same nil-pointer-panic reason as *SFSArray
+// above.
 func redactSFSValue(v SFSValue) string {
 	if s, ok := v.Val.(string); ok {
 		return redact(s)
@@ -309,9 +366,22 @@ func redactSFSValue(v SFSValue) string {
 		return fmt.Sprintf("[REDACTED %d items]", n)
 	}
 	if arr, ok := v.Val.(*SFSArray); ok {
+		if arr == nil {
+			return "<nil>"
+		}
 		return fmt.Sprintf("[REDACTED %d items]", len(arr.items))
 	}
-	return formatSFSValueRedacted(v)
+	if obj, ok := v.Val.(*SFSObject); ok {
+		if obj == nil {
+			return "<nil>"
+		}
+		return fmt.Sprintf("[REDACTED %d fields]", len(obj.keys))
+	}
+	// Fail-closed fallback: any value shape under a sensitive key that isn't one of the
+	// explicitly-recognized-safe forms above is masked by a fixed placeholder, rather than falling
+	// through to formatSFSValueRedacted -- a formatter that doesn't know it's operating inside a
+	// sensitive context and will happily print raw content (see the doc comment above).
+	return "[REDACTED]"
 }
 
 // primitiveArrayLen reports the length of val and true if val is one of the 8 primitive array
@@ -557,6 +627,16 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 		return nil
 	case sfsObjectType:
 		inner := v.Val.(*SFSObject)
+		if inner == nil {
+			// Mirrors round 15's decode/format-side nil guard (formatSFSValueRedacted's *SFSObject
+			// case): the type assertion above succeeds (ok=true) for a nil pointer of the right
+			// dynamic type, so without this check, `inner.keys` below would dereference a nil
+			// pointer and panic. No current call site passes PutSFSObject(key, nil) -- this is
+			// latent, defense-in-depth for a future mistake -- but writeTaggedValue/writeValuePayload
+			// have no key name in scope at this point (only the value itself), so the error can't
+			// name the offending key.
+			return fmt.Errorf("sfsobject: nil *SFSObject value (sfsObjectType) cannot be encoded")
+		}
 		n, err := int16Count(len(inner.keys), "keys")
 		if err != nil {
 			return err
@@ -573,6 +653,11 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 		return nil
 	case sfsArrayType:
 		inner := v.Val.(*SFSArray)
+		if inner == nil {
+			// Mirrors the sfsObjectType nil guard immediately above -- same nil-pointer-panic gap,
+			// same reasoning, same "no key name in scope at this point" caveat.
+			return fmt.Errorf("sfsobject: nil *SFSArray value (sfsArrayType) cannot be encoded")
+		}
 		n, err := int16Count(len(inner.items), "items")
 		if err != nil {
 			return err

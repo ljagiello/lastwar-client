@@ -236,6 +236,25 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 		buildings = append(buildings, b)
 	}
 
+	// seenVisitorUUIDs mirrors seenBuildingUUIDs above and exists for the identical reason: the
+	// bare `init` bootstrap push is the sole source visitors are populated from (ParseInitVisitors,
+	// via msg.Params' visitor.list field), but a redundant resend of that same init push within one
+	// fetch window would otherwise double-append every visitor it carries, just like the
+	// building_new/defaultBuilds resend case above does for buildings. GreetVisitors (visitors.go)
+	// issues one real visitor.operate network call per slice entry with no dedup of its own, so a
+	// doubled visitor list here means a doubled real network call per uid -- and per conn.go's
+	// benignErrorCodes only covering visitor_err_coming for that call family, the second (redundant)
+	// call risks a genuine, non-benign failure rather than a harmless no-op.
+	seenVisitorUUIDs := make(map[int64]bool)
+	appendVisitor := func(v Visitor) {
+		uid := v.Uid()
+		if seenVisitorUUIDs[uid] {
+			return
+		}
+		seenVisitorUUIDs[uid] = true
+		visitors = append(visitors, v)
+	}
+
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -265,7 +284,9 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			for _, b := range ParseInitBuildings(msg.Params) {
 				appendBuilding(b)
 			}
-			visitors = append(visitors, ParseInitVisitors(msg.Params)...)
+			for _, v := range ParseInitVisitors(msg.Params) {
+				appendVisitor(v)
+			}
 			slog.Info("init: buildings loaded", "field", "building_new", "count", len(buildings))
 			slog.Info("init: visitors loaded", "field", "visitor.list", "count", len(visitors))
 			deadline = time.Now().Add(3 * time.Second)
@@ -429,26 +450,51 @@ func CollectIdleReward(conn *GameConn) error {
 // none can go through the same per-building loop below.
 func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) error {
 	var errs []error
-	errs = append(errs, CollectIdleReward(conn))
-	errs = append(errs, GreetVisitors(conn, visitors))
-	errs = append(errs, ClaimAllMail(conn))
-	errs = append(errs, HelpAllianceMembers(conn))
-	errs = append(errs, ClaimAllianceGifts(conn))
-	errs = append(errs, DonateRecommendedAllianceTech(conn))
-	errs = append(errs, ClaimVIPDailyLoginScore(conn))
-	errs = append(errs, ClaimVIPDailyFreebie(conn))
+
+	// The 8 fixed sub-actions plus one closure per collectible building below are each
+	// independent (none scoped to any other's outcome), so an ordinary decoded business-logic
+	// errorCode failure in one must not stop the rest from running -- every error, regardless of
+	// kind, still gets appended to errs rather than returned immediately, same as before this
+	// loop existed. A net.Error is a different kind of failure though: it means the underlying
+	// TCP connection itself is known-dead (e.g. silently blackholed, no RST), so every subsequent
+	// action in this list is already doomed to independently burn a full defaultCmdTimeout before
+	// failing the exact same way. FetchBuildings (above) already distinguishes this class of
+	// failure via errors.As against net.Error; the loop below mirrors that exact check and breaks
+	// early the first time it fires, instead of pointlessly waiting out every remaining action's
+	// timeout in turn. The error that triggered the break is still appended to errs first, so the
+	// caller's aggregated error still reports what actually happened.
+	actions := []func() error{
+		func() error { return CollectIdleReward(conn) },
+		func() error { return GreetVisitors(conn, visitors) },
+		func() error { return ClaimAllMail(conn) },
+		func() error { return HelpAllianceMembers(conn) },
+		func() error { return ClaimAllianceGifts(conn) },
+		func() error { return DonateRecommendedAllianceTech(conn) },
+		func() error { return ClaimVIPDailyLoginScore(conn) },
+		func() error { return ClaimVIPDailyFreebie(conn) },
+	}
 
 	toCollect := collectibleBuildings(buildings)
 	if len(toCollect) == 0 {
 		slog.Info("no matching collectible buildings found on this account")
 	}
 	for _, b := range toCollect {
-		cmd, _ := collectCmdFor(b.BId())
-		slog.Info("attempting collect", "name", BuildingNameOf(b.BId()), "uuid", b.Uuid(), "buildingLevel", b.Level(), "cmd", cmd)
-		params := NewSFSObject()
-		params.PutLong("uuid", b.Uuid())
-		if _, err := sendAndWait(conn, "collect "+BuildingNameOf(b.BId()), cmd, params); err != nil {
-			errs = append(errs, err)
+		actions = append(actions, func() error {
+			cmd, _ := collectCmdFor(b.BId())
+			slog.Info("attempting collect", "name", BuildingNameOf(b.BId()), "uuid", b.Uuid(), "buildingLevel", b.Level(), "cmd", cmd)
+			params := NewSFSObject()
+			params.PutLong("uuid", b.Uuid())
+			_, err := sendAndWait(conn, "collect "+BuildingNameOf(b.BId()), cmd, params)
+			return err
+		})
+	}
+
+	for _, action := range actions {
+		err := action()
+		errs = append(errs, err)
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			break
 		}
 	}
 	return errors.Join(errs...)

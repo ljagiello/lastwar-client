@@ -57,6 +57,16 @@ func HelpAllianceMembers(conn *GameConn) error {
 // and a non-empty `reward`; nothing in the handler treats calling this
 // with zero pending gifts of a given type as an error, so it's safe to
 // call both types unconditionally on every run.
+//
+// Honestly left open (round 16 audit): that safety argument is a static read
+// of the decompiled handler, not a live-captured confirmation for type=1
+// specifically -- unlike VIP's daily claims (vip.go, errorCode 120289) and
+// the alliance tech donate cooldown (errorCode 120471 below), there is no
+// benignErrorCodes entry backing the type=1 (Premium) call, since no
+// Premium-ineligible response has actually been captured to know what its
+// errorCode (if any) looks like. If a future run ever surfaces an
+// unexpected fatal error specifically on the type=1 branch, capture it and
+// register the real code here rather than guessing at one now.
 const (
 	allianceGiftPremium int32 = 1
 	allianceGiftRegular int32 = 2

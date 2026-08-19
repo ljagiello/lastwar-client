@@ -178,6 +178,45 @@ type LoginServerListRespon struct {
 	Rt               *LoginToken        `json:"rt"`
 }
 
+// applyLoginServerFallback synthesizes a single ServerList entry from LoginServer when the
+// server returned no ServerList entries at all -- exactly the scenario AccountServerInfo's own
+// doc comment describes: opt=new, i.e. the very first connection, before any account/state is
+// associated with this device. Before this fallback existed, every caller of GetServerList
+// (login.go's Login, unconditionally) treated an empty ServerList as a hard failure
+// ("no servers returned") even when the response carried a perfectly usable LoginServer --
+// the exact field its own comment says exists for this case.
+//
+// This has NOT been confirmed live: no capture exists in this repo of a genuine opt=new
+// response with an empty ServerList (populated or not). Per this project's standing rule
+// against guessing at unconfirmed server behavior, the fallback is deliberately conservative:
+//   - it only fires for opt=new, matching AccountServerInfo's own documented scope exactly --
+//     GetServerList's opt=fix/opt=refresh/opt=login callers (crossserver.go's DoCrossServerLogin
+//     redirect-refresh, main.go's -cs-rt refresh, login.go's own opt=login/opt=fix paths) see
+//     zero behavior change from this function;
+//   - it only fires when ServerList is genuinely empty, so it never touches, reorders, or
+//     shadows a populated ServerList;
+//   - it never invents data AccountServerInfo doesn't carry. Notably, AccountServerInfo has no
+//     Zone field (unlike LoginServerInfo), so the synthesized entry's Zone is left "" rather
+//     than guessed -- callers that derive a zone/serverID from it (e.g. login.go's
+//     serverIDFromZone) get a best-effort, not-necessarily-correct empty zone in this fallback
+//     path, which is the honest reflection of what AccountServerInfo actually provides.
+func applyLoginServerFallback(lsr *LoginServerListRespon, opt GSLOpt) {
+	if opt.Opt != "new" || len(lsr.ServerList) != 0 || lsr.LoginServer == nil {
+		return
+	}
+	lsr.ServerList = []LoginServerInfo{{
+		IP:   lsr.LoginServer.IP,
+		Port: lsr.LoginServer.Port,
+		WsIP: lsr.LoginServer.WsIP,
+		// WsPort has no home in LoginServerInfo (which carries no ws_port field at all -- see
+		// its definition above) and, like LoginServerInfo.WsIP, ws_ip/ws_port aren't read
+		// anywhere in this codebase today; nothing is lost that would otherwise be used.
+		// ID, Name, Zone, GameUid, Uid, Status: left at their zero values -- AccountServerInfo
+		// carries none of them, and opt=new is precisely the case where no gameUid/account
+		// exists yet to fill them with.
+	}}
+}
+
 // firstHost returns the first entry of a "|"-delimited fallback host list.
 func firstHost(pipeList string) string {
 	first, _, _ := strings.Cut(pipeList, "|")
@@ -342,6 +381,7 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 				// carries a live at/rt session token. See the bodyLen comment above.
 				return nil, fmt.Errorf("decode decrypted GSL response: %w (plainLen=%d)", err, len(plain))
 			}
+			applyLoginServerFallback(&lsr, opt)
 			return &lsr, nil
 		}
 	}
@@ -349,6 +389,7 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 		// Not the raw body -- same reasoning as the two decode-failure branches above.
 		return nil, fmt.Errorf("decode plaintext GSL response: %w (bodyLen=%d)", err, len(body))
 	}
+	applyLoginServerFallback(&lsr, opt)
 	return &lsr, nil
 }
 

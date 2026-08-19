@@ -239,10 +239,13 @@ func TestWaitForInitPushHalfwayActivePull(t *testing.T) {
 		}
 	}()
 
-	buildings, visitors, gotInit := waitForInitPush(client, window)
+	buildings, visitors, gotInit, err := waitForInitPush(client, window)
 
 	if gotInit {
 		t.Fatalf("expected gotInit=false (server never sends the init push), got true (buildings=%v visitors=%v)", buildings, visitors)
+	}
+	if err != nil {
+		t.Errorf("err = %v, want nil (a genuine silence-until-deadline timeout is not an error)", err)
 	}
 
 	select {
@@ -255,5 +258,37 @@ func TestWaitForInitPushHalfwayActivePull(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected waitForInitPush to send login.init as an active-pull fallback partway through the window, but it never arrived")
+	}
+}
+
+// TestWaitForInitPushConnectionFailure is the regression test for waitForInitPush's terminal-error
+// return: a genuine connection failure (here: the peer closing, giving ReadEnvelope a real EOF/
+// closed-pipe error) must be visible to the caller as a non-nil, non-timeout error -- not silently
+// collapsed into the exact same (nil, nil, false, nil) outcome as a plain silence-until-deadline
+// timeout, which is what waitForInitPush used to return unconditionally (discarding the real
+// ReadEnvelope error entirely; see login.go's call site and doc comment). Mirrors
+// TestWaitForInitPushHalfwayActivePull's structure, but forces a real error instead of letting the
+// server just stay silent.
+func TestWaitForInitPushConnectionFailure(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+	server.conn.Close() // simulate a real connection failure (EOF/reset), not silence
+
+	const window = 200 * time.Millisecond
+	start := time.Now()
+	buildings, visitors, gotInit, err := waitForInitPush(client, window)
+	elapsed := time.Since(start)
+
+	if gotInit {
+		t.Fatalf("expected gotInit=false, got true (buildings=%v visitors=%v)", buildings, visitors)
+	}
+	if err == nil {
+		t.Fatal("expected a non-nil error for a genuine connection failure, got nil (indistinguishable from a plain timeout)")
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Errorf("err = %v, want a genuine connection-failure error, not a timeout error", err)
+	}
+	if elapsed > window {
+		t.Errorf("waitForInitPush took %v, want it to return promptly on connection failure rather than waiting out the full %v window", elapsed, window)
 	}
 }

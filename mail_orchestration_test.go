@@ -507,3 +507,201 @@ func TestClaimAllMailByteLengthBatching(t *testing.T) {
 	assertBatchesCoverExactly(t, "read-status", readBatches, []int{9, 2}, wantUids)
 	assertBatchesCoverExactly(t, "reward-claim", rewardBatches, []int{9, 2}, wantUids)
 }
+
+// TestClaimAllMailProcessesPartialMailOnListPageFailure is the regression test for the round-16
+// fix to ClaimAllMail's handling of a ListMail error: ListMail deliberately returns whatever mail
+// it already collected before a mid-pagination sendAndWait failure (see its own doc comment), not
+// nil, specifically so a transient failure on a later page doesn't have to cost the caller
+// already-identified earlier mail. Before the fix, ClaimAllMail returned immediately on
+// `err != nil` without ever looking at the `mail` slice ListMail still handed back, discarding
+// page 1's fully-fetched mail and claiming nothing for the run.
+//
+// The fake server here answers page 1 of chat.get.system.mails normally (more=true, two mail
+// entries, one with an unclaimed reward), then answers page 2 with a genuine (non-benign)
+// errorCode instead of a valid page -- a real sendAndWait failure via classifyResponse's
+// outcomeFailure path, not the lastUid-missing anomaly or a benign no-op. ClaimAllMail must still
+// mark page 1's two mail entries as read and claim its one unclaimed reward, and its returned
+// error must mention the page-2 failure.
+func TestClaimAllMailProcessesPartialMailOnListPageFailure(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	readReq := func(wantCmd string) *ExtensionMessage {
+		t.Helper()
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read %s request: %v", wantCmd, err)
+			return nil
+		}
+		msg, ok := env.AsExtension()
+		if !ok {
+			t.Errorf("%s request: AsExtension() = false", wantCmd)
+			return nil
+		}
+		if msg.Cmd != wantCmd {
+			t.Errorf("request Cmd = %q, want %s", msg.Cmd, wantCmd)
+		}
+		return msg
+	}
+
+	var readStatusUIDs, rewardUIDs []string
+	var rewardType int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		// Page 1: succeeds, two mail entries, more=true so ListMail queues a second page.
+		if readReq("chat.get.system.mails") == nil {
+			return
+		}
+		resp1 := NewSFSObject()
+		arr1 := NewSFSArray()
+		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0)) // rewardStatus=0: unclaimed reward
+		arr1.AddSFSObject(newTestMailObj("uid-2", 4, 1)) // rewardStatus=1: already claimed/no reward
+		resp1.PutSFSArray("msg", arr1)
+		resp1.PutBool("more", true)
+		resp1.PutUtfString("lastUid", "uid-2")
+		resp1.PutLong("lastMailTime", 555)
+		if err := server.SendExtension("push.chat.get.system.mails", resp1); err != nil {
+			return
+		}
+
+		// Page 2: a genuine (non-benign) failure -- classifyResponse's outcomeFailure path, not
+		// the lastUid-missing anomaly TestListMailStopsOnMissingLastUid covers.
+		if readReq("chat.get.system.mails") == nil {
+			return
+		}
+		resp2 := NewSFSObject()
+		resp2.PutUtfString("errorCode", "999999") // not in benignErrorCodes: a genuine failure
+		if err := server.SendExtension("push.chat.get.system.mails", resp2); err != nil {
+			return
+		}
+
+		// ClaimAllMail must still process page 1's two mail entries despite the page-2 failure.
+		if msg := readReq("mail.read.status.betch"); msg != nil {
+			if uids := msg.Params.GetString("uids"); uids != "" {
+				readStatusUIDs = strings.Split(uids, ",")
+			}
+			resp := NewSFSObject()
+			resp.PutBool("success", true)
+			if err := server.SendExtension("mail.read.status.betch", resp); err != nil {
+				return
+			}
+		}
+		if msg := readReq("mail.reward.batch"); msg != nil {
+			rewardType = msg.Params.GetInt("type")
+			if uids := msg.Params.GetString("uids"); uids != "" {
+				rewardUIDs = strings.Split(uids, ",")
+			}
+			resp := NewSFSObject()
+			resp.PutBool("success", true)
+			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	err := ClaimAllMail(client)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never finished all expected requests")
+	}
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (page 2's genuine list-mail failure must be reported)")
+	}
+	if !strings.Contains(err.Error(), "999999") {
+		t.Errorf("ClaimAllMail() error = %v, want it to mention the page-2 failure's errorCode 999999", err)
+	}
+
+	wantUIDs := []string{"uid-1", "uid-2"}
+	if len(readStatusUIDs) != len(wantUIDs) {
+		t.Fatalf("read-status uids = %v, want %v -- page 1's mail must still be marked read despite the page-2 failure", readStatusUIDs, wantUIDs)
+	}
+	for i, uid := range wantUIDs {
+		if readStatusUIDs[i] != uid {
+			t.Errorf("read-status uids[%d] = %q, want %q", i, readStatusUIDs[i], uid)
+		}
+	}
+
+	if len(rewardUIDs) != 1 || rewardUIDs[0] != "uid-1" {
+		t.Fatalf("reward-claim uids = %v, want [\"uid-1\"] -- page 1's one unclaimed reward must still be claimed", rewardUIDs)
+	}
+	if rewardType != 3 {
+		t.Errorf("reward-claim type = %d, want 3 (uid-1's type)", rewardType)
+	}
+}
+
+// TestClaimAllMailReadStatusFailureLoggingDoesNotOverclaim is the regression test for the
+// round-16 fix to ClaimAllMail's "marked mail as read" log line: it used to log the full mail
+// count unconditionally right after the read-status batch loop, regardless of whether any batch
+// in that loop actually failed -- so it always claimed the full count succeeded even when it
+// didn't (the failure still surfaced via the function's final errors.Join, just not from this
+// specific log line). The fake server here answers ListMail's single page normally, then answers
+// the one read-status batch with a genuine (non-benign) failure. The success-claiming "marked
+// mail as read" log line must not appear.
+func TestClaimAllMailReadStatusFailureLoggingDoesNotOverclaim(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read list-mail request: %v", err)
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
+			return
+		}
+		resp := NewSFSObject()
+		arr := NewSFSArray()
+		arr.AddSFSObject(newTestMailObj("uid-1", 3, 1)) // rewardStatus=1: no reward to claim
+		resp.PutSFSArray("msg", arr)
+		resp.PutBool("more", false)
+		if err := server.SendExtension("push.chat.get.system.mails", resp); err != nil {
+			return
+		}
+
+		env, err = server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read mail.read.status.betch request: %v", err)
+			return
+		}
+		msg, ok = env.AsExtension()
+		if !ok || msg.Cmd != "mail.read.status.betch" {
+			t.Errorf("read-status request malformed: %+v ok=%v", msg, ok)
+			return
+		}
+		readResp := NewSFSObject()
+		readResp.PutUtfString("errorCode", "999999") // genuine failure, not benign
+		if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
+			return
+		}
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	err := ClaimAllMail(client)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never finished all expected requests")
+	}
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (the read-status batch got a genuine failure)")
+	}
+
+	if logged := buf.String(); strings.Contains(logged, "marked mail as read") {
+		t.Errorf("log claims \"marked mail as read\" (a completed fact) despite the read-status batch failing:\n%s", logged)
+	}
+}

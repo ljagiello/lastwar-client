@@ -187,3 +187,39 @@ func TestHandleInteractiveLineDoesNotLeakRawParamsOnJSONParseError(t *testing.T)
 		t.Errorf("expected a \"bad JSON params\" log entry, got:\n%s", logged)
 	}
 }
+
+// TestHandleInteractiveLineAbortsOnTrailingGarbageAfterJSON covers the "well-formed JSON value
+// followed by leftover bytes" case: json.Decoder.Decode only consumes the first JSON value on the
+// line and returns no error on its own just because text remains afterward, so
+// handleInteractiveLine must check dec.More() itself and abort -- the same as the adjacent
+// malformed-JSON branch covered by TestHandleInteractiveLineDoesNotLeakRawParamsOnJSONParseError
+// above -- instead of silently discarding the trailing text and sending a command with only the
+// first value's params. As in TestHandleInteractiveLineAbortsOnUnsupportedValue, running this
+// over a net.Pipe-backed GameConn with nobody reading on the other end turns "did it still send
+// despite the trailing garbage" into a clean timeout failure instead of a hang.
+func TestHandleInteractiveLineAbortsOnTrailingGarbageAfterJSON(t *testing.T) {
+	client, _ := newPipeGameConnPair(t)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Well-formed JSON object immediately followed by trailing garbage on the same line.
+		handleInteractiveLine(client, `cmd.name {"uuid":123} some trailing garbage here`)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleInteractiveLine did not return promptly -- it likely tried to send despite trailing garbage after the JSON value")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "bad JSON params") {
+		t.Errorf("expected a \"bad JSON params\" log entry for trailing garbage after a well-formed JSON value, got:\n%s", logged)
+	}
+}

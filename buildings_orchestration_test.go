@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -281,6 +284,69 @@ func TestFetchBuildingsDedupesBuildingUUIDAcrossSources(t *testing.T) {
 	}
 }
 
+// TestFetchBuildingsDedupesVisitorUIDAcrossInitPushes is the round-16 regression test for
+// FetchBuildings' seenVisitorUUIDs dedupe (buildings.go): the visitor list's sole population
+// source is the bare `init` push's `visitor` field (ParseInitVisitors), but a redundant resend of
+// that same init push within one fetch window -- e.g. a duplicate bootstrap/init resend, the exact
+// scenario TestFetchBuildingsDedupesBuildingUUIDAcrossSources above covers for buildings -- must
+// not double-append every visitor it carries. A duplicate would otherwise cause GreetVisitors
+// (visitors.go) to issue two real visitor.operate network calls for the same uid.
+//
+// Mutation check: reverting appendVisitor's call site in buildings.go back to plain
+// `visitors = append(visitors, ParseInitVisitors(msg.Params)...)` makes this test fail with 2
+// visitors instead of 1.
+func TestFetchBuildingsDedupesVisitorUIDAcrossInitPushes(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const dupeUID = int64(888)
+	newInitParamsWithVisitor := func() *SFSObject {
+		visitorList := NewSFSArray()
+		v := NewSFSObject()
+		v.PutLong("uid", dupeUID)
+		v.PutInt("eventId", 2001)
+		v.PutInt("visitorId", 6)
+		visitorList.AddSFSObject(v)
+		visitor := NewSFSObject()
+		visitor.PutSFSArray("list", visitorList)
+		params := NewSFSObject()
+		params.PutSFSObject("visitor", visitor)
+		return params
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := server.SendExtension("init", newInitParamsWithVisitor()); err != nil {
+			return
+		}
+		// A redundant resend of the same bootstrap/init push -- the identical scenario
+		// TestFetchBuildingsDedupesBuildingUUIDAcrossSources exercises for buildings, applied to
+		// visitors instead (buildings.go's own FIX-1 doc comment on seenVisitorUUIDs).
+		if err := server.SendExtension("init", newInitParamsWithVisitor()); err != nil {
+			return
+		}
+		server.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment: ends the test fast instead of waiting out the post-init 3s window
+	}()
+
+	_, visitors, err := FetchBuildings(client, 2*time.Second)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("FetchBuildings() error = %v, want an error wrapping io.EOF (expected fake-server-hangup artifact, see doc comment)", err)
+	}
+	if len(visitors) != 1 {
+		t.Fatalf("got %d visitors, want exactly 1 (uid %d arrived via two separate init pushes)", len(visitors), dupeUID)
+	}
+	if visitors[0].Uid() != dupeUID {
+		t.Errorf("got uid %d, want %d", visitors[0].Uid(), dupeUID)
+	}
+}
+
 // TestCollectIdleRewardSuccess covers CollectIdleReward's documented two-call sequence -- a peek
 // (action=0) immediately followed by a claim (action=1), both against `lw.pve.idle.reward` (see
 // its doc comment in buildings.go) -- against a fake server that answers both with a plain
@@ -428,5 +494,90 @@ func TestCollectAllAggregatesErrorsWithoutShortCircuiting(t *testing.T) {
 	}
 	if len(collectedUUIDs) != 2 || collectedUUIDs[0] != 501 || collectedUUIDs[1] != 502 {
 		t.Errorf("collected building uuids = %v, want [501 502] in order", collectedUUIDs)
+	}
+}
+
+// fakeNetErrConn is a minimal net.Conn whose every Read fails with a fakeNetError -- a genuine
+// connection-level failure (Timeout()==true), standing in for what a real silently-dead/blackholed
+// TCP connection's eventual read-deadline expiry would produce, as opposed to a well-formed response
+// carrying a decoded (possibly non-benign) errorCode. Writes succeed and are counted, so a test can
+// prove exactly how many requests were sent before CollectAll's net.Error early-abort (buildings.go)
+// fired.
+type fakeNetErrConn struct {
+	mu     sync.Mutex
+	writes int
+}
+
+func (c *fakeNetErrConn) Read([]byte) (int, error) { return 0, fakeNetError{} }
+
+func (c *fakeNetErrConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	c.writes++
+	c.mu.Unlock()
+	return len(b), nil
+}
+
+func (c *fakeNetErrConn) writeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
+}
+
+func (c *fakeNetErrConn) Close() error                     { return nil }
+func (c *fakeNetErrConn) LocalAddr() net.Addr              { return fakeNetAddr{} }
+func (c *fakeNetErrConn) RemoteAddr() net.Addr             { return fakeNetAddr{} }
+func (c *fakeNetErrConn) SetDeadline(time.Time) error      { return nil }
+func (c *fakeNetErrConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *fakeNetErrConn) SetWriteDeadline(time.Time) error { return nil }
+
+type fakeNetAddr struct{}
+
+func (fakeNetAddr) Network() string { return "fake" }
+func (fakeNetAddr) String() string  { return "fake" }
+
+// fakeNetError implements net.Error directly (error + Timeout() + the deprecated-but-still-required
+// Temporary()), simulating a genuine connection-level failure rather than a decoded errorCode
+// business-logic failure -- the same distinction FetchBuildings' own net.Error check (buildings.go)
+// already makes, and login.go's waitForInitPush/TestWaitForTimeout (conn_wait_test.go) already rely
+// on for the same purpose.
+type fakeNetError struct{}
+
+func (fakeNetError) Error() string   { return "fake net.Error: simulated dead connection" }
+func (fakeNetError) Timeout() bool   { return true }
+func (fakeNetError) Temporary() bool { return false }
+
+// TestCollectAllAbortsRemainingActionsOnNetError is the round-16 regression test for CollectAll's
+// (buildings.go) net.Error early-abort. TestCollectAllAggregatesErrorsWithoutShortCircuiting above
+// proves ordinary decoded errorCode failures must NOT short-circuit the run; this test proves the
+// opposite must happen for a genuine connection-level failure, mirroring FetchBuildings' own
+// errors.As-against-net.Error check.
+//
+// The fake connection's Read always fails with fakeNetError, so CollectAll's very first sub-action
+// -- CollectIdleReward's initial peek call -- fails immediately with a wrapped net.Error, before it
+// ever gets to its own second (claim) call. Only that one request should ever be sent: if CollectAll
+// didn't break early, GreetVisitors would be a no-op (visitors is nil) but ClaimAllMail,
+// HelpAllianceMembers, ClaimAllianceGifts, DonateRecommendedAllianceTech, both VIP claims, and the
+// one collectible building below would each still attempt a real request of their own.
+//
+// Mutation check: reverting CollectAll's actions/net.Error-break loop in buildings.go back to the
+// old flat sequence of unconditional `errs = append(errs, ...)` calls makes this test fail with
+// writeCount() == 9 (one per fixed sub-action plus the one building collect) instead of 1.
+func TestCollectAllAbortsRemainingActionsOnNetError(t *testing.T) {
+	fake := &fakeNetErrConn{}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	buildings := []Building{newTestBuilding(501, BuildingFarmland, 2)}
+
+	err := CollectAll(client, buildings, nil)
+
+	if err == nil {
+		t.Fatal("CollectAll() = nil, want a non-nil error (the fake connection's every Read fails)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Errorf("CollectAll() error = %v, want it to wrap a net.Error (the failure that triggered the break)", err)
+	}
+	if got := fake.writeCount(); got != 1 {
+		t.Errorf("fake connection saw %d writes, want exactly 1 (only CollectIdleReward's first request -- CollectAll should have aborted before any other sub-action or building collect)", got)
 	}
 }

@@ -538,3 +538,255 @@ func TestDecodeLargeByteArrayFieldNotChargedAgainstMaxDecodedNodes(t *testing.T)
 		}
 	}
 }
+
+// TestRedactSFSValueMasksScalarTypesUnderSensitiveKey is the round-16 regression test for Fix 1a:
+// redactSFSValue's fallback for any non-string, non-array value under a sensitive key used to be
+// formatSFSValueRedacted(v) -- the ordinary, NON-redacting recursive formatter, whose own default
+// case is the naive fmt.Sprintf("%v", val). This meant a sensitive key's value reached via
+// PutInt/PutLong/PutBool/PutDouble/PutByte/PutShort (any scalar Go type other than string) printed
+// in full cleartext. Proven live-reachable via interactive.go's putJSONValue, which routes any bare
+// JSON number param to PutLong with no key-name restriction -- an operator typing
+// `account.login.new {"verifyCode": 837291}` used to leak 837291 in cleartext through
+// handleInteractiveLine's params.StringRedacted() logging. redactSFSValue's fallback is now the
+// fixed "[REDACTED]" placeholder, so every scalar type is masked regardless of shape.
+func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
+	cases := []struct {
+		name string
+		put  func(o *SFSObject, key string)
+		want string // substring that must NOT appear raw in the output
+	}{
+		{"PutInt", func(o *SFSObject, key string) { o.PutInt(key, 725310) }, "725310"},
+		{"PutLong", func(o *SFSObject, key string) { o.PutLong(key, 88613579246) }, "88613579246"},
+		{"PutDouble", func(o *SFSObject, key string) { o.PutDouble(key, 90210.5) }, "90210.5"},
+		{"PutByte", func(o *SFSObject, key string) { o.PutByte(key, 0xAB) }, "171"},
+		{"PutShort", func(o *SFSObject, key string) { o.PutShort(key, -12321) }, "-12321"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := NewSFSObject()
+			c.put(o, "verifyCode")
+			o.PutUtfString("un", "player-one")
+
+			got := o.StringRedacted()
+
+			if strings.Contains(got, c.want) {
+				t.Errorf("StringRedacted leaks a %s scalar value under a sensitive key in cleartext (found %q): %s", c.name, c.want, got)
+			}
+			if !strings.Contains(got, "verifyCode=[REDACTED]") {
+				t.Errorf("StringRedacted should mask a %s scalar value under a sensitive key via the fail-closed [REDACTED] fallback, got: %s", c.name, got)
+			}
+			if !strings.Contains(got, "player-one") {
+				t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+			}
+		})
+	}
+
+	// PutBool is checked separately: "true"/"false" are too generic to safely substring-search for
+	// accidental leakage, so this instead asserts the exact masked shape directly.
+	t.Run("PutBool", func(t *testing.T) {
+		o := NewSFSObject()
+		o.PutBool("verifyCode", true)
+		o.PutUtfString("un", "player-one")
+
+		got := o.StringRedacted()
+		if !strings.Contains(got, "verifyCode=[REDACTED]") {
+			t.Errorf("StringRedacted should mask a PutBool scalar value under a sensitive key via the fail-closed [REDACTED] fallback, got: %s", got)
+		}
+	})
+}
+
+// TestRedactSFSValueMasksNestedSFSObjectUnderSensitiveKey is the round-16 regression test for Fix
+// 1b: redactSFSValue's fallback for a nested *SFSObject value under a sensitive key used to
+// delegate to formatSFSValueRedacted(v), whose own *SFSObject case calls the NESTED object's OWN
+// StringRedacted() -- which only re-checks the NESTED object's OWN key names against
+// sensitiveSFSKeys, completely losing the fact that the OUTER key was already known-sensitive. A
+// secret sitting under an ordinary-looking sub-key name inside that nested object (e.g.
+// {loginKey: {value: "the-real-secret"}}) used to print in full. redactSFSValue now has an
+// explicit *SFSObject case that blanket-masks by field count instead, mirroring the *SFSArray
+// case's style.
+func TestRedactSFSValueMasksNestedSFSObjectUnderSensitiveKey(t *testing.T) {
+	const secretValue = "the-real-secret-nested-under-an-ordinary-subkey-must-not-leak"
+
+	inner := NewSFSObject()
+	inner.PutUtfString("value", secretValue) // "value" is not itself a sensitive key name
+
+	o := NewSFSObject()
+	o.PutSFSObject("loginKey", inner)
+	o.PutUtfString("un", "player-one")
+
+	got := o.StringRedacted()
+
+	if strings.Contains(got, secretValue) {
+		t.Errorf("StringRedacted leaks a secret nested inside a *SFSObject under a sensitive key, via an ordinary-looking sub-key name: %s", got)
+	}
+	if !strings.Contains(got, "loginKey=[REDACTED 1 fields]") {
+		t.Errorf("StringRedacted should blanket-mask a nested *SFSObject under a sensitive key by field count, got: %s", got)
+	}
+	if !strings.Contains(got, "player-one") {
+		t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+	}
+}
+
+// TestRedactSFSValueNilPointerUnderSensitiveKeyDoesNotPanic is the round-16 regression test for
+// Fix 2 (and the *SFSObject analog added alongside Fix 1a): redactSFSValue's existing *SFSArray
+// case had no nil check -- PutSFSArray(sensitiveKey, (*SFSArray)(nil)) followed by
+// StringRedacted() panicked with a nil pointer dereference, since the type assertion succeeds
+// (ok=true) for a nil pointer of the right dynamic type, and then `arr.items` dereferences it.
+// The new *SFSObject case added by Fix 1a is checked for the same class of bug too.
+func TestRedactSFSValueNilPointerUnderSensitiveKeyDoesNotPanic(t *testing.T) {
+	t.Run("nil *SFSArray under a sensitive key", func(t *testing.T) {
+		var nilArr *SFSArray
+		o := NewSFSObject()
+		o.PutSFSArray("loginKey", nilArr)
+		o.PutUtfString("un", "player-one")
+
+		var got string
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("StringRedacted panicked on a nil *SFSArray under a sensitive key: %v", r)
+				}
+			}()
+			got = o.StringRedacted()
+		}()
+		if !strings.Contains(got, "loginKey=<nil>") {
+			t.Errorf("StringRedacted() on a nil *SFSArray under a sensitive key = %q, want it to contain \"loginKey=<nil>\"", got)
+		}
+	})
+
+	t.Run("nil *SFSObject under a sensitive key", func(t *testing.T) {
+		var nilObj *SFSObject
+		o := NewSFSObject()
+		o.PutSFSObject("loginKey", nilObj)
+		o.PutUtfString("un", "player-one")
+
+		var got string
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("StringRedacted panicked on a nil *SFSObject under a sensitive key: %v", r)
+				}
+			}()
+			got = o.StringRedacted()
+		}()
+		if !strings.Contains(got, "loginKey=<nil>") {
+			t.Errorf("StringRedacted() on a nil *SFSObject under a sensitive key = %q, want it to contain \"loginKey=<nil>\"", got)
+		}
+	})
+}
+
+// TestStringRedactedMasksFix4SensitiveKeys is the round-16 regression test for Fix 4:
+// sensitiveSFSKeys was missing gcmRegisterId/parseRegisterId (push-notification device tokens,
+// same actionable-device-targeting risk class as firebaseId), googleName (a real person's Google
+// account display name -- more directly PII than a device token), mt (undocumented meaning, same
+// field cluster per docs/live-validation.mdx), and simOp/simOpName/phone_model/osVersion/
+// phone_screen/phone_native_screen (the rest of the device/carrier-identifier cluster) -- all
+// confirmed real fields identity.go's BuildLoginParams constructs. None of these leak from this Go
+// client's own placeholder traffic today, but decode.go's -decode-stream tool would print real
+// values for these fields in cleartext when decoding a genuinely captured non-Go-client login.
+func TestStringRedactedMasksFix4SensitiveKeys(t *testing.T) {
+	secrets := map[string]string{
+		"gcmRegisterId":       "secret-gcmregisterid-must-not-leak-abc123",
+		"parseRegisterId":     "secret-parseregisterid-must-not-leak-def456",
+		"googleName":          "Secret Real Person Name Must Not Leak",
+		"mt":                  "secret-mt-must-not-leak-ghi789",
+		"simOp":               "secret-simop-must-not-leak-jkl012",
+		"simOpName":           "secret-simopname-must-not-leak-mno345",
+		"phone_model":         "secret-phonemodel-must-not-leak-pqr678",
+		"osVersion":           "secret-osversion-must-not-leak-stu901",
+		"phone_screen":        "secret-phonescreen-must-not-leak-vwx234",
+		"phone_native_screen": "secret-phonenativescreen-must-not-leak-yz567",
+	}
+
+	o := NewSFSObject()
+	for key, val := range secrets {
+		o.PutUtfString(key, val)
+	}
+	o.PutUtfString("un", "player-one")
+
+	got := o.StringRedacted()
+
+	for key, secret := range secrets {
+		if strings.Contains(got, secret) {
+			t.Errorf("StringRedacted leaks %q's value in cleartext: %s", key, got)
+		}
+	}
+	if !strings.Contains(got, "player-one") {
+		t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+	}
+}
+
+// TestEncodeObjectNilNestedValueReturnsErrorNotPanic is the round-16 regression test for Fix 3,
+// mirroring round 15's TestNilNestedValueDoesNotPanic (the decode/format-side fix) but for the
+// encode path: writeValuePayload's sfsObjectType case (`inner := v.Val.(*SFSObject)` then
+// `len(inner.keys)`) and sfsArrayType case (`inner := v.Val.(*SFSArray)` then `len(inner.items)`)
+// used to panic with a nil pointer dereference on PutSFSObject(key, nil)/PutSFSArray(key, nil) --
+// the type assertion succeeds (ok=true) for a nil pointer of the right dynamic type, so
+// `inner.keys`/`inner.items` dereferenced it. No current call site in this repo passes nil here
+// (login.go/identity.go/crossserver.go/conn.go all confirmed via grep), so this was latent, not
+// active -- but a real crash-on-future-mistake vector on the write path, mirroring what round 15
+// already fixed on the read path. EncodeObject now returns a clean error instead of panicking.
+func TestEncodeObjectNilNestedValueReturnsErrorNotPanic(t *testing.T) {
+	t.Run("nil *SFSObject value", func(t *testing.T) {
+		var nilObj *SFSObject
+		o := NewSFSObject()
+		o.PutSFSObject("child", nilObj)
+		o.PutUtfString("un", "player-one")
+
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("EncodeObject panicked on a nil *SFSObject value: %v", r)
+				}
+			}()
+			_, err = EncodeObject(o)
+		}()
+		if err == nil {
+			t.Fatal("EncodeObject with a nil *SFSObject value should return an error, got nil")
+		}
+	})
+
+	t.Run("nil *SFSArray value", func(t *testing.T) {
+		var nilArr *SFSArray
+		o := NewSFSObject()
+		o.PutSFSArray("child", nilArr)
+		o.PutUtfString("un", "player-one")
+
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("EncodeObject panicked on a nil *SFSArray value: %v", r)
+				}
+			}()
+			_, err = EncodeObject(o)
+		}()
+		if err == nil {
+			t.Fatal("EncodeObject with a nil *SFSArray value should return an error, got nil")
+		}
+	})
+
+	t.Run("nil *SFSObject value nested two levels deep", func(t *testing.T) {
+		var nilObj *SFSObject
+		inner := NewSFSObject()
+		inner.PutSFSObject("grandchild", nilObj)
+
+		o := NewSFSObject()
+		o.PutSFSObject("child", inner)
+
+		var err error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("EncodeObject panicked on a nil *SFSObject value nested two levels deep: %v", r)
+				}
+			}()
+			_, err = EncodeObject(o)
+		}()
+		if err == nil {
+			t.Fatal("EncodeObject with a nil *SFSObject value nested two levels deep should return an error, got nil")
+		}
+	})
+}

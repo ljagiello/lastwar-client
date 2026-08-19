@@ -200,6 +200,79 @@ func TestStateFilePathWarnsAndFallsBackWhenHomeDirUnavailable(t *testing.T) {
 	}
 }
 
+// TestLoadOrCreateDeviceIdentityDoesNotClobberOnReadFailure confirms the fix for the bug where
+// loadOrCreateDeviceIdentity treated ANY device-id read error (not just os.IsNotExist) as "no
+// identity yet" -- silently fabricating and persisting a brand-new random device ID over an
+// EXISTING, valid one, permanently losing the identity the server already recognizes. A directory
+// sitting where the state file is expected reproduces a reliable non-ENOENT read failure (unlike
+// permission bits, this also works when tests run as root) without needing to fabricate a
+// genuinely unreadable-but-present regular file. Before the fix, this test's second assertion
+// would fail: loadOrCreateDeviceIdentity would return success with a freshly-generated DeviceID
+// instead of surfacing the read error.
+func TestLoadOrCreateDeviceIdentityDoesNotClobberOnReadFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// Put a directory where the device-id state file is expected, so os.ReadFile fails with a
+	// non-ENOENT error ("is a directory") instead of the plain "file doesn't exist yet" case.
+	if err := os.Mkdir(deviceIDStatePath(), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	_, err := loadOrCreateDeviceIdentity()
+	if err == nil {
+		t.Fatal("loadOrCreateDeviceIdentity: got nil error for a non-ENOENT device-id read failure, want an error -- it must not silently fabricate a replacement identity")
+	}
+	if !strings.Contains(buf.String(), "refusing to fabricate a replacement identity") {
+		t.Errorf("expected a warning distinguishing this from the genuine first-run case, got: %s", buf.String())
+	}
+
+	// The directory must be left untouched -- no plain file should have been written over/into
+	// it, confirming nothing was clobbered.
+	fi, err := os.Stat(deviceIDStatePath())
+	if err != nil {
+		t.Fatalf("stat device id path: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Errorf("device id path is no longer a directory -- something wrote over it")
+	}
+}
+
+// TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropGameUidOnReadFailure confirms readTrimmed's
+// fix applies to GameUid/Username/LoginKey too, not just the device id: a non-ENOENT read failure
+// on an EXISTING gameUid state file must not be silently treated as "" (which, per gslOptFor in
+// login.go, would pick opt=new instead of the correct opt=fix even though the real gameUid was on
+// disk the whole time). Before the fix this returned (identity, nil) with GameUid == ""; now it
+// must surface the error instead.
+func TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropGameUidOnReadFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// A directory in place of the gameUid state file reproduces a reliable non-ENOENT read
+	// failure on an otherwise-legitimate device id (created fresh on this same call).
+	if err := os.Mkdir(gameUidStatePath(), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	_, err := loadOrCreateDeviceIdentity()
+	if err == nil {
+		t.Fatal("loadOrCreateDeviceIdentity: got nil error for a non-ENOENT gameUid read failure, want an error rather than a silently-empty GameUid")
+	}
+	if !strings.Contains(buf.String(), "failed to read gameUid state file") {
+		t.Errorf("expected a warning naming the failed gameUid read, got: %s", buf.String())
+	}
+}
+
 // TestAirKeyMatchesKnownValue is AirKey()'s counterpart to selftest_test.go's
 // TestPackageSignMatchesKnownValue -- AirKey() is just as wire-format-critical (it's the
 // `lw_airKey`/`airKey` value the server echoes back and validates, per identity.go's AirKey doc

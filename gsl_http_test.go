@@ -93,6 +93,75 @@ func TestGetServerListAgainstFakeServer(t *testing.T) {
 	}
 }
 
+// TestGetServerListFallsBackToLoginServerWhenServerListEmpty covers the opt=new fallback added to
+// applyLoginServerFallback (gsl.go): a fake GSL server returns an empty ServerList but a populated
+// LoginServer -- the field AccountServerInfo's own doc comment says exists specifically for a
+// brand-new device with no account/state yet (opt=new). Before this fallback, login.go's caller
+// unconditionally treated an empty ServerList as "no servers returned" for every opt, including
+// this exact opt=new case the field documents itself as covering. This does not assert anything
+// about real server behavior (no live capture of this scenario exists in this repo yet) -- it only
+// confirms GetServerList's own, conservative, additive fallback logic behaves as coded.
+func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Same plaintext-fallback shape as TestGetServerListAgainstFakeServer, but with an empty
+		// ServerList and a populated LoginServer instead.
+		resp := LoginServerListRespon{
+			Code:       "0",
+			ServerList: []LoginServerInfo{},
+			LoginServer: &AccountServerInfo{
+				IP:     "9.9.9.9",
+				Port:   12345,
+				WsIP:   "9.9.9.9",
+				WsPort: 12346,
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	if err != nil {
+		t.Fatalf("GetServerList: %v", err)
+	}
+	if len(lsr.ServerList) != 1 {
+		t.Fatalf("ServerList = %+v, want a single synthesized entry from LoginServer", lsr.ServerList)
+	}
+	got := lsr.ServerList[0]
+	if got.IP != "9.9.9.9" || got.Port != 12345 || got.WsIP != "9.9.9.9" {
+		t.Errorf("synthesized ServerList[0] = %+v, want IP/Port/WsIP from LoginServer", got)
+	}
+
+	// Same scenario but for a non-"new" opt: the fallback must NOT fire, so callers like
+	// crossserver.go's opt=fix redirect-refresh and main.go's opt=refresh see zero behavior
+	// change -- an empty ServerList must still surface as empty, letting the existing "no
+	// servers returned" handling in those callers behave exactly as it did before this fix.
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := LoginServerListRespon{
+			Code:       "0",
+			ServerList: []LoginServerInfo{},
+			LoginServer: &AccountServerInfo{
+				IP:   "9.9.9.9",
+				Port: 12345,
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server2.Close()
+
+	lsrFix, err := GetServerList(defaultHTTPClient(), server2.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "fix"}, "", "")
+	if err != nil {
+		t.Fatalf("GetServerList: %v", err)
+	}
+	if len(lsrFix.ServerList) != 0 {
+		t.Errorf("ServerList = %+v, want it to stay empty for opt=fix (fallback is scoped to opt=new only)", lsrFix.ServerList)
+	}
+}
+
 // TestGetServerListRejectsOversizedResponse exercises maxGSLResponseSize's rejection branch on
 // the GetServerList side (its own io.ReadAll/LimitReader call site, separate from CheckVersion's).
 func TestGetServerListRejectsOversizedResponse(t *testing.T) {

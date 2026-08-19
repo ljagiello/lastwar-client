@@ -172,17 +172,34 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 // OnCreate confirms the wire request needs only `uids`, no `type` -- so
 // every discovered mail can be marked read in one pass regardless of
 // category, unlike the reward claim below.
+//
+// Bug fixed here (round 16): ListMail deliberately returns whatever mail
+// it already collected before a mid-pagination sendAndWait failure (see
+// its own doc comment) rather than nil, specifically so a transient
+// failure on e.g. page 3 of a multi-page mailbox doesn't have to cost the
+// caller pages 1-2's worth of already-identified mail. An earlier version
+// of this function threw that away anyway: it returned immediately on
+// `err != nil` without ever looking at the `mail` ListMail still handed
+// back, discarding every already-identified entry and claiming nothing
+// for that run even though the data needed to do so was already fully in
+// hand. Fixed by folding the ListMail error into `errs` (the same
+// error-accumulation slice the batch-processing loops below already use)
+// instead of returning early, so the rest of this function runs its
+// normal batch-claiming logic against whatever partial `mail` slice
+// ListMail managed to collect.
 func ClaimAllMail(conn *GameConn) error {
+	var errs []error
+
 	mail, err := ListMail(conn)
 	if err != nil {
-		return fmt.Errorf("list mail: %w", err)
+		errs = append(errs, fmt.Errorf("list mail: %w", err))
 	}
 	if len(mail) == 0 {
-		slog.Info("no mail found")
-		return nil
+		if err == nil {
+			slog.Info("no mail found")
+		}
+		return errors.Join(errs...)
 	}
-
-	var errs []error
 
 	allUIDs := make([]string, len(mail))
 	for i, m := range mail {
@@ -204,14 +221,26 @@ func ClaimAllMail(conn *GameConn) error {
 		maxUIDsBytes  = 60000
 	)
 	offset := 0
+	readFailed := false
 	for _, batch := range batchByCountAndBytes(allUIDs, readBatchSize, maxUIDsBytes) {
 		readParams := NewSFSObject()
 		readParams.PutUtfString("uids", strings.Join(batch, ","))
 		_, err := sendAndWait(conn, fmt.Sprintf("mail read-status (batch %d, size %d)", offset, len(batch)), "mail.read.status.betch", readParams)
+		if err != nil {
+			readFailed = true
+		}
 		errs = append(errs, err)
 		offset += len(batch)
 	}
-	slog.Info("marked mail as read", "count", len(allUIDs))
+	// Only claim the full count succeeded if every read-status batch above actually did -- a
+	// failure still surfaces via this function's final errors.Join regardless, but this line
+	// specifically must not overstate what happened. If any batch failed, log the attempt (not a
+	// completed fact) instead.
+	if readFailed {
+		slog.Warn("mark mail as read had failures", "attempted", len(allUIDs))
+	} else {
+		slog.Info("marked mail as read", "count", len(allUIDs))
+	}
 
 	byType := groupUnclaimedByType(mail)
 	if len(byType) == 0 {

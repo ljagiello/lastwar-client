@@ -139,10 +139,55 @@ func usernameStatePath() string { return stateFilePath(".lastwar_goclient_userna
 func gameUidStatePath() string  { return stateFilePath(".lastwar_goclient_gameuid") }
 func loginKeyStatePath() string { return stateFilePath(".lastwar_goclient_loginkey") }
 
+// readTrimmed reads path and returns its trimmed contents. A missing file (os.IsNotExist) is not
+// an error -- it just means that piece of state hasn't been persisted yet (e.g. first run, or a
+// GameUid/LoginKey not learned yet), and callers should treat it as "" the same as before. Any
+// OTHER read error -- permission denied, I/O failure, a directory sitting where a file was
+// expected, etc. -- is now returned as an error instead of being silently swallowed as "absent":
+// treating a transient failure to read an EXISTING, valid state file the same as "no state yet"
+// is exactly the bug that let loadOrCreateDeviceIdentity fabricate and persist a brand-new random
+// device ID over a real one the server already recognizes, and let a Username/GameUid/LoginKey
+// read hiccup silently return "" and make login.go's gslOptFor pick the wrong opt value even
+// though the real value was sitting on disk the whole time.
+func readTrimmed(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// createDeviceIDStateFile persists a freshly-generated device id, but only if the file doesn't
+// already exist. O_EXCL closes the TOCTOU gap between loadOrCreateDeviceIdentity's earlier
+// read-not-exists check and this write: if some other invocation created the file in between (the
+// documented deployment is a single cron job per machine, so concurrent invocations aren't the
+// primary realistic trigger here, but this is a basic safety margin at negligible cost), this
+// fails with an os.IsExist error instead of silently clobbering whatever that other invocation
+// already wrote -- the caller re-reads rather than overwrites in that case.
+func createDeviceIDStateFile(path, id string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(id)
+	return err
+}
+
 func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
-	id := ""
-	if b, err := os.ReadFile(deviceIDStatePath()); err == nil {
-		id = strings.TrimSpace(string(b))
+	id, err := readTrimmed(deviceIDStatePath())
+	if err != nil {
+		// A non-ENOENT failure reading an EXISTING device-id file must never be treated as "no
+		// identity yet" -- doing so would fabricate and persist a brand-new random device ID
+		// over the real one the server already recognizes, permanently losing it (and leaving
+		// the fabricated deviceId/airKey -- AirKey() derives from DeviceID -- mismatched against
+		// a still-valid persisted loginKey on the next login). Surface the real problem instead
+		// of silently replacing the identity.
+		slog.Warn("failed to read device id state file; refusing to fabricate a replacement identity", "path", deviceIDStatePath(), "error", err)
+		return nil, fmt.Errorf("read device id state: %w", err)
 	}
 	if id == "" {
 		// Fallback path a real client would take if the native UDID call
@@ -152,8 +197,22 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 			return nil, err
 		}
 		id = hex.EncodeToString(raw) + "_n3d"
-		if err := saveStateFile(deviceIDStatePath(), id); err != nil {
-			return nil, fmt.Errorf("persist device id: %w", err)
+		if err := createDeviceIDStateFile(deviceIDStatePath(), id); err != nil {
+			if os.IsExist(err) {
+				// Another invocation created the file between our read-not-exists check above
+				// and this write -- re-read instead of unconditionally overwriting whatever it
+				// persisted; see createDeviceIDStateFile's doc comment.
+				reread, rereadErr := readTrimmed(deviceIDStatePath())
+				if rereadErr != nil {
+					return nil, fmt.Errorf("device id file appeared concurrently and could not be re-read: %w", rereadErr)
+				}
+				if reread == "" {
+					return nil, fmt.Errorf("device id file appeared concurrently but is empty: %s", deviceIDStatePath())
+				}
+				id = reread
+			} else {
+				return nil, fmt.Errorf("persist device id: %w", err)
+			}
 		}
 	}
 	// deviceId+gameUid alone (no loginKey) are sufficient to attempt an
@@ -164,17 +223,26 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 	warnIfLoosePermissions(usernameStatePath())
 	warnIfLoosePermissions(gameUidStatePath())
 	warnIfLoosePermissions(loginKeyStatePath())
-	readTrimmed := func(path string) string {
-		if b, err := os.ReadFile(path); err == nil {
-			return strings.TrimSpace(string(b))
-		}
-		return ""
+	username, err := readTrimmed(usernameStatePath())
+	if err != nil {
+		slog.Warn("failed to read username state file", "path", usernameStatePath(), "error", err)
+		return nil, fmt.Errorf("read username state: %w", err)
+	}
+	gameUid, err := readTrimmed(gameUidStatePath())
+	if err != nil {
+		slog.Warn("failed to read gameUid state file", "path", gameUidStatePath(), "error", err)
+		return nil, fmt.Errorf("read gameUid state: %w", err)
+	}
+	loginKey, err := readTrimmed(loginKeyStatePath())
+	if err != nil {
+		slog.Warn("failed to read loginKey state file", "path", loginKeyStatePath(), "error", err)
+		return nil, fmt.Errorf("read loginKey state: %w", err)
 	}
 	return &deviceIdentity{
 		DeviceID: id,
-		Username: readTrimmed(usernameStatePath()),
-		GameUid:  readTrimmed(gameUidStatePath()),
-		LoginKey: readTrimmed(loginKeyStatePath()),
+		Username: username,
+		GameUid:  gameUid,
+		LoginKey: loginKey,
 	}, nil
 }
 

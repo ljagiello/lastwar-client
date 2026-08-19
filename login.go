@@ -137,6 +137,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	var conn *GameConn
 	var buildings []Building
 	var visitors []Visitor
+	var initErr error
 	gotInit := false
 	redirectHops := 0
 
@@ -284,12 +285,19 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 
 		slog.Info("step 5: waiting for init push sequence")
 		conn.conn.SetReadDeadline(time.Time{})
-		buildings, visitors, gotInit = waitForInitPush(conn, initPushTimeout)
+		buildings, visitors, gotInit, initErr = waitForInitPush(conn, initPushTimeout)
 		if gotInit {
 			slog.Info("got init push", "buildings", len(buildings))
 			break
 		}
-		slog.Error("no init push within timeout", "timeoutMs", initPushTimeout.Milliseconds())
+		if initErr != nil {
+			// A real connection failure (reset, EOF, decode error, ...) surfaced while waiting --
+			// distinct from a genuine silence-until-deadline timeout (initErr == nil in that case).
+			// See waitForInitPush's doc comment for why this distinction matters.
+			slog.Error("no init push: connection failed while waiting", "error", initErr, "timeoutMs", initPushTimeout.Milliseconds())
+		} else {
+			slog.Error("no init push within timeout", "timeoutMs", initPushTimeout.Milliseconds())
+		}
 	}
 	if !gotInit {
 		slog.Warn("giving up on init after all attempts; continuing anyway, building list may be empty")
@@ -437,16 +445,22 @@ func redact(s string) string {
 // (Assembly-CSharp.decompiled.cs:109304, 121428, 122381-122419) -- partway
 // through the wait as a fallback, in case the push itself never arrives
 // (report 15's init_push_missing_after_login finding #2). Returns the
-// parsed building list, the parsed visitor list, and whether `init` was
-// actually seen.
-func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visitor, bool) {
+// parsed building list, the parsed visitor list, whether `init` was
+// actually seen, and the terminal read error: nil on a genuine
+// silence-until-deadline timeout (the expected "server just never sent it"
+// case), or the real non-timeout error (connection reset, EOF, a decode
+// error, ...) when the wait ended for some other reason -- mirroring
+// waitFor's sibling helper, which returns its own ReadEnvelope error
+// verbatim rather than collapsing every failure mode into one generic
+// "gave up" outcome.
+func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visitor, bool, error) {
 	deadline := time.Now().Add(timeout)
 	halfway := time.Now().Add(timeout / 2)
 	sentActivePull := false
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return nil, nil, false
+			return nil, nil, false, nil
 		}
 
 		if !sentActivePull && !time.Now().Before(halfway) {
@@ -480,14 +494,21 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 				// "give up."
 				continue
 			}
-			return nil, nil, false
+			if isTimeout {
+				// Genuine silence-until-deadline: the expected, unremarkable outcome when the
+				// server just never sends `init`. No error to report.
+				return nil, nil, false, nil
+			}
+			// A real connection failure, not a deadline -- surface it so the caller can log
+			// what actually went wrong instead of a generic timeout message.
+			return nil, nil, false, err
 		}
 		msg, ok := env.AsExtension()
 		if !ok {
 			continue
 		}
 		if msg.Cmd == "init" {
-			return ParseInitBuildings(msg.Params), ParseInitVisitors(msg.Params), true
+			return ParseInitBuildings(msg.Params), ParseInitVisitors(msg.Params), true, nil
 		}
 		slog.Debug("skipped push while waiting for init", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
 	}

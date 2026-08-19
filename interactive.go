@@ -100,6 +100,18 @@ func handleInteractiveLine(conn *GameConn, line string) {
 			slog.Error("bad JSON params", "cmd", cmd, "error", err)
 			return
 		}
+		if dec.More() {
+			// Decode only consumes the first well-formed JSON value on the line -- it
+			// doesn't error just because there are leftover bytes after it (e.g. a stray
+			// trailing token, or a second concatenated JSON value). Left unchecked, that
+			// trailing text is silently discarded and the command sends with an
+			// incomplete/misleading view of what the operator typed. Same "do not echo
+			// the raw text" reasoning as the Decode-error branch above applies here too,
+			// since the trailing text could itself be an accidentally-appended
+			// credential fragment.
+			slog.Error("bad JSON params", "cmd", cmd, "error", fmt.Errorf("trailing data after JSON value"))
+			return
+		}
 		for k, v := range raw {
 			if !putJSONValue(params, k, v) {
 				slog.Error("aborting send: unsupported param value, would send incomplete params", "cmd", cmd, "key", k)

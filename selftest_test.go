@@ -8,7 +8,7 @@ import (
 
 func TestSFSObjectRoundTrip(t *testing.T) {
 	o := NewSFSObject()
-	o.PutUtfString("mail", "jagiello.lukasz@gmail.com")
+	o.PutUtfString("mail", "roundtrip-test@example.com")
 	o.PutInt("type", 0)
 	o.PutLong("bignum", 1234567890123)
 	o.PutBool("flag", true)
@@ -28,7 +28,7 @@ func TestSFSObjectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if decoded.GetString("mail") != "jagiello.lukasz@gmail.com" {
+	if decoded.GetString("mail") != "roundtrip-test@example.com" {
 		t.Errorf("mail mismatch: %q", decoded.GetString("mail"))
 	}
 	if decoded.GetInt("type") != 0 {
