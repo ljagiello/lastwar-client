@@ -681,6 +681,123 @@ func TestCollectAllAggregatesErrorsWithoutShortCircuiting(t *testing.T) {
 	}
 }
 
+// TestCollectAllCapsCollectibleBuildingsAndLogsWarning is the round-24 regression test for
+// CollectAll's maxCollectibleBuildingsPerRun sanity cap (buildings.go): unlike GreetVisitors
+// (visitors.go), which now enforces the init push's own server-sent `maxNum` field, there is no
+// server-sent "expected building count" anywhere in this protocol, so CollectAll's per-building
+// collect loop needed a purely defensive, client-side ceiling instead -- closing the same
+// unbounded-hang threat model (an arbitrary/hostile -cs-ip peer that simply never responds, each
+// collect call costing up to a full defaultCmdTimeout) as buildings.go's own capDeadline (round 20)
+// and ParseInitVisitors' maxVisitorsDefensiveCeiling (visitors.go), just for a different loop.
+//
+// The fake account here owns maxCollectibleBuildingsPerRun+50 collectible buildings (all
+// BuildingFarmland, distinct uuids assigned in ascending order) -- comfortably over the cap. The
+// fake server answers exactly fixedSubActionRequests (the 8 non-building sub-actions' own request
+// count, mirroring TestCollectAllAggregatesErrorsWithoutShortCircuiting's wantRequests formula with
+// visitors=nil so GreetVisitors contributes 0) plus maxCollectibleBuildingsPerRun
+// building.production.collect requests, with plain success responses throughout (no injected
+// failures -- this test is only about the cap, not error aggregation). If CollectAll didn't cap the
+// list, it would attempt one collect per building (350 of them) and the fake server -- which only
+// answers maxCollectibleBuildingsPerRun of them before its goroutine returns -- would leave
+// CollectAll's 301st collect call hanging with nobody to answer it, and this test's own done-channel
+// wait would time out instead of completing quickly.
+//
+// Mutation check: reverting the `else if len(toCollect) > maxCollectibleBuildingsPerRun { ... }`
+// truncation in buildings.go's CollectAll back out makes this test fail: either the done-channel
+// wait times out (the fake server starves waiting for a 301st collect request nobody sent, while
+// CollectAll is itself blocked on a request nobody will ever answer), or -- if the fake server were
+// instead sized to answer all 350 -- collectedUUIDs would have 350 entries instead of exactly
+// maxCollectibleBuildingsPerRun and no truncation warning would be logged.
+func TestCollectAllCapsCollectibleBuildingsAndLogsWarning(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const numBuildings = maxCollectibleBuildingsPerRun + 50
+	buildings := make([]Building, 0, numBuildings)
+	for i := 0; i < numBuildings; i++ {
+		buildings = append(buildings, newTestBuilding(int64(10000+i), BuildingFarmland, 1))
+	}
+
+	// Mirrors TestCollectAllAggregatesErrorsWithoutShortCircuiting's wantRequests formula: idle(2) +
+	// mail-list(1) + help(1) + gifts(2) + tech-refresh(1) + vip(2) = 9, with visitors=nil so
+	// GreetVisitors contributes 0 requests of its own.
+	const fixedSubActionRequests = 9
+	const wantRequests = fixedSubActionRequests + maxCollectibleBuildingsPerRun
+
+	var collectedUUIDs []int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < wantRequests; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("request %d: ReadEnvelope: %v", i, err)
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				t.Errorf("request %d: not a well-formed extension message", i)
+				return
+			}
+
+			resp := NewSFSObject()
+			replyCmd := msg.Cmd
+			switch msg.Cmd {
+			case "chat.get.system.mails":
+				// ListMail (mail.go) waits under a different cmd name -- see
+				// TestCollectAllAggregatesErrorsWithoutShortCircuiting's identical case.
+				replyCmd = "push.chat.get.system.mails"
+			case "science.data.refresh":
+				// No "allianceScience" field: DonateRecommendedAllianceTech reads that as "no tech
+				// tree data" and returns nil without a second al.science.donate call.
+			case "building.production.collect":
+				collectedUUIDs = append(collectedUUIDs, msg.Params.GetLong("uuid"))
+				resp.PutBool("success", true)
+			default: // lw.pve.idle.reward, al.help.all, alliance.reward.allreceive, vip.add.login.score, vip.get.every.day.reward
+				resp.PutBool("success", true)
+			}
+			_ = server.SendExtension(replyCmd, resp)
+		}
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	err := CollectAll(client, buildings, nil)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake server never finished reading all expected requests (a missing/broken cap would leave it waiting for more building.production.collect requests than CollectAll ever sends)")
+	}
+
+	if err != nil {
+		t.Fatalf("CollectAll() = %v, want nil (no genuine failure was injected -- this test is only about the collectible-building sanity cap)", err)
+	}
+	if len(collectedUUIDs) != maxCollectibleBuildingsPerRun {
+		t.Fatalf("fake server received %d building.production.collect requests, want exactly %d (the sanity cap, not one per owned building -- account owns %d)",
+			len(collectedUUIDs), maxCollectibleBuildingsPerRun, numBuildings)
+	}
+	for i, uuid := range collectedUUIDs {
+		if want := int64(10000 + i); uuid != want {
+			t.Errorf("collectedUUIDs[%d] = %d, want %d (the first %d buildings, in order)", i, uuid, want, maxCollectibleBuildingsPerRun)
+			break
+		}
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "collectible building count exceeds sanity cap") {
+		t.Errorf("expected a truncation warning log, got:\n%s", logged)
+	}
+	if wantCount := fmt.Sprintf("count=%d", numBuildings); !strings.Contains(logged, wantCount) {
+		t.Errorf("truncation warning log missing %q, got:\n%s", wantCount, logged)
+	}
+	if wantCap := fmt.Sprintf("cap=%d", maxCollectibleBuildingsPerRun); !strings.Contains(logged, wantCap) {
+		t.Errorf("truncation warning log missing %q, got:\n%s", wantCap, logged)
+	}
+}
+
 // fakeNetErrConn is a minimal net.Conn whose every Read fails with a fakeNetError. By default
 // (timeout: false, the zero value -- what every bare fakeNetErrConn{} literal across this package's
 // other _test.go files gets) that's a genuine connection-level failure (Timeout()==false), standing

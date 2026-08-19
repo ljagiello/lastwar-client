@@ -561,6 +561,66 @@ func TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 	}
 }
 
+// TestDoCrossServerLoginRejectsEmptyInitialIP is the round-24 regression test for
+// DoCrossServerLogin's INITIAL dial address: it used to build addr via a raw
+// fmt.Sprintf("%s:%d", firstHost(p.IP), p.Port) with no validation at all -- unlike this same
+// function's own redirect branch (TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP above) and
+// both of login.go's Login() call sites, all three of which route through buildBaseZoneLoginAddr
+// and reject an empty resolved host with a clear error. A pipe-malformed ip like "|1.2.3.4" is
+// non-empty raw but firstHost resolves it down to "", so the old code built a ":<port>"-shaped
+// address, which Go's "host:port" dial syntax silently treats as the loopback interface instead of
+// failing clearly. No fake game server is needed here -- the fix must reject this before ever
+// attempting to dial one.
+func TestDoCrossServerLoginRejectsEmptyInitialIP(t *testing.T) {
+	p := CrossServerLoginParams{
+		IP:        "|1.2.3.4", // firstHost("|1.2.3.4") == "" -- the malformed case
+		Port:      9339,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+	result, err := DoCrossServerLogin(p)
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("expected an error for an empty/pipe-malformed initial ip, got nil")
+	}
+	if strings.Contains(err.Error(), ":9339") {
+		t.Errorf("err = %q, must not contain a \":<port>\"-shaped address (that's the loopback-dial footgun this guard exists to prevent)", err.Error())
+	}
+}
+
+// TestDoCrossServerLoginRejectsNonPositiveInitialPort is the port-half counterpart to
+// TestDoCrossServerLoginRejectsEmptyInitialIP: a non-positive Port (e.g. the zero value a caller
+// forgets to set) must also be rejected clearly by the INITIAL dial's buildBaseZoneLoginAddr call,
+// not silently turned into a "host:0"-shaped address that Go's dial syntax would treat as "any
+// port" rather than erroring. No fake game server is needed -- the fix must reject this before
+// ever attempting to dial one.
+func TestDoCrossServerLoginRejectsNonPositiveInitialPort(t *testing.T) {
+	p := CrossServerLoginParams{
+		IP:        "203.0.113.9",
+		Port:      0,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+	result, err := DoCrossServerLogin(p)
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("expected an error for a non-positive initial port, got nil")
+	}
+	if strings.Contains(err.Error(), "203.0.113.9:0") {
+		t.Errorf("err = %q, must not contain a \"host:0\"-shaped address (that's the footgun this guard exists to prevent)", err.Error())
+	}
+}
+
 // TestDoCrossServerLoginRedirectRefreshesGameUid exercises the major fix in crossserver.go's
 // serverInfo redirect block: the mid-redirect GSL refresh (opt=fix) returns a fresh serverList
 // entry alongside the fresh access token, and its gameUid must be propagated into p.GameUid --

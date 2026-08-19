@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"os"
 	"regexp"
@@ -309,5 +310,66 @@ func TestCrossServerFlagNamesMatchesDeclarations(t *testing.T) {
 		if !declared[name] {
 			t.Errorf("crossServerFlagNames recognizes %q but no such flag is declared on the FlagSet in main() -- remove it, or check whether the flag was renamed", name)
 		}
+	}
+}
+
+// TestShouldAbortBeforeInteractive is the fast, deterministic unit test of the decision extracted
+// from both -collect call sites (main() and runCrossServerTest) as this round's Fix 1:
+// shouldAbortBeforeInteractive(err, interactiveRequested) in main.go. See its doc comment there for
+// the full rationale; summarized here as the shape this table pins down:
+//
+//   - a nil CollectAll error never aborts, regardless of -interactive.
+//   - a genuinely fatal error (containsNonTimeoutNetError(err) == true -- a real net.Error with
+//     Timeout()==false anywhere in err's tree) always aborts, regardless of -interactive: staying
+//     connected to a definitely-dead connection would be useless.
+//   - any other non-nil error (an ordinary per-item benign-timeout net.Error, a plain decoded
+//     business-logic failure, or a join of only those) aborts ONLY when -interactive was NOT
+//     requested -- preserving today's -collect-only behavior unchanged -- and does NOT abort when
+//     -interactive WAS requested, which is the actual bug this round fixes: before it, an operator's
+//     explicit request to stay connected was silently discarded on exactly this class of error.
+//
+// Reuses buildings_orchestration_test.go's fakeNetError (same package) for the net.Error cases,
+// rather than redefining an equivalent type here, and errors.Join to prove the joined/buried-error
+// case is handled the same way containsNonTimeoutNetError itself walks it (a genuine non-timeout
+// net.Error anywhere in the tree wins, even alongside otherwise-benign siblings).
+func TestShouldAbortBeforeInteractive(t *testing.T) {
+	genuineNetErr := fakeNetError{timeout: false}
+	benignNetErr := fakeNetError{timeout: true}
+	businessErr := errors.New("some decoded errorCode failure")
+
+	cases := []struct {
+		name                 string
+		err                  error
+		interactiveRequested bool
+		want                 bool
+	}{
+		{"nil error, interactive requested", nil, true, false},
+		{"nil error, interactive not requested", nil, false, false},
+		{"genuine non-timeout net.Error, interactive requested -- still aborts (dead connection)", genuineNetErr, true, true},
+		{"genuine non-timeout net.Error, interactive not requested -- aborts", genuineNetErr, false, true},
+		{"benign timeout net.Error, interactive requested -- does NOT abort (this round's fix)", benignNetErr, true, false},
+		{"benign timeout net.Error, interactive not requested -- still aborts (unchanged -collect-only behavior)", benignNetErr, false, true},
+		{"plain business-logic error (not a net.Error at all), interactive requested -- does NOT abort", businessErr, true, false},
+		{"plain business-logic error, interactive not requested -- still aborts", businessErr, false, true},
+		{
+			"joined error: benign timeout + genuine non-timeout net.Error buried in it, interactive requested -- still aborts",
+			errors.Join(businessErr, benignNetErr, genuineNetErr),
+			true,
+			true,
+		},
+		{
+			"joined error of only benign-timeout/business failures, interactive requested -- does NOT abort",
+			errors.Join(businessErr, benignNetErr),
+			true,
+			false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := shouldAbortBeforeInteractive(c.err, c.interactiveRequested)
+			if got != c.want {
+				t.Errorf("shouldAbortBeforeInteractive(err=%v, interactiveRequested=%v) = %v, want %v", c.err, c.interactiveRequested, got, c.want)
+			}
+		})
 	}
 }

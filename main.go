@@ -36,7 +36,7 @@ func main() {
 	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip -- also sent on every -cs-rt GSL opt=refresh call, unlike -cs-zone (which only matters for -cs-ip): gameUid is passed to GetServerList unconditionally, so it matters even for a bare -cs-rt with no -cs-ip at all")
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
-	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- IF the refresh response includes a non-empty server list, it REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and IF it includes a fresh access token, that REPLACES any explicitly-passed -cs-at; either can come back empty, in which case the corresponding -cs-* value passed here (or loaded from a session config) is used unchanged instead -- a warning is logged when that leaves a possibly-stale -cs-at in place with no refresh")
+	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- IF the refresh response includes a non-empty server list, it REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and IF it includes a fresh access token, that REPLACES any explicitly-passed -cs-at; either can come back empty, in which case the corresponding -cs-* value passed here (or loaded from a session config) is used unchanged instead -- a warning is logged when that leaves a possibly-stale -cs-at in place with no refresh. If BOTH come back empty (no fresh access token AND no server list), that is NOT a graceful fallback: it is treated as a likely-rejected/expired refresh token and exits with code 2")
 	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at (e.g. one captured live from a real client) -- a cheap CheckVersion call is still made, to enable mid-login redirect-refresh capability, but no other GSL call happens unless -cs-rt is also set")
 	csIOS := fs.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
 	handshake := fs.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
@@ -241,7 +241,9 @@ func main() {
 		slog.Info("collecting resources")
 		if err := CollectAll(conn, buildings, visitors); err != nil {
 			slog.Error("collect run had failures", "error", err)
-			os.Exit(1)
+			if shouldAbortBeforeInteractive(err, *interactive != "") {
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -250,6 +252,52 @@ func main() {
 	}
 
 	slog.Info("client exiting")
+}
+
+// shouldAbortBeforeInteractive decides, at both -collect call sites (main() and
+// runCrossServerTest), whether a non-nil CollectAll error should os.Exit(1) right there or fall
+// through to the "if -interactive is set, stay connected" check a few lines later.
+//
+// CollectAll's own doc comment (see buildings.go) is explicit that it issues one independent
+// request per fixed action plus one per collectible building, and a sendAndWait net.Error with
+// Timeout()==true on any one of them is "a normal, expected timeout on one action's response, not
+// evidence the connection is dead" -- not proof the connection, or the rest of the collect run,
+// is actually broken. Before this fix, BOTH call sites treated every non-nil CollectAll error
+// identically to a genuinely dead connection: os.Exit(1) before ever reaching the -interactive
+// check below. An operator who explicitly passed -interactive alongside -collect -- intending to
+// stay connected afterward regardless of whether every single collect action succeeded -- had that
+// explicit request silently discarded on what, given how many independent requests one collect run
+// issues, is not a rare edge case.
+//
+// containsNonTimeoutNetError(err) (buildings.go) is CollectAll's own internal test for "genuinely
+// fatal": a real net.Error with Timeout()==false anywhere in err's tree, as opposed to an ordinary
+// per-item benign timeout or a plain decoded business-logic failure. Reusing it here keeps this
+// function's notion of "fatal" identical to CollectAll's own, rather than inventing a second,
+// possibly-divergent classification.
+//
+//   - err == nil: nothing to abort for.
+//   - containsNonTimeoutNetError(err) == true: the connection is genuinely dead. Abort
+//     unconditionally -- interactive mode against a definitely-dead connection would be useless
+//     regardless of what was requested, so existing os.Exit(1) behavior is preserved as-is.
+//   - err != nil but containsNonTimeoutNetError(err) == false (ordinary business-logic/benign-
+//     timeout failures only): if -interactive was explicitly requested, do NOT abort -- let the
+//     operator's explicit request to stay connected actually take effect (the collect failures
+//     were already logged by the caller before this is consulted, so they remain visible, just not
+//     fatal). If -interactive was NOT requested, preserve the existing os.Exit(1) behavior
+//     unchanged -- this fix is specifically about not discarding an explicit -interactive request,
+//     not about softening the -collect-only case.
+//
+// Taking err and interactiveRequested as plain arguments (rather than being inlined at either call
+// site) is what makes the actual decision unit-testable across representative error shapes without
+// needing a live CollectAll run against a fake server at both call sites.
+func shouldAbortBeforeInteractive(err error, interactiveRequested bool) bool {
+	if err == nil {
+		return false
+	}
+	if containsNonTimeoutNetError(err) {
+		return true
+	}
+	return !interactiveRequested
 }
 
 // decodeModeIgnoredFlags returns which of the given visited (explicitly set on the command line)
@@ -739,7 +787,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 		slog.Info("collecting resources")
 		if err := CollectAll(conn, buildings, visitors); err != nil {
 			slog.Error("collect run had failures", "error", err)
-			os.Exit(1)
+			if shouldAbortBeforeInteractive(err, o.interactive != "") {
+				os.Exit(1)
+			}
 		}
 	}
 

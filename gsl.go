@@ -384,6 +384,17 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 			applyLoginServerFallback(&lsr, opt)
 			return &lsr, nil
 		}
+		// "bin" is present but empty. Without this branch, execution would fall through to
+		// json.Unmarshal(body, &lsr) below against the ORIGINAL top-level envelope (shaped like
+		// {"bin":"",...}), which has none of LoginServerListRespon's fields -- unknown/extra
+		// keys are silently ignored by encoding/json, so lsr would end up completely
+		// zero-valued with a nil error. Both real call sites (login.go's initial GSL call and
+		// the serverInfo-redirect access-token refresh path) treat a nil error as success; the
+		// refresh path in particular never logs anything in that case -- neither the "fresh
+		// access token acquired" success line nor the "GSL refresh failed" fallback line fires,
+		// making it a fully silent no-op. Fail loud instead: this is a decode failure, not an
+		// empty-but-valid response.
+		return nil, fmt.Errorf("GSL response: bin field present but empty")
 	}
 	if err := json.Unmarshal(body, &lsr); err != nil {
 		// Not the raw body -- same reasoning as the two decode-failure branches above.

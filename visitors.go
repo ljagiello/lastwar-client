@@ -56,9 +56,30 @@ func (v Visitor) VisitorId() int32 { return v.Raw.GetInt("visitorId") }
 // discovering "not started yet" from the server's error response.
 func (v Visitor) StartTime() int64 { return v.Raw.GetLong("startTime") }
 
+// maxVisitorsDefensiveCeiling is the fallback cap ParseInitVisitors applies to `visitor.list` when
+// the init push's own sibling `maxNum` field (see the Visitor doc comment above -- the real push
+// carries `visitor={addNum, maxNum, list}`) is absent, unparseable, or nonsensical (<= 0). This
+// closes the same unbounded-hang threat model buildings.go's capDeadline (round 20) closed for wait
+// DURATION, just for item COUNT instead: GreetVisitors issues one sequential `visitor.operate`
+// network call per parsed visitor, and each can cost up to a full defaultCmdTimeout (8s, conn.go)
+// against a peer that simply never responds -- this project's own threat model already treats an
+// arbitrary/hostile -cs-ip peer as in-scope (see capDeadline's own doc comment, round 16's
+// redactSFSValue fail-open fix). Set well above the live-confirmed maxNum=5 (see the Visitor doc
+// comment above) as a defensive margin, not hardcoded to exactly 5, since the real live value could
+// legitimately vary a bit across accounts/game versions -- but still small enough to keep
+// GreetVisitors' worst-case sequential wall-clock cost bounded to a couple minutes, not an
+// open-ended hang.
+const maxVisitorsDefensiveCeiling = 25
+
 // ParseInitVisitors extracts the current visitor list from the bare `init`
 // bootstrap push's `visitor.list` field -- a sibling of `building_new` in
 // the same payload, see the Visitor doc comment above.
+//
+// The list is capped at the init push's own `maxNum` field when present and sane (> 0), falling
+// back to maxVisitorsDefensiveCeiling otherwise -- see that constant's doc comment for the full
+// threat-model rationale. A server-sent list longer than the cap actually applied is itself logged
+// as a Warn: that's a signal worth knowing about (a misbehaving/hostile peer, or this client's
+// live-confirmed maxNum assumption having drifted), not something to silently truncate away.
 func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	var out []Visitor
 	v, ok := initParams.Get("visitor")
@@ -77,7 +98,19 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	if !ok {
 		return out
 	}
+
+	limit := maxVisitorsDefensiveCeiling
+	if maxNum := visitorObj.GetInt("maxNum"); maxNum > 0 {
+		limit = int(maxNum)
+	}
+	if len(arr.items) > limit {
+		slog.Warn("visitor.list longer than cap; truncating", "listLen", len(arr.items), "cap", limit)
+	}
+
 	for _, item := range arr.items {
+		if len(out) >= limit {
+			break
+		}
 		vi, ok := item.Val.(*SFSObject)
 		if !ok {
 			continue
@@ -115,9 +148,10 @@ func GreetVisitors(conn *GameConn, visitors []Visitor) error {
 		// (connection reset, broken pipe, etc.) means every remaining visitor in this loop is
 		// already doomed to independently burn a full defaultCmdTimeout before failing the exact
 		// same way -- same root cause as CollectAll's own net.Error early-abort (buildings.go),
-		// mirrored here. The blast radius is bounded either way: `visitors` comes from the `init`
-		// push's `visitor.list`, capped live at maxNum=5 (see the Visitor doc comment above), so
-		// this only ever saves waiting out at most ~4 extra timeouts, not an open-ended list.
+		// mirrored here. The blast radius is bounded either way: `visitors` comes from
+		// ParseInitVisitors, which caps `visitor.list` at the init push's own `maxNum` field (seen
+		// live as 5) or maxVisitorsDefensiveCeiling otherwise (see ParseInitVisitors' doc comment),
+		// so this loop's own worst case is bounded, not an open-ended list.
 		var netErr net.Error
 		if errors.As(err, &netErr) && !netErr.Timeout() {
 			break

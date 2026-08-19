@@ -111,7 +111,17 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 	}
 
 	const maxRedirects = 3
-	addr := fmt.Sprintf("%s:%d", firstHost(p.IP), p.Port)
+	// buildBaseZoneLoginAddr (login.go) is the same helper the redirect branch below and both of
+	// login.go's Login() call sites use -- it rejects an empty host or non-positive port with a
+	// clear error instead of silently building a "host:0" or ":<port>"-shaped address that Go's
+	// "host:port" dial syntax would treat as the loopback interface. main.go's runCrossServerTest
+	// happens to pre-validate both of these before calling DoCrossServerLogin today, but this is
+	// an exported, reusable function in its own right (see the doc comment above) -- it must not
+	// rely on a specific caller's external guards to avoid a silent loopback dial.
+	addr, err := buildBaseZoneLoginAddr(p.IP, p.Port)
+	if err != nil {
+		return nil, fmt.Errorf("cross-server login: %w", err)
+	}
 	zone := p.Zone
 
 	for hop := 0; ; hop++ {
@@ -169,19 +179,19 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			outer.PutSFSObject("p", loginContent)
 			// 0600, not 0644 -- this dump includes p.at (the live access token), same
 			// sensitivity as the session config file (see config.go's SaveSessionConfig).
+			// Written via atomicWriteStateFile (identity.go: temp-file-in-same-dir, fsync,
+			// chmod 0600, then rename) rather than a plain os.WriteFile+os.Chmod -- that older
+			// pattern left a torn-write window (truncate-then-write as separate syscalls, no
+			// fsync) and, on a pre-existing target left behind at 0644 by some other process,
+			// briefly published the freshly-written access token at that looser mode before the
+			// follow-up Chmod caught up. atomicWriteStateFile is what config.go's
+			// SaveSessionConfig and identity.go's saveStateFile themselves now use for exactly
+			// this reason.
 			if encoded, err := EncodeObject(outer); err != nil {
 				// Debug-only path -- don't fail the actual login over a failed debug dump.
 				slog.Error("failed to encode login body debug dump", "path", f, "error", err)
-			} else if err := os.WriteFile(f, encoded, 0600); err != nil {
+			} else if err := atomicWriteStateFile(f, string(encoded)); err != nil {
 				slog.Error("failed to write login body debug dump", "path", f, "error", err)
-			} else if err := os.Chmod(f, 0600); err != nil {
-				// os.WriteFile's mode argument only applies when the file is newly created; on
-				// an existing file (e.g. a prior loosely-permissioned dump left at the same
-				// path) its previous mode wins. Chmod explicitly so the 0600 invariant this
-				// dump needs (it carries a live access token) actually holds on every write,
-				// not just at creation -- mirrors config.go's SaveSessionConfig and
-				// identity.go's saveStateFile, which hit this same gotcha.
-				slog.Error("failed to chmod login body debug dump to 0600", "path", f, "error", err)
 			}
 		}
 		if err := conn.SendEnvelope(controllerSystem, actionLogin, loginContent); err != nil {

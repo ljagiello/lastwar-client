@@ -2,7 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
@@ -244,5 +247,130 @@ func TestGreetVisitorsDoesNotAbortOnTimeoutNetError(t *testing.T) {
 	}
 	if got := fake.writeCount(); got != 3 {
 		t.Errorf("fake connection saw %d writes, want exactly 3 (a Timeout()==true net.Error must not abort the remaining visitors)", got)
+	}
+}
+
+// TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation is the round-24 regression test for
+// ParseInitVisitors' maxNum enforcement (visitors.go): the init push's own `visitor.maxNum` sibling
+// field (see the Visitor doc comment) is now read and used to cap `visitor.list` before GreetVisitors
+// ever sees the parsed slice -- closing the unbounded-hang threat model the round-24 audit reopened:
+// a hostile or misbehaving peer could otherwise pad visitor.list arbitrarily, and each greet costs up
+// to a full defaultCmdTimeout (conn.go) against a peer that never responds.
+//
+// This covers the full real-world path in two stages. First, a fake server sends a single `init`
+// push whose visitor.list carries wantVisitors entries (well over a deliberately small maxNum=3)
+// through FetchBuildings (buildings.go) -- the sole call site ParseInitVisitors is actually reached
+// from -- and asserts the returned slice has exactly maxNum entries plus the truncation warning was
+// logged. Second, GreetVisitors is run on that already-capped slice against its own fake server that
+// only answers maxNum requests before returning: if GreetVisitors (or ParseInitVisitors before it)
+// ever regressed to processing the full wantVisitors list, GreetVisitors' 4th request would hang with
+// nobody left to answer it, and this test's own done-channel wait would time out.
+//
+// Mutation check: reverting ParseInitVisitors' cap loop in visitors.go back to appending every
+// visitor.list entry unconditionally makes this test fail at the FetchBuildings stage already (len
+// (visitors) == wantVisitors instead of maxNum, no truncation warning logged) -- the second stage
+// would then also time out waiting for a 4th request nobody in the greet-server loop is there to
+// answer.
+func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T) {
+	const (
+		maxNum       = 3
+		wantVisitors = 8 // well over maxNum
+	)
+
+	initClient, initServer := newPipeGameConnPair(t)
+
+	initDone := make(chan struct{})
+	go func() {
+		defer close(initDone)
+		list := NewSFSArray()
+		for i := 0; i < wantVisitors; i++ {
+			v := NewSFSObject()
+			v.PutLong("uid", int64(5000+i))
+			v.PutInt("eventId", 2000+int32(i))
+			v.PutInt("visitorId", 6)
+			list.AddSFSObject(v)
+		}
+		visitor := NewSFSObject()
+		visitor.PutInt("maxNum", maxNum)
+		visitor.PutSFSArray("list", list)
+		params := NewSFSObject()
+		params.PutSFSObject("visitor", visitor)
+		if err := initServer.SendExtension("init", params); err != nil {
+			return
+		}
+		initServer.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment (buildings_orchestration_test.go): ends the test fast instead of waiting out the post-init 3s window
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	_, visitors, err := FetchBuildings(initClient, 2*time.Second)
+	slog.SetDefault(orig)
+
+	select {
+	case <-initDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake init-push server goroutine never finished")
+	}
+
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("FetchBuildings() error = %v, want an error wrapping io.EOF (expected fake-server-hangup artifact, see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment)", err)
+	}
+	if len(visitors) != maxNum {
+		t.Fatalf("FetchBuildings parsed %d visitors, want exactly %d (the init push's own maxNum=%d field, not the full %d-entry visitor.list)", len(visitors), maxNum, maxNum, wantVisitors)
+	}
+	for i, v := range visitors {
+		if want := int64(5000 + i); v.Uid() != want {
+			t.Errorf("visitors[%d].Uid() = %d, want %d (the first %d visitors, in order)", i, v.Uid(), want, maxNum)
+		}
+	}
+
+	if logged := buf.String(); !strings.Contains(logged, "visitor.list longer than cap") {
+		t.Errorf("expected a truncation warning log from ParseInitVisitors, got:\n%s", logged)
+	}
+
+	// Second stage: prove GreetVisitors itself only ever attempts a greet for the already-capped
+	// slice FetchBuildings returned, not the original wantVisitors-sized list -- a fake server that
+	// answers only maxNum requests before its goroutine returns.
+	greetClient, greetServer := newPipeGameConnPair(t)
+
+	var gotUids []int64
+	greetDone := make(chan struct{})
+	go func() {
+		defer close(greetDone)
+		for i := 0; i < maxNum; i++ {
+			env, err := greetServer.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				return
+			}
+			gotUids = append(gotUids, msg.Params.GetLong("uid"))
+			resp := NewSFSObject()
+			resp.PutBool("success", true)
+			_ = greetServer.SendExtension(msg.Cmd, resp)
+		}
+	}()
+
+	if err := GreetVisitors(greetClient, visitors); err != nil {
+		t.Fatalf("GreetVisitors() = %v, want nil", err)
+	}
+
+	select {
+	case <-greetDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake greet server never finished reading the expected requests (a broken cap would leave GreetVisitors sending more requests than the fake server answers, or a broken slice would send fewer)")
+	}
+
+	if len(gotUids) != maxNum {
+		t.Fatalf("fake greet server received %d requests, want exactly %d", len(gotUids), maxNum)
+	}
+	for i, uid := range gotUids {
+		if want := int64(5000 + i); uid != want {
+			t.Errorf("gotUids[%d] = %d, want %d (the first %d visitors, in order)", i, uid, want, maxNum)
+		}
 	}
 }

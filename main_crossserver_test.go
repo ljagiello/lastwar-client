@@ -669,3 +669,142 @@ func TestRunCrossServerTestExitsWhenGSLRefreshCallFails(t *testing.T) {
 		t.Errorf("subprocess stderr = %s\nwant it to contain %q", stderr.String(), wantMsg)
 	}
 }
+
+// fakeInitPushThenFailAllServer behaves exactly like login_integration_test.go's
+// fakeInitPushServer for the login/init handshake (plain success Login response, then the bare
+// `init` push), but -- unlike fakeInitPushServer, whose handler goroutine returns right after
+// sending `init` and stops reading -- keeps the connection open afterward and answers EVERY
+// subsequent request generically with a plain decoded, non-benign errorCode failure: it reads one
+// envelope, echoes back whatever cmd it carried (same trick as conn_wait_test.go's
+// readAndReply(server, "", ...)) with an errorCode no cmd's benignErrorCodes entry recognizes, and
+// loops until the connection closes.
+//
+// Built for TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive below: CollectAll
+// (buildings.go) issues one independent sendAndWait per fixed action, and a fake server that never
+// replies at all would make each one burn a real 8s defaultCmdTimeout (conn.go) before failing --
+// exactly the cost TestSendAndWaitTimeoutNoResponse's own comment (conn_wait_test.go) documents
+// this codebase deliberately avoids paying in a test. Replying immediately with a decoded errorCode
+// failure instead produces the same "err != nil, but not a net.Error at all" shape as sendAndWait's
+// ordinary per-item timeout does for containsNonTimeoutNetError's purposes (buildings.go: both are
+// "ordinary business-logic/benign-timeout failures", not evidence of a dead connection) -- fast and
+// deterministic instead of slow.
+func fakeInitPushThenFailAllServer() func(*GameConn) {
+	return func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+			return
+		}
+		for {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				continue
+			}
+			fail := NewSFSObject()
+			fail.PutUtfString("errorCode", "999999") // not in benignErrorCodes for any cmd
+			// Reply under BOTH the exact request cmd (sendAndWait's default waitCmds, used by 7
+			// of CollectAll's 8 fixed sub-actions) AND its "push."-prefixed variant (the ONE
+			// exception: mail.go's ListMail explicitly waits only on "push."+reqCmd, per the
+			// real server's own documented response shape for that one command -- see ListMail's
+			// sendAndWait call). Sending both, rather than trying to special-case which shape a
+			// given cmd expects, guarantees a match regardless of which convention the specific
+			// sub-action uses; whichever one a given sendAndWait call doesn't consume as its
+			// match is just a harmless non-matching envelope for the NEXT sendAndWait call to
+			// skip over, the same tolerated case TestWaitForDeadlineElapsedAfterNonMatchingEnvelope
+			// (conn_wait_test.go) already covers.
+			if err := server.SendExtension(msg.Cmd, fail); err != nil {
+				return
+			}
+			if err := server.SendExtension("push."+msg.Cmd, fail); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive is the end-to-end regression
+// test for this round's Fix 1 (main.go): before this fix, runCrossServerTest treated ANY non-nil
+// CollectAll error -- including one made up entirely of ordinary per-item business-logic/benign-
+// timeout failures, which CollectAll's own doc comment (buildings.go) is explicit is "a normal,
+// expected... not evidence the connection is dead" -- identically to a genuinely dead connection:
+// os.Exit(1) before ever reaching the "if o.interactive != \"\" { RunInteractive(...) }" check a
+// few lines later. An operator who explicitly passed -interactive alongside -collect had that
+// explicit request silently discarded whenever even one of CollectAll's several independent
+// requests came back with an ordinary failure -- not a rare edge case, given how many independent
+// requests one collect run issues.
+//
+// Setup: fakeInitPushThenFailAllServer (above) logs the fake connection in and sends the `init`
+// push normally, so FetchBuildings succeeds fast (same as this file's other tests), then answers
+// every one of CollectAll's requests -- starting with CollectIdleReward's unconditional, always-
+// sent "lw.pve.idle.reward" peek, which guarantees CollectAll's aggregated error is non-nil -- with
+// a plain decoded errorCode failure: not a net.Error at all, let alone a non-timeout one, so
+// containsNonTimeoutNetError(err) is false and shouldAbortBeforeInteractive (main.go) must NOT
+// abort given -interactive was requested. No -cs-rt is used, so the fake GSL server below only
+// needs to answer CheckVersion's unconditional getlsu3dversion.php call (see runCrossServerTest's
+// own comment on why that call is made unconditionally) with something local, instead of possibly
+// reaching out to a real host.
+//
+// -interactive itself points at a path that does not exist, so RunInteractive (interactive.go)
+// logs its "interactive mode: reading commands" banner immediately (before ever touching that
+// path) and then exits 1 shortly after via its own pre-existing, already-covered "stat control pipe
+// failed" branch -- deliberately reused here instead of standing up a real FIFO, purely so this
+// test can observe "control actually reached RunInteractive" via a distinctive log line without
+// risking a hang.
+//
+// Before this round's fix, the subprocess below would instead exit 1 via CollectAll's own
+// os.Exit(1), with "collect run had failures" logged and NOTHING further -- "interactive mode:
+// reading commands" would never appear in stderr at all. That's the actual regression this test
+// targets: the exit code alone is 1 either way (just via a different path), so the assertion below
+// is on the log content, not the exit code.
+func TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		gameAddr := startFakeGameServer(t, fakeInitPushThenFailAllServer())
+		gameHost, gamePort := splitHostPortInt(t, gameAddr)
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		useFakeGSLServer(t, gsl)
+
+		runCrossServerTest(crossServerTestOpts{
+			ip: gameHost, port: gamePort, zone: "APS1", gameUid: "uid-1", at: "tok-1",
+			collect:     true,
+			interactive: t.TempDir() + "/does-not-exist-fifo",
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will then
+		// see a clean (non-error) subprocess exit and fail with a clear message instead of this
+		// silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1 (from RunInteractive's own \"stat control pipe failed\" exit, only reachable via this round's fix); stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "collect run had failures") {
+		t.Errorf("subprocess stderr = %s\nwant it to still contain \"collect run had failures\" -- the collect failures must stay logged, not be silently swallowed, even though they're no longer fatal here", stderr.String())
+	}
+	const wantReachedInteractive = "interactive mode: reading commands"
+	if !strings.Contains(stderr.String(), wantReachedInteractive) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q -- this is the actual regression this test targets: before this round's fix, CollectAll's error triggered os.Exit(1) before RunInteractive was ever reached, so this line would never appear", stderr.String(), wantReachedInteractive)
+	}
+}

@@ -111,6 +111,58 @@ func EncodePacket(body []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// deadConnError wraps an error that is (or unwraps to) io.EOF or
+// io.ErrUnexpectedEOF -- i.e. the underlying reader is definitively
+// closed/exhausted, not a timeout or some other transient I/O error -- so it
+// additionally satisfies net.Error with Timeout()==false and
+// Temporary()==false.
+//
+// Neither io.EOF nor io.ErrUnexpectedEOF implements net.Error, and
+// fmt.Errorf's %w wrapping doesn't change that: errors.As (and the direct
+// type assertions containsNonTimeoutNetError-style helpers use) only
+// succeed if SOME error in the chain implements the target interface. Left
+// unwrapped, a peer's graceful close (a clean FIN, or the far end simply
+// exiting -- io.ReadFull surfaces this as bare io.EOF for a between-packets
+// close, or io.ErrUnexpectedEOF for a mid-packet close) would silently defeat
+// every "abort remaining independent work on a genuine dead connection"
+// check built across rounds 16-23 (buildings.go's CollectAll, mail.go's
+// ClaimAllMail, visitors.go's GreetVisitors, alliance.go's
+// ClaimAllianceGifts, interactive.go's handleInteractiveLine) -- each of
+// those wastes a full defaultCmdTimeout re-discovering the same dead
+// connection independently instead of aborting after the first failure.
+//
+// Mirrors login.go's deadlineExceededError (same net.Error shape via a small
+// local type) but with the opposite semantic: that one means "benign, keep
+// going" (Timeout()==true), this one means "genuine dead connection, abort"
+// (Timeout()==false). Wraps (never replaces) the original error via Unwrap
+// so errors.Is(err, io.EOF)/errors.Is(err, io.ErrUnexpectedEOF) checks
+// elsewhere (e.g. decode.go's DecodeStreamFile stream-termination check, and
+// readFrameField's own mid-frame-vs-clean-EOF classification below) keep
+// working unchanged straight through this wrapper.
+type deadConnError struct {
+	err error
+}
+
+func (e deadConnError) Error() string { return e.err.Error() }
+func (e deadConnError) Unwrap() error { return e.err }
+func (deadConnError) Timeout() bool   { return false }
+func (deadConnError) Temporary() bool { return false }
+
+// wrapIfClosed wraps err in deadConnError when it is, or unwraps to, io.EOF
+// or io.ErrUnexpectedEOF. Any other error (including an already-net.Error
+// network failure such as a connection reset, which arrives as a genuine
+// *net.OpError rather than a bare io.EOF/io.ErrUnexpectedEOF) passes through
+// unchanged. A nil err passes through unchanged too.
+func wrapIfClosed(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return deadConnError{err: err}
+	}
+	return err
+}
+
 // readFrameField performs io.ReadFull for a frame field read that happens
 // AFTER a packet's leading header byte has already been successfully read.
 // Per io.ReadFull's documented contract, a read that consumes zero bytes
@@ -123,12 +175,21 @@ func EncodePacket(body []byte) ([]byte, error) {
 // DecodeStreamFile's `errors.Is(err, io.EOF)` check correctly classify only
 // a genuine stream-start EOF (the header read, which does NOT use this
 // helper) as clean, while any mid-frame truncation surfaces as a real error.
+//
+// The (possibly just-converted) error is then run through wrapIfClosed: a
+// closed/exhausted reader at this point -- whether a genuine clean end (bare
+// io.EOF further up the call chain, before any field of THIS frame was
+// touched) or a mid-frame truncation (io.ErrUnexpectedEOF, from either the
+// conversion above or a real partial io.ReadFull) -- means the connection is
+// definitively dead, so the result must satisfy net.Error with
+// Timeout()==false by the time it reaches a live network caller such as
+// GameConn.ReadEnvelope.
 func readFrameField(r io.Reader, buf []byte) error {
 	if _, err := io.ReadFull(r, buf); err != nil {
 		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF
 		}
-		return err
+		return wrapIfClosed(err)
 	}
 	return nil
 }
@@ -138,7 +199,14 @@ func readFrameField(r io.Reader, buf []byte) error {
 func ReadPacket(r io.Reader) ([]byte, error) {
 	var hb [1]byte
 	if _, err := io.ReadFull(r, hb[:]); err != nil {
-		return nil, fmt.Errorf("read header: %w", err)
+		// wrapIfClosed: a bare io.EOF here (the only shape io.ReadFull produces for a
+		// zero-byte read, per its documented contract) is a genuine clean end-of-stream --
+		// e.g. a peer's graceful TCP close between packets -- so it must satisfy net.Error
+		// with Timeout()==false once it reaches a live network caller like
+		// GameConn.ReadEnvelope, while still satisfying errors.Is(err, io.EOF) for
+		// between-packets callers like decode.go's DecodeStreamFile. See deadConnError's
+		// doc comment above readFrameField for the full rationale.
+		return nil, fmt.Errorf("read header: %w", wrapIfClosed(err))
 	}
 	header := hb[0]
 

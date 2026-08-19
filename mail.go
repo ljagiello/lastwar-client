@@ -159,6 +159,20 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 			break
 		}
 		clientseq = lastUid
+		// lastMailTime is lastUid's sibling cursor field, read the same way and forwarded the
+		// same way into the next page's request -- but GetLong can't tell a missing/null
+		// lastMailTime apart from a legitimate explicit 0 (both silently return int64(0)),
+		// unlike GetString's "" which is never a legitimate mail uid. Left unguarded, a
+		// response with a valid lastUid but a missing lastMailTime would silently reset
+		// reqTime to the same value as the cold-start request while clientseq keeps advancing
+		// normally -- the exact failure shape the lastUid check above exists to prevent, just
+		// on its sibling field. Impact is bounded (seenUIDs dedupes any re-fetched mail,
+		// maxPages caps the loop), so this doesn't abort pagination like the lastUid check
+		// does, but it's still worth surfacing so an operator can tell a run hit this instead
+		// of quietly assuming it's a legitimate mail timestamped at the epoch.
+		if v, ok := msg.Params.Get("lastMailTime"); !ok || v.Val == nil {
+			slog.Warn("list mail: response reported more=true but lastMailTime is missing/null, reqTime will reset to 0 for the next page instead of the real cursor value", "page", page, "collectedSoFar", len(all))
+		}
 		reqTime = msg.Params.GetLong("lastMailTime")
 		first = false
 		truncated = true

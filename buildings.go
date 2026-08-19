@@ -484,6 +484,23 @@ func CollectIdleReward(conn *GameConn) error {
 	return nil
 }
 
+// maxCollectibleBuildingsPerRun is a defensive, non-protocol-guessing sanity ceiling on how many
+// buildings CollectAll will issue building.production.collect requests for in one run. Unlike
+// visitors.go's GreetVisitors -- whose visitor.list carries a server-sent `maxNum` sibling field
+// ParseInitVisitors now enforces directly -- there is no equivalent "expected building count" field
+// documented anywhere in this codebase's protocol notes, so this can't be a real protocol limit,
+// only defense-in-depth: the same category of deliberately generous, non-protocol-guessing safety
+// margin as sfsobject.go's maxDecodedNodes/maxFrameSize/maxNestDepth.
+//
+// Set generously large -- no real account's building count could plausibly approach it -- while
+// still finite enough to bound CollectAll's worst-case sequential runtime against a peer that simply
+// never responds to something reasonable: each collect call can cost up to a full defaultCmdTimeout
+// (8s, conn.go), so 300 * 8s caps the worst case at ~40 minutes instead of an unbounded hang. This
+// closes the same threat model as buildings.go's own capDeadline (round 20) and
+// maxVisitorsDefensiveCeiling (visitors.go), just for this loop's item COUNT instead of wait
+// DURATION.
+const maxCollectibleBuildingsPerRun = 300
+
 // CollectAll finds every instance of every confirmed resource-producing
 // building type -- see collectCmdFor's switch for the full list -- and
 // collects their accumulated output, plus the account-level "Armed Truck"
@@ -551,6 +568,10 @@ func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) error 
 	toCollect := collectibleBuildings(buildings)
 	if len(toCollect) == 0 {
 		slog.Info("no matching collectible buildings found on this account")
+	} else if len(toCollect) > maxCollectibleBuildingsPerRun {
+		slog.Warn("collectible building count exceeds sanity cap; truncating",
+			"count", len(toCollect), "cap", maxCollectibleBuildingsPerRun)
+		toCollect = toCollect[:maxCollectibleBuildingsPerRun]
 	}
 	for _, b := range toCollect {
 		actions = append(actions, func() error {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"strings"
@@ -608,5 +609,136 @@ func TestWaitForInitPushSendExtensionFailure(t *testing.T) {
 	// path after logging the send failure.
 	if elapsed > window*3/4 {
 		t.Errorf("waitForInitPush took %v, want it to return promptly after the failed send rather than waiting out the full %v window", elapsed, window)
+	}
+}
+
+// TestReadPacketGracefulCloseIsNonTimeoutNetError is the packet.go-level regression test for round
+// 24's MAJOR finding: a peer's graceful close (a clean FIN, or the far end process simply exiting,
+// with nothing sent) surfaces from ReadPacket's leading io.ReadFull(r, hb[:]) header read as bare
+// io.EOF, which does not itself implement net.Error -- and fmt.Errorf's %w wrapping doesn't change
+// that, since errors.As only succeeds if SOME error in the chain implements the target interface.
+// Left unfixed, every one of the 5 "abort remaining independent work on a genuine dead connection"
+// checks built across rounds 16-23 (buildings.go's CollectAll, mail.go's ClaimAllMail, visitors.go's
+// GreetVisitors, alliance.go's ClaimAllianceGifts, interactive.go's handleInteractiveLine, all via
+// containsNonTimeoutNetError or a direct net.Error check) silently never fires for this, the single
+// most realistic real-world failure mode -- empirically reproduced during the audit: wiring an
+// equivalent fake conn into CollectAll produced 9 separate wasted requests, each burning a full
+// defaultCmdTimeout, instead of aborting after the first.
+//
+// bytes.NewReader(nil) is itself exactly the shape under test: an io.Reader whose very first Read
+// call returns bare io.EOF and nothing else -- standing in for a socket a peer closed before
+// sending anything at all (the between-packets case; see
+// TestReadPacketMidFrameCloseIsNonTimeoutNetError below for the mid-frame variant).
+func TestReadPacketGracefulCloseIsNonTimeoutNetError(t *testing.T) {
+	_, err := ReadPacket(bytes.NewReader(nil))
+	if err == nil {
+		t.Fatal("expected an error reading a packet off a closed/empty stream, got nil")
+	}
+	// The fix must wrap, not replace: decode.go's DecodeStreamFile still needs
+	// errors.Is(err, io.EOF) to hold for the header-read site specifically, to keep correctly
+	// reporting a genuine between-packets stream end as clean.
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("err = %v, want errors.Is(err, io.EOF) to still hold through the net.Error wrapper", err)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error -- a graceful close must be recognizable as a genuine dead connection, not silently indistinguishable from an ordinary decode error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- a graceful close is a genuine dead connection, not the benign kind of net.Error sendAndWait's ordinary per-command timeout produces (see TestWaitForTimeout), which downstream early-abort checks must NOT trip on")
+	}
+	if netErr.Temporary() {
+		t.Errorf("netErr.Temporary() = true, want false")
+	}
+}
+
+// TestReadPacketMidFrameCloseIsNonTimeoutNetError is the readFrameField-path sibling of
+// TestReadPacketGracefulCloseIsNonTimeoutNetError above: a close partway through a frame (here,
+// right after the header byte but before the length field it promised) rather than cleanly between
+// packets. packet_oom_test.go's TestReadPacketMidFrameTruncationIsNotClassifiedAsCleanEOF already
+// proves this shape correctly satisfies errors.Is(err, io.ErrUnexpectedEOF) (not io.EOF); this test
+// proves it ALSO now satisfies net.Error with Timeout()==false, confirming the fix was applied at
+// readFrameField itself and not just the one header-read call the audit specifically called out.
+func TestReadPacketMidFrameCloseIsNonTimeoutNetError(t *testing.T) {
+	// A lone header byte declaring hdrBigSized (so ReadPacket expects a 4-byte length field to
+	// follow) with nothing after it.
+	_, err := ReadPacket(bytes.NewReader([]byte{hdrBinary | hdrEncrypted | hdrBigSized}))
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if errors.Is(err, io.EOF) {
+		t.Errorf("err = %v, satisfies errors.Is(err, io.EOF) -- a mid-frame close must not be misclassified as a clean end-of-stream", err)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("err = %v, want errors.Is(err, io.ErrUnexpectedEOF)", err)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false")
+	}
+}
+
+// eofConn is a minimal net.Conn whose every Read returns bare io.EOF, simulating a peer's graceful
+// close at the live-connection level -- as opposed to fakeNetError-style fakes elsewhere in this
+// package (buildings_orchestration_test.go et al.), which simulate an already-a-net.Error
+// connection failure such as a connection reset. This is the shape a real net.Conn produces for
+// THAT specific close, which round 24 found silently defeated every containsNonTimeoutNetError-style
+// early-abort check because bare io.EOF does not itself implement net.Error. Every other net.Conn
+// method is left as a nil-embed panic if called -- ReadEnvelope never calls them, so a test that did
+// would be exercising the wrong thing anyway.
+type eofConn struct {
+	net.Conn
+}
+
+func (eofConn) Read([]byte) (int, error) { return 0, io.EOF }
+
+// TestReadEnvelopeGracefulCloseIsNonTimeoutNetError is the conn.go-level regression test: proves
+// the fix reaches GameConn.ReadEnvelope, the actual live-connection call site every orchestration
+// loop's sendAndWait/waitForCmd/waitFor chain sits on top of, not just ReadPacket in isolation.
+func TestReadEnvelopeGracefulCloseIsNonTimeoutNetError(t *testing.T) {
+	conn := eofConn{}
+	client := &GameConn{conn: conn, reader: bufio.NewReaderSize(conn, 4096)}
+
+	_, err := client.ReadEnvelope()
+	if err == nil {
+		t.Fatal("expected an error reading an envelope off a gracefully-closed connection, got nil")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- ReadEnvelope's caller chain (waitFor/waitForCmd/sendAndWait) must be able to distinguish this from its own ordinary per-command timeout")
+	}
+	if netErr.Temporary() {
+		t.Errorf("netErr.Temporary() = true, want false")
+	}
+}
+
+// TestDeadlineExceededErrorDirect is the minor regression-coverage fix for round 23's
+// deadlineExceededError (login.go): go tool cover -func showed Error() and Temporary() at 0.0%
+// coverage, with only Timeout() exercised (indirectly, via
+// TestWaitForDeadlineElapsedAfterNonMatchingEnvelope above) -- a regression emptying Error()'s
+// message or flipping Temporary() to true would go undetected. Exercises all three methods
+// directly against the zero value, matching how every real caller constructs it
+// (deadlineExceededError{}, waitFor's own deadline-elapsed branch).
+func TestDeadlineExceededErrorDirect(t *testing.T) {
+	err := deadlineExceededError{}
+
+	msg := err.Error()
+	if msg == "" {
+		t.Error("Error() returned an empty message, want a non-empty description of what happened")
+	}
+	if !strings.Contains(msg, "timed out") && !strings.Contains(msg, "timeout") {
+		t.Errorf("Error() = %q, want a message that actually describes a timeout", msg)
+	}
+	if err.Temporary() {
+		t.Error("Temporary() = true, want false")
+	}
+	if !err.Timeout() {
+		t.Error("Timeout() = false, want true")
 	}
 }

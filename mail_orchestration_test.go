@@ -204,6 +204,131 @@ func TestListMailStopsOnMissingLastUid(t *testing.T) {
 	}
 }
 
+// TestListMailWarnsOnMissingLastMailTime is the regression test for this round's fix to ListMail's
+// pagination loop: lastMailTime is lastUid's sibling cursor field (read the line right after lastUid
+// and forwarded the same way into the next page's `time` request field), but unlike GetString's ""
+// zero value -- which is never a legitimate mail uid, so TestListMailStopsOnMissingLastUid's check
+// can safely treat it as "missing" -- GetLong's int64(0) zero value IS indistinguishable from a
+// legitimate cold-start `time`. Before this fix, a response with a valid lastUid but a missing
+// lastMailTime silently reset reqTime to 0 with zero diagnostic, while clientseq kept advancing
+// normally: an asymmetric, harder-to-notice version of the exact anomaly the lastUid check already
+// guards against. This does not abort pagination (bounded impact: seenUIDs dedupes, maxPages caps
+// the loop -- see mail.go's comment), so, unlike TestListMailStopsOnMissingLastUid, the fake server
+// here does answer a second request; the fix is only observable via (a) the second request's `time`
+// coming back 0 despite page 1 reporting `more: true` with a valid lastUid, and (b) a new warning
+// naming lastMailTime.
+func TestListMailWarnsOnMissingLastMailTime(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	type gotReq struct {
+		clientseq string
+		time      int64
+	}
+	var gotReqs []gotReq
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		readReq := func() (*ExtensionMessage, bool) {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return nil, false
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				return nil, false
+			}
+			gotReqs = append(gotReqs, gotReq{msg.Params.GetString("clientseq"), msg.Params.GetLong("time")})
+			return msg, true
+		}
+
+		msg, ok := readReq()
+		if !ok {
+			return
+		}
+		if msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("page 1 Cmd = %q, want chat.get.system.mails", msg.Cmd)
+		}
+		resp1 := NewSFSObject()
+		arr1 := NewSFSArray()
+		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0))
+		resp1.PutSFSArray("msg", arr1)
+		resp1.PutBool("more", true)
+		resp1.PutUtfString("lastUid", "uid-2")
+		// Deliberately no PutLong("lastMailTime", ...) call: `more: true` with a valid lastUid but
+		// a genuinely missing lastMailTime is exactly the malformed shape under test.
+		if err := server.SendExtension("push.chat.get.system.mails", resp1); err != nil {
+			return
+		}
+
+		msg, ok = readReq()
+		if !ok {
+			return
+		}
+		if msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("page 2 Cmd = %q, want chat.get.system.mails", msg.Cmd)
+		}
+		resp2 := NewSFSObject()
+		arr2 := NewSFSArray()
+		arr2.AddSFSObject(newTestMailObj("uid-3", 9, 0))
+		resp2.PutSFSArray("msg", arr2)
+		resp2.PutBool("more", false)
+		_ = server.SendExtension("push.chat.get.system.mails", resp2)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	var got []Mail
+	var err error
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		got, err = ListMail(client)
+	}()
+
+	select {
+	case <-listDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ListMail never returned")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished both pages")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	wantUids := []string{"uid-1", "uid-3"}
+	if len(got) != len(wantUids) {
+		t.Fatalf("got %d mail entries, want %d", len(got), len(wantUids))
+	}
+	for i, m := range got {
+		if m.Uid() != wantUids[i] {
+			t.Errorf("mail[%d].Uid() = %q, want %q", i, m.Uid(), wantUids[i])
+		}
+	}
+
+	if len(gotReqs) != 2 {
+		t.Fatalf("fake server saw %d requests, want 2", len(gotReqs))
+	}
+	if gotReqs[1].clientseq != "uid-2" {
+		t.Errorf("page 2 request clientseq = %q, want %q (page 1's lastUid) -- the missing lastMailTime must not stop clientseq advancing", gotReqs[1].clientseq, "uid-2")
+	}
+	if gotReqs[1].time != 0 {
+		t.Errorf("page 2 request time = %d, want 0 -- lastMailTime was missing from page 1's response so reqTime resets to GetLong's zero value", gotReqs[1].time)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "lastMailTime") {
+		t.Errorf("expected a warning mentioning lastMailTime when more=true but lastMailTime is missing, got log:\n%s", logged)
+	}
+}
+
 // TestListMailWarnsOnNonBoolMoreField is the regression test for this round's fix to ListMail's
 // pagination loop: a response whose `more` field is present but not a bool must not be silently
 // treated as more=false with zero diagnostic. Before the fix, `mv.Val.(bool)`'s failed assertion

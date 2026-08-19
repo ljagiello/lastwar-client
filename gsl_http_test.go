@@ -408,6 +408,37 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 	})
 }
 
+// TestGetServerListBinFieldPresentButEmpty is the round-24 regression test for a fallthrough gap
+// in GetServerList's "bin" handling: when the top-level "bin" field is PRESENT but decodes to an
+// empty string, the old code's "if binStr != \"\" { ...decrypt and return... }" had no else
+// branch, so execution fell through to json.Unmarshal(body, &lsr) against the ORIGINAL top-level
+// envelope (shaped like {"bin":"",...}), which has none of LoginServerListRespon's required
+// fields -- unknown/extra keys are silently ignored by encoding/json, so lsr ended up completely
+// zero-valued with a NIL error. Traced live: login.go's serverInfo-redirect access-token refresh
+// call site treats a nil error as success, so this specific case was a fully silent no-op with
+// zero diagnostic signal anywhere -- neither the "fresh access token acquired" success log nor
+// the "GSL refresh failed; following redirect with stale token anyway" failure log ever fired.
+// GetServerList must fail loud instead of returning a zero-valued success.
+func TestGetServerListBinFieldPresentButEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"bin":"","code":"0"}`)
+	}))
+	defer server.Close()
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	if err == nil {
+		t.Fatalf("GetServerList: expected an error for a present-but-empty bin field, got nil (lsr=%+v)", lsr)
+	}
+	if !strings.Contains(err.Error(), "bin field present but empty") {
+		t.Errorf("GetServerList error = %q, want it to mention the empty-bin decode-failure branch", err)
+	}
+}
+
 // TestGetServerListCodeAcceptsStringOrNumber proves LoginServerListRespon.Code decodes both a
 // string-typed and a bare-number `code` field without error, mirroring
 // TestFlexStringUnmarshalJSON's coverage of flexString's string/number tolerance but exercised
