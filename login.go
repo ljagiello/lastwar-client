@@ -488,7 +488,23 @@ func redact(s string) string {
 	if len(s) <= 8 {
 		return "***"
 	}
-	return s[:4] + "..." + s[len(s)-4:]
+	// Slice by rune, not byte, boundary: sensitiveSFSKeys covers fields that can
+	// legitimately carry multi-byte UTF-8 (googleName is a Google account display
+	// name, e.g. CJK; mail is an internationalized email address). Raw byte-index
+	// slicing (the pre-fix s[:4]/s[len(s)-4:] here) can land mid-rune and emit
+	// invalid UTF-8 into both slog's JSON sink and StringRedacted()'s raw
+	// fmt.Printf terminal sink. For plain ASCII input, byte and rune indices
+	// coincide, so this is a no-op behavior change: same first-4/last-4 shape.
+	r := []rune(s)
+	if len(r) <= 8 {
+		// Byte length is >8 (checked above) but rune count is small -- a short
+		// multi-byte string (e.g. a 3-rune CJK name at 3 bytes/rune = 9 bytes).
+		// Not enough runes to usefully show a non-overlapping first-4/last-4
+		// slice without leaking most or all of it back out, so fully redact
+		// instead, same as the short-input case above.
+		return "***"
+	}
+	return string(r[:4]) + "..." + string(r[len(r)-4:])
 }
 
 // waitForInitPush waits for the bare `init` bootstrap push (report 14 §5:

@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -515,5 +519,153 @@ func TestRunCrossServerTestNoAccessTokenAtAllWarning(t *testing.T) {
 	if strings.Contains(log, "continuing with the original -cs-at unrefreshed") ||
 		strings.Contains(log, "continuing with the session config's access token, unrefreshed") {
 		t.Errorf("subprocess stderr = %s\nwant the o.at==\"\" branch's own distinct wording, not the sibling o.at!=\"\" branch's \"unrefreshed\" wording (there's no stale token here to be unrefreshed, there's no token at all)", log)
+	}
+}
+
+// TestRunCrossServerTestExitsWhenPortNotGiven is the regression test for this round's Fix 3:
+// runCrossServerTest's "port <= 0" pre-flight guard (main.go, the sibling right below the
+// firstHost(ip) == "" guard TestRunCrossServerTestExitsWhenIPEmpty above already covers) had zero
+// test coverage of its own, despite that guard's own doc comment describing exactly why it exists
+// (DoCrossServerLogin has no equivalent Port check; an unset/zero port would otherwise only be
+// caught much later by the OS dial call, producing a cryptic "dial tcp 127.0.0.1:0: connect: can't
+// assign requested address" instead of a message that says what's actually missing).
+//
+// Mirrors TestRunCrossServerTestExitsWhenIPEmpty's re-exec-subprocess pattern (runCrossServerTest
+// calls os.Exit(1) directly on this path too, so it can't be driven to completion in-process
+// without also killing this test binary), but with a valid ip and port left at/below zero instead.
+// A fake GSL server is still needed even though -cs-rt is never set here: runCrossServerTest's
+// CheckVersion call happens unconditionally, before the ip/port checks, regardless of -cs-rt (see
+// its own doc comment in main.go) -- without overriding checkVersionHosts, that call would instead
+// try to reach the real, live GSL hosts.
+//
+// Covers both boundary values the finding calls out ("port left at/below zero"): the flag's own
+// zero-value default (0, e.g. -cs-port simply never passed) and a negative value (-1, e.g. a
+// malformed -cs-port=-1).
+func TestRunCrossServerTestExitsWhenPortNotGiven(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		useFakeGSLServer(t, gsl)
+
+		port := 0
+		if raw := os.Getenv("LASTWAR_TEST_CS_PORT"); raw != "" {
+			p, err := strconv.Atoi(raw)
+			if err != nil {
+				t.Fatalf("parse LASTWAR_TEST_CS_PORT=%q: %v", raw, err)
+			}
+			port = p
+		}
+
+		// ip is a valid, non-empty value -- this test targets the port check specifically, not the
+		// ip check TestRunCrossServerTestExitsWhenIPEmpty above already covers. No -cs-rt is set, so
+		// this never reaches the GSL-refresh block at all; the fake GSL server above only exists to
+		// satisfy the unconditional CheckVersion call before the ip/port checks are reached.
+		runCrossServerTest(crossServerTestOpts{
+			ip:   "1.2.3.4",
+			port: port,
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will then
+		// see a clean (non-error) subprocess exit and fail with a clear message instead of this
+		// silently passing.
+		return
+	}
+
+	for _, port := range []int{0, -1} {
+		t.Run(fmt.Sprintf("port=%d", port), func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestExitsWhenPortNotGiven$")
+			cmd.Env = append(os.Environ(),
+				"LASTWAR_TEST_HELPER_PROCESS=1",
+				fmt.Sprintf("LASTWAR_TEST_CS_PORT=%d", port),
+			)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			runErr := cmd.Run()
+
+			exitErr, ok := runErr.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+			}
+			if exitErr.ExitCode() != 1 {
+				t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+			}
+			const wantMsg = "no port given"
+			if !strings.Contains(stderr.String(), wantMsg) {
+				t.Errorf("subprocess stderr = %s\nwant it to contain %q (the pre-fix behavior instead falls through to a cryptic \"can't assign requested address\" dial failure)", stderr.String(), wantMsg)
+			}
+		})
+	}
+}
+
+// TestRunCrossServerTestExitsWhenGSLRefreshCallFails is the regression test for this round's Fix
+// 4: the -cs-rt GSL opt=refresh call itself failing (GetServerList returning a transport/HTTP
+// error, as distinct from a successful-but-unusable response -- already covered by
+// TestRunCrossServerTestExitsCode2WhenRefreshHasNoUsableData above) had zero test coverage before
+// this round.
+//
+// It also pins down which of the two exit paths after that error is actually reachable, settling
+// the question this round's fix answered: GetServerList's own error returns (gsl.go) never wrap
+// ErrAuthRejected -- only the SFS2X handshake/login/cross-server-login paths (conn.go, login.go,
+// crossserver.go) do, since those are the ones that decode an explicit server-side rejection error
+// code. So the errors.Is(err, ErrAuthRejected)-gated os.Exit(2) branch that used to exist here was
+// dead code with an inaccurate comment claiming it matched those sibling sites; this round removed
+// it, leaving only the generic os.Exit(1) fallback. This test proves that fallback fires correctly:
+// a fake GSL server that answers getlsu3dversion.php (CheckVersion) normally but returns a plain
+// HTTP 500 for getserverlist.php (the opt=refresh call) must exit 1 with the "GSL refresh failed"
+// message.
+//
+// Uses a hand-built fake HTTP server (rather than newFakeGSLServer, which always answers
+// getserverlist.php successfully) so getlsu3dversion.php can keep succeeding -- CheckVersion must
+// succeed first, or runCrossServerTest exits fatally there instead, before ever reaching the
+// opt=refresh call this test targets. Mirrors gsl_http_test.go's own
+// TestGetServerListDecodeFailuresDoNotLeakRawResponse "HTTP status error" subtest for the
+// getserverlist.php handler shape, combined with newFakeGSLServer's own getlsu3dversion.php
+// handling.
+func TestRunCrossServerTestExitsWhenGSLRefreshCallFails(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		pub := testRSAPubKeyDER(t)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "getlsu3dversion.php"):
+				_ = json.NewEncoder(w).Encode(CheckVersionResponse{ResMsg: pub})
+			case strings.HasSuffix(r.URL.Path, "getserverlist.php"):
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte("simulated GSL server error"))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		useFakeGSLServer(t, server)
+
+		runCrossServerTest(crossServerTestOpts{
+			ip:   "1.2.3.4",
+			port: 18888,
+			rt:   "some-refresh-token",
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will then
+		// see a clean (non-error) subprocess exit and fail with a clear message instead of this
+		// silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestExitsWhenGSLRefreshCallFails$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1 (GetServerList's HTTP-status error never wraps ErrAuthRejected, so only the generic os.Exit(1) fallback is reachable here); stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	const wantMsg = "GSL refresh failed"
+	if !strings.Contains(stderr.String(), wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q", stderr.String(), wantMsg)
 	}
 }

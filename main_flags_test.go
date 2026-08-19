@@ -184,30 +184,68 @@ func TestRefreshHasUsableData(t *testing.T) {
 // the flag-vs-config distinction: nothing explicit yields nil (the existing plain INFO "server
 // selected" log stays as-is), while any explicitly-set flag among cs-ip/cs-port/cs-zone/cs-gameuid
 // is named, in declaration order, regardless of which subset was set.
+//
+// It also covers round 20's Fix 1: serverListOverrideFlags used to check ONLY the four *Explicit
+// "flag was typed" bools, never whether the underlying ip/port/zone/gameUid value was actually
+// non-empty/non-zero. Go's flag.Visit fires for a flag whenever it appeared on the command line at
+// all, even if the value given equals the flag's own zero-value default (e.g. -cs-ip "" from a
+// possibly-unset shell variable in a cron wrapper, or -cs-port 0) -- so an operator who explicitly
+// passed an EMPTY/zero value used to get a misleading WARN claiming that flag's value was
+// "overriding" something, when no meaningful value was ever supplied. The
+// "explicitly typed but empty/zero" cases below pin down that this is no longer reported as an
+// override, mirroring the neighboring -cs-at check's own `o.at != "" && o.atExplicit` symmetry.
 func TestServerListOverrideFlags(t *testing.T) {
 	cases := []struct {
-		name                                                    string
-		ipExplicit, portExplicit, zoneExplicit, gameUidExplicit bool
-		want                                                    []string
+		name            string
+		ip              string
+		ipExplicit      bool
+		port            int
+		portExplicit    bool
+		zone            string
+		zoneExplicit    bool
+		gameUid         string
+		gameUidExplicit bool
+		want            []string
 	}{
-		{"nothing explicit", false, false, false, false, nil},
-		{"only cs-ip explicit", true, false, false, false, []string{"cs-ip"}},
-		{"only cs-port explicit", false, true, false, false, []string{"cs-port"}},
-		{"only cs-zone explicit", false, false, true, false, []string{"cs-zone"}},
-		{"only cs-gameuid explicit", false, false, false, true, []string{"cs-gameuid"}},
+		{"nothing explicit", "", false, 0, false, "", false, "", false, nil},
+		{"only cs-ip explicit, with a real value", "1.2.3.4", true, 0, false, "", false, "", false, []string{"cs-ip"}},
+		{"only cs-port explicit, with a real value", "", false, 12345, true, "", false, "", false, []string{"cs-port"}},
+		{"only cs-zone explicit, with a real value", "", false, 0, false, "APS1234", true, "", false, []string{"cs-zone"}},
+		{"only cs-gameuid explicit, with a real value", "", false, 0, false, "", false, "uid1", true, []string{"cs-gameuid"}},
 		{
-			"all four explicit, declaration order preserved regardless of a different natural check order",
-			true, true, true, true,
+			"all four explicit with real values, declaration order preserved regardless of a different natural check order",
+			"1.2.3.4", true, 12345, true, "APS1234", true, "uid1", true,
 			[]string{"cs-ip", "cs-port", "cs-zone", "cs-gameuid"},
 		},
-		{"ip and zone only", true, false, true, false, []string{"cs-ip", "cs-zone"}},
+		{"ip and zone only, with real values", "1.2.3.4", true, 0, false, "APS1234", true, "", false, []string{"cs-ip", "cs-zone"}},
+		{
+			// Round 20 regression case: -cs-ip was explicitly typed (e.g. a cron wrapper always
+			// emitting -cs-ip "$IP" from a possibly-unset shell var), but its value is the empty
+			// string -- the flag's own zero-value default. Before this round's fix, this was
+			// indistinguishable from a real override and produced a misleading WARN.
+			"cs-ip explicitly typed but empty -> not reported as overridden", "", true, 0, false, "", false, "", false, nil,
+		},
+		{
+			// Same class of bug, for -cs-port: explicitly typed as 0 (its zero value), e.g. -cs-port 0.
+			"cs-port explicitly typed but zero -> not reported as overridden", "", false, 0, true, "", false, "", false, nil,
+		},
+		{
+			// All four explicitly typed but all left at their zero values -- none should be reported.
+			"all four explicit but all empty/zero -> not reported as overridden", "", true, 0, true, "", true, "", true, nil,
+		},
+		{
+			// Mixed: cs-ip explicitly typed with a real value, cs-port explicitly typed but empty --
+			// only cs-ip should be reported.
+			"cs-ip explicit with a real value, cs-port explicit but zero -> only cs-ip reported",
+			"1.2.3.4", true, 0, true, "", false, "", false, []string{"cs-ip"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := serverListOverrideFlags(c.ipExplicit, c.portExplicit, c.zoneExplicit, c.gameUidExplicit)
+			got := serverListOverrideFlags(c.ip, c.ipExplicit, c.port, c.portExplicit, c.zone, c.zoneExplicit, c.gameUid, c.gameUidExplicit)
 			if !slices.Equal(got, c.want) {
-				t.Errorf("serverListOverrideFlags(ip=%v, port=%v, zone=%v, gameUid=%v) = %v, want %v",
-					c.ipExplicit, c.portExplicit, c.zoneExplicit, c.gameUidExplicit, got, c.want)
+				t.Errorf("serverListOverrideFlags(ip=%q, ipExplicit=%v, port=%v, portExplicit=%v, zone=%q, zoneExplicit=%v, gameUid=%q, gameUidExplicit=%v) = %v, want %v",
+					c.ip, c.ipExplicit, c.port, c.portExplicit, c.zone, c.zoneExplicit, c.gameUid, c.gameUidExplicit, got, c.want)
 			}
 		})
 	}

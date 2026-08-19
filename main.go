@@ -33,7 +33,7 @@ func main() {
 	csIP := fs.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
 	csPort := fs.Int("cs-port", 0, "port for -cs-ip")
 	csZone := fs.String("cs-zone", "", "zone for -cs-ip, e.g. APS1234")
-	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip")
+	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip -- also sent on every -cs-rt GSL opt=refresh call, unlike -cs-zone (which only matters for -cs-ip): gameUid is passed to GetServerList unconditionally, so it matters even for a bare -cs-rt with no -cs-ip at all")
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
 	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- IF the refresh response includes a non-empty server list, it REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and IF it includes a fresh access token, that REPLACES any explicitly-passed -cs-at; either can come back empty, in which case the corresponding -cs-* value passed here (or loaded from a session config) is used unchanged instead -- a warning is logged when that leaves a possibly-stale -cs-at in place with no refresh")
@@ -353,27 +353,38 @@ func refreshHasUsableData(lsr *LoginServerListRespon) bool {
 }
 
 // serverListOverrideFlags reports which of "cs-ip", "cs-port", "cs-zone", "cs-gameuid" (in that
-// order) were actually typed on the command line -- per ipExplicit/portExplicit/zoneExplicit/
-// gameUidExplicit, see crossServerTestOpts' doc comment -- and are therefore about to be silently
-// overridden by a GSL opt=refresh response's non-empty ServerList. A nil result means none of the
-// four were explicitly set (e.g. a fresh cron run with no prior overrides, where ip/port/zone/
-// gameUid started from either their zero value or a loaded session config), which the call site
-// uses to keep its existing plain INFO-level "server selected" log instead of escalating to WARN --
-// only a real override of an operator-supplied value escalates. Taking the four bools as plain
-// arguments (rather than the whole crossServerTestOpts struct, or being inlined at the call site) is
-// what makes this testable without building a real crossServerTestOpts/GSL round-trip.
-func serverListOverrideFlags(ipExplicit, portExplicit, zoneExplicit, gameUidExplicit bool) []string {
+// order) were both actually typed on the command line -- per ipExplicit/portExplicit/
+// zoneExplicit/gameUidExplicit, see crossServerTestOpts' doc comment -- AND carried a real,
+// non-zero-value value (ip/port/zone/gameUid respectively) at the time, and are therefore about
+// to be silently overridden by a GSL opt=refresh response's non-empty ServerList. A nil result
+// means none of the four qualify (e.g. a fresh cron run with no prior overrides, where ip/port/
+// zone/gameUid started from either their zero value or a loaded session config), which the call
+// site uses to keep its existing plain INFO-level "server selected" log instead of escalating to
+// WARN -- only a real override of an operator-supplied value escalates.
+//
+// Both conditions are required, exactly like the neighboring "ignoring -cs-at" check just above
+// this function's call site (`o.at != "" && o.atExplicit`), and for the identical reason: Go's
+// flag.Visit fires for a flag whenever it appeared on the command line at all, even if the value
+// given equals the flag's own zero-value default (e.g. an operator explicitly passing -cs-ip ""
+// from a possibly-unset shell variable, or someone intentionally relying on -cs-rt alone with no
+// -cs-ip -- both cases this codebase explicitly supports). Checking *Explicit alone, as this
+// function used to, meant such a case would still be reported as "overriding" a flag whose value
+// was never actually meaningful, producing a misleading WARN. Taking both the four values and the
+// four bools as plain arguments (rather than the whole crossServerTestOpts struct, or being
+// inlined at the call site) is what makes this testable without building a real
+// crossServerTestOpts/GSL round-trip.
+func serverListOverrideFlags(ip string, ipExplicit bool, port int, portExplicit bool, zone string, zoneExplicit bool, gameUid string, gameUidExplicit bool) []string {
 	var out []string
-	if ipExplicit {
+	if ipExplicit && ip != "" {
 		out = append(out, "cs-ip")
 	}
-	if portExplicit {
+	if portExplicit && port != 0 {
 		out = append(out, "cs-port")
 	}
-	if zoneExplicit {
+	if zoneExplicit && zone != "" {
 		out = append(out, "cs-zone")
 	}
-	if gameUidExplicit {
+	if gameUidExplicit && gameUid != "" {
 		out = append(out, "cs-gameuid")
 	}
 	return out
@@ -539,14 +550,20 @@ func runCrossServerTest(o crossServerTestOpts) {
 		slog.Info("GSL getserverlist (opt=refresh)")
 		lsr, err := GetServerList(gslHTTPClient, gslGateHost, gslRSAPub, deviceID, GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
 		if err != nil {
+			// Unlike the ErrAuthRejected-gated os.Exit(2) sites elsewhere in this file (the
+			// plain-login failure in main(), and the SFS2X cross-server-login failure further
+			// down in this function), a GetServerList error is never gated on errors.Is(err,
+			// ErrAuthRejected) here: GetServerList's own error returns (gsl.go) never wrap it --
+			// only the SFS2X handshake/login/cross-server-login paths (conn.go, login.go,
+			// crossserver.go) do, since those are the ones that decode an explicit server-side
+			// rejection error code from the game server. This HTTP-based GSL endpoint's own
+			// success-vs-rejection semantics haven't been confirmed live yet either (see
+			// LoginServerListRespon.Code's own doc comment), so there is nothing here an exit-2
+			// branch could actually be gated on -- a prior version of this code had one anyway,
+			// unreachable, with a comment incorrectly claiming it matched those sibling sites.
+			// Every GetServerList failure -- network/HTTP/decode/decrypt, all of it -- is just a
+			// generic failure (1) until real evidence of a confirmed-rejection shape exists here.
 			slog.Error("GSL refresh failed", "error", err)
-			// Exit code 2 marks a confirmed server-side auth rejection specifically -- see the
-			// matching comment in main() above. A network/HTTP/decode/decrypt failure that never
-			// reached a confirmed rejection is just a generic failure (1), matching the two
-			// sibling ErrAuthRejected-gated exits elsewhere in this file.
-			if errors.Is(err, ErrAuthRejected) {
-				os.Exit(2)
-			}
 			os.Exit(1)
 		}
 		slog.Info("GSL refresh response", "code", lsr.Code, "serverListLen", len(lsr.ServerList))
@@ -611,13 +628,17 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 		if len(lsr.ServerList) > 0 {
 			srv := lsr.ServerList[0]
-			if overridden := serverListOverrideFlags(o.ipExplicit, o.portExplicit, o.zoneExplicit, o.gameUidExplicit); len(overridden) > 0 {
-				// Symmetric to the "ignoring -cs-at" WARN above, for the same reason: an
-				// operator-supplied value is about to be silently replaced. Only escalated to
-				// WARN when it's actually overriding something the operator explicitly typed --
-				// a fresh cron run with no prior -cs-ip/-cs-port/-cs-zone/-cs-gameuid overrides at
-				// all (e.g. everything came from a session config, or nothing was set yet) keeps
-				// the plain INFO-level "server selected" log below instead.
+			if overridden := serverListOverrideFlags(ip, o.ipExplicit, port, o.portExplicit, zone, o.zoneExplicit, gameUid, o.gameUidExplicit); len(overridden) > 0 {
+				// Symmetric to the "ignoring -cs-at" WARN above, for the same reason (and, as of
+				// this round's fix to serverListOverrideFlags, genuinely the same check: both
+				// require the flag to have been explicitly typed AND to carry a real, non-zero
+				// value, not just *Explicit alone): an operator-supplied value is about to be
+				// silently replaced. Only escalated to WARN when it's actually overriding
+				// something the operator explicitly typed with a meaningful value -- a fresh cron
+				// run with no prior -cs-ip/-cs-port/-cs-zone/-cs-gameuid overrides at all (e.g.
+				// everything came from a session config, nothing was set yet, or a flag was
+				// explicitly passed but empty/zero) keeps the plain INFO-level "server selected"
+				// log below instead.
 				slog.Warn("GSL refresh response's server list is overriding explicitly-passed flag(s)", "overriddenFlags", overridden, "ip", srv.IP, "port", srv.Port, "zone", srv.Zone, "gameUid", srv.GameUid)
 			} else {
 				slog.Info("server selected", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone, "gameUid", srv.GameUid)

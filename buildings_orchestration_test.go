@@ -347,6 +347,91 @@ func TestFetchBuildingsDedupesVisitorUIDAcrossInitPushes(t *testing.T) {
 	}
 }
 
+// TestFetchBuildingsDeadlineCappedAgainstRepeatedInitPushes is the round-20 regression test for
+// FetchBuildings' per-push deadline extension (the "init"/"push.init.build" cases' unconditional
+// `deadline = time.Now().Add(3 * time.Second)`, now `deadline = capDeadline(time.Now().Add(3*
+// time.Second), originalDeadline)`). Before this fix, every qualifying push reset the deadline
+// with no cap against the caller-supplied timeout at all, so a peer -- this client supports
+// connecting to arbitrary hosts via -cs-ip, which this project's threat model already treats as
+// untrusted/hostile-capable -- that kept re-sending "init" faster than the 3-second window could
+// keep this call (and therefore the whole synchronous main() flow) hanging indefinitely, a
+// materially worse outcome than a bounded timeout for the cron-wrapper usage main.go's own
+// comments describe as a first-class use case.
+//
+// The fake server sends 5 qualifying "init" pushes spaced 400ms apart (comfortably under the
+// 3-second reset window, so every single one would extend the deadline if uncapped) against a
+// short 2-second caller timeout. If the deadline were still being reset unconditionally, the last
+// push (at ~1.6s) would push the effective deadline out to ~4.6s -- well past the 2-second budget
+// the caller actually asked for. This test asserts FetchBuildings returns within a bounded window
+// close to that original 2-second budget instead.
+//
+// Unlike TestFetchBuildingsDedupesVisitorUIDAcrossInitPushes/
+// TestFetchBuildingsInitPushParsesBuildingsAndVisitors above, which each send only 2 pushes and
+// then close the connection (exiting via a wrapped io.EOF, never actually exercising the deadline
+// logic at all), this test's fake server never closes its end of the pipe -- it just stops sending
+// after the 5th push and returns. The only way FetchBuildings can terminate here is the deadline
+// itself elapsing and the loop's `remaining <= 0` / SetReadDeadline-timeout break firing, which is
+// exactly the code path this fix targets.
+//
+// Mutation check: reverting either capDeadline call site in buildings.go back to the old plain
+// `deadline = time.Now().Add(3 * time.Second)` makes this test fail (or hang past its own 6-second
+// safety timeout), since the 5th push's reset would push the effective deadline to ~4.6s -- outside
+// this test's asserted bound.
+func TestFetchBuildingsDeadlineCappedAgainstRepeatedInitPushes(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const (
+		callerTimeout = 2 * time.Second
+		pushSpacing   = 400 * time.Millisecond
+		numPushes     = 5 // spaced well under the 3s reset window; last push lands at ~1.6s
+	)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < numPushes; i++ {
+			if i > 0 {
+				time.Sleep(pushSpacing)
+			}
+			params := NewSFSObject()
+			arr := NewSFSArray()
+			arr.AddSFSObject(newTestBuildingSFS(int64(1000+i), BuildingFarmland, 1))
+			params.PutSFSArray("building_new", arr)
+			if err := server.SendExtension("init", params); err != nil {
+				return
+			}
+		}
+		// Deliberately does NOT close the connection: the point of this test is that
+		// FetchBuildings must give up on its own, governed by the capped deadline, not because
+		// the peer hung up (contrast the io.EOF-driven tests above).
+	}()
+
+	start := time.Now()
+	buildings, _, err := FetchBuildings(client, callerTimeout)
+	elapsed := time.Since(start)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fake server goroutine never finished sending its 5 init pushes")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil (a plain deadline-elapsed timeout is not itself an error, per the existing convention)", err)
+	}
+	// Uncapped, the 5th push (sent at ~1.6s) would reset the deadline to ~4.6s. Capped, the
+	// deadline can never move past callerTimeout (2s) regardless of how many pushes arrive.
+	// Bounded generously above callerTimeout to absorb scheduling jitter while staying well
+	// under what the uncapped bug would produce.
+	if maxWant := callerTimeout + 1*time.Second; elapsed > maxWant {
+		t.Errorf("FetchBuildings took %v, want at most ~%v (deadline must be capped at the caller's original %v timeout despite repeated qualifying init pushes -- an uncapped reset from the 5th push alone would run to ~%v)",
+			elapsed, maxWant, callerTimeout, pushSpacing*(numPushes-1)+3*time.Second)
+	}
+	if len(buildings) != numPushes {
+		t.Errorf("got %d buildings, want %d (one distinct uuid per init push, all processed before the capped deadline fired)", len(buildings), numPushes)
+	}
+}
+
 // TestCollectIdleRewardSuccess covers CollectIdleReward's documented two-call sequence -- a peek
 // (action=0) immediately followed by a claim (action=1), both against `lw.pve.idle.reward` (see
 // its doc comment in buildings.go) -- against a fake server that answers both with a plain

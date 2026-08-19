@@ -218,10 +218,34 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 // is the fastest way to confirm which of Farmland/Iron Mine/Gold Mine/
 // Training Base collect via a queue-item uuid vs a direct building-uuid
 // action.
+// capDeadline returns the earlier of a per-push extension candidate and the caller's original
+// outer deadline -- so a burst of qualifying bootstrap pushes (see the "init"/"push.init.build"
+// cases below) can still extend FetchBuildings' wait somewhat, for a slow-but-legitimate
+// multi-push bootstrap burst, but can never push the total wait past the timeout the caller
+// originally asked for.
+func capDeadline(candidate, original time.Time) time.Time {
+	if candidate.After(original) {
+		return original
+	}
+	return candidate
+}
+
 func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visitor, error) {
 	var buildings []Building
 	var visitors []Visitor
-	deadline := time.Now().Add(timeout)
+	// originalDeadline is the caller's actual budget (main.go passes 12s/15s at its two call
+	// sites) and, unlike deadline below, is NEVER reassigned once set -- it exists solely so the
+	// per-push 3-second extension below (see the "init"/"push.init.build" cases) has something
+	// fixed to cap itself against. Before this fix, that extension reassigned deadline directly
+	// on every qualifying push with no cap at all, so a peer that kept re-sending either push type
+	// faster than the 3s window could hold this call open indefinitely -- a materially worse
+	// outcome than a bounded timeout for the cron-wrapper usage main.go's own comments describe as
+	// a first-class use case. This client supports connecting to arbitrary hosts via -cs-ip, which
+	// this project's threat model already treats as untrusted/hostile-capable (see round 16's
+	// redactSFSValue fail-open fix for the same threat model applied elsewhere), so a hostile peer
+	// deliberately doing this is a real scenario, not just a theoretical one.
+	originalDeadline := time.Now().Add(timeout)
+	deadline := originalDeadline
 	gotInitBuild := false
 
 	// seenBuildingUUIDs dedupes across the three population sources below (init/building_new,
@@ -292,7 +316,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			}
 			slog.Info("init: buildings loaded", "field", "building_new", "count", len(buildings))
 			slog.Info("init: visitors loaded", "field", "visitor.list", "count", len(visitors))
-			deadline = time.Now().Add(3 * time.Second)
+			deadline = capDeadline(time.Now().Add(3*time.Second), originalDeadline)
 		case "push.init.build":
 			gotInitBuild = true
 			if v, ok := msg.Params.Get("defaultBuilds"); ok {
@@ -316,7 +340,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			slog.Info("push.init.build: buildings loaded", "count", len(buildings))
 			// Keep listening a little longer for queue pushes that often
 			// follow immediately, but we already have what we came for.
-			deadline = time.Now().Add(3 * time.Second)
+			deadline = capDeadline(time.Now().Add(3*time.Second), originalDeadline)
 		case "push.add.building":
 			if v, ok := msg.Params.Get("buildings"); ok {
 				if arr, ok := v.Val.(*SFSArray); ok {

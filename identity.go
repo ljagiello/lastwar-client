@@ -160,21 +160,86 @@ func readTrimmed(path string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
+// writeTempStateFile writes content to a brand-new, fsync'd temp file in the same directory as
+// finalPath (so a subsequent same-directory Rename/Link is both atomic and guaranteed to stay on
+// one filesystem), at 0600, and returns its path -- it never touches finalPath itself. This is
+// the shared write+fsync durability step behind both ways this package publishes a state file:
+//   - atomicWriteStateFile (below) publishes via os.Rename, which silently overwrites an existing
+//     destination -- correct for saveStateFile (loginKey/gameUid/username) and the device-id
+//     empty-file self-heal path in loadOrCreateDeviceIdentity, where clobbering whatever
+//     (possibly stale/empty) content was already there is exactly the point.
+//   - createDeviceIDStateFile (below) publishes via os.Link instead, which fails with an
+//     os.IsExist-shaped error if the destination already exists rather than overwriting it --
+//     required there to preserve the O_CREATE|O_EXCL-equivalent race-detection
+//     loadOrCreateDeviceIdentity's os.IsExist(err) handling depends on.
+//
+// Either way, because the content is fully written and durable on disk *before* the publish step
+// even runs, a crash/OOM-kill/power-loss between this call returning and the caller's
+// Rename/Link can only ever leave the temp file behind -- finalPath itself is never partially
+// written to, so no torn/truncated content can ever become visible there.
+func writeTempStateFile(finalPath, content string) (tmpPath string, err error) {
+	dir := filepath.Dir(finalPath)
+	tmp, err := os.CreateTemp(dir, filepath.Base(finalPath)+".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	tmpPath = tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return "", err
+	}
+	cleanup = false
+	return tmpPath, nil
+}
+
 // createDeviceIDStateFile persists a freshly-generated device id, but only if the file doesn't
-// already exist. O_EXCL closes the TOCTOU gap between loadOrCreateDeviceIdentity's earlier
+// already exist. Exclusivity closes the TOCTOU gap between loadOrCreateDeviceIdentity's earlier
 // read-not-exists check and this write: if some other invocation created the file in between (the
 // documented deployment is a single cron job per machine, so concurrent invocations aren't the
 // primary realistic trigger here, but this is a basic safety margin at negligible cost), this
 // fails with an os.IsExist error instead of silently clobbering whatever that other invocation
 // already wrote -- the caller re-reads rather than overwrites in that case.
+//
+// The id is written to a temp file first (fsync'd, via the writeTempStateFile helper above, the
+// same one atomicWriteStateFile uses) and published with os.Link rather than a direct
+// O_CREATE|O_EXCL+WriteString straight to path. The old direct-write approach had a window
+// between O_CREATE|O_EXCL succeeding and WriteString completing where a crash/OOM-kill/ENOSPC
+// left a partial, non-empty, non-zero-length device-id file behind -- which the empty-file
+// self-heal logic in loadOrCreateDeviceIdentity does NOT catch (it only self-heals a
+// confirmed-empty leftover, never an already-non-empty-but-truncated one), so a truncated id
+// could silently become the permanent device identity on every subsequent run. os.Link preserves
+// the exact exclusivity os.O_EXCL provided -- it fails with an os.IsExist-shaped error if path
+// already exists, exactly like the old O_EXCL failure, unlike os.Rename which would silently
+// overwrite an existing destination and defeat the whole race-detection purpose this function
+// exists for -- while still avoiding the torn-write window, since by the time Link runs the
+// linked-to content is already fully written and fsync'd, so Link itself can only ever succeed
+// outright or fail outright, never publish a partial file. The temp file is removed after a
+// successful Link (the data itself survives at path via the surviving hard link; only the extra
+// temp-name directory entry goes away) and also removed if Link fails, so no stray "<base>.tmp-*"
+// file is ever left behind either way.
 func createDeviceIDStateFile(path, id string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	tmpPath, err := writeTempStateFile(path, id)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = f.WriteString(id)
-	return err
+	defer os.Remove(tmpPath)
+	return os.Link(tmpPath, path)
 }
 
 // deviceIDEmptyRetryAttempts/deviceIDEmptyRetryDelay bound how long loadOrCreateDeviceIdentity
@@ -194,32 +259,17 @@ const (
 // behind, or (for a concurrent writer instead of a crash) could race and clobber a
 // slow-but-genuine concurrent writer's partial content. Rename within the same directory is
 // atomic on POSIX filesystems, so any reader sees either the old complete content or the new
-// complete content, never a torn write. fsync-ing the temp file before the rename ensures the
-// content is durable before the rename makes it visible. Shared by both the device-id
-// self-heal path below and saveStateFile (loginKey/gameUid/username) -- every persisted
-// device-identity state file gets the same torn-write protection, not just the device id.
+// complete content, never a torn write. Used by saveStateFile (loginKey/gameUid/username) and the
+// device-id empty-file self-heal path in loadOrCreateDeviceIdentity, where overwriting whatever
+// was already at path is the desired behavior; createDeviceIDStateFile needs os.Link's stricter
+// exclusivity instead (see writeTempStateFile's doc comment above), so it doesn't go through this
+// function -- but it gets the same torn-write protection via the shared writeTempStateFile step.
 func atomicWriteStateFile(path, content string) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	tmpPath, err := writeTempStateFile(path, content)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath) // no-op once the rename below succeeds -- the path no longer exists
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		return err
-	}
 	return os.Rename(tmpPath, path)
 }
 

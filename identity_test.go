@@ -455,6 +455,136 @@ func TestLoadOrCreateDeviceIdentityRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCreateDeviceIDStateFileNormalCreation confirms createDeviceIDStateFile's switch from a
+// direct O_CREATE|O_EXCL+WriteString to write-temp-then-os.Link still produces exactly the same
+// end result for the ordinary first-run case: the id lands at path, readable back verbatim, at
+// 0600, with no stray "<base>.tmp-*" file left behind once Link has published it. Link (unlike
+// Rename) doesn't remove the source name on its own -- it just adds a second directory entry
+// pointing at the same inode -- so this also confirms createDeviceIDStateFile's explicit
+// post-Link os.Remove cleanup actually runs, not just that the content made it to path.
+func TestCreateDeviceIDStateFileNormalCreation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "device-id")
+
+	const wantID = "fresh-device-id_n3d"
+	if err := createDeviceIDStateFile(path, wantID); err != nil {
+		t.Fatalf("createDeviceIDStateFile: %v", err)
+	}
+
+	got, err := readTrimmed(path)
+	if err != nil {
+		t.Fatalf("readTrimmed: %v", err)
+	}
+	if got != wantID {
+		t.Errorf("got %q, want %q", got, wantID)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Errorf("got mode %v for %s, want 0600", fi.Mode().Perm(), path)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("got directory entries %v, want exactly [%s] (no leftover temp file after Link)", names, filepath.Base(path))
+	}
+}
+
+// TestCreateDeviceIDStateFileExclusivityOnExistingFile confirms the switch from
+// O_CREATE|O_EXCL to write-temp-then-os.Link preserved the exact exclusivity semantics
+// loadOrCreateDeviceIdentity's os.IsExist(err) race-detection depends on (see
+// createDeviceIDStateFile's doc comment): calling it against a path that already has real content
+// must fail with an os.IsExist error -- exactly like the old O_EXCL failure -- rather than
+// silently overwriting it the way a naive write-temp-then-os.Rename fix would have (os.Rename
+// doesn't fail when the destination already exists on POSIX -- it just clobbers it, which would
+// defeat the whole point of the exclusivity check). The pre-existing content must survive
+// untouched, and no stray temp file should be left behind.
+func TestCreateDeviceIDStateFileExclusivityOnExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "device-id")
+
+	const existingID = "already-here-device-id_n3d"
+	if err := os.WriteFile(path, []byte(existingID), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := createDeviceIDStateFile(path, "would-be-new-device-id_n3d")
+	if err == nil {
+		t.Fatal("createDeviceIDStateFile: got nil error against a pre-existing file, want an os.IsExist error")
+	}
+	if !os.IsExist(err) {
+		t.Errorf("got error %v, want one satisfying os.IsExist -- loadOrCreateDeviceIdentity's race-detection branches on exactly this", err)
+	}
+
+	got, err := readTrimmed(path)
+	if err != nil {
+		t.Fatalf("readTrimmed: %v", err)
+	}
+	if got != existingID {
+		t.Errorf("existing content = %q after a failed createDeviceIDStateFile, want it left untouched at %q (os.Link must not clobber an existing destination, unlike os.Rename)", got, existingID)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("got directory entries %v, want exactly [%s] (temp file cleaned up after a failed Link)", names, filepath.Base(path))
+	}
+}
+
+// TestWriteTempStateFileDoesNotTouchFinalPathBeforePublish simulates a crash in the window
+// createDeviceIDStateFile's fix was specifically designed to close: after the temp file's content
+// is fully written and fsync'd (durable), but before the Link call that publishes it ever runs.
+// writeTempStateFile itself never touches finalPath -- it only creates and populates a
+// separately-named temp file -- so a crash in exactly that window can only ever leave the temp
+// file behind; finalPath is never partially written to, truncated, or otherwise touched. This is
+// the property that makes publishing via os.Link safe: by the time Link runs, there is no way for
+// it to expose anything other than the already-complete content, so it can only succeed outright
+// (publishing the full content) or fail outright (leaving finalPath exactly as it was before) --
+// never leave a torn/partial file visible at finalPath, unlike the old direct
+// O_CREATE|O_EXCL+WriteString path this replaced, where a crash between those two syscalls left a
+// truncated, non-empty device-id file sitting at the real path.
+func TestWriteTempStateFileDoesNotTouchFinalPathBeforePublish(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "device-id-crash-sim")
+
+	tmpPath, err := writeTempStateFile(path, "fully-written-and-durable-content")
+	if err != nil {
+		t.Fatalf("writeTempStateFile: %v", err)
+	}
+	// Simulate a crash right here -- after the content is fully durable on disk, but before any
+	// caller has run Rename/Link to publish it.
+
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("final path exists (or a stat error other than not-exist occurred) after a simulated crash before publish, want it completely untouched: err=%v", statErr)
+	}
+
+	got, err := readTrimmed(tmpPath)
+	if err != nil {
+		t.Fatalf("readTrimmed(tmpPath): %v", err)
+	}
+	if got != "fully-written-and-durable-content" {
+		t.Errorf("temp file content = %q, want the content to already be fully durable at the temp path before publish is even attempted", got)
+	}
+
+	os.Remove(tmpPath)
+}
+
 // TestSaveStateFileRoundTrip confirms saveStateFile's normal write-then-read round trip still
 // works correctly after switching it from a plain os.WriteFile to the write-temp-then-rename
 // atomicWriteStateFile helper (the same one atomicWriteDeviceIDStateFile's self-heal path already
