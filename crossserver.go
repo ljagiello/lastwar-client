@@ -132,7 +132,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			slog.Info("cross-server login: following serverInfo redirect", "hop", hop, "addr", addr, "zone", zone)
 		}
 		slog.Info("cross-server login: dialing directly (no GSL call)", "addr", addr)
-		conn, err := DialGame(addr, 10*time.Second)
+		conn, err := dialGame(addr, 10*time.Second)
 		if err != nil {
 			return nil, err
 		}
@@ -242,7 +242,12 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 				conn.Close()
 				return nil, fmt.Errorf("cross-server login: serverInfo redirect: %w", err)
 			}
-			newZone := siObj.GetString("zone")
+			// redirectZone (login.go) is redirectIP's sibling for this field -- see its doc
+			// comment for why a wrong-typed zone is a real, non-theoretical desync risk even
+			// though (unlike a wrong-typed ip) it doesn't stop the redirect itself from being
+			// followed: ip/port can still resolve fine on their own, so this would otherwise
+			// silently redial to the new address while keeping the stale zone.
+			newZone := redirectZone(siObj, "crossserver.go cross-server Login")
 			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddr, "newZone", newZone, "oldAddr", addr, "oldZone", zone)
 
 			// Before closing this connection and redialing, refresh AccessTok via GSL --

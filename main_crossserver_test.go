@@ -206,6 +206,48 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestWarnsOnExplicitlyEmptyInteractive is the end-to-end regression test for
+// this round's Fix 2 (the interactiveExplicit call site inside runCrossServerTest): before this
+// fix, an explicitly-passed-but-empty -interactive flag (e.g. -interactive "$CONTROL_PIPE" with an
+// unset/empty $CONTROL_PIPE) silently behaved exactly as if -interactive were never passed at all,
+// with zero diagnostic -- unlike every sibling -cs-* flag (see e.g. the -cs-ip/-cs-gameuid "given
+// but empty" checks elsewhere in this file). This drives runCrossServerTest through a full
+// successful login (fake GSL + fake game server) with interactiveExplicit: true and interactive
+// left empty, and asserts the new warning fires.
+//
+// Unlike this file's other end-to-end tests that reach o.interactive != "" and call the real,
+// forever-blocking RunInteractive (which calls os.Exit and needs the re-exec-subprocess idiom),
+// an EMPTY o.interactive here means runCrossServerTest just logs the warning and returns normally
+// -- no subprocess needed.
+func TestRunCrossServerTestWarnsOnExplicitlyEmptyInteractive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	gameAddr := startFakeGameServer(t, fakeInitPushServer(nil))
+	gameHost, gamePort := splitHostPortInt(t, gameAddr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+	useFakeGSLServer(t, gsl)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	runCrossServerTest(crossServerTestOpts{
+		ip: gameHost, port: gamePort, zone: "APS1", gameUid: "uid-1", at: "tok-1",
+		interactive:         "",
+		interactiveExplicit: true,
+	})
+
+	log := buf.String()
+	if !strings.Contains(log, "-interactive was given but empty") {
+		t.Errorf("log = %s\nwant the new \"-interactive was given but empty\" warning", log)
+	}
+	if !strings.Contains(log, "client exiting") {
+		t.Errorf("log = %s\nwant runCrossServerTest to still return normally (not enter interactive mode, not exit fatally) for an explicitly-empty -interactive", log)
+	}
+}
+
 // TestRunCrossServerTestExitsWhenIPEmpty is the regression test for this round's fix: the
 // firstHost(ip) == "" pre-flight check added to runCrossServerTest alongside its existing
 // port <= 0 check (see main.go). Without that check, an empty ip reaches

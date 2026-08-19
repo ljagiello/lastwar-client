@@ -116,6 +116,42 @@ func redirectIP(siObj *SFSObject, context string) string {
 	return siObj.GetString("ip")
 }
 
+// redirectZone is redirectIP's sibling for the serverInfo redirect payload's "zone" field: the
+// same present-but-wrong-typed-vs-genuinely-absent distinction (Warn on the former, silent "" on
+// the latter), applied to zone instead of ip. This matters in a DIFFERENT, arguably worse way
+// than a wrong-typed ip does: a wrong-typed ip stops the redirect from being followed at all --
+// there's nowhere to redial to (see redirectIP's own doc comment) -- but a wrong-typed zone does
+// NOT stop anything, since ip/port can still resolve fine on their own. The connection silently
+// redials to the NEW ip/port while keeping the STALE zone, a real, non-theoretical desync risk:
+// both call sites below resend this (possibly stale) zone as `zn` on the redialed Login, so a
+// silently-kept-stale zone means the redialed connection claims the OLD zone while actually
+// talking to the NEW shard. gsl.go's getIntFlexible helper exists specifically because this SAME
+// serverInfo object is documented as sometimes sending wrong-typed fields -- zone is exactly as
+// exposed to that as ip and port are. context names the caller for the log line's benefit, same
+// as redirectIP.
+func redirectZone(siObj *SFSObject, context string) string {
+	v, ok := siObj.Get("zone")
+	if !ok || v.Val == nil {
+		return ""
+	}
+	if !sfsFieldKindAccepts(sfsFieldKindString, v.Val) {
+		slog.Warn("serverInfo redirect: zone field present but wrong-typed -- may silently keep a stale zone while still redialing to the new ip/port",
+			"context", context, "goType", fmt.Sprintf("%T", v.Val), "raw", siObj.StringRedacted())
+		return ""
+	}
+	return siObj.GetString("zone")
+}
+
+// dialGame indirects DialGame (conn.go) through a package var, mirroring gsl.go's
+// checkVersionHosts override pattern, so a test can substitute a fake dialer -- e.g. one that
+// hands back a real GameConn with its underlying net.Conn swapped for a write-failing wrapper
+// (conn_wait_test.go's writeFailConn, or login_integration_test.go's writeFailAfterConn for
+// targeting a specific later send in a multi-step flow) -- rather than trying to win an
+// inherently racy real-TCP "peer closed right after accept" timing game to force a deterministic
+// send-stage failure. Production code always resolves this to the real DialGame; only tests ever
+// reassign it, and always restore the original via t.Cleanup.
+var dialGame = DialGame
+
 // warnIfWrongTypedField logs a Warn when o has field present (non-nil) but its concrete decoded
 // Go type isn't one kind's corresponding GetLong/GetInt/GetString accessor (sfsobject.go) actually
 // reads -- distinct from field being genuinely absent, which every call site below already,
@@ -240,7 +276,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		}
 		slog.Info("step 3: open SFS2X TCP connection")
 		slog.Info("dialing", "addr", addr, "zone", zone)
-		conn, err = DialGame(addr, 10*time.Second)
+		conn, err = dialGame(addr, 10*time.Second)
 		if err != nil {
 			return nil, err
 		}
@@ -307,6 +343,12 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			conn.Close()
 			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), ErrAuthRejected)
 		}
+		// warnIfWrongTypedField below adds a diagnostic for the "field present but wrong-typed"
+		// case specifically, matching the push.account.login.new un/loginKey/gameUid/
+		// gameUserName siblings further down this function -- distinct from genuinely absent,
+		// which the un != "" check just below already, deliberately, treats as "nothing to
+		// persist" and stays silent about.
+		warnIfWrongTypedField(env.Content, "un", "base-zone login response", sfsFieldKindString)
 		// Not "un": env.Content.GetString("un") -- that would print the server's real returned
 		// account username in cleartext at Info level on every successful login. usernameLen
 		// mirrors the emailLen pattern used elsewhere in this file for the same reason.
@@ -336,7 +378,10 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 				conn.Close()
 				return nil, fmt.Errorf("login: serverInfo redirect: %w", err)
 			}
-			newZone := siObj.GetString("zone")
+			// redirectZone (above) is redirectIP's sibling for this field -- see its doc comment
+			// for why a wrong-typed zone is a real, non-theoretical desync risk even though
+			// (unlike a wrong-typed ip) it doesn't stop the redirect itself from being followed.
+			newZone := redirectZone(siObj, "login.go base-zone Login")
 			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddr, "newZone", newZone, "oldAddr", addr, "oldZone", zone)
 			conn.Close()
 			addr = newAddr
@@ -616,11 +661,12 @@ func redact(s string) string {
 // verbatim rather than collapsing every failure mode into one generic
 // "gave up" outcome. A failed SendExtension for the login.init active-pull
 // fallback itself is treated identically to a failed ReadEnvelope: it's
-// returned immediately as this same terminal connection-failure result,
-// not merely logged and fallen through into the next blocking read. A
-// half-open connection can surface a local write error fast while the
-// following ReadEnvelope genuinely blocks until the deadline -- without
-// this, that scenario would misreport a definite, already-logged
+// returned immediately as this same terminal connection-failure result
+// (wrapped in sendStageError, conn.go -- round 30; see the send site
+// below), not merely logged and fallen through into the next blocking
+// read. A half-open connection can surface a local write error fast while
+// the following ReadEnvelope genuinely blocks until the deadline --
+// without this, that scenario would misreport a definite, already-logged
 // connection failure as an ordinary silence-until-deadline timeout,
 // denying the caller (Login) the fail-fast behavior it's specifically
 // built around the initErr!=nil case for.
@@ -644,9 +690,16 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 				// Same terminal treatment as a failed ReadEnvelope below: a failed send is a
 				// definite, already-observed connection failure, not something to merely log and
 				// keep waiting past -- see this function's doc comment for why falling through
-				// here would misreport it as a plain timeout instead.
-				slog.Error("login.init send failed", "error", err)
-				return nil, nil, false, err
+				// here would misreport it as a plain timeout instead. Wrapped in sendStageError
+				// (conn.go), matching every other direct SendEnvelope/SendExtension call site on
+				// the login hot path (round 29) -- this one was missed then. Without it, a write
+				// failure that itself happens to report Timeout()==true (e.g. SendExtension's own
+				// write-deadline-exceeded case) would be indistinguishable from this function's
+				// own benign silence-until-deadline timeout outcome (nil error) to any caller
+				// checking errors.As(&netErr) && netErr.Timeout().
+				wrapped := sendStageError{err: err}
+				slog.Error("login.init send failed", "error", wrapped)
+				return nil, nil, false, wrapped
 			}
 		}
 

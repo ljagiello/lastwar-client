@@ -214,8 +214,9 @@ func TestStringRedactedMatchesStringForNonSensitiveData(t *testing.T) {
 
 // TestFmtVerbAutoInvokesStringerSafely is the round-14 regression test for Fix 1, the structural
 // fix to the credential-leak bug class this repo has hunted for four rounds: *SFSObject's String()
-// method used to be the raw, unredacted dump (now renamed unsafeRawString(), see sfsobject.go), so
-// ANY code path that handed a *SFSObject to fmt's %v/%s verbs, a Print-family function, or slog's
+// method used to be the raw, unredacted dump (renamed unsafeRawString() in round 14, then deleted
+// entirely as dead code in round 15 -- see sfsobject.go), so ANY code path that handed a
+// *SFSObject to fmt's %v/%s verbs, a Print-family function, or slog's
 // Any-kind attribute formatting would automatically invoke it via fmt.Stringer -- with zero literal
 // ".String()" text in the source, a pattern credential_leak_lint_test.go's text-scanning approach
 // structurally cannot see. This test exercises exactly that implicit-invocation path (never calling

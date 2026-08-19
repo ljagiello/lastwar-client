@@ -228,6 +228,46 @@ func TestHandleInteractiveLineAbortsOnTrailingGarbageAfterJSON(t *testing.T) {
 	}
 }
 
+// TestHandleInteractiveLineRejectsBareNullParams is the regression test for this round's fix: a
+// bare top-level JSON null params body (e.g. "cmd.name null") decodes successfully into a nil
+// map[string]any, with json.Decoder.Decode returning no error at all -- diverging from every OTHER
+// malformed-body shape (a bare number/string/bool/array), which all correctly fail that same
+// Decode call and hit the existing "bad JSON params" error branch
+// (TestHandleInteractiveLineDoesNotLeakRawParamsOnJSONParseError above covers that error branch;
+// TestPutJSONValue's own "unsupported nil is rejected" case, interactive_test.go, is a different
+// thing entirely -- that's putJSONValue rejecting a nil VALUE for one key inside an otherwise valid
+// object, not the top-level params body itself being bare null). Before this fix,
+// handleInteractiveLine let this one shape slip through as if it were a legitimate empty params
+// object, silently sending the command with no params and no diagnostic. As in
+// TestHandleInteractiveLineAbortsOnUnsupportedValue, running this over a net.Pipe-backed GameConn
+// with nobody reading on the other end turns "did it still send despite the bare null" into a
+// clean timeout failure instead of a hang.
+func TestHandleInteractiveLineRejectsBareNullParams(t *testing.T) {
+	client, _ := newPipeGameConnPair(t)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleInteractiveLine(client, `cmd.name null`)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleInteractiveLine did not return promptly -- it likely sent the command despite a bare JSON null params body")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "bad JSON params") {
+		t.Errorf("expected a \"bad JSON params\" log entry for a bare JSON null params body, got:\n%s", logged)
+	}
+}
+
 // TestHandleInteractiveLineAbortsOnMissingSpaceBeforeJSON covers a case that falls through both
 // of the above malformed-input checks entirely: strings.Cut(line, " ") requires a literal space
 // between the command name and its JSON params, so a line where that space was dropped (a JSON
@@ -554,5 +594,114 @@ func TestStatControlPipeWithRetryGivesUpOnPersistentFailure(t *testing.T) {
 	}
 	if want := 3 * time.Second; elapsed > want {
 		t.Errorf("statControlPipeWithRetry() took %v to give up, want well under %v (bounded, not retrying forever)", elapsed, want)
+	}
+}
+
+// TestOpenControlPipeWithRetryGivesUpOnPersistentFailure is openControlPipeWithRetry's sibling of
+// TestStatControlPipeWithRetryGivesUpOnPersistentFailure above, for the identical reason (see that
+// test's doc comment): a path that never appears at all must still eventually report failure (not
+// retry forever), and within a bounded amount of time -- this closes the coverage gap noted this
+// round, where openControlPipeWithRetry (structurally identical to statControlPipeWithRetry) had a
+// "recovers from a transient failure" test (TestOpenControlPipeWithRetryRecoversFromTransientMissingFile
+// above) but no matching "gives up on a persistent one" boundary test.
+func TestOpenControlPipeWithRetryGivesUpOnPersistentFailure(t *testing.T) {
+	path := t.TempDir() + "/never-created"
+
+	start := time.Now()
+	_, err := openControlPipeWithRetry(path)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("openControlPipeWithRetry() error = nil, want a non-nil error for a control pipe path that never appears")
+	}
+	if want := 3 * time.Second; elapsed > want {
+		t.Errorf("openControlPipeWithRetry() took %v to give up, want well under %v (bounded, not retrying forever)", elapsed, want)
+	}
+}
+
+// TestRunInteractivePersistentScanErrorGivesUpBounded is the regression test for this round's fix
+// to RunInteractive's bufio.Scanner loop: before this fix, RunInteractive never called
+// scanner.Buffer() at all, silently defaulting to bufio.MaxScanTokenSize (64KB) -- so any single
+// control-pipe line over that size failed with bufio.ErrTooLong. And when scanner.Scan() ended via
+// a genuine scanner.Err() != nil (of which ErrTooLong is one example, but not the only one), the
+// pre-fix code just logged "control pipe scan error" and immediately looped back to the top
+// (reopening the FIFO) with NO delay and NO attempt cap -- unlike the bounded
+// statControlPipeWithRetry/openControlPipeWithRetry helpers this file already covers above. If the
+// writer producing the bad input stayed connected and kept reproducing it, this could spin
+// open-error-close indefinitely.
+//
+// This drives a real FIFO with a background writer goroutine that repeatedly opens it and writes a
+// line larger than maxControlPipeLineSize with no '\n' at all -- guaranteeing a genuine, persistent
+// bufio.ErrTooLong scan error on every single iteration, never a clean EOF (which would just be the
+// FIFO's ordinary "writer closed" case, not a scan error at all). RunInteractive calls os.Exit(1)
+// once its new consecutive-scan-error budget is exhausted, so (like this file's other
+// os.Exit-reaching tests above) this uses the same re-exec-the-test-binary-as-a-subprocess idiom --
+// with the elapsed wall-clock time as the actual proof this doesn't spin unboundedly: the exit
+// code/log content alone wouldn't distinguish "gave up after a handful of bounded attempts" from
+// "eventually gave up after spinning for an hour", only the bounded elapsed time does.
+//
+// Mutation-testing note: reverting the fix (dropping the consecutiveScanErrors cap and its
+// controlPipeRetryDelay pause, back to "log and immediately loop with no bound") would make this
+// test hang until cmd.Run() is killed by the test framework's own overall timeout, rather than
+// exiting within this test's own elapsed-time bound -- a clear, non-silent failure either way.
+func TestRunInteractivePersistentScanErrorGivesUpBounded(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		path := os.Getenv("LASTWAR_TEST_CONTROL_PIPE")
+		client, _ := newPipeGameConnPair(t)
+
+		go func() {
+			// Comfortably over maxControlPipeLineSize, and never containing a '\n' -- the scanner
+			// can never find a token boundary within its buffer budget, guaranteeing ErrTooLong
+			// every time instead of ever producing a clean line or a clean EOF.
+			oversized := bytes.Repeat([]byte("a"), maxControlPipeLineSize+4096)
+			for {
+				f, err := os.OpenFile(path, os.O_WRONLY, 0)
+				if err != nil {
+					return
+				}
+				_, _ = f.Write(oversized)
+				f.Close()
+			}
+		}()
+
+		RunInteractive(client, path)
+		// RunInteractive only ever returns via os.Exit -- reached only if this fix regresses back
+		// to spinning forever, in which case the outer cmd.Run() below never completes and this
+		// test fails via the surrounding test framework's own timeout instead of a clean assertion.
+		return
+	}
+
+	dir := t.TempDir()
+	path := dir + "/control.pipe"
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("Mkfifo: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunInteractivePersistentScanErrorGivesUpBounded$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1", "LASTWAR_TEST_CONTROL_PIPE="+path)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	start := time.Now()
+	runErr := cmd.Run()
+	elapsed := time.Since(start)
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	if want := 10 * time.Second; elapsed > want {
+		t.Errorf("subprocess took %v to give up on a persistent control pipe scan error, want well under %v (bounded, not spinning open-error-close forever)", elapsed, want)
+	}
+
+	log := stderr.String()
+	if !strings.Contains(log, "control pipe scan error") {
+		t.Errorf("subprocess stderr = %s\nwant repeated \"control pipe scan error\" log lines, proving this actually went through the scan-error path", log)
+	}
+	if !strings.Contains(log, "giving up") {
+		t.Errorf("subprocess stderr = %s\nwant a \"giving up\" log line once the consecutive-scan-error budget is exhausted", log)
 	}
 }

@@ -96,11 +96,19 @@ func TestHasUnclaimedRewardMissingFieldIsNotUnclaimed(t *testing.T) {
 // (ok && v.Val != nil), so a PRESENT-BUT-WRONG-TYPED rewardStatus (e.g. sent as a string instead of
 // an int) slipped past the guard and then coerced to int32(0) via GetInt's silent zero-value
 // coercion -- and the "== 0" comparison deterministically (not just a chance collision)
-// misclassified it as unclaimed on every call. Reverting the requireFieldType guard in
-// HasUnclaimedReward (back to the old `v, ok := m.Raw.Get("rewardStatus"); !ok || v.Val == nil`
-// check) would make this test fail: the wrong-typed mail would then read as unclaimed and get
-// bucketed into groupUnclaimedByType's output, ready to be sent in a real mail.reward.batch
-// request.
+// misclassified it as unclaimed on every call. Reverting the wrong-type check in HasUnclaimedReward
+// (back to the old `v, ok := m.Raw.Get("rewardStatus"); !ok || v.Val == nil` check, with no
+// wrong-type rejection at all) would make this test fail: the wrong-typed mail would then read as
+// unclaimed and get bucketed into groupUnclaimedByType's output, ready to be sent in a real
+// mail.reward.batch request.
+//
+// Also covers HasUnclaimedReward's round-30 fix: a genuinely-absent rewardStatus (the normal case
+// for notification-only mail -- see ClaimAllMail's doc comment) must log NO warning at all, unlike
+// the present-but-wrong-typed case, which still must. Before round 30, HasUnclaimedReward routed
+// through requireFieldType (buildings.go), whose requirePresentField delegate logs a Warn for ANY
+// missing field -- so reverting round 30 (routing this back through requireFieldType) would make
+// this test's "absent logs nothing" assertion fail: every routine notification-only mail item would
+// again log a spurious Warn.
 func TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified(t *testing.T) {
 	wrongTyped := NewSFSObject()
 	wrongTyped.PutUtfString("uid", "wrong-type-1")
@@ -112,13 +120,22 @@ func TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified(t *testing.T
 	genuineUnclaimed.PutInt("type", 3)
 	genuineUnclaimed.PutInt("rewardStatus", 0)
 
-	mail := []Mail{{Raw: wrongTyped}, {Raw: genuineUnclaimed}}
+	absentRewardStatus := NewSFSObject()
+	absentRewardStatus.PutUtfString("uid", "notif-absent-1")
+	absentRewardStatus.PutInt("type", 3)
+	// deliberately no PutInt("rewardStatus", ...) call -- the normal, routine shape for
+	// notification-only mail, not an anomaly worth a warning.
+
+	mail := []Mail{{Raw: wrongTyped}, {Raw: genuineUnclaimed}, {Raw: absentRewardStatus}}
 
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	gotWrongTyped := mail[0].HasUnclaimedReward()
 	gotGenuine := mail[1].HasUnclaimedReward()
+	logBeforeAbsentCheck := buf.String()
+	gotAbsent := mail[2].HasUnclaimedReward()
+	logged := buf.String()
 	slog.SetDefault(orig)
 
 	if gotWrongTyped {
@@ -127,18 +144,23 @@ func TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified(t *testing.T
 	if !gotGenuine {
 		t.Errorf("HasUnclaimedReward() = false for mail with rewardStatus=0, want true")
 	}
+	if gotAbsent {
+		t.Errorf("HasUnclaimedReward() = true for mail with no rewardStatus field, want false")
+	}
 
-	logged := buf.String()
-	if !strings.Contains(logged, "wrong-typed rewardStatus") {
-		t.Errorf("expected a wrong-typed-rewardStatus warning, got log:\n%s", logged)
+	if !strings.Contains(logBeforeAbsentCheck, "rewardStatus") || !strings.Contains(logBeforeAbsentCheck, "wrong-typed") {
+		t.Errorf("expected a wrong-typed-rewardStatus warning (from warnIfWrongTypedField, login.go), got log:\n%s", logBeforeAbsentCheck)
+	}
+	if logged != logBeforeAbsentCheck {
+		t.Errorf("HasUnclaimedReward() on a mail with a genuinely-absent rewardStatus logged something -- this is the routine notification-only-mail case and must stay silent; log grew from:\n%s\nto:\n%s", logBeforeAbsentCheck, logged)
 	}
 
 	got := groupUnclaimedByType(mail)
 	if len(got) != 1 {
-		t.Fatalf("got %d distinct types, want 1 (the wrong-typed-rewardStatus mail must be excluded)", len(got))
+		t.Fatalf("got %d distinct types, want 1 (the wrong-typed-rewardStatus and absent-rewardStatus mail must both be excluded)", len(got))
 	}
 	if len(got[3]) != 1 || got[3][0] != "genuine-unclaimed-1" {
-		t.Errorf("type 3: got %v, want [genuine-unclaimed-1] -- wrong-type-1 (wrong-typed rewardStatus) must not appear", got[3])
+		t.Errorf("type 3: got %v, want [genuine-unclaimed-1] -- wrong-type-1 (wrong-typed rewardStatus) and notif-absent-1 (no rewardStatus) must not appear", got[3])
 	}
 }
 

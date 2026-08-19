@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -782,5 +783,212 @@ func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("post-redirect fake server never received a Login request")
+	}
+}
+
+// TestDoCrossServerLoginRedirectWrongTypedZoneIsWarned is the round-30 regression test for the
+// gate login.go's redirectZone helper closes: unlike its siblings redirectIP (hardened round 29
+// for exactly this "present but wrong-typed" gap) and port (hardened via getIntFlexible), the
+// serverInfo redirect's zone field used to be read via an entirely UNGUARDED
+// siObj.GetString("zone") -- which silently returns "" for ANY wrong-typed zone field,
+// indistinguishable from a genuinely absent one.
+//
+// This matters in a DIFFERENT, arguably worse way than a wrong-typed ip does: a wrong-typed ip
+// stops the redirect from being followed at all, since there's nowhere to redial to. A wrong-typed
+// zone does NOT stop anything -- here the ip/port are well-typed, so the redirect IS followed to
+// the new address, but the zone silently falls back to "" and (per the existing `if newZone != ""`
+// guard) the STALE pre-redirect zone is kept and resent as `zn` on the redialed Login. That's a
+// real, non-theoretical desync risk: the connection ends up talking to the new shard's ip/port
+// while both the redialed Login request and DoCrossServerLogin's own returned Zone still claim the
+// old one.
+//
+// Here the first fake server's redirect carries a well-typed ip/port (pointing at a second fake
+// server) but a wrong-typed zone (PutInt instead of PutUtfString). Proves: (1) the redirect is
+// still followed (Addr == the second server's address, and that server actually receives the
+// redialed Login), (2) Zone is NOT updated -- it stays "APS1", the stale pre-redirect value, and
+// that stale value is what actually gets resent as `zn` -- and (3) a Warn mentioning the
+// wrong-typed zone field is logged, unlike the pre-fix total silence.
+func TestDoCrossServerLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
+	var gotZoneOnSecondServer string
+	newAddr := startFakeGameServer(t, func(server *GameConn) {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		gotZoneOnSecondServer = env.Content.GetString("zn")
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	newHost, newPort := splitHostPortInt(t, newAddr)
+
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		si := NewSFSObject()
+		si.PutUtfString("ip", newHost) // well-typed: the redirect must still be followed
+		si.PutInt("port", int32(newPort))
+		si.PutInt("zone", 999) // wrong-typed: a real zone is always a UTF string, never a number
+		resp := NewSFSObject()
+		resp.PutSFSObject("serverInfo", si)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, oldAddr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := DoCrossServerLogin(p)
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v (a wrong-typed zone must not be a fatal error -- the redirect itself still follows on the well-typed ip/port)", err)
+	}
+	defer result.Conn.Close()
+
+	if result.Addr != newAddr {
+		t.Errorf("Addr = %q, want %q (the redirect must still be followed -- ip/port are well-typed, only zone is wrong-typed)", result.Addr, newAddr)
+	}
+	if result.Zone != "APS1" {
+		t.Errorf("Zone = %q, want %q (unchanged/stale -- the wrong-typed zone can't overwrite it, which is exactly the desync risk this test documents: a followed ip/port redirect paired with a stale zone)", result.Zone, "APS1")
+	}
+
+	if gotZoneOnSecondServer != "APS1" {
+		t.Errorf("second server saw Login zn=%q, want %q (the redialed Login resent the stale zone, since the new one could not be read)", gotZoneOnSecondServer, "APS1")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "wrong-typed") || !strings.Contains(logged, "zone") {
+		t.Errorf("expected a Warn log mentioning the wrong-typed zone field, got:\n%s", logged)
+	}
+}
+
+// fakeWriteFailError is a minimal net.Error used to inject a deterministic write-stage failure
+// into a real (dialed, not net.Pipe) *GameConn -- see writeFailAfterConn and withFailingDial
+// below. Deliberately reports Timeout()==true, mirroring conn_wait_test.go's
+// fakeTimeoutNetError/TestSendAndWaitWriteStageFailureIsNonTimeoutNetError and
+// conn_handshake_test.go's TestDoHandshakeSendFailureIsNonTimeoutNetError: a genuine
+// deadline-exceeded net.Conn.Write returns exactly this Timeout()==true shape, and the whole
+// point of sendStageError (conn.go) is to force Timeout()==false on the error a caller actually
+// sees regardless of what the underlying write failure itself reports. Defined locally here
+// (rather than reusing conn_wait_test.go's identically-shaped type) since this file's tests must
+// not depend on the exact contents of a file owned by a different concurrently-editing agent.
+type fakeWriteFailError struct{ msg string }
+
+func (e fakeWriteFailError) Error() string { return e.msg }
+func (fakeWriteFailError) Timeout() bool   { return true }
+func (fakeWriteFailError) Temporary() bool { return true }
+
+// writeFailAfterConn wraps a net.Conn, passing the first n Write calls through to the embedded
+// conn unchanged and making the (n+1)th and every later Write fail with a fixed error. This is
+// writeFailConn's (conn_wait_test.go) counting sibling: writeFailConn fails every write
+// unconditionally, which is exactly right for a helper under test that itself performs the very
+// first send (e.g. DoHandshake, or DoCrossServerLogin's/Login()'s own base-zone Login send), but
+// too blunt for targeting a SPECIFIC send-stage call site deep in Login()'s multi-step flow --
+// e.g. account.login.send.verify.code or account.login.new, both of which only run after one or
+// more earlier sends on the same connection have already succeeded. n=0 degenerates to "fail
+// every write", the same behavior as writeFailConn.
+type writeFailAfterConn struct {
+	net.Conn
+	n   int
+	err error
+}
+
+func (w *writeFailAfterConn) Write(p []byte) (int, error) {
+	if w.n <= 0 {
+		return 0, w.err
+	}
+	w.n--
+	return w.Conn.Write(p)
+}
+
+// withFailingDial overrides login.go's dialGame package var for the duration of the calling test
+// (restored via t.Cleanup), so that the NEXT n writes issued by whatever GameConn Login() or
+// DoCrossServerLogin() dials succeed as normal (dialing for real, against whatever fake game
+// server the test already stood up), while the (n+1)th and every later write fails with err. This
+// is the round-30 regression-test infrastructure for the finding that all 4 of login.go's/
+// crossserver.go's direct SendEnvelope/SendExtension call sites on the login hot path had zero
+// test coverage for their sendStageError wrapping: Login()/DoCrossServerLogin() dial their own
+// connection internally via DialGame, so -- unlike sendAndWait/DoHandshake, which operate on a
+// caller-supplied *GameConn a test can build over net.Pipe and swap writeFailConn into directly
+// (conn_wait_test.go/conn_handshake_test.go) -- there is no seam to inject a write failure without
+// either winning an inherently racy real-TCP "peer closed right after accept" timing game, or
+// indirecting the dial itself. dialGame is that indirection: production code always resolves it to
+// the real DialGame (conn.go); only tests ever reassign it.
+func withFailingDial(t *testing.T, n int, err error) {
+	t.Helper()
+	orig := dialGame
+	dialGame = func(addr string, timeout time.Duration) (*GameConn, error) {
+		conn, dialErr := DialGame(addr, timeout)
+		if dialErr != nil {
+			return nil, dialErr
+		}
+		conn.conn = &writeFailAfterConn{Conn: conn.conn, n: n, err: err}
+		return conn, nil
+	}
+	t.Cleanup(func() { dialGame = orig })
+}
+
+// TestDoCrossServerLoginSendFailureIsNonTimeoutNetError is the round-30 regression test for the
+// TESTING-RIGOR finding that crossserver.go's own login-send call site (its conn.SendEnvelope
+// call, wrapped in sendStageError since round 29) had zero coverage -- a coverage profile showed
+// execution count 0 for that block despite the wrapping already being in place. DoCrossServerLogin
+// sends the base-zone Login as the very FIRST write on a freshly dialed connection (no handshake
+// by default), so withFailingDial(t, 0, ...) makes that first write fail deterministically.
+// Mirrors TestSendAndWaitWriteStageFailureIsNonTimeoutNetError's / TestDoHandshakeSendFailure
+// IsNonTimeoutNetError's assertions exactly (conn_wait_test.go/conn_handshake_test.go): the
+// returned error must wrap the injected failure (errors.Is) and satisfy net.Error with
+// Timeout()==false/Temporary()==false even though the injected failure itself reports
+// Timeout()==true -- proving sendStageError's wrapping, not a bare passthrough.
+func TestDoCrossServerLoginSendFailureIsNonTimeoutNetError(t *testing.T) {
+	// Idle handler: the fake server never receives anything, since the client's send itself fails
+	// before the packet ever reaches the network.
+	addr := startFakeGameServer(t, func(server *GameConn) {})
+	host, port := splitHostPortInt(t, addr)
+
+	writeErr := fakeWriteFailError{msg: "simulated write-deadline-exceeded failure"}
+	withFailingDial(t, 0, writeErr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+	result, err := DoCrossServerLogin(p)
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("expected an error when the login send itself fails")
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("err = %v, want it to wrap the underlying write failure %v", err, writeErr)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- a send-stage failure must be distinguishable from DoCrossServerLogin's own benign wait-stage timeout, even though the underlying write error itself reports Timeout()==true (mirroring a real deadline-exceeded net.Conn.Write)")
+	}
+	if netErr.Temporary() {
+		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"strings"
 )
 
@@ -49,19 +50,31 @@ func (m Mail) RewardStatus() int32 { return m.Raw.GetInt("rewardStatus") }
 // so a present-but-wrong-typed rewardStatus (e.g. sent as a string or float) passed the old guard,
 // coerced to 0 via GetInt, and the "== 0" comparison DETERMINISTICALLY (every time, not merely a
 // collision risk) misclassified it as unclaimed -- feeding groupUnclaimedByType, which would then
-// bucket that mail's uid into a real mail.reward.batch request for a reward that may not exist. Now
-// uses the shared requireFieldType guard (same one ListMail's uid check and groupUnclaimedByType's
-// type check already use) so a present-but-wrong-typed rewardStatus is treated the same as a
-// missing one: "no verifiable reward status" (false), not "unclaimed". See
-// TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified for the regression coverage.
+// bucket that mail's uid into a real mail.reward.batch request for a reward that may not exist.
 //
-// Note: buildings.go's requirePresentField doc comment currently cites this function as an example
-// of a presence-only guard that "only ever compares the raw presence, never keys a lookup off the
-// value" -- that citation is now stale, since this function's "== 0" comparison is keyed off the
-// value via requireFieldType, not requirePresentField's presence-only check. Not fixed here since
-// this file doesn't own buildings.go.
+// Fixed (round 30): the round-29 fix above routed this through requireFieldType (buildings.go),
+// which delegates to requirePresentField -- and requirePresentField unconditionally logs a Warn for
+// ANY missing field, not just a wrong-typed one. But a genuinely-absent rewardStatus is the NORMAL,
+// EXPECTED case for notification-only mail (see this doc comment's second paragraph, and
+// ClaimAllMail's doc comment, which cites a live capture where all 21 visible mail items lacked
+// rewardStatus) -- not an anomaly worth a warning. Routing it through requireFieldType meant every
+// single routine notification-only mail item logged a spurious Warn. Now mirrors visitors.go's
+// ParseInitVisitors maxNum handling: presence/non-nil is checked directly and silently (no warning
+// -- this is the expected case) before falling through to false, and warnIfWrongTypedField
+// (login.go) is used instead of requireFieldType so a Warn fires ONLY for the present-but-wrong-
+// typed case, which remains rejected (not misclassified as unclaimed) exactly as the round-29 fix
+// intended. See TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified (now also covering
+// the absent case logs nothing) for the regression coverage.
 func (m Mail) HasUnclaimedReward() bool {
-	if !requireFieldType(m.Raw, "rewardStatus", "mail reward status", sfsFieldKindInt) {
+	v, ok := m.Raw.Get("rewardStatus")
+	if !ok || v.Val == nil {
+		// Genuinely absent: the normal case for notification-only mail. Silent -- no warning --
+		// matching ParseInitVisitors' maxNum handling (visitors.go) for the identical
+		// absent-is-expected reason.
+		return false
+	}
+	warnIfWrongTypedField(m.Raw, "rewardStatus", "mail reward status", sfsFieldKindInt)
+	if !sfsFieldKindAccepts(sfsFieldKindInt, v.Val) {
 		return false
 	}
 	return m.RewardStatus() == 0
@@ -218,12 +231,26 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		// same presence-only shape requirePresentField uses -- so a PRESENT-BUT-WRONG-TYPED
 		// lastMailTime (e.g. sent as a string) silently passed this guard and then coerced to 0
 		// via GetLong with zero diagnostic signal, the same conflation HasUnclaimedReward's own
-		// round-29 fix addresses for rewardStatus (see its doc comment above). Now routed
-		// through the shared requireFieldType guard (mail.go/buildings.go/alliance.go/
-		// visitors.go's uid/uuid/type/scienceId checks already use it) so a wrong-typed
-		// lastMailTime warns too, not just a missing/null one -- see
-		// TestListMailWarnsOnWrongTypedLastMailTime.
-		if !requireFieldType(msg.Params, "lastMailTime", "list mail page", sfsFieldKindLong) {
+		// round-29 fix addresses for rewardStatus (see its doc comment above).
+		//
+		// Fixed (round 30): the round-29 fix routed this through requireFieldType (buildings.go),
+		// the hard-reject/skip-an-entry pattern -- but this call site never actually skips
+		// anything (it's inside the pagination loop over the whole page response, not a
+		// per-array-entry loop), so requireFieldType's own "skipping list mail page entry with
+		// no/wrong-typed lastMailTime field" log line was actively misleading (nothing is
+		// skipped), and doubled up with the more specific warning immediately below into a
+		// redundant double-Warn on every wrong-typed value. Now uses the same presence-
+		// silent/warn-only-on-wrong-type shape as HasUnclaimedReward's own round-30 fix (mail.go)
+		// and ParseInitVisitors' maxNum handling (visitors.go): presence is checked directly and
+		// silently, warnIfWrongTypedField (login.go) fires a Warn only for the present-but-wrong-
+		// typed case, and the specific "missing/null/wrong-typed" diagnostic below -- not
+		// requireFieldType's generic one -- remains the single, primary warning for this call
+		// site, covering both the missing and wrong-typed cases exactly as before. See
+		// TestListMailWarnsOnWrongTypedLastMailTime and TestListMailWarnsOnMissingLastMailTime.
+		lastMailTimeV, lastMailTimePresent := msg.Params.Get("lastMailTime")
+		lastMailTimeOK := lastMailTimePresent && lastMailTimeV.Val != nil && sfsFieldKindAccepts(sfsFieldKindLong, lastMailTimeV.Val)
+		warnIfWrongTypedField(msg.Params, "lastMailTime", "list mail page", sfsFieldKindLong)
+		if !lastMailTimeOK {
 			slog.Warn("list mail: response reported more=true but lastMailTime is missing/null/wrong-typed, reqTime will reset to 0 for the next page instead of the real cursor value", "page", page, "collectedSoFar", len(all))
 		}
 		reqTime = msg.Params.GetLong("lastMailTime")
@@ -396,8 +423,21 @@ func ClaimAllMail(conn *GameConn) error {
 		slog.Info("no unclaimed mail rewards found", "totalMail", len(mail))
 		return errors.Join(errs...)
 	}
+	// mailTypes is collected and sorted before the loop below, mirroring PrintBuildings' identical
+	// byType-key-sorting pattern (buildings.go) for the identical reproducibility reason: Go
+	// deliberately randomizes map iteration order run-to-run, so iterating byType directly (as this
+	// used to) made which alliance-mail types get attempted before a genuine net.Error abort
+	// nondeterministic across identical runs. Sorting first makes two runs over identical unclaimed
+	// mail byte-for-byte identical in which type's reward-claim batch is attempted, and aborted on,
+	// first.
+	mailTypes := make([]int32, 0, len(byType))
+	for mailType := range byType {
+		mailTypes = append(mailTypes, mailType)
+	}
+	sort.Slice(mailTypes, func(i, j int) bool { return mailTypes[i] < mailTypes[j] })
 rewardLoop:
-	for mailType, uids := range byType {
+	for _, mailType := range mailTypes {
+		uids := byType[mailType]
 		slog.Info("claiming mail reward", "type", mailType, "count", len(uids))
 		offset := 0
 		for _, batch := range batchByCountAndBytes(uids, readBatchSize, maxUIDsBytes) {

@@ -422,7 +422,13 @@ func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 				pp := NewSFSObject()
 				pp.PutLong("clientTime", time.Since(start).Milliseconds())
 				if err := c.SendEnvelope(controllerSystem, actionPingPong, pp); err != nil {
-					slog.Error("heartbeat send failed -- closing connection", "error", err)
+					// sendStageError: consistency with sendAndWait/DoHandshake/the login-path send
+					// sites -- this error is never returned across a function boundary or inspected
+					// for Timeout() today (it's logged and the connection is closed unconditionally
+					// either way), so wrapping it has no behavioral effect now, but keeps the
+					// invariant "every direct send-stage error in this package is sendStageError-
+					// wrapped" true package-wide for any future caller that does inspect it.
+					slog.Error("heartbeat send failed -- closing connection", "error", sendStageError{err: err})
 					c.Close()
 					return
 				}

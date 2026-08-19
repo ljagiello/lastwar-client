@@ -51,7 +51,7 @@ func main() {
 	interactive := fs.String("interactive", "", "stay connected and read ad-hoc test commands from this control FIFO instead of exiting; only flat scalar param values (strings/bools/numbers) are supported -- nested JSON objects/arrays are rejected with a logged error and abort the whole send (see interactive.go)")
 
 	csIP := fs.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
-	csPort := fs.Int("cs-port", 0, "port for -cs-ip")
+	csPort := fs.Int("cs-port", 0, "port for -cs-ip -- must be a positive value; runtime validation rejects 0 or a negative port before ever attempting to dial (see runCrossServerTest's own port <= 0 check), producing a clear error instead of a cryptic OS-level dial failure")
 	csZone := fs.String("cs-zone", "", "zone for -cs-ip, e.g. APS1234")
 	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip -- also sent on every -cs-rt GSL opt=refresh call, unlike -cs-zone (which only matters for -cs-ip): gameUid is passed to GetServerList unconditionally, so it matters even for a bare -cs-rt with no -cs-ip at all")
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
@@ -131,6 +131,10 @@ func main() {
 	csZoneSetExplicitly := false
 	csGameUidSetExplicitly := false
 	csAtSetExplicitly := false
+	// interactiveSetExplicitly mirrors the csXSetExplicitly bools above, for -interactive
+	// specifically -- see warnIfInteractiveExplicitlyEmpty's own doc comment for why this needs the
+	// identical "was it actually typed" tracking despite -interactive not being a -cs-* flag itself.
+	interactiveSetExplicitly := false
 	var visitedFlags []string
 
 	// registeredFlagNames is every flag name actually declared on fs (regardless of whether it
@@ -156,6 +160,8 @@ func main() {
 			csGameUidSetExplicitly = true
 		case "cs-at":
 			csAtSetExplicitly = true
+		case "interactive":
+			interactiveSetExplicitly = true
 		}
 		visitedFlags = append(visitedFlags, f.Name)
 
@@ -253,7 +259,7 @@ func main() {
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
 			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
 			zoneExplicit: csZoneSetExplicitly, gameUidExplicit: csGameUidSetExplicitly,
-			atExplicit: csAtSetExplicitly,
+			atExplicit: csAtSetExplicitly, interactiveExplicit: interactiveSetExplicitly,
 		})
 		return
 	}
@@ -326,6 +332,7 @@ func main() {
 		}
 	}
 
+	warnIfInteractiveExplicitlyEmpty(interactiveSetExplicitly, *interactive)
 	if *interactive != "" {
 		RunInteractive(conn, *interactive) // blocks forever
 	}
@@ -446,6 +453,33 @@ func warnIfDecodeLabelIgnored(decodeStream, decodeLabel string) {
 func warnIfExplicitConfigPathNotFound(cfg *SessionConfig, configPath string, noConfig bool) {
 	if cfg == nil && configPath != "" && !noConfig {
 		slog.Warn("explicit -config path not found; continuing without it", "path", configPath)
+	}
+}
+
+// warnIfInteractiveExplicitlyEmpty logs a warning when -interactive was explicitly passed on the
+// command line (per explicit, populated via the same fs.Visit-based visitedFlags mechanism this
+// file already uses for -cs-ip/-cs-port/-cs-zone/-cs-gameuid/-cs-at -- see interactiveSetExplicitly
+// in main() and crossServerTestOpts' interactiveExplicit field) but ended up with an empty value --
+// e.g. a cron/automation wrapper passing -interactive "$CONTROL_PIPE" with an unset/empty
+// $CONTROL_PIPE. Before this fix, that silently behaved exactly as if -interactive were never
+// passed at all, with zero diagnostic -- unlike every sibling -cs-* flag, which already
+// warns/errors clearly on this exact "given but empty" shape (see e.g. the -cs-ip/-cs-gameuid
+// checks in runCrossServerTest).
+//
+// Deliberately not fatal: an empty -interactive value degrades to the existing, entirely
+// legitimate "don't enter interactive mode" behavior (unlike an empty -cs-ip/-cs-gameuid, which
+// leaves the connection unusable and is treated as fatal), so a WARN that names the mistake is the
+// right bar here -- not an os.Exit that would abort an otherwise-successful run over what only
+// affects this one optional feature.
+//
+// Applies identically at both -interactive call sites (main()'s own check, right before its
+// RunInteractive call, and runCrossServerTest's o.interactive check). Taking explicit/interactive
+// as plain arguments (rather than being inlined at either call site) is what makes this testable
+// via slog output capture, matching this file's established warnIfDecodeLabelIgnored/
+// warnIfExplicitConfigPathNotFound pattern.
+func warnIfInteractiveExplicitlyEmpty(explicit bool, interactive string) {
+	if explicit && interactive == "" {
+		slog.Warn("-interactive was given but empty -- not entering interactive mode (pass a non-empty control FIFO path, e.g. -interactive /path/to/pipe)")
 	}
 }
 
@@ -695,6 +729,13 @@ type crossServerTestOpts struct {
 	// leaving-in-place a config-loaded default (expected, unremarkable, or worded without
 	// misattributing it to a flag the operator never typed).
 	ipExplicit, portExplicit, zoneExplicit, gameUidExplicit, atExplicit bool
+
+	// interactiveExplicit records whether -interactive was actually typed on the command line, the
+	// same fs.Visit-based mechanism as the five *Explicit fields above -- see
+	// warnIfInteractiveExplicitlyEmpty's own doc comment for what this enables: distinguishing an
+	// explicitly-passed-but-empty -interactive (worth a WARN) from -interactive simply never being
+	// passed at all (the ordinary, silent, non-interactive case).
+	interactiveExplicit bool
 }
 
 // runCrossServerTest exercises DoCrossServerLogin directly, using an
@@ -1026,6 +1067,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 
+	warnIfInteractiveExplicitlyEmpty(o.interactiveExplicit, o.interactive)
 	if o.interactive != "" {
 		RunInteractive(conn, o.interactive)
 	}

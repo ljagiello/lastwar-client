@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"math"
+	"strconv"
+	"testing"
+)
 
 func TestFindServerInfo(t *testing.T) {
 	t.Run("nested under p", func(t *testing.T) {
@@ -66,6 +70,67 @@ func TestGetIntFlexible(t *testing.T) {
 			t.Fatalf("got %d, want 0", got)
 		}
 	})
+}
+
+// TestGetIntFlexibleRejectsOutOfInt32RangeString is the round-30 regression test for the MAJOR
+// finding: getIntFlexible's string-fallback path used to do a bare, unchecked int32(n) conversion
+// on strconv.Atoi's result, reintroducing the exact int64-to-int32 unchecked-narrowing bug round 29
+// fixed in sfsobject.go's GetInt. On a 64-bit platform Go's int is 64-bit, so Atoi parses a numeric
+// string outside int32's range without error, and the bare conversion used to silently wrap it
+// (e.g. "4294967301" -> 5) instead of rejecting it -- a corrupted/hostile numeric-string port would
+// then have sailed straight past buildBaseZoneLoginAddr's only guard (rejecting non-positive
+// values) and silently redialed the wrong port. This proves that no longer happens: a
+// string-encoded value comfortably outside int32's range must now come back as the documented
+// zero-value fallback (the same fallback getIntFlexible already uses for an absent/empty field),
+// not as a wrapped, corrupted int32.
+func TestGetIntFlexibleRejectsOutOfInt32RangeString(t *testing.T) {
+	tests := []struct {
+		name string
+		val  int64
+	}{
+		// 1<<32 + 5 wraps to 5 under naive int32(n) truncation -- picking a value whose wrapped
+		// result would itself look like a plausible small int32 is the whole point: a test value
+		// that wrapped to something already-implausible (e.g. still enormous) wouldn't actually
+		// prove the old bug is fixed. Mirrors TestGetIntRejectsOutOfInt32RangeLong's own case
+		// selection (sfsobject_array_test.go).
+		{"just above MaxInt32, wraps to a small negative value under naive truncation", math.MaxInt32 + 1},
+		{"far above MaxInt32 (1<<32 + 5 wraps to 5)", int64(1)<<32 + 5},
+		{"just below MinInt32", math.MinInt32 - 1},
+		{"far below MinInt32", -(int64(1) << 40) - 7},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := NewSFSObject()
+			o.PutUtfString("port", strconv.FormatInt(tt.val, 10))
+
+			got := getIntFlexible(o, "port")
+
+			// The naive int32(n) conversion Go performs is the exact bug this test guards against --
+			// computing it here (rather than hardcoding an expected wrapped value) keeps the test
+			// resilient to exactly which wrapped value a given input produces, while still proving
+			// getIntFlexible's real output is NOT that wrapped value.
+			wrapped := int32(tt.val)
+			if got == wrapped && wrapped != 0 {
+				t.Errorf("getIntFlexible(%q) = %d, which is the silently-wrapped (int32(n)) value -- want the zero-value fallback (0) for an out-of-int32-range numeric string, not a wrapped/corrupted value", strconv.FormatInt(tt.val, 10), got)
+			}
+			if got != 0 {
+				t.Errorf("getIntFlexible(%q) = %d, want 0 (the documented zero-value fallback for an out-of-int32-range numeric string)", strconv.FormatInt(tt.val, 10), got)
+			}
+		})
+	}
+
+	// Sanity/boundary check: string-encoded values that DO fit in int32's range must still
+	// round-trip normally, proving this fix didn't accidentally over-tighten getIntFlexible for
+	// legitimate in-range ports (including the exact MinInt32/MaxInt32 boundary values themselves).
+	inRange := []int64{0, 1, 25092, -1, math.MaxInt32, math.MinInt32}
+	for _, v := range inRange {
+		o := NewSFSObject()
+		o.PutUtfString("port", strconv.FormatInt(v, 10))
+		if got := getIntFlexible(o, "port"); got != int32(v) {
+			t.Errorf("getIntFlexible(%q) = %d, want %d (an in-range numeric string must still round-trip normally)", strconv.FormatInt(v, 10), got, int32(v))
+		}
+	}
 }
 
 func TestServerIDFromZone(t *testing.T) {

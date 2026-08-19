@@ -410,6 +410,129 @@ func TestParseInitBuildingsRawItemCapBoundary(t *testing.T) {
 	})
 }
 
+// TestFetchBuildingsPushAddBuildingWrongTypedUUIDIsRejected is the round-30 regression test for
+// requireFieldType's uuid guard as used by FetchBuildings' "push.add.building" inline loop
+// (buildings.go) -- the second of the three sibling loops sharing the identical uuid+bId guard
+// pair (ParseInitBuildings' building_new loop, this push.add.building loop, and the
+// push.init.build/defaultBuilds loop). Before this round, a wrong-typed-uuid/bId regression test
+// existed for only the first of the three (ParseInitBuildings, via
+// TestParseInitBuildingsWrongTypedUUIDIsRejected above); this closes that gap for one of the other
+// two, mirroring that test's technique exactly -- a wrong-typed (string) uuid entry alongside a
+// genuinely well-typed uuid=0 entry, proving the two are not conflated (a wrong-typed uuid must not
+// silently coerce to uuid=0 via GetLong and collide with a genuine uuid=0 building) -- but drives it
+// through a live push.add.building push via FetchBuildings, the same newPipeGameConnPair/
+// SendExtension fake-server pattern TestFetchBuildingsPushAddBuildingCapsRawItemsExamined above uses
+// for this same loop.
+func TestFetchBuildingsPushAddBuildingWrongTypedUUIDIsRejected(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wrongTyped := NewSFSObject()
+		wrongTyped.PutUtfString("uuid", "not-a-long") // wrong SFS type: a uuid must be a Long
+		wrongTyped.PutInt("bId", BuildingFarmland)
+
+		genuineZero := NewSFSObject()
+		genuineZero.PutLong("uuid", 0) // a real, well-typed uuid that happens to be zero
+		genuineZero.PutInt("bId", BuildingIronMine)
+
+		arr := NewSFSArray()
+		arr.AddSFSObject(wrongTyped)
+		arr.AddSFSObject(genuineZero)
+		params := NewSFSObject()
+		params.PutSFSArray("buildings", arr)
+		_ = server.SendExtension("push.add.building", params)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	buildings, _, err := FetchBuildings(client, 150*time.Millisecond)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished sending push.add.building")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil", err)
+	}
+	if len(buildings) != 1 {
+		t.Fatalf("got %d buildings, want 1 (only the genuine, well-typed uuid=0 entry -- the string-typed one must be rejected, not silently coerced to uuid=0 too)", len(buildings))
+	}
+	if buildings[0].Uuid() != 0 || buildings[0].BId() != BuildingIronMine {
+		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=0 bId=%d entry", buildings[0].Uuid(), buildings[0].BId(), BuildingIronMine)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping push.add.building entry with wrong-typed uuid field") {
+		t.Errorf("expected a wrong-typed-uuid warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping push.add.building entry with no uuid field") {
+		t.Errorf("wrong-typed uuid must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
+// TestFetchBuildingsPushAddBuildingWrongTypedBIdIsRejected is TestFetchBuildingsPushAddBuildingWrongTypedUUIDIsRejected's
+// sibling for the bId half of the identical guard pair, mirroring
+// TestParseInitBuildingsWrongTypedBIdIsRejected's technique the same way its uuid counterpart above
+// mirrors TestParseInitBuildingsWrongTypedUUIDIsRejected's.
+func TestFetchBuildingsPushAddBuildingWrongTypedBIdIsRejected(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wrongTyped := NewSFSObject()
+		wrongTyped.PutLong("uuid", 111)
+		wrongTyped.PutUtfString("bId", "not-an-int") // wrong SFS type: bId must be an Int
+
+		genuineZero := NewSFSObject()
+		genuineZero.PutLong("uuid", 222)
+		genuineZero.PutInt("bId", 0) // a real, well-typed bId that happens to be zero (an unknown type)
+
+		arr := NewSFSArray()
+		arr.AddSFSObject(wrongTyped)
+		arr.AddSFSObject(genuineZero)
+		params := NewSFSObject()
+		params.PutSFSArray("buildings", arr)
+		_ = server.SendExtension("push.add.building", params)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	buildings, _, err := FetchBuildings(client, 150*time.Millisecond)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished sending push.add.building")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil", err)
+	}
+	if len(buildings) != 1 {
+		t.Fatalf("got %d buildings, want 1 (only the genuine, well-typed bId=0 entry -- the string-typed one must be rejected, not silently coerced to bId=0 too)", len(buildings))
+	}
+	if buildings[0].Uuid() != 222 || buildings[0].BId() != 0 {
+		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=222 bId=0 entry", buildings[0].Uuid(), buildings[0].BId())
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping push.add.building entry with wrong-typed bId field") {
+		t.Errorf("expected a wrong-typed-bId warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping push.add.building entry with no bId field") {
+		t.Errorf("wrong-typed bId must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
 func TestParseInitVisitors(t *testing.T) {
 	t.Run("well-formed entry kept, missing-uid entry skipped", func(t *testing.T) {
 		bad := NewSFSObject()

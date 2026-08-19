@@ -26,11 +26,15 @@ var sinkStartRe = regexp.MustCompile(`\b(slog\.(Info|Warn|Error|Debug|Log)|fmt\.
 // sink call. Hoisted to package level for the same reason as sinkStartRe above.
 //
 // Round-14 addition: since SFSObject.String() itself is now safe by default (it delegates to
-// StringRedacted(), see sfsobject.go), the genuinely dangerous call is now .unsafeRawString() --
-// the renamed, still-unredacted raw dump, meant to be called only from within sfsobject.go itself.
-// This pattern flags both: .unsafeRawString() because it's the real, live risk, and plain
-// .String() for defense-in-depth (see TestNoRawSFSObjectDumpInLogsOrErrors's doc comment for why
-// that's kept even though it's no longer unsafe for SFSObject specifically).
+// StringRedacted(), see sfsobject.go), the raw, unredacted dump that used to live under the name
+// String() was renamed to the unexported unsafeRawString(). Round 15 then deleted
+// unsafeRawString() (and its formatSFSValue() recursion helper) entirely as dead code, once a
+// `deadcode` audit confirmed nothing called them anymore -- no such method exists anywhere in this
+// codebase today. This pattern still flags both names: .unsafeRawString() is kept purely as
+// defense-in-depth against a hypothetical future reintroduction of that escape hatch, and plain
+// .String() for the same historical reasons (see TestNoRawSFSObjectDumpInLogsOrErrors's doc
+// comment for why that's kept even though it's no longer unsafe for SFSObject specifically).
+// Neither alternative matches anything dangerous in this codebase as it stands today.
 var stringCallRe = regexp.MustCompile(`\.(String|unsafeRawString)\(\)`)
 
 // TestNoRawSFSObjectDumpInLogsOrErrors is the round-11 process fix (testing-rigor's "minor"
@@ -73,14 +77,20 @@ var stringCallRe = regexp.MustCompile(`\.(String|unsafeRawString)\(\)`)
 // never see anyway, since no literal ".String()" appears in source for that -- closing that gap
 // required the structural fix in sfsobject.go, not a broader regex here). The raw, unredacted dump
 // that used to live under the name String() was renamed to the unexported unsafeRawString(), which
-// does NOT satisfy fmt.Stringer and is only meant to be called from within sfsobject.go itself (by
-// formatSFSValue's recursive raw-dump path). So this guard's real, live purpose going forward is
-// catching an accidental call to that unsafeRawString() escape hatch from outside sfsobject.go --
-// stringCallRe below now flags ".unsafeRawString()" the same way it flags ".String()". Plain
-// ".String()" stays flagged too, purely for defense-in-depth/historical reasons (four rounds of
-// this bug class living under that exact name is reason enough to keep watching it, even though it
-// no longer needs to be) -- see the allowlist entries below for the SFSObject.String() call sites,
-// which are now unconditionally safe rather than "safe because we checked the data."
+// did NOT satisfy fmt.Stringer and was only ever meant to be called from within sfsobject.go itself
+// (by formatSFSValue's recursive raw-dump path).
+//
+// Round-15 update: unsafeRawString() and formatSFSValue() were deleted entirely as dead code
+// (confirmed via `go run golang.org/x/tools/cmd/deadcode@latest .` -- nothing called either one
+// anymore, since String() had delegated straight to StringRedacted() since round 14). Neither
+// function exists anywhere in this codebase today. So this guard's purpose going forward is pure
+// defense-in-depth, not catching an active, currently-reachable escape hatch: stringCallRe still
+// flags ".unsafeRawString()" in case that name is ever reintroduced by a future contributor
+// reaching for the same "I need the raw dump" pattern, and flags plain ".String()" for the same
+// historical reasons (four rounds of this bug class living under that exact name is reason enough
+// to keep watching it, even though it's no longer unsafe for SFSObject specifically) -- see the
+// allowlist entries below for the SFSObject.String() call sites, which are now unconditionally
+// safe rather than "safe because we checked the data."
 func TestNoRawSFSObjectDumpInLogsOrErrors(t *testing.T) {
 	// allowlist maps "file.go:<trimmed text of the line where the sink call starts>" to why that
 	// call is safe. Every entry here was individually confirmed safe by this repo's own audit

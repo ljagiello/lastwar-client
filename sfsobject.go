@@ -103,6 +103,12 @@ func (o *SFSObject) Has(key string) bool { _, ok := o.values[key]; return ok }
 
 // Get returns the raw SFSValue stored under key, and whether it was present.
 func (o *SFSObject) Get(key string) (SFSValue, bool) { v, ok := o.values[key]; return v, ok }
+
+// GetString reads a field as string, returning "" if the field is absent or its concrete decoded
+// Go type isn't string -- the same "treat as absent/zero-value" fallback GetInt/GetLong use for a
+// wrong-typed field, not a panic or an error. Both sfsUtfString and sfsText wire tags decode to
+// Go's plain string type (see the decode switch below), so there is no further wire-tag-level
+// distinction to make here.
 func (o *SFSObject) GetString(key string) string {
 	if v, ok := o.values[key]; ok {
 		if s, ok := v.Val.(string); ok {
@@ -167,6 +173,11 @@ func (o *SFSObject) GetInt(key string) int32 {
 	}
 	return 0
 }
+
+// GetLong reads a field as int64, accepting the same narrower integer types GetInt does (int32,
+// int16, byte). Unlike GetInt, it never needs a range check against its own return type: int64 is
+// GetLong's native return type, so every accepted narrower type widens into it without any
+// possibility of overflow -- see GetInt's own doc comment above for why ITS int64 case needs one.
 func (o *SFSObject) GetLong(key string) int64 {
 	if v, ok := o.values[key]; ok {
 		switch n := v.Val.(type) {

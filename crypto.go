@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 )
 
 const saltAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-/=<>?{}[]"
@@ -211,5 +210,5 @@ func (g *GSLCrypto) DecryptResponse(binField string) (string, error) {
 
 // rsaModulusBitLen is a small helper used only for sanity logging.
 func rsaModulusBitLen(pub *rsa.PublicKey) int {
-	return new(big.Int).Set(pub.N).BitLen()
+	return pub.N.BitLen()
 }

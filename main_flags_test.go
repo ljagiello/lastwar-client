@@ -157,6 +157,42 @@ func TestWarnIfExplicitConfigPathNotFound(t *testing.T) {
 	}
 }
 
+// TestWarnIfInteractiveExplicitlyEmpty is the regression test for this round's Fix 2:
+// warnIfInteractiveExplicitlyEmpty (main.go) is the pure decision behind the new "-interactive was
+// given but empty" diagnostic -- see its own doc comment for the full rationale (an explicit but
+// empty -interactive used to silently behave exactly as if the flag were never passed at all, with
+// zero diagnostic, unlike every sibling -cs-* flag). This pins down that the warning fires only
+// when -interactive was both explicitly typed on the command line AND ended up empty, and stays
+// silent for every other combination (never passed at all, or passed with a real value).
+func TestWarnIfInteractiveExplicitlyEmpty(t *testing.T) {
+	cases := []struct {
+		name        string
+		explicit    bool
+		interactive string
+		wantWarning bool
+	}{
+		{"explicitly passed but empty -> warns", true, "", true},
+		{"explicitly passed with a real value -> no warning", true, "/tmp/some.pipe", false},
+		{"never passed at all (default empty) -> no warning", false, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			defer slog.SetDefault(orig)
+
+			warnIfInteractiveExplicitlyEmpty(c.explicit, c.interactive)
+
+			got := strings.Contains(buf.String(), "-interactive was given but empty")
+			if got != c.wantWarning {
+				t.Errorf("warnIfInteractiveExplicitlyEmpty(explicit=%v, interactive=%q): warning present = %v, want %v (log output: %s)",
+					c.explicit, c.interactive, got, c.wantWarning, buf.String())
+			}
+		})
+	}
+}
+
 func TestRefreshHasUsableData(t *testing.T) {
 	cases := []struct {
 		name       string

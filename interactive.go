@@ -34,6 +34,16 @@ const (
 	controlPipeRetryDelay = 50 * time.Millisecond
 )
 
+// maxControlPipeLineSize is the maximum single control-FIFO line RunInteractive's bufio.Scanner
+// will accept, overriding the default bufio.MaxScanTokenSize (64KB) that scanner would otherwise
+// silently fall back to. This tool's documented command format (RunInteractive's own doc comment)
+// is a bare cmd name plus a flat, scalar-only JSON params object -- nothing remotely close to this
+// size -- so 1MB is generous headroom for a legitimate line while still bounding how much a single
+// oversized/malformed line can make the scanner buffer before giving up with bufio.ErrTooLong,
+// which -- like any other scanner.Err() -- now goes through the bounded consecutive-scan-error
+// retry/backoff in RunInteractive below instead of being uniquely, immediately fatal.
+const maxControlPipeLineSize = 1024 * 1024
+
 // RunInteractive keeps the connection alive (heartbeat already running)
 // and reads commands from a control FIFO, one per line, of the form:
 //
@@ -67,6 +77,14 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 		os.Exit(0)
 	}()
 
+	// consecutiveScanErrors tracks back-to-back loop iterations that ended via a genuine
+	// scanner.Err() != nil (as opposed to a clean scanner.Scan()==false-with-nil-Err() EOF, the
+	// ordinary "writer closed" case every iteration of this loop is otherwise designed around --
+	// see the comment on that reopen below). Reset to 0 on any iteration that DOESN'T end in a scan
+	// error, so this only fires on a genuinely persistent, back-to-back failure, not one isolated
+	// blip in an otherwise-healthy stream of commands.
+	consecutiveScanErrors := 0
+
 	for {
 		fi, statErr := statControlPipeWithRetry(controlPipe)
 		if statErr != nil {
@@ -87,6 +105,15 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 			os.Exit(1)
 		}
 		scanner := bufio.NewScanner(f)
+		// See controlPipeRetries' own doc comment for why a bufio.Scanner's default 64KB
+		// bufio.MaxScanTokenSize would otherwise turn any single line over that size into a fatal
+		// bufio.ErrTooLong scan error, indistinguishable here from a genuinely broken pipe. Sized
+		// generously above the flat scalar-only command-line format this tool actually supports
+		// (see RunInteractive's own doc comment) -- a legitimate line is always far smaller than
+		// this -- purely so an oversized line is treated the same as any other persistent scan
+		// error below (bounded retry, then give up) instead of being uniquely fatal on its very
+		// first occurrence.
+		scanner.Buffer(make([]byte, 0, 64*1024), maxControlPipeLineSize)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
@@ -94,12 +121,29 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 			}
 			handleInteractiveLine(conn, line)
 		}
-		if err := scanner.Err(); err != nil {
-			slog.Error("control pipe scan error", "controlPipe", controlPipe, "error", err)
-		}
 		f.Close()
-		// A FIFO reader sees EOF once every writer closes; reopen and
-		// keep waiting for the next command instead of exiting.
+		if err := scanner.Err(); err != nil {
+			consecutiveScanErrors++
+			slog.Error("control pipe scan error", "controlPipe", controlPipe, "error", err, "consecutiveScanErrors", consecutiveScanErrors)
+			if consecutiveScanErrors > controlPipeRetries {
+				// Same bound as statControlPipeWithRetry/openControlPipeWithRetry's own
+				// controlPipeRetries budget above -- a scan error persisting across this many
+				// back-to-back reopen attempts, with no delay between them, is exactly the
+				// unbounded open-error-close spin this fix exists to prevent: treat it as
+				// genuinely fatal instead of looping forever.
+				slog.Error("control pipe scan error persisted too many times in a row, giving up", "controlPipe", controlPipe, "consecutiveScanErrors", consecutiveScanErrors)
+				os.Exit(1)
+			}
+			// A writer still connected and producing bad input (e.g. one that keeps reopening the
+			// FIFO and immediately erroring) could otherwise spin this loop with no delay at all --
+			// pause before reopening, mirroring controlPipeRetryDelay's own pacing.
+			time.Sleep(controlPipeRetryDelay)
+			continue
+		}
+		// A clean scanner.Scan()==false with a nil Err() is the ordinary case: a FIFO reader sees
+		// EOF once every writer closes. Reset the consecutive-error counter (this iteration wasn't
+		// a scan error at all) and reopen, waiting for the next command instead of exiting.
+		consecutiveScanErrors = 0
 	}
 }
 
@@ -183,6 +227,18 @@ func handleInteractiveLine(conn *GameConn, line string) {
 			// the raw text echoed back; see the "sending command" comment below for the same
 			// reasoning applied to params.
 			slog.Error("bad JSON params", "cmd", cmd, "error", err)
+			return
+		}
+		if raw == nil {
+			// A bare top-level JSON "null" decodes into a map[string]any successfully -- Decode
+			// leaves raw as the type's zero value (nil) rather than erroring -- unlike every OTHER
+			// malformed-body shape (a bare number/string/bool/array), which all correctly fail this
+			// Decode call and already hit the error branch just above. Left unchecked, this one
+			// shape would slip through as if it were a legitimate empty params object -- silently
+			// sending the command with no params and no diagnostic, instead of surfacing what's
+			// almost certainly a mistake (e.g. a stray "null" left over from copy-pasting a
+			// response body as if it were a request).
+			slog.Error("bad JSON params", "cmd", cmd, "error", fmt.Errorf("params decoded to JSON null, not an object"))
 			return
 		}
 		if dec.More() {

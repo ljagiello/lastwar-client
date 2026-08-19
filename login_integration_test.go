@@ -1226,3 +1226,246 @@ func TestLoginRedactsEmailInLogs(t *testing.T) {
 		t.Errorf("Login()'s logged output is missing %q -- the email-verification log lines may not have fired, or logged the wrong length:\n%s", wantEmailLen, logged)
 	}
 }
+
+// TestLoginRedirectWrongTypedIPIsWarned is the round-30 regression test for the TESTING-RIGOR
+// finding that login.go's OWN base-zone Login() call site of redirectIP had no wrong-typed-ip
+// regression test -- only crossserver.go's sibling call site did
+// (TestDoCrossServerLoginRedirectWrongTypedIPIsWarned, crossserver_test.go). Mirrors that test's
+// technique exactly, but end to end through Login() itself: the fake game server's Login response
+// carries a serverInfo whose ip field is the WRONG SFS type (PutInt instead of PutUtfString), then
+// immediately follows up with the `init` push so Login() completes fast instead of waiting out its
+// real 45s initPushTimeout. Proves (1) Login() does not treat the wrong-typed ip as fatal -- it
+// still completes successfully, since the response is otherwise a normal (non-redirect) success --
+// and (2) a Warn mentioning the wrong-typed ip field is logged, not silence, and (3) no redirect
+// was actually followed (no "reconnecting to new address" log line).
+func TestLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		si := NewSFSObject()
+		si.PutInt("ip", 12345) // wrong-typed: a real ip is always a UTF string, never a number
+		si.PutInt("port", 9339)
+		si.PutUtfString("zone", "APS2")
+		resp := NewSFSObject()
+		resp.PutSFSObject("serverInfo", si)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		// The wrong-typed ip must not be treated as a redirect, so Login() falls through to
+		// step 5's init-push wait -- send it right away so this test doesn't wait out the real
+		// 45s initPushTimeout.
+		_ = server.SendExtension("init", NewSFSObject())
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{})
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("Login: %v (a wrong-typed ip must not be treated as a fatal error -- it degrades to \"no redirect\", same as a genuinely absent ip)", err)
+	}
+	defer result.Conn.Close()
+
+	logged := buf.String()
+	if !strings.Contains(logged, "wrong-typed") || !strings.Contains(logged, "ip") {
+		t.Errorf("expected a Warn log mentioning the wrong-typed ip field, got:\n%s", logged)
+	}
+	if strings.Contains(logged, "reconnecting to new address") {
+		t.Errorf("expected no serverInfo redirect to have been followed (the wrong-typed ip can't resolve to one), but the log shows one was:\n%s", logged)
+	}
+}
+
+// TestLoginBaseZoneSendFailureIsNonTimeoutNetError is the round-30 regression test for the
+// TESTING-RIGOR finding that login.go's base-zone Login() send (the conn.SendEnvelope call
+// wrapped in sendStageError, conn.go) had zero test coverage -- a coverage profile showed
+// execution count 0 for that block despite the wrapping already being in place since round 29.
+// This is the FIRST write Login() ever issues on a freshly dialed connection, so
+// withFailingDial(t, 0, ...) (crossserver_test.go) makes it fail deterministically. Mirrors
+// TestSendAndWaitWriteStageFailureIsNonTimeoutNetError's / TestDoHandshakeSendFailureIsNon
+// TimeoutNetError's assertions exactly (conn_wait_test.go/conn_handshake_test.go): the returned
+// error must wrap the injected failure (errors.Is) and satisfy net.Error with
+// Timeout()==false/Temporary()==false even though the injected failure itself reports
+// Timeout()==true -- proving sendStageError's wrapping, not a bare passthrough.
+func TestLoginBaseZoneSendFailureIsNonTimeoutNetError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	// Idle handler: the fake server never receives anything, since the client's very first send
+	// (the base-zone Login itself) fails before the packet ever reaches the network.
+	addr := startFakeGameServer(t, func(server *GameConn) {})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	writeErr := fakeWriteFailError{msg: "simulated write-deadline-exceeded failure"}
+	withFailingDial(t, 0, writeErr)
+
+	_, err := Login(LoginOptions{})
+	if err == nil {
+		t.Fatal("expected an error when the base-zone Login send itself fails")
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("err = %v, want it to wrap the underlying write failure %v", err, writeErr)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- a send-stage failure must be distinguishable from Login()'s own benign wait-stage timeouts, even though the underlying write error itself reports Timeout()==true (mirroring a real deadline-exceeded net.Conn.Write)")
+	}
+	if netErr.Temporary() {
+		t.Errorf("netErr.Temporary() = true, want false")
+	}
+}
+
+// TestLoginSendVerifyCodeSendFailureIsNonTimeoutNetError is TestLoginBaseZoneSendFailure
+// IsNonTimeoutNetError's sibling for login.go's account.login.send.verify.code send (step 6):
+// unlike the base-zone Login send, this one only runs after the base-zone Login send has already
+// succeeded and step 5's init-push wait has completed -- so withFailingDial(t, 1, ...) lets that
+// one earlier write through unchanged and fails only the next one. The fake server accepts and
+// answers the base-zone Login (sending `init` right away so step 5 doesn't wait out its real 45s
+// timeout) but never receives an account.login.send.verify.code request: the client's send for it
+// fails before the packet ever reaches the network.
+func TestLoginSendVerifyCodeSendFailureIsNonTimeoutNetError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		_ = server.SendExtension("init", NewSFSObject())
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	// GameUid empty here, same as TestLoginEmailVerificationPath: a fresh device identity with no
+	// loginKey/gameUid drives gslOptFor to opt=new, which keeps Login() off the opt=="login"
+	// fast-path return and routes it into the email-verification steps this test needs to reach.
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	writeErr := fakeWriteFailError{msg: "simulated write-deadline-exceeded failure"}
+	withFailingDial(t, 1, writeErr)
+
+	_, err := Login(LoginOptions{Email: "player@example.com"})
+	if err == nil {
+		t.Fatal("expected an error when the account.login.send.verify.code send itself fails")
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("err = %v, want it to wrap the underlying write failure %v", err, writeErr)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false")
+	}
+	if netErr.Temporary() {
+		t.Errorf("netErr.Temporary() = true, want false")
+	}
+}
+
+// TestLoginAccountLoginNewSendFailureIsNonTimeoutNetError is TestLoginSendVerifyCodeSendFailure
+// IsNonTimeoutNetError's sibling for login.go's account.login.new send (step 8): this one only
+// runs after BOTH the base-zone Login send and the account.login.send.verify.code send have
+// already succeeded (and the verification code has been read back off CodePipe), so
+// withFailingDial(t, 2, ...) lets those two earlier writes through unchanged and fails only the
+// third. The fake server drives the flow all the way up to (but not through) account.login.new:
+// base-zone Login + immediate `init` push, then a real account.login.send.verify.code
+// request/ack round trip -- account.login.new itself is never received, since the client's send
+// for it fails before the packet ever reaches the network.
+func TestLoginAccountLoginNewSendFailureIsNonTimeoutNetError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const testEmail = "player@example.com"
+	const testCode = "654321"
+	pipePath := mkfifoT(t, t.TempDir(), "code.pipe")
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+			return
+		}
+
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		ack := NewSFSObject()
+		ack.PutBool("success", true)
+		_ = server.SendExtension("account.login.send.verify.code", ack)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	go func() {
+		f, err := os.OpenFile(pipePath, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(testCode + "\n")
+	}()
+
+	writeErr := fakeWriteFailError{msg: "simulated write-deadline-exceeded failure"}
+	withFailingDial(t, 2, writeErr)
+
+	_, err := Login(LoginOptions{Email: testEmail, CodePipe: pipePath})
+	if err == nil {
+		t.Fatal("expected an error when the account.login.new send itself fails")
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("err = %v, want it to wrap the underlying write failure %v", err, writeErr)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false")
+	}
+	if netErr.Temporary() {
+		t.Errorf("netErr.Temporary() = true, want false")
+	}
+}

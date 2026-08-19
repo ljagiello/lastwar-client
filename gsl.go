@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -262,12 +263,26 @@ func findServerInfo(content *SFSObject) *SFSObject {
 // through as real numbers -- this one specifically doesn't). Falls back
 // to parsing the string form so a redirect doesn't silently resolve to
 // port 0 depending on which type the server happened to send this time.
+//
+// Round 30 fix: the string-fallback path used to do a bare, unchecked int32(n) conversion on
+// strconv.Atoi's result, mirroring the exact bug GetInt's own round-29 fix (sfsobject.go) closed
+// for its int64 case -- on a 64-bit platform Go's int is 64-bit, so Atoi happily parses a
+// numeric string outside int32's range, and the bare conversion silently wraps it (e.g.
+// "4294967301" -> 5) instead of rejecting it. Both real call sites (login.go's/crossserver.go's
+// port-from-redirect reads) feed this straight into buildBaseZoneLoginAddr's redial, whose only
+// port guard rejects non-positive values -- a wrapped small positive port would have sailed
+// straight through. Now checked against math.MinInt32/MaxInt32 before converting, degrading to
+// the same 0 fallback this function already uses for an absent/empty field, exactly like GetInt's
+// own fix. See TestGetIntFlexibleRejectsOutOfInt32RangeString (redirect_helpers_test.go).
 func getIntFlexible(o *SFSObject, key string) int32 {
 	if n := o.GetInt(key); n != 0 {
 		return n
 	}
 	if s := o.GetString(key); s != "" {
 		if n, err := strconv.Atoi(s); err == nil {
+			if n < math.MinInt32 || n > math.MaxInt32 {
+				return 0
+			}
 			return int32(n)
 		}
 	}

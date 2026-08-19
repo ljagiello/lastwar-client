@@ -174,8 +174,19 @@ func (b Building) PointId() int32 { return b.Raw.GetInt("pId") }
 //
 // Presence-only, by design: this does NOT check field's concrete decoded type, so it's only
 // sufficient on its own for a caller that never feeds field to a typed accessor (GetLong/GetInt/
-// GetString) -- e.g. HasUnclaimedReward's (mail.go) explicit-null-vs-missing guard on
-// rewardStatus, which only ever compares the raw presence, never keys a lookup off the value.
+// GetString). As of this round, the only caller is requireFieldType immediately below, which
+// layers its own type check on top -- there is no call site anywhere in this codebase that invokes
+// requirePresentField directly for a hard, warn-on-any-absence reject.
+//
+// (mail.go's HasUnclaimedReward used to be cited here as that example, but that citation went
+// stale twice over and is removed as of round 30: its "== 0" comparison keys a lookup off the
+// value, so it never fit the presence-only pattern this paragraph describes even before round 30 --
+// and round 30 additionally stopped it from calling requirePresentField at all, since a
+// genuinely-absent rewardStatus is the NORMAL case for notification-only mail, not something worth
+// this function's unconditional Warn. It now checks presence directly and silently via a plain
+// `Get`, warning only for the present-but-wrong-typed case via warnIfWrongTypedField (login.go) --
+// see HasUnclaimedReward's own doc comment.)
+//
 // Every call site that DOES key a dedup map or lookup off a field read via a typed accessor
 // (buildings.go/mail.go/alliance.go/visitors.go's uuid/uid/type/scienceId checks) must use
 // requireFieldType below instead -- see that function's doc comment for why.
