@@ -103,16 +103,23 @@ const maxVisitorsUpperBound = 300
 //
 // The cap bounds the number of RAW `visitor.list` items examined (round 26), not merely the number
 // of valid ones appended to the returned slice. Before round 26, the loop below only stopped once
-// len(out) reached limit -- so a malformed entry (not an *SFSObject, or missing the required "uid"
-// field via requirePresentField) hit a `continue` that didn't count against the cap at all, since it
-// never reached the append. requirePresentField itself logs a Warn per malformed entry, and the raw
-// `arr.items` slice is bounded only by sfsobject.go's much larger maxDecodedNodes=300,000 decode
-// budget -- so a hostile peer could pad visitor.list with up to ~300,000 minimal malformed entries
-// (e.g. objects with no "uid" field) and force this function to scan and log-warn on every single one
-// regardless of how small `limit` was configured, even though the returned slice (and therefore
-// GreetVisitors' own worst-case cost, see maxVisitorsDefensiveCeiling's doc comment above) really was
-// still capped. There's no legitimate reason to look at more raw items than the output cap already
-// enforces, so the loop below now stops after examining `limit` items total, valid or not.
+// len(out) reached limit -- so a malformed entry (not an *SFSObject, or missing/wrong-typed the
+// required "uid" field via requireFieldType) hit a `continue` that didn't count against the cap at
+// all, since it never reached the append. requireFieldType itself logs a Warn per malformed entry,
+// and the raw `arr.items` slice is bounded only by sfsobject.go's much larger
+// maxDecodedNodes=300,000 decode budget -- so a hostile peer could pad visitor.list with up to
+// ~300,000 minimal malformed entries (e.g. objects with no "uid" field) and force this function to
+// scan and log-warn on every single one regardless of how small `limit` was configured, even though
+// the returned slice (and therefore GreetVisitors' own worst-case cost, see
+// maxVisitorsDefensiveCeiling's doc comment above) really was still capped. There's no legitimate
+// reason to look at more raw items than the output cap already enforces, so the loop below now stops
+// after examining `limit` items total, valid or not.
+//
+// uid is guarded via requireFieldType, not just requirePresentField (round 28): a present-but-
+// wrong-typed uid (e.g. sent as a string) used to pass a presence-only guard and then silently
+// coerce to uid=0 via GetLong's own zero-value fallback -- colliding with a genuinely-zero uid, or
+// another wrong-typed one, in FetchBuildings' seenVisitorUUIDs and login.go's dedupeVisitors (the
+// PRIMARY init-push path), silently dropping one of the two as a spurious "duplicate".
 func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	var out []Visitor
 	v, ok := initParams.Get("visitor")
@@ -153,7 +160,7 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 		if !ok {
 			continue
 		}
-		if !requirePresentField(vi, "uid", "visitor.list") {
+		if !requireFieldType(vi, "uid", "visitor.list", sfsFieldKindLong) {
 			continue
 		}
 		out = append(out, Visitor{Raw: vi})

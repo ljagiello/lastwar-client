@@ -112,6 +112,61 @@ func TestSendAndWaitRealFailure(t *testing.T) {
 	}
 }
 
+// fakeTimeoutNetError is a minimal net.Error whose Timeout() reports true, standing in for the
+// *net.OpError a real deadline-exceeded net.Conn.Write returns -- per net.Conn's documented
+// contract, "a Write ... that exceeds the [write] deadline ... returns an error that wraps
+// os.ErrDeadlineExceeded" and satisfies net.Error with Timeout() == true. Used by
+// TestSendAndWaitWriteStageFailureIsNonTimeoutNetError below to prove sendAndWait's write-stage
+// wrapper (sendStageError, conn.go) forces Timeout()==false even when the underlying cause is
+// itself exactly this Timeout()==true shape.
+type fakeTimeoutNetError struct{ msg string }
+
+func (e fakeTimeoutNetError) Error() string { return e.msg }
+func (fakeTimeoutNetError) Timeout() bool   { return true }
+func (fakeTimeoutNetError) Temporary() bool { return true }
+
+// TestSendAndWaitWriteStageFailureIsNonTimeoutNetError is the round-28 regression test for the
+// MAJOR finding that sendAndWait used to return a SendExtension/write-stage failure completely
+// unwrapped, indistinguishable from waitForCmd's benign wait-stage timeout (TestWaitForTimeout
+// above) once the underlying write error happened to itself be a Timeout()==true net.Error --
+// exactly what SendEnvelope's writeTimeout deadline produces on a genuinely half-open connection.
+// Reuses writeFailConn (defined above for TestWaitForInitPushSendExtensionFailure) to force
+// conn.SendExtension's underlying Write to fail deterministically, injecting fakeTimeoutNetError
+// as the write failure specifically so this test fails loudly if sendAndWait ever stops wrapping
+// the write-stage error: without the fix, errors.As below would find the raw, unwrapped
+// fakeTimeoutNetError and this test's Timeout()==false assertion would correctly catch the
+// regression.
+func TestSendAndWaitWriteStageFailureIsNonTimeoutNetError(t *testing.T) {
+	client, _ := newPipeGameConnPair(t) // server intentionally left idle: the write must fail before any read is attempted
+	writeErr := fakeTimeoutNetError{msg: "simulated write-deadline-exceeded failure"}
+	client.conn = &writeFailConn{Conn: client.conn, err: writeErr}
+
+	// Sanity check on the test's own setup: the injected failure really does report
+	// Timeout()==true, mirroring what a genuine deadline-exceeded net.Conn.Write returns -- if
+	// this ever went false the test below would trivially pass for the wrong reason.
+	if !writeErr.Timeout() {
+		t.Fatal("test setup bug: writeErr must itself report Timeout()==true")
+	}
+
+	_, err := sendAndWait(client, "test write failure", "test.cmd", NewSFSObject())
+	if err == nil {
+		t.Fatal("expected sendAndWait to return an error when the send itself fails")
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("err = %v, want it to wrap the underlying write failure %v", err, writeErr)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- a write-stage failure must be distinguishable from sendAndWait's ordinary benign wait-stage timeout (TestWaitForTimeout), even though the underlying write error itself reports Timeout()==true (mirroring a real deadline-exceeded net.Conn.Write); downstream containsNonTimeoutNetError-style checks (buildings.go, mail.go, alliance.go, visitors.go) must treat this as a genuine connection failure requiring abort, not a benign per-command timeout")
+	}
+	if netErr.Temporary() {
+		t.Errorf("netErr.Temporary() = true, want false")
+	}
+}
+
 func TestSendAndWaitTimeoutNoResponse(t *testing.T) {
 	// sendAndWait takes no timeout parameter -- it always waits via waitForCmd(conn,
 	// defaultCmdTimeout, ...), and defaultCmdTimeout (conn.go) is a plain 8*time.Second const, not

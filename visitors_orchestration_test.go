@@ -539,6 +539,107 @@ func TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput(t *testing.T) {
 	}
 }
 
+// TestParseInitVisitorsFallbackCeilingBoundary is the round-28 boundary-condition regression test
+// for maxVisitorsDefensiveCeiling's fallback cap (used when the init push's own `maxNum` field is
+// absent, unparseable, or <= 0 -- see ParseInitVisitors' doc comment):
+// TestParseInitVisitorsFallbackCeilingTruncatesWithoutMaxNum above overshoots the ceiling by 5
+// items, so it would not catch a production ">"-to-">=" regression in the truncation-warning
+// condition (`len(arr.items) > limit`) -- an off-by-one there would either warn one item too early,
+// or worse, silently drop the last legitimate visitor of an exactly-at-ceiling push without ever
+// logging why. This drives both sides of that boundary directly with well-formed entries, so
+// len(out) itself -- not just a logged-warning count -- proves whether the cap fired at the right
+// point.
+func TestParseInitVisitorsFallbackCeilingBoundary(t *testing.T) {
+	t.Run("exactly ceiling items: all parsed, no truncation warning", func(t *testing.T) {
+		params := newVisitorInitParams(false, 0, maxVisitorsDefensiveCeiling)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		out := ParseInitVisitors(params)
+		slog.SetDefault(orig)
+
+		if len(out) != maxVisitorsDefensiveCeiling {
+			t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (the ceiling, all well-formed)", len(out), maxVisitorsDefensiveCeiling)
+		}
+		if strings.Contains(buf.String(), "visitor.list longer than cap") {
+			t.Errorf("unexpected truncation warning at exactly-ceiling boundary:\n%s", buf.String())
+		}
+	})
+
+	t.Run("ceiling+1 items: truncation warning fires, only ceiling parsed", func(t *testing.T) {
+		params := newVisitorInitParams(false, 0, maxVisitorsDefensiveCeiling+1)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		out := ParseInitVisitors(params)
+		slog.SetDefault(orig)
+
+		if len(out) != maxVisitorsDefensiveCeiling {
+			t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (ceiling+1 input must still truncate)", len(out), maxVisitorsDefensiveCeiling)
+		}
+		if !strings.Contains(buf.String(), "visitor.list longer than cap; truncating") {
+			t.Errorf("expected a truncation warning at ceiling+1, got:\n%s", buf.String())
+		}
+	})
+}
+
+// TestParseInitVisitorsWrongTypedUIDIsRejected is the round-28 regression test for requireFieldType
+// (buildings.go), exercised here at ParseInitVisitors' own uid guard: before this round's fix,
+// requirePresentField only checked presence, never that uid's concrete decoded SFS type actually
+// matched what Visitor.Uid() (GetLong) accepts. A present-but-wrong-typed uid (e.g. the server
+// sending it as a string instead of a Long) used to silently pass that presence-only guard and then
+// coerce to int64(0) via GetLong's own zero-value fallback -- colliding with a genuinely-zero uid,
+// or another wrong-typed one, in FetchBuildings' seenVisitorUUIDs and login.go's dedupeVisitors
+// (the PRIMARY init-push path).
+//
+// The input here has a wrong-typed uid entry (a string) and a separate, genuinely-well-typed uid=0
+// entry -- proving these two are no longer conflated: exactly one visitor must come back (the
+// genuine uid=0 one), and a "wrong-typed uid" warning, not a "missing uid" one, must be logged.
+//
+// Mutation check: reverting ParseInitVisitors' `requireFieldType(vi, "uid", "visitor.list",
+// sfsFieldKindLong)` back to `requirePresentField(vi, "uid", "visitor.list")` makes this test fail
+// with 2 visitors instead of 1 (both uid=0, indistinguishable), and no "wrong-typed" warning logged.
+func TestParseInitVisitorsWrongTypedUIDIsRejected(t *testing.T) {
+	wrongTyped := NewSFSObject()
+	wrongTyped.PutUtfString("uid", "not-a-long") // wrong SFS type: a visitor uid must be a Long
+	wrongTyped.PutInt("eventId", 2005)
+
+	genuineZero := NewSFSObject()
+	genuineZero.PutLong("uid", 0) // a real, well-typed uid that happens to be zero
+	genuineZero.PutInt("eventId", 2001)
+
+	list := NewSFSArray()
+	list.AddSFSObject(wrongTyped)
+	list.AddSFSObject(genuineZero)
+	visitor := NewSFSObject()
+	visitor.PutSFSArray("list", list)
+	params := NewSFSObject()
+	params.PutSFSObject("visitor", visitor)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := ParseInitVisitors(params)
+	slog.SetDefault(orig)
+
+	if len(got) != 1 {
+		t.Fatalf("ParseInitVisitors parsed %d visitors, want 1 (only the genuine, well-typed uid=0 entry -- the string-typed one must be rejected, not silently coerced to uid=0 too)", len(got))
+	}
+	if got[0].Uid() != 0 || got[0].EventId() != 2001 {
+		t.Errorf("got visitor uid=%d eventId=%d, want the genuine uid=0 eventId=2001 entry", got[0].Uid(), got[0].EventId())
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping visitor.list entry with wrong-typed uid field") {
+		t.Errorf("expected a wrong-typed-uid warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping visitor.list entry with no uid field") {
+		t.Errorf("wrong-typed uid must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
 // eofConnWithWrites is a minimal net.Conn whose every Read returns bare io.EOF -- like
 // conn_wait_test.go's eofConn, simulating a peer's graceful close at the live-connection level -- but
 // unlike eofConn (which embeds a nil net.Conn and would panic if any other method were called), Write

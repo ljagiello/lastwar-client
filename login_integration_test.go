@@ -240,6 +240,86 @@ func TestLoginDedupesInitPushBuildingsAndVisitors(t *testing.T) {
 	}
 }
 
+// fakeInitPushServerWithWrongTypedBuildingUUID mirrors fakeInitPushServer above, but the `init`
+// push it sends carries a building_new array with ONE entry whose `uuid` field has the WRONG
+// concrete SFS type (a UtfString, "not-a-long", instead of a Long) alongside a separate, genuinely
+// well-typed building whose uuid happens to be the real zero value (0). See
+// TestLoginRejectsWrongTypedBuildingUUID, the round 28 regression test this exists for.
+func fakeInitPushServerWithWrongTypedBuildingUUID() func(*GameConn) {
+	return func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+
+		wrongTyped := NewSFSObject()
+		wrongTyped.PutUtfString("uuid", "not-a-long") // wrong SFS type: a building uuid must be a Long
+		wrongTyped.PutInt("bId", BuildingFarmland)
+		genuineZero := NewSFSObject()
+		genuineZero.PutLong("uuid", 0) // a real, well-typed uuid that happens to be zero
+		genuineZero.PutInt("bId", BuildingIronMine)
+		buildingArr := NewSFSArray()
+		buildingArr.AddSFSObject(wrongTyped)
+		buildingArr.AddSFSObject(genuineZero)
+
+		init := NewSFSObject()
+		init.PutSFSArray("building_new", buildingArr)
+		_ = server.SendExtension("init", init)
+	}
+}
+
+// TestLoginRejectsWrongTypedBuildingUUID is the round-28 regression test for requireFieldType
+// (buildings.go), exercised end to end through Login()'s PRIMARY init-push path -- waitForInitPush
+// (login.go), called directly by Login() on every login, not FetchBuildings' fallback -- proving
+// the fix actually protects that path, not just ParseInitBuildings in isolation.
+//
+// Before this round's fix, requirePresentField only checked that `uuid` was present and non-nil,
+// never that its concrete decoded SFS type matched what Building.Uuid() (GetLong) accepts. A
+// present-but-wrong-typed uuid silently passed that guard and coerced to int64(0) via GetLong's own
+// zero-value fallback -- indistinguishable from THIS test's separate, genuinely-well-typed uuid=0
+// building. dedupeBuildings (login.go) would then see two buildings both reading as uuid=0 and
+// silently drop one as a spurious "duplicate" -- exactly the scenario TestLoginDedupesInitPushBuildingsAndVisitors
+// above proves is otherwise correct behavior for a REAL duplicate, but wrong here since these are
+// two distinct buildings, not one resent twice.
+//
+// Mutation check: reverting ParseInitBuildings' `requireFieldType(bi, "uuid", "building_new",
+// sfsFieldKindLong)` back to `requirePresentField(bi, "uuid", "building_new")` makes this test fail
+// with len(result.Buildings) == 1 instead of... actually still 1, but the WRONG one survives
+// (whichever of the two colliding uuid=0 entries dedupeBuildings happens to keep first) -- so the
+// real assertion that catches the regression is BId(), not just the count: it would come back as
+// BuildingFarmland (the wrong-typed entry, first in the array) instead of BuildingIronMine (the
+// genuine one).
+func TestLoginRejectsWrongTypedBuildingUUID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	addr := startFakeGameServer(t, fakeInitPushServerWithWrongTypedBuildingUUID())
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	result, err := Login(LoginOptions{})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	defer result.Conn.Close()
+
+	if len(result.Buildings) != 1 {
+		t.Fatalf("got %d buildings, want exactly 1 (only the genuine, well-typed uuid=0 entry -- the string-typed one must be rejected outright, not silently coerced to uuid=0 and merged with the genuine one)", len(result.Buildings))
+	}
+	if result.Buildings[0].Uuid() != 0 || result.Buildings[0].BId() != BuildingIronMine {
+		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=0 bId=%d (BuildingIronMine) entry -- got the wrong-typed entry's bId instead if this reads BuildingFarmland", result.Buildings[0].Uuid(), result.Buildings[0].BId(), BuildingIronMine)
+	}
+}
+
 // TestLoginConnectionFailureWhileWaitingForInit is the integration-level regression test for
 // round 17's fix in Login() itself (the "if initErr != nil { ...; conn.Close(); return nil,
 // fmt.Errorf(...) }" block in step 5, right after the waitForInitPush call): a genuine connection

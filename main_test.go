@@ -270,9 +270,13 @@ func TestRunCrossServerTestPortExplicitButInvalidWording(t *testing.T) {
 	}
 
 	log := stderr.String()
-	const wantMsg = "invalid -cs-port value: -1 (must be positive)"
+	const wantMsg = "invalid -cs-port value (must be positive)"
 	if !strings.Contains(log, wantMsg) {
 		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the new wording for an explicitly-typed but invalid port, distinct from the genuinely-never-given case)", log, wantMsg)
+	}
+	const wantPortField = "port=-1"
+	if !strings.Contains(log, wantPortField) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q -- the invalid port value is now logged as a structured field, not baked into the message text", log, wantPortField)
 	}
 	const dontWantMsg = "no port given"
 	if strings.Contains(log, dontWantMsg) {

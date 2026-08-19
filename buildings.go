@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"time"
 )
 
@@ -170,10 +171,98 @@ func (b Building) PointId() int32 { return b.Raw.GetInt("pId") }
 // treated the same as a missing field: Has() only reflects key presence, so a null-typed entry
 // would otherwise slip past the guard and GetInt/GetLong/GetString would fall through to a
 // zero value indistinguishable from a genuine one.
+//
+// Presence-only, by design: this does NOT check field's concrete decoded type, so it's only
+// sufficient on its own for a caller that never feeds field to a typed accessor (GetLong/GetInt/
+// GetString) -- e.g. HasUnclaimedReward's (mail.go) explicit-null-vs-missing guard on
+// rewardStatus, which only ever compares the raw presence, never keys a lookup off the value.
+// Every call site that DOES key a dedup map or lookup off a field read via a typed accessor
+// (buildings.go/mail.go/alliance.go/visitors.go's uuid/uid/type/scienceId checks) must use
+// requireFieldType below instead -- see that function's doc comment for why.
 func requirePresentField(o *SFSObject, field, context string) bool {
 	v, ok := o.Get(field)
 	if !ok || v.Val == nil {
 		slog.Warn("skipping "+context+" entry with no "+field+" field", "raw", o.String())
+		return false
+	}
+	return true
+}
+
+// sfsFieldKind identifies which family of concrete decoded Go types a field must be one of for
+// the caller's chosen typed accessor (GetLong/GetInt/GetString, sfsobject.go) to read it
+// correctly instead of silently falling through to that accessor's own zero-value coercion. Each
+// constant's accepted-type set mirrors the corresponding accessor's own type switch exactly, so
+// requireFieldType's check and the accessor's own behavior can never disagree.
+type sfsFieldKind int
+
+const (
+	// sfsFieldKindLong mirrors GetLong's accepted set: int64, int32, int16, byte.
+	sfsFieldKindLong sfsFieldKind = iota
+	// sfsFieldKindInt mirrors GetInt's accepted set: int32, int16, byte, int64. This happens to be
+	// the identical Go-type set as sfsFieldKindLong above (GetInt and GetLong both widen/narrow
+	// across the same four integer types) -- kept as a separate constant anyway so call sites stay
+	// self-documenting about which accessor they actually use, and so the two can diverge safely if
+	// GetInt/GetLong's own accepted sets ever do.
+	sfsFieldKindInt
+	// sfsFieldKindString mirrors GetString's accepted set: string. Both sfsUtfString and sfsText
+	// wire tags decode to Go's plain string type (sfsobject.go's decode switch), so there is no
+	// further wire-tag-level distinction to make from the Go type alone.
+	sfsFieldKindString
+)
+
+// sfsFieldKindAccepts reports whether val's concrete Go type is one kind's corresponding
+// GetLong/GetInt/GetString accessor actually reads, rather than silently coercing to a zero
+// value.
+func sfsFieldKindAccepts(kind sfsFieldKind, val interface{}) bool {
+	switch kind {
+	case sfsFieldKindLong, sfsFieldKindInt:
+		switch val.(type) {
+		case int64, int32, int16, byte:
+			return true
+		}
+	case sfsFieldKindString:
+		switch val.(type) {
+		case string:
+			return true
+		}
+	}
+	return false
+}
+
+// requireFieldType is requirePresentField's type-aware sibling: it reports whether o has field
+// AND that field's concrete decoded Go type is one kind's accessor (GetLong/GetInt/GetString)
+// actually accepts, logging a Warn and returning false otherwise -- treating a present-but-
+// wrong-typed field exactly the same as an absent one, rather than letting it silently pass
+// requirePresentField's presence-only guard and then fall through to GetLong/GetInt/GetString's
+// own zero-value coercion.
+//
+// Why this exists (round 28 audit): GetLong/GetInt/GetString (sfsobject.go) each silently return
+// a zero value (int64(0)/int32(0)/"") for ANY non-nil value whose concrete Go type isn't in their
+// accepted set -- indistinguishable from a genuine zero/empty value. requirePresentField alone
+// only ever checked presence, so a present-but-wrong-typed uuid/uid/type/scienceId field (e.g. the
+// server sending a uuid as a string, or a type as a float) used to pass its guard and then
+// silently coerce to zero once read via the typed accessor -- colliding with a genuinely-zero
+// entry, or another wrong-typed one, in every dedup map/lookup keyed on it: login.go's
+// dedupeBuildings/dedupeVisitors (the PRIMARY init-push path, called from Login() on every login,
+// since both consume ParseInitBuildings/ParseInitVisitors' output directly), buildings.go's own
+// seenBuildingUUIDs/seenVisitorUUIDs in FetchBuildings, mail.go's seenUIDs in ListMail (a
+// PERMANENT reward loss on a wrong-typed uid, since rewardStatus is per-mail), mail.go's
+// groupUnclaimedByType (silently merges into a genuine type=0 batch), and alliance.go's
+// findRecommendedTech (returns scienceId=0, causing a real donate attempt against the wrong tech).
+//
+// Every call site that keys a dedup map or lookup off a field this codebase reads via GetLong/
+// GetInt/GetString uses this instead of requirePresentField for that reason -- see
+// TestParseInitBuildingsWrongTypedUUIDIsRejected (buildings_visitors_test.go) and
+// TestFindRecommendedTechWrongTypedScienceIdIsRejected (alliance_test.go) for the regression
+// coverage proving a wrong-typed field is now rejected rather than silently coerced to zero.
+func requireFieldType(o *SFSObject, field, context string, kind sfsFieldKind) bool {
+	if !requirePresentField(o, field, context) {
+		return false
+	}
+	v, _ := o.Get(field) // presence and non-nil-ness already confirmed by requirePresentField above
+	if !sfsFieldKindAccepts(kind, v.Val) {
+		slog.Warn("skipping "+context+" entry with wrong-typed "+field+" field",
+			"raw", o.StringRedacted(), "goType", fmt.Sprintf("%T", v.Val))
 		return false
 	}
 	return true
@@ -195,7 +284,7 @@ func requirePresentField(o *SFSObject, field, context string) bool {
 // maxDecodedNodes=300,000 decode-level budget. ParseInitBuildings in particular feeds the PRIMARY
 // init-push path (login.go's waitForInitPush, called from Login() on every login, not just
 // FetchBuildings' fallback), so a hostile/misbehaving -cs-ip peer could pad building_new with up to
-// ~300,000 minimal malformed entries (each triggering a Warn log via requirePresentField below) and
+// ~300,000 minimal malformed entries (each triggering a Warn log via requireFieldType below) and
 // force a full scan-and-log cost on every single login.
 //
 // Set well above maxCollectibleBuildingsPerRun=300 (below): that constant bounds the POST-parse,
@@ -240,7 +329,7 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 		if !ok {
 			continue
 		}
-		if !requirePresentField(bi, "uuid", "building_new") {
+		if !requireFieldType(bi, "uuid", "building_new", sfsFieldKindLong) {
 			continue
 		}
 		out = append(out, Building{Raw: bi})
@@ -392,7 +481,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 						}
 						if biv, ok := wrapper.Get("buildInfo"); ok {
 							if bi, ok := biv.Val.(*SFSObject); ok {
-								if !requirePresentField(bi, "uuid", "push.init.build") {
+								if !requireFieldType(bi, "uuid", "push.init.build", sfsFieldKindLong) {
 									continue
 								}
 								appendBuilding(Building{Raw: bi})
@@ -432,7 +521,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 						if !ok {
 							continue
 						}
-						if !requirePresentField(bi, "uuid", "push.add.building") {
+						if !requireFieldType(bi, "uuid", "push.add.building", sfsFieldKindLong) {
 							continue
 						}
 						appendBuilding(Building{Raw: bi})
@@ -468,13 +557,28 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 // to stdout (not slog/stderr) to keep it capturable via shell redirection,
 // per the stdout=data/stderr=logs convention -version and -decode-stream
 // also follow.
+//
+// The "building type:" blocks are printed in ascending bId order, not map iteration order: Go
+// deliberately randomizes map iteration order run-to-run, so iterating byType directly (as this
+// used to) made stdout's block order nondeterministic for identical input -- undermining the
+// "capturable via shell redirection" purpose stated above, since a plain `diff` between two runs
+// against the same account would show spurious reordering noise alongside (or instead of) any
+// real change. Collecting and sorting the keys first makes two runs over identical building data
+// byte-for-byte identical.
 func PrintBuildings(buildings []Building) {
 	byType := map[int32][]Building{}
 	for _, b := range buildings {
 		byType[b.BId()] = append(byType[b.BId()], b)
 	}
+	bIds := make([]int32, 0, len(byType))
+	for bId := range byType {
+		bIds = append(bIds, bId)
+	}
+	sort.Slice(bIds, func(i, j int) bool { return bIds[i] < bIds[j] })
+
 	fmt.Printf("building summary: distinctTypes=%d totalInstances=%d\n", len(byType), len(buildings))
-	for bId, list := range byType {
+	for _, bId := range bIds {
+		list := byType[bId]
 		fmt.Printf("building type: bId=%d name=%s instances=%d\n", bId, BuildingNameOf(bId), len(list))
 		for _, b := range list {
 			fmt.Printf("building instance: uuid=%d buildingLevel=%d pointId=%d raw=%s\n", b.Uuid(), b.Level(), b.PointId(), b.Raw.StringRedacted())

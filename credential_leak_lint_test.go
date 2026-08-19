@@ -160,6 +160,128 @@ func TestNoRawSFSObjectDumpInLogsOrErrors(t *testing.T) {
 	}
 }
 
+// getStringSensitiveKeyRe matches a `.GetString("key")` call, capturing the literal key name --
+// used by TestNoSensitiveGetStringLoggedRaw (below) to find call sites that extract a field's raw
+// Go string value by key. Unlike a `.String()`/`.StringRedacted()` dump of a whole object,
+// GetString(key) returns a bare string with no field-name context at all once it's in the caller's
+// hands, so it bypasses StringRedacted()'s key-by-key sensitiveSFSKeys check entirely -- there is
+// nothing left downstream that could redact it.
+var getStringSensitiveKeyRe = regexp.MustCompile(`\.GetString\("(\w+)"\)`)
+
+// redactWrappedGetStringRe matches the one form TestNoSensitiveGetStringLoggedRaw treats as SAFE:
+// the extracted value immediately wrapped in redact() (login.go's own first4...last4 shortening
+// helper), e.g. `redact(msg2.Params.GetString("loginKey"))` -- the pattern every current call site
+// that legitimately logs a sensitive field's actual *value* (as opposed to just its length) already
+// uses.
+var redactWrappedGetStringRe = regexp.MustCompile(`redact\([\w.]*GetString\("(\w+)"\)\)`)
+
+// TestNoSensitiveGetStringLoggedRaw is the round-28 sibling of TestNoRawSFSObjectDumpInLogsOrErrors
+// above, closing a related but distinct gap in the same credential-leak bug class. That test scans
+// for a raw .String()/.StringRedacted()-style dump of a *whole* SFSObject reaching a log/error sink;
+// this one scans for a *single field's* raw value reaching one via .GetString(key) -- a call that
+// returns a bare Go string with no way for anything downstream to know which key it came from, so
+// it can never be redacted after the fact the way a full StringRedacted() dump can.
+//
+// This is exactly the shape of the round-28 finding: login.go used to call
+// `slog.Info("login OK", "un", env.Content.GetString("un"))`, logging the server's real returned
+// account username in cleartext at Info level on every successful login -- even after "un" was
+// registered in sensitiveSFSKeys (sfsobject.go), since StringRedacted()'s redaction never runs on
+// this call path at all.
+//
+// Scans every non-test .go source file for a slog.*/fmt.*/log.Print* sink call, using
+// sinkStartRe/joinSinkCall from the sibling test above only to find where a (possibly multi-line)
+// sink call ends -- unlike that test, this one then re-joins the ORIGINAL, unstripped lines in that
+// range rather than joinSinkCall's paren-balance-stripped text: stripStringsAndComments deliberately
+// erases string-literal CONTENTS (so a stray paren inside one can't confuse the paren tally), which
+// would erase the very key name -- `"un"` inside `GetString("un")` -- this scan needs to see. It
+// then flags a `.GetString("key")` call for a key registered in sensitiveSFSKeys, unless that same
+// call is wrapped in redact(...) (the one safe pattern this repo uses for logging a sensitive
+// field's value, e.g. login.go's `redact(msg2.Params.GetString("loginKey"))`).
+//
+// Known, accepted limitation, mirroring the sibling test's own documented gap: this cannot catch a
+// GetString(...) result stashed in a local variable and logged several statements later -- only the
+// DIRECT, same-sink-call embedding is caught (a full go/ast-based data-flow check would close this
+// too; not implemented here for the same "no current instance of the gap exists to justify the
+// added complexity" reason the sibling test's doc comment gives).
+func TestNoSensitiveGetStringLoggedRaw(t *testing.T) {
+	// allowlist mirrors TestNoRawSFSObjectDumpInLogsOrErrors' own allowlist shape: "file.go:<trimmed
+	// sink-call start line>" -> justification. Empty today -- every current GetString(sensitiveKey)
+	// call embedded directly in a sink is either wrapped in redact() (safe, and never matched by
+	// this scan to begin with) or was fixed by the round-28 change this test guards.
+	allowlist := map[string]string{}
+
+	seen := map[string]bool{}
+
+	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		lines := strings.Split(string(data), "\n")
+		relName := filepath.ToSlash(path) // filepath.WalkDir(".", ...) already yields root-relative paths with no "./" prefix
+
+		for i := 0; i < len(lines); i++ {
+			if !sinkStartRe.MatchString(lines[i]) {
+				continue
+			}
+			startIdx := i
+			_, endIdx := joinSinkCall(lines, i)
+			i = endIdx
+			// Deliberately the RAW lines, not joinSinkCall's paren-stripped text -- see this test's
+			// doc comment above for why the stripped version would hide the key name entirely.
+			rawJoined := strings.Join(lines[startIdx:endIdx+1], "\n")
+
+			safeKeys := map[string]bool{}
+			for _, m := range redactWrappedGetStringRe.FindAllStringSubmatch(rawJoined, -1) {
+				safeKeys[m[1]] = true
+			}
+
+			for _, m := range getStringSensitiveKeyRe.FindAllStringSubmatch(rawJoined, -1) {
+				key := m[1]
+				if !sensitiveSFSKeys[key] || safeKeys[key] {
+					continue
+				}
+				trimmedStart := strings.TrimSpace(lines[startIdx])
+				allowKey := relName + ":" + trimmedStart
+				if _, ok := allowlist[allowKey]; ok {
+					seen[allowKey] = true
+					continue
+				}
+				t.Errorf("%s:%d: a slog.*/fmt.*/log.Print* call embeds .GetString(%q) directly -- %q is a "+
+					"registered sensitive key (sensitiveSFSKeys, sfsobject.go), so this bypasses "+
+					"StringRedacted()'s field-by-field redaction entirely and logs the real value in "+
+					"cleartext. Log its length instead (mirroring the emailLen/usernameLen pattern), or "+
+					"wrap it in redact(...) if the value itself is genuinely useful to log, or add this "+
+					"line to the allowlist in this test with a one-line justification if it's genuinely "+
+					"safe.\n\tline: %s", relName, startIdx+1, key, key, trimmedStart)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDir: %v", err)
+	}
+
+	for key := range allowlist {
+		if !seen[key] {
+			t.Errorf("allowlist entry no longer matches any source line (line was fixed/removed/reworded) -- remove this stale entry: %s", key)
+		}
+	}
+}
+
 // stripStringsAndComments removes the contents of Go double-quoted strings, single-quoted rune
 // literals, backtick-delimited raw strings, and any trailing "//" line comment from a single
 // physical line, leaving only characters that are actually part of Go syntax (call parens,

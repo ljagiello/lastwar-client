@@ -52,6 +52,27 @@ func (m Mail) HasUnclaimedReward() bool {
 	return m.RewardStatus() == 0
 }
 
+// mailListRawItemCap bounds how many RAW entries in a single page's `msg` response array ListMail's
+// pagination loop below will examine, independent of ListMail's own mailListPageSize (100, the
+// requested page-size hint) and maxPages (20) -- both of those bound round-trip COUNT only, not the
+// size of any single page's response array, which is otherwise bounded only by sfsobject.go's much
+// larger maxDecodedNodes=300,000 decode budget. Without this, a malformed entry (not an *SFSObject,
+// or missing/wrong-typed the required "uid" field via requireFieldType) hits a `continue` that
+// doesn't advance any output-count-based cap, since it never reaches the append -- the same gap
+// visitors.go's ParseInitVisitors closed in round 26 for visitor.list, applied here to mail.list
+// pages. requireFieldType itself logs a Warn per malformed entry, so a hostile/misbehaving peer
+// responding to a single mail.list page with a huge malformed array would otherwise force full
+// scan-and-log cost regardless of the requested page size. Set comfortably above
+// mailListPageSize=100 -- a legitimate server response may reasonably vary somewhat from the exact
+// requested page size -- but still finite and well below the decode-level ceiling.
+//
+// Package-scoped (round 28), matching buildings.go's maxRawBuildingItemsPerPush and alliance.go's
+// allianceScienceRawItemCap -- this used to be a function-scoped const inside ListMail itself, the
+// only one of this codebase's three raw-item-scan caps declared that way, purely for consistency
+// with its two siblings (no functional difference either way, since ListMail was and remains its
+// only reader).
+const mailListRawItemCap = 1000
+
 // ListMail fetches the account's mail via `chat.get.system.mails`,
 // following the real client's own request shape
 // (extracted/lua_decompiled/5018_Net_Msgs_Mail_MailGetMutiMessage.lua:
@@ -75,20 +96,6 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 	const pushCmd = "push.chat.get.system.mails"
 	const maxPages = 20
 	const mailListPageSize = 100
-	// mailListRawItemCap bounds how many RAW entries in a single page's `msg` response array the
-	// loop below will examine, independent of mailListPageSize (100, the requested page-size hint)
-	// and maxPages (20) -- both of those bound round-trip COUNT only, not the size of any single
-	// page's response array, which is otherwise bounded only by sfsobject.go's much larger
-	// maxDecodedNodes=300,000 decode budget. Without this, a malformed entry (not an *SFSObject, or
-	// missing the required "uid" field via requirePresentField) hits a `continue` that doesn't
-	// advance any output-count-based cap, since it never reaches the append -- the same gap
-	// visitors.go's ParseInitVisitors closed in round 26 for visitor.list, applied here to mail.list
-	// pages. requirePresentField itself logs a Warn per malformed entry, so a hostile/misbehaving
-	// peer responding to a single mail.list page with a huge malformed array would otherwise force
-	// full scan-and-log cost regardless of the requested page size. Set comfortably above
-	// mailListPageSize=100 -- a legitimate server response may reasonably vary somewhat from the
-	// exact requested page size -- but still finite and well below the decode-level ceiling.
-	const mailListRawItemCap = 1000
 
 	var all []Mail
 	// seenUIDs dedupes mail uids across pages, mirroring FetchBuildings' seenBuildingUUIDs/
@@ -143,7 +150,7 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 					if !ok {
 						continue
 					}
-					if !requirePresentField(mo, "uid", "mail") {
+					if !requireFieldType(mo, "uid", "mail", sfsFieldKindString) {
 						continue
 					}
 					m := Mail{Raw: mo}
@@ -420,21 +427,22 @@ func batchByCountAndBytes(uids []string, maxCount, maxBytes int) [][]string {
 // connection.
 //
 // Same GetInt-can't-distinguish-missing-from-zero conflation HasUnclaimedReward guards against for
-// rewardStatus applies here to type: a reward-bearing mail whose `type` field is genuinely absent
-// or explicitly null would otherwise fall through m.Type()'s GetInt to the int32 zero value,
-// indistinguishable from a real type=0, and get silently bucketed into (and later sent as) a
-// `mail.reward.batch {type:0, ...}` request the server may not recognize. So this checks presence
-// via the shared requirePresentField guard (same one ListMail already uses for uid, and
-// alliance.go/buildings.go use for scienceId/uuid) before trusting m.Type(), and skips -- with a
-// warning -- any reward-bearing mail whose type is missing or explicitly null, rather than
-// defaulting it into a type=0 batch.
+// rewardStatus applies here to type: a reward-bearing mail whose `type` field is genuinely absent,
+// explicitly null, or present with the wrong concrete SFS type (e.g. sent as a string) would
+// otherwise fall through m.Type()'s GetInt to the int32 zero value, indistinguishable from a real
+// type=0, and get silently bucketed into (and later sent as) a `mail.reward.batch {type:0, ...}`
+// request the server may not recognize -- merging it into a genuinely-type=0 batch it doesn't
+// belong to. So this checks presence AND type via the shared requireFieldType guard (same one
+// ListMail already uses for uid, and alliance.go/buildings.go use for scienceId/uuid) before
+// trusting m.Type(), and skips -- with a warning -- any reward-bearing mail whose type is missing,
+// explicitly null, or wrong-typed, rather than defaulting it into a type=0 batch.
 func groupUnclaimedByType(mail []Mail) map[int32][]string {
 	byType := make(map[int32][]string)
 	for _, m := range mail {
 		if !m.HasUnclaimedReward() {
 			continue
 		}
-		if !requirePresentField(m.Raw, "type", "mail reward") {
+		if !requireFieldType(m.Raw, "type", "mail reward", sfsFieldKindInt) {
 			continue
 		}
 		byType[m.Type()] = append(byType[m.Type()], m.Uid())

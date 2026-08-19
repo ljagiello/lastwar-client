@@ -116,7 +116,10 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	slog.Info("device identity", "deviceIdLen", len(ident.DeviceID))
 	slog.Info("air key", "airKeyLen", len(ident.AirKey()))
-	slog.Info("persisted state", "username", ident.Username, "gameUid", ident.GameUid, "loginKey", redact(ident.LoginKey))
+	// Not "username": ident.Username -- that would print the operator's real persisted account
+	// username in cleartext at Info level on every run. Mirrors the emailLen pattern used
+	// elsewhere in this file for the same PII-in-a-plain-string reason (see step 6 below).
+	slog.Info("persisted state", "usernameLen", len(ident.Username), "gameUid", ident.GameUid, "loginKey", redact(ident.LoginKey))
 
 	opt := gslOptFor(ident)
 	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt)
@@ -258,12 +261,16 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			conn.Close()
 			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), ErrAuthRejected)
 		}
-		slog.Info("login OK", "un", env.Content.GetString("un"))
-		if un := env.Content.GetString("un"); un != "" && un != ident.Username {
+		// Not "un": env.Content.GetString("un") -- that would print the server's real returned
+		// account username in cleartext at Info level on every successful login. usernameLen
+		// mirrors the emailLen pattern used elsewhere in this file for the same reason.
+		un := env.Content.GetString("un")
+		slog.Info("login OK", "usernameLen", len(un))
+		if un != "" && un != ident.Username {
 			if err := ident.SaveUsername(un); err != nil {
 				slog.Warn("failed to persist username", "error", err)
 			} else {
-				slog.Info("persisted username for future runs", "username", un)
+				slog.Info("persisted username for future runs", "usernameLen", len(un))
 			}
 		}
 

@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // RunInteractive keeps the connection alive (heartbeat already running)
@@ -153,7 +152,7 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		os.Exit(1)
 	}
 
-	msg, err := waitForCmd(conn, 8*time.Second, cmd, "push."+cmd)
+	msg, err := waitForCmd(conn, defaultCmdTimeout, cmd, "push."+cmd)
 	if err != nil {
 		// Same net.Error/Timeout() distinction round 21 applied at 6+ other call sites
 		// (buildings.go, mail.go, visitors.go, alliance.go) -- and that's already honored two

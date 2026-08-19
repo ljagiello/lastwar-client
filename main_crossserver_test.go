@@ -272,6 +272,68 @@ func TestRunCrossServerTestExitsWhenIPEmpty(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestExitsWhenIPExplicitlyEmpty is the regression test for this round's Fix 1:
+// the firstHost(ip) == "" check above used to log the exact same "no ip given" message regardless
+// of whether -cs-ip was actually typed on the command line with an empty value (e.g. -cs-ip "")
+// versus never given at all -- unlike the sibling -cs-port check just below it in main.go, which
+// already branched on o.portExplicit to produce a distinct, more accurate message for "explicitly
+// passed but invalid" vs "never given at all". This drives runCrossServerTest with ipExplicit:
+// true and ip left empty (as -cs-ip "" would leave it) and asserts the resulting message names
+// -cs-ip and says it was given-but-empty, distinct from TestRunCrossServerTestExitsWhenIPEmpty
+// above's "never given" wording.
+//
+// Mutation-testing note: reverting the ip check back to always logging "no ip given" regardless of
+// o.ipExplicit makes this test's wantMsg assertion fail (the message would still contain "no ip
+// given" instead of the explicit-specific wording), proving this test actually exercises the fix
+// rather than passing vacuously.
+//
+// Uses the same re-exec-the-test-binary-as-a-subprocess idiom as TestRunCrossServerTestExitsWhenIPEmpty
+// above, for the same reason: runCrossServerTest calls os.Exit(1) directly on this path.
+func TestRunCrossServerTestExitsWhenIPExplicitlyEmpty(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		useFakeGSLServer(t, gsl)
+
+		// ip is left empty, but ipExplicit is true -- as if -cs-ip "" were actually typed on the
+		// command line. No -cs-rt is set, so this never reaches the GSL-refresh block; the fake GSL
+		// server above only exists to satisfy the unconditional CheckVersion call before the ip/port
+		// checks are reached.
+		runCrossServerTest(crossServerTestOpts{
+			ip:         "",
+			ipExplicit: true,
+			port:       18888,
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will
+		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
+		// this silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestExitsWhenIPExplicitlyEmpty$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	log := stderr.String()
+	const wantMsg = "-cs-ip was given but empty"
+	if !strings.Contains(log, wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q (distinguishing an explicitly-passed-but-empty -cs-ip from one never given at all)", log, wantMsg)
+	}
+	if strings.Contains(log, "no ip given") {
+		t.Errorf("subprocess stderr = %s\nwant the explicit-but-empty wording, not the \"never given at all\" wording TestRunCrossServerTestExitsWhenIPEmpty already covers", log)
+	}
+}
+
 // TestRunCrossServerTestExitsCode2WhenRefreshHasNoUsableData is the regression test for this
 // round's Fix 1 (exit-code contract gap): a GSL opt=refresh response with neither a fresh access
 // token nor a non-empty server list (refreshHasUsableData(lsr) == false) used to exit 1, the
@@ -686,6 +748,72 @@ func TestRunCrossServerTestExitsWhenGameUidEmpty(t *testing.T) {
 	const wantMsg = "no gameUid given"
 	if !strings.Contains(stderr.String(), wantMsg) {
 		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the pre-fix behavior instead proceeds into DoCrossServerLogin and burns a network round-trip before failing downstream)", stderr.String(), wantMsg)
+	}
+}
+
+// TestRunCrossServerTestExitsWhenGameUidExplicitlyEmpty is the regression test for this round's
+// Fix 1 (the gameUid half): the gameUid == "" check above used to log the exact same "no gameUid
+// given" message regardless of whether -cs-gameuid was actually typed on the command line with an
+// empty value (e.g. -cs-gameuid "") versus never given at all -- unlike the sibling -cs-port check
+// in main.go, which already branched on o.portExplicit to produce a distinct, more accurate message
+// for "explicitly passed but invalid" vs "never given at all". This drives runCrossServerTest with
+// gameUidExplicit: true and gameUid left empty (as -cs-gameuid "" would leave it) and asserts the
+// resulting message names -cs-gameuid and says it was given-but-empty, distinct from
+// TestRunCrossServerTestExitsWhenGameUidEmpty above's "never given" wording.
+//
+// Mutation-testing note: reverting the gameUid check back to always logging "no gameUid given"
+// regardless of o.gameUidExplicit makes this test's wantMsg assertion fail (the message would still
+// contain "no gameUid given" instead of the explicit-specific wording), proving this test actually
+// exercises the fix rather than passing vacuously.
+//
+// Uses the same re-exec-the-test-binary-as-a-subprocess idiom as
+// TestRunCrossServerTestExitsWhenGameUidEmpty above, for the same reason: runCrossServerTest calls
+// os.Exit(1) directly on this path. ip/port are both given valid values so this test isolates the
+// gameUid check specifically, rather than tripping the sibling ip/port checks first.
+func TestRunCrossServerTestExitsWhenGameUidExplicitlyEmpty(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		useFakeGSLServer(t, gsl)
+
+		// gameUid is left empty, but gameUidExplicit is true -- as if -cs-gameuid "" were actually
+		// typed on the command line. No -cs-rt is set, so this never reaches the GSL-refresh block;
+		// the fake GSL server above only exists to satisfy the unconditional CheckVersion call
+		// before the ip/port/gameUid checks are reached. ip/port are valid so this isolates the
+		// gameUid check.
+		runCrossServerTest(crossServerTestOpts{
+			ip:              "1.2.3.4",
+			port:            18888,
+			gameUid:         "",
+			gameUidExplicit: true,
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will
+		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
+		// this silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestExitsWhenGameUidExplicitlyEmpty$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	log := stderr.String()
+	const wantMsg = "-cs-gameuid was given but empty"
+	if !strings.Contains(log, wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q (distinguishing an explicitly-passed-but-empty -cs-gameuid from one never given at all)", log, wantMsg)
+	}
+	if strings.Contains(log, "no gameUid given") {
+		t.Errorf("subprocess stderr = %s\nwant the explicit-but-empty wording, not the \"never given at all\" wording TestRunCrossServerTestExitsWhenGameUidEmpty already covers", log)
 	}
 }
 

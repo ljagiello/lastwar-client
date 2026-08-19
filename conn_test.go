@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -239,5 +241,94 @@ func TestGameConnSendReceiveRoundTrip(t *testing.T) {
 	}
 	if got := msg.Params.GetString("hello"); got != "world" {
 		t.Errorf("Params.hello = %q, want world", got)
+	}
+}
+
+// countingCloseConn is a minimal net.Conn whose Close() counts invocations and, from the second
+// call onward, returns a distinct "spurious" error -- standing in for the real
+// "use of closed network connection" error a genuine net.Conn returns when Close() is called on
+// it more than once. Used by the TestCloseIsIdempotent* tests below to prove GameConn.Close()
+// invokes the underlying net.Conn's Close() at most once no matter how many times, or how
+// concurrently, GameConn.Close() itself is called.
+type countingCloseConn struct {
+	net.Conn
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingCloseConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if c.calls > 1 {
+		return errors.New("use of closed network connection")
+	}
+	return nil
+}
+
+func (c *countingCloseConn) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestCloseIsIdempotentSequential is the round-28 regression test for the MINOR finding that
+// GameConn.Close()'s sync.Once only deduped the stopHeartbeat channel close, leaving the
+// underlying net.Conn.Close() call outside the Once to run unconditionally on every call -- so a
+// second Close() invoked the real socket's Close() a second time and could surface a spurious
+// "use of closed network connection" error even though nothing new actually failed. Asserts both
+// halves of genuine idempotency: the underlying Close() runs exactly once, and every call to
+// GameConn.Close() -- not just the first -- returns that same result.
+func TestCloseIsIdempotentSequential(t *testing.T) {
+	conn := &countingCloseConn{}
+	c := &GameConn{conn: conn, reader: bufio.NewReaderSize(conn, 4096)}
+
+	err1 := c.Close()
+	err2 := c.Close()
+	err3 := c.Close()
+
+	if got := conn.callCount(); got != 1 {
+		t.Errorf("underlying net.Conn.Close() called %d times across 3 GameConn.Close() calls, want exactly 1", got)
+	}
+	if err1 != nil {
+		t.Errorf("first Close() = %v, want nil", err1)
+	}
+	if err2 != err1 {
+		t.Errorf("second Close() = %v, want it to equal the first Close()'s result (%v) -- a genuinely idempotent Close must not surface a spurious second error from re-invoking the underlying socket's Close()", err2, err1)
+	}
+	if err3 != err1 {
+		t.Errorf("third Close() = %v, want it to equal the first Close()'s result (%v)", err3, err1)
+	}
+}
+
+// TestCloseIsIdempotentConcurrent is TestCloseIsIdempotentSequential's concurrent sibling,
+// covering the realistic scenario named in the finding: StartHeartbeat's own error branch calling
+// c.Close() concurrently with the main goroutine's error-path c.Close() after a failed blocked
+// read. Every concurrent caller must observe exactly one real underlying Close() and the same
+// returned result -- sync.Once.Do's happens-before guarantee (every Do call blocks until the
+// function has finished running) makes this safe to assert without a data race.
+func TestCloseIsIdempotentConcurrent(t *testing.T) {
+	conn := &countingCloseConn{}
+	c := &GameConn{conn: conn, reader: bufio.NewReaderSize(conn, 4096)}
+
+	const n = 20
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = c.Close()
+		}(i)
+	}
+	wg.Wait()
+
+	if got := conn.callCount(); got != 1 {
+		t.Errorf("underlying net.Conn.Close() called %d times across %d concurrent GameConn.Close() calls, want exactly 1", got, n)
+	}
+	for i, err := range errs {
+		if err != errs[0] {
+			t.Errorf("concurrent Close() call %d = %v, want it to equal call 0's result (%v)", i, err, errs[0])
+		}
 	}
 }

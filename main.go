@@ -26,8 +26,8 @@ func main() {
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	email := fs.String("email", "", "account email to bind the guest identity to via email verification; if omitted and no loginKey is on file yet, the run silently stays on a fresh guest identity (no account binding, no error)")
 	codePipe := fs.String("code-pipe", "", "path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin")
-	collect := fs.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both once-a-day VIP claims, after login")
-	listBuildings := fs.Bool("list-buildings", false, "print every owned building (id, type, level) to stdout. NOTE: this print already happens by DEFAULT whenever -collect is NOT passed -- this flag only matters when -collect IS also passed, where it forces the same print to happen alongside collection instead of being skipped; the process still exits after -collect/-list-buildings finish (assuming -collect, if passed, didn't fail fatally first) unless -interactive is also set")
+	collect := fs.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck/Overlord idle rewards, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both once-a-day VIP claims, after login")
+	listBuildings := fs.Bool("list-buildings", false, "print every owned building's details (a summary line, a per-type line, and a per-instance line with uuid/level/pointId and a full raw redacted dump -- not just id/type/level) to stdout. NOTE: this print already happens by DEFAULT whenever -collect is NOT passed -- this flag only matters when -collect IS also passed, where it forces the same print to happen alongside collection instead of being skipped; the process still exits after -collect/-list-buildings finish (assuming -collect, if passed, didn't fail fatally first) unless -interactive is also set")
 	interactive := fs.String("interactive", "", "stay connected and read ad-hoc test commands from this control FIFO instead of exiting; only flat scalar param values (strings/bools/numbers) are supported -- nested JSON objects/arrays are rejected with a logged error and abort the whole send (see interactive.go)")
 
 	csIP := fs.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
@@ -856,7 +856,19 @@ func runCrossServerTest(o crossServerTestOpts) {
 	// refresh block above (which can replace ip with a fresh server list entry), so a config/flag
 	// omission that IS resolved by -cs-rt doesn't false-positive.
 	if firstHost(ip) == "" {
-		slog.Error("cross-server login: no ip given (pass -cs-ip or a session config with ip)")
+		if o.ipExplicit {
+			// Distinct from the "never given at all" wording just below: -cs-ip WAS actually typed
+			// on the command line (per o.ipExplicit, the same visitedFlags mechanism this file
+			// already uses elsewhere -- e.g. the neighboring "ignoring -cs-at" / serverListOverrideFlags
+			// call sites, and the identical pattern the -cs-port check just below already applies), it
+			// just carried an empty value -- e.g. -cs-ip "" or -cs-ip with no argument consumed.
+			// Before this fix, this case logged the exact same "no ip given" message as an ip that
+			// was never passed at all, actively misdirecting an operator debugging a simple empty-value
+			// typo toward the wrong root cause (did I forget the flag? vs. did I pass it with no value?).
+			slog.Error("cross-server login: -cs-ip was given but empty (pass a non-empty ip)")
+		} else {
+			slog.Error("cross-server login: no ip given (pass -cs-ip or a session config with ip)")
+		}
 		os.Exit(1)
 	}
 
@@ -877,7 +889,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			// exact same "no port given" message as a port that was never passed at all, actively
 			// misdirecting an operator debugging a simple typo toward the wrong root cause (did I
 			// forget the flag? vs. did I fat-finger the value?).
-			slog.Error(fmt.Sprintf("cross-server login: invalid -cs-port value: %d (must be positive)", port))
+			slog.Error("cross-server login: invalid -cs-port value (must be positive)", "port", port)
 		} else {
 			slog.Error("cross-server login: no port given (pass -cs-port or a session config with port)")
 		}
@@ -898,7 +910,19 @@ func runCrossServerTest(o crossServerTestOpts) {
 	// refresh block above (which can replace gameUid with a fresh server list entry), so a config/
 	// flag omission that IS resolved by -cs-rt doesn't false-positive.
 	if gameUid == "" {
-		slog.Error("cross-server login: no gameUid given (pass -cs-gameuid or a session config with gameUid) -- an empty gameUid is sent directly as the un field on the wire and reliably fails with ec=28/E011, misleadingly resembling an expired/stale session rather than a missing-gameUid configuration gap")
+		if o.gameUidExplicit {
+			// Distinct from the "never given at all" wording just below: -cs-gameuid WAS actually
+			// typed on the command line (per o.gameUidExplicit, the same visitedFlags mechanism this
+			// file already uses elsewhere -- e.g. the neighboring "ignoring -cs-at" /
+			// serverListOverrideFlags call sites, and the identical pattern the -cs-ip/-cs-port checks
+			// above already apply), it just carried an empty value -- e.g. -cs-gameuid "". Before this
+			// fix, this case logged the exact same "no gameUid given" message as a gameUid that was
+			// never passed at all, actively misdirecting an operator debugging a simple empty-value
+			// typo toward the wrong root cause (did I forget the flag? vs. did I pass it empty?).
+			slog.Error("cross-server login: -cs-gameuid was given but empty (pass a non-empty gameUid) -- an empty gameUid is sent directly as the un field on the wire and reliably fails with ec=28/E011, misleadingly resembling an expired/stale session rather than a missing-gameUid configuration gap")
+		} else {
+			slog.Error("cross-server login: no gameUid given (pass -cs-gameuid or a session config with gameUid) -- an empty gameUid is sent directly as the un field on the wire and reliably fails with ec=28/E011, misleadingly resembling an expired/stale session rather than a missing-gameUid configuration gap")
+		}
 		os.Exit(1)
 	}
 

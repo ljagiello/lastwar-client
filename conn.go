@@ -41,6 +41,7 @@ type GameConn struct {
 
 	stopHeartbeat chan struct{}
 	closeOnce     sync.Once
+	closeErr      error
 }
 
 // writeTimeout bounds every socket write via SendEnvelope. Without it, a
@@ -64,13 +65,24 @@ func DialGame(addr string, timeout time.Duration) (*GameConn, error) {
 	}, nil
 }
 
+// Close is idempotent: the underlying net.Conn.Close() call, like the stopHeartbeat channel
+// close, lives inside closeOnce so it only actually runs once no matter how many times or how
+// concurrently Close() is called (e.g. StartHeartbeat's own error-branch c.Close() racing the
+// main goroutine's error-path c.Close() after a failed blocked read). Its result is captured into
+// closeErr from inside the Once and returned on every call -- including calls after the first,
+// which skip the Do body entirely -- so the return value is genuinely idempotent too: a second
+// Close() reports the same outcome as the first, rather than a spurious "use of closed network
+// connection" from re-invoking the socket's Close() a second time. sync.Once.Do's happens-before
+// guarantee (every Do call blocks until the function, if any, has finished running) makes reading
+// closeErr after Do returns race-free even when multiple goroutines call Close() concurrently.
 func (c *GameConn) Close() error {
 	c.closeOnce.Do(func() {
 		if c.stopHeartbeat != nil {
 			close(c.stopHeartbeat)
 		}
+		c.closeErr = c.conn.Close()
 	})
-	return c.conn.Close()
+	return c.closeErr
 }
 
 // SendEnvelope builds the outer {c,a,p} SFSObject, serializes, frames, and
@@ -244,6 +256,38 @@ func logCommandResult(label string, msg *ExtensionMessage) {
 
 const defaultCmdTimeout = 8 * time.Second
 
+// sendStageError wraps a failure from sendAndWait's send stage (conn.SendExtension, which
+// ultimately calls SendEnvelope's c.conn.Write under a writeTimeout write deadline) so it can
+// never be confused with waitForCmd's benign wait-stage timeout outcome (deadlineExceededError,
+// login.go). Per Go's net.Conn contract, a deadline-exceeded Write returns a *net.OpError that
+// already satisfies net.Error with Timeout()==true -- identical, as far as the
+// errors.As(&netErr)+!netErr.Timeout() early-abort checks in buildings.go/mail.go/alliance.go/
+// visitors.go are concerned, to sendAndWait's own ordinary "no matching response within
+// defaultCmdTimeout" outcome. Left unwrapped, a connection so broken it can't even send a request
+// would be silently treated as "the response just hasn't arrived yet, keep going" instead of "the
+// connection is dead, abort" -- backwards from what actually happened: SendEnvelope's write
+// deadline exists specifically to bound how long a half-open connection can hang (see its own doc
+// comment), and a write-side failure means the send itself never got out, not that a well-sent
+// request's response was merely slow.
+//
+// A failed send is unconditionally treated as a genuine connection failure regardless of the
+// underlying cause (write-deadline exceeded, connection reset, or even a local encode error from
+// deeper in SendExtension/SendEnvelope) -- unlike packet.go's deadConnError, which only activates
+// for the specific EOF/ErrUnexpectedEOF shapes wrapIfClosed recognizes, this wrapper is applied
+// unconditionally to sendAndWait's entire send-stage branch. Mirrors deadConnError's net.Error-
+// shaping technique (a small unexported struct forcing Timeout()==false/Temporary()==false) and
+// wraps -- never replaces -- the original error via Unwrap, so errors.Is/errors.As against the
+// underlying cause (e.g. a specific *net.OpError) keep working through this wrapper. Only applied
+// to the write-error branch below; waitForCmd's read/wait-side timeout behavior is untouched.
+type sendStageError struct {
+	err error
+}
+
+func (e sendStageError) Error() string { return "send: " + e.err.Error() }
+func (e sendStageError) Unwrap() error { return e.err }
+func (sendStageError) Timeout() bool   { return false }
+func (sendStageError) Temporary() bool { return false }
+
 // sendAndWait sends a command and waits for its response, logging the outcome via
 // logCommandResult and returning an error if the send/wait itself failed or classifyResponse
 // says the response was a genuine failure. This is the single dedup point for the near-identical
@@ -253,8 +297,9 @@ const defaultCmdTimeout = 8 * time.Second
 // (e.g. mail.go's push.chat.get.system.mails).
 func sendAndWait(conn *GameConn, label, sendCmd string, params *SFSObject, waitCmds ...string) (*ExtensionMessage, error) {
 	if err := conn.SendExtension(sendCmd, params); err != nil {
-		slog.Error(label+" send failed", "cmd", sendCmd, "error", err)
-		return nil, err
+		wrapped := sendStageError{err: err}
+		slog.Error(label+" send failed", "cmd", sendCmd, "error", wrapped)
+		return nil, wrapped
 	}
 	if len(waitCmds) == 0 {
 		waitCmds = []string{sendCmd}

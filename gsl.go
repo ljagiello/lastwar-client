@@ -31,7 +31,8 @@ const (
 // config responses, never expected to exceed a few KB.
 const maxGSLResponseSize = 1 << 20 // 1 MiB
 
-// onlineCheckVersionHostList, dossier §02.
+// checkVersionHosts lists the candidate CheckVersion/GetServerList gate hosts to try in order,
+// dossier §02.
 var checkVersionHosts = []string{
 	"https://lastwar-serverlist-cf.lastwarapp.net",
 	"https://lastwar-serverlist-us-aws-ali.lastwargame.com",

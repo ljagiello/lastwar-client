@@ -181,6 +181,189 @@ func TestFetchBuildingsPushAddBuildingCapsRawItemsExamined(t *testing.T) {
 	}
 }
 
+// TestFetchBuildingsPushInitBuildCapsRawItemsExamined covers the "push.init.build" case's own
+// inline loop in FetchBuildings (buildings.go) -- the THIRD of the three sibling loops that share
+// maxRawBuildingItemsPerPush (see that constant's doc comment above ParseInitBuildings in
+// buildings.go). Round 27 added the cap to all three loops (ParseInitBuildings' building_new scan,
+// this "push.init.build"/defaultBuilds scan, and "push.add.building"/buildings scan) but only wrote
+// regression tests for the first and third -- see
+// TestParseInitBuildingsCapsRawItemsExaminedNotJustValidOutput and
+// TestFetchBuildingsPushAddBuildingCapsRawItemsExamined above, whose technique (and fake-server
+// pattern, buildings_orchestration_test.go/conn_wait_test.go's newPipeGameConnPair/SendExtension)
+// this test mirrors exactly, just for the middle loop.
+//
+// Each defaultBuilds entry here is a wrapper carrying a buildInfo object with no "uuid" field (see
+// buildings.go's push.init.build case: it reads `wrapper.Get("buildInfo")` first, then checks
+// requireFieldType on THAT nested object, not the wrapper itself), so every entry is malformed and
+// len(buildings) stays 0 throughout the scan either way -- counting the actually-logged "missing
+// uuid" warnings, not len(buildings), is what makes this test capable of catching an
+// unbounded-scan regression at all.
+//
+// No "init" push is sent in this test, so gotAuthoritativeInit never becomes true and
+// push.init.build's own deadline-shrink (gated on it) never fires -- FetchBuildings simply waits
+// out the short fixed timeout passed below, same as TestFetchBuildingsPushAddBuildingCapsRawItemsExamined
+// does for its own sibling loop.
+//
+// Mutation check: reverting the "push.init.build" case's `for i, item := range arr.items { if i >=
+// maxRawBuildingItemsPerPush { break }; ... }` in buildings.go back to a plain `for _, item := range
+// arr.items { ... }` (no cap at all) makes this test fail with a logged-warning count of
+// wantMalformed instead of maxRawBuildingItemsPerPush.
+func TestFetchBuildingsPushInitBuildCapsRawItemsExamined(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const wantMalformed = maxRawBuildingItemsPerPush + 500 // far more malformed entries than the cap
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		params := NewSFSObject()
+		arr := NewSFSArray()
+		for i := 0; i < wantMalformed; i++ {
+			bad := NewSFSObject()
+			bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
+			wrapper := NewSFSObject()
+			wrapper.PutSFSObject("buildInfo", bad)
+			arr.AddSFSObject(wrapper)
+		}
+		params.PutSFSArray("defaultBuilds", arr)
+		_ = server.SendExtension("push.init.build", params)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	buildings, _, err := FetchBuildings(client, 150*time.Millisecond)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished sending push.init.build")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil (a plain timeout after partial data is not itself an error)", err)
+	}
+	if len(buildings) != 0 {
+		t.Fatalf("got %d buildings, want 0 (every entry in this test is malformed -- missing uuid)", len(buildings))
+	}
+
+	gotWarnings := strings.Count(buf.String(), "skipping push.init.build entry with no uuid field")
+	if gotWarnings != maxRawBuildingItemsPerPush {
+		t.Errorf("push.init.build's inline loop logged %d \"missing uuid\" warnings, want exactly %d (the cap on RAW items examined) -- input had %d malformed entries; the loop must stop scanning after the first %d regardless of how many turned out valid", gotWarnings, maxRawBuildingItemsPerPush, wantMalformed, maxRawBuildingItemsPerPush)
+	}
+	if !strings.Contains(buf.String(), "push.init.build defaultBuilds longer than raw-item scan cap; truncating") {
+		t.Errorf("expected a truncation warning from push.init.build's inline loop, got:\n%s", buf.String())
+	}
+}
+
+// TestParseInitBuildingsWrongTypedUUIDIsRejected is the round-28 regression test for
+// requireFieldType (buildings.go): before this round's fix, requirePresentField only checked that
+// a field was present and non-nil, never that its concrete decoded SFS type actually matched what
+// Building.Uuid() (GetLong) accepts. A present-but-wrong-typed uuid (e.g. the server sending it as
+// a string instead of a Long) silently passed that presence-only guard and then coerced to
+// int64(0) via GetLong's own zero-value fallback -- indistinguishable from a genuine uuid=0 and
+// exactly as dangerous: dedupeBuildings (login.go, the PRIMARY init-push path) and FetchBuildings'
+// seenBuildingUUIDs would treat it as a duplicate of any other zero/wrong-typed uuid, silently
+// dropping one of two otherwise-distinct real buildings.
+//
+// The input here has a wrong-typed uuid entry (a string) and a separate, genuinely-well-typed
+// uuid=0 entry -- proving these two are no longer conflated: exactly one building must come back
+// (the genuine uuid=0 one), and a "wrong-typed uuid" warning, not a "missing uuid" one, must be
+// logged for the string entry.
+//
+// Mutation check: reverting ParseInitBuildings' `requireFieldType(bi, "uuid", "building_new",
+// sfsFieldKindLong)` back to `requirePresentField(bi, "uuid", "building_new")` makes this test fail
+// with 2 buildings instead of 1 (both uuid=0, indistinguishable), and no "wrong-typed" warning
+// logged.
+func TestParseInitBuildingsWrongTypedUUIDIsRejected(t *testing.T) {
+	wrongTyped := NewSFSObject()
+	wrongTyped.PutUtfString("uuid", "not-a-long") // wrong SFS type: a uuid must be a Long
+	wrongTyped.PutInt("bId", BuildingFarmland)
+
+	genuineZero := NewSFSObject()
+	genuineZero.PutLong("uuid", 0) // a real, well-typed uuid that happens to be zero
+	genuineZero.PutInt("bId", BuildingIronMine)
+
+	arr := NewSFSArray()
+	arr.AddSFSObject(wrongTyped)
+	arr.AddSFSObject(genuineZero)
+	params := NewSFSObject()
+	params.PutSFSArray("building_new", arr)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := ParseInitBuildings(params)
+	slog.SetDefault(orig)
+
+	if len(got) != 1 {
+		t.Fatalf("ParseInitBuildings parsed %d buildings, want 1 (only the genuine, well-typed uuid=0 entry -- the string-typed one must be rejected, not silently coerced to uuid=0 too)", len(got))
+	}
+	if got[0].Uuid() != 0 || got[0].BId() != BuildingIronMine {
+		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=0 bId=%d entry", got[0].Uuid(), got[0].BId(), BuildingIronMine)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping building_new entry with wrong-typed uuid field") {
+		t.Errorf("expected a wrong-typed-uuid warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping building_new entry with no uuid field") {
+		t.Errorf("wrong-typed uuid must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
+// TestParseInitBuildingsRawItemCapBoundary is the round-28 boundary-condition regression test for
+// maxRawBuildingItemsPerPush: every prior raw-item-scan-cap test for this constant (see
+// TestParseInitBuildingsCapsRawItemsExaminedNotJustValidOutput above) overshoots the cap by a wide
+// margin (+500), so none would catch a production ">"-to-">=" regression in the truncation-warning
+// condition (`len(arr.items) > maxRawBuildingItemsPerPush`) -- an off-by-one there would either warn
+// one item too early, or worse, silently drop the last legitimate entry of an exactly-at-cap push
+// without ever logging why. This test drives both sides of that boundary directly with well-formed
+// entries, so len(got) itself -- not just a logged-warning count -- proves whether the cap fired at
+// the right point.
+func TestParseInitBuildingsRawItemCapBoundary(t *testing.T) {
+	buildParams := func(n int) *SFSObject {
+		arr := NewSFSArray()
+		for i := 0; i < n; i++ {
+			arr.AddSFSObject(newTestBuildingSFS(int64(i), BuildingFarmland, 1))
+		}
+		params := NewSFSObject()
+		params.PutSFSArray("building_new", arr)
+		return params
+	}
+
+	t.Run("exactly cap items: all parsed, no truncation warning", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := ParseInitBuildings(buildParams(maxRawBuildingItemsPerPush))
+		slog.SetDefault(orig)
+
+		if len(got) != maxRawBuildingItemsPerPush {
+			t.Fatalf("got %d buildings, want exactly %d (the cap, all well-formed)", len(got), maxRawBuildingItemsPerPush)
+		}
+		if strings.Contains(buf.String(), "longer than raw-item scan cap") {
+			t.Errorf("unexpected truncation warning at exactly-cap boundary:\n%s", buf.String())
+		}
+	})
+
+	t.Run("cap+1 items: truncation warning fires, only cap parsed", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := ParseInitBuildings(buildParams(maxRawBuildingItemsPerPush + 1))
+		slog.SetDefault(orig)
+
+		if len(got) != maxRawBuildingItemsPerPush {
+			t.Fatalf("got %d buildings, want exactly %d (cap+1 input must still truncate to the cap)", len(got), maxRawBuildingItemsPerPush)
+		}
+		if !strings.Contains(buf.String(), "building_new longer than raw-item scan cap; truncating") {
+			t.Errorf("expected a truncation warning at cap+1, got:\n%s", buf.String())
+		}
+	})
+}
+
 func TestParseInitVisitors(t *testing.T) {
 	t.Run("well-formed entry kept, missing-uid entry skipped", func(t *testing.T) {
 		bad := NewSFSObject()

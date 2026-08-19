@@ -614,7 +614,8 @@ func uidsOf(mail []Mail) []string {
 func TestListMailCapsRawItemsExaminedPerPage(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
-	const mailListRawItemCap = 1000         // must match ListMail's own unexported mailListRawItemCap constant
+	// mailListRawItemCap is now package-scoped (mail.go, round 28), so this references ListMail's
+	// own real constant directly -- no local re-declaration to keep in sync by hand anymore.
 	wantMalformed := mailListRawItemCap * 5 // far more malformed entries than the cap
 
 	done := make(chan struct{})
@@ -669,6 +670,198 @@ func TestListMailCapsRawItemsExaminedPerPage(t *testing.T) {
 	}
 	if !strings.Contains(logged, "page response array longer than raw-item scan cap") {
 		t.Errorf("expected a warning about the page response array exceeding the raw-item scan cap, got log:\n%s", logged)
+	}
+}
+
+// TestListMailRawItemCapBoundary is the round-28 boundary-condition regression test for
+// mailListRawItemCap: TestListMailCapsRawItemsExaminedPerPage above overshoots the cap by 5x, so it
+// would not catch a production ">"-to-">=" regression in the truncation-warning condition
+// (`len(arr.items) > mailListRawItemCap`) -- an off-by-one there would either warn one item too
+// early, or worse, silently drop the last legitimate mail of an exactly-at-cap page without ever
+// logging why. This drives both sides of that boundary directly with well-formed, uniquely-uid'd
+// entries, so len(got) itself -- not just a logged-warning count -- proves whether the cap fired at
+// the right point.
+func TestListMailRawItemCapBoundary(t *testing.T) {
+	sendPageAndList := func(t *testing.T, n int) ([]Mail, string) {
+		t.Helper()
+		client, server := newPipeGameConnPair(t)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			if _, ok := env.AsExtension(); !ok {
+				return
+			}
+			resp := NewSFSObject()
+			arr := NewSFSArray()
+			for i := 0; i < n; i++ {
+				arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-%d", i), 3, 0))
+			}
+			resp.PutSFSArray("msg", arr)
+			resp.PutBool("more", false)
+			_ = server.SendExtension("push.chat.get.system.mails", resp)
+		}()
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got, err := ListMail(client)
+		slog.SetDefault(orig)
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("fake server never finished")
+		}
+		if err != nil {
+			t.Fatalf("ListMail() = %v, want nil", err)
+		}
+		return got, buf.String()
+	}
+
+	t.Run("exactly cap items: all parsed, no truncation warning", func(t *testing.T) {
+		got, logged := sendPageAndList(t, mailListRawItemCap)
+		if len(got) != mailListRawItemCap {
+			t.Fatalf("ListMail() returned %d mail entries, want exactly %d (the cap, all well-formed)", len(got), mailListRawItemCap)
+		}
+		if strings.Contains(logged, "longer than raw-item scan cap") {
+			t.Errorf("unexpected truncation warning at exactly-cap boundary:\n%s", logged)
+		}
+	})
+
+	t.Run("cap+1 items: truncation warning fires, only cap parsed", func(t *testing.T) {
+		got, logged := sendPageAndList(t, mailListRawItemCap+1)
+		if len(got) != mailListRawItemCap {
+			t.Fatalf("ListMail() returned %d mail entries, want exactly %d (cap+1 input must still truncate to the cap)", len(got), mailListRawItemCap)
+		}
+		if !strings.Contains(logged, "page response array longer than raw-item scan cap; truncating") {
+			t.Errorf("expected a truncation warning at cap+1, got:\n%s", logged)
+		}
+	})
+}
+
+// TestListMailWrongTypedUIDIsRejected is the round-28 regression test for requireFieldType
+// (buildings.go), exercised here at ListMail's own uid guard: before this round's fix,
+// requirePresentField only checked presence, never that uid's concrete decoded SFS type actually
+// matched what Mail.Uid() (GetString) accepts. A present-but-wrong-typed uid (e.g. the server
+// sending it as an Int instead of a UtfString) used to silently pass that presence-only guard and
+// then coerce to "" via GetString's own zero-value fallback -- colliding with any other wrong-typed
+// entry in seenUIDs, and worse, feeding ClaimAllMail's read-status/reward-claim batches a uid=""
+// that doesn't identify any real mail -- a PERMANENT loss of the real mail's reward, since
+// rewardStatus is per-mail.
+//
+// The input here has one wrong-typed-uid entry and one genuine, well-typed entry -- proving exactly
+// one mail comes back (the genuine one), and a "wrong-typed uid" warning, not a "missing uid" one,
+// is logged for the other.
+//
+// Mutation check: reverting ListMail's `requireFieldType(mo, "uid", "mail", sfsFieldKindString)`
+// back to `requirePresentField(mo, "uid", "mail")` makes this test fail with 2 mail entries instead
+// of 1 (the wrong-typed one silently coerced to uid=""), and no "wrong-typed" warning logged.
+func TestListMailWrongTypedUIDIsRejected(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		if _, ok := env.AsExtension(); !ok {
+			return
+		}
+		wrongTyped := NewSFSObject()
+		wrongTyped.PutInt("uid", 12345) // wrong SFS type: a mail uid must be a UtfString
+		wrongTyped.PutInt("type", 3)
+
+		resp := NewSFSObject()
+		arr := NewSFSArray()
+		arr.AddSFSObject(wrongTyped)
+		arr.AddSFSObject(newTestMailObj("real-uid-1", 3, 0))
+		resp.PutSFSArray("msg", arr)
+		resp.PutBool("more", false)
+		_ = server.SendExtension("push.chat.get.system.mails", resp)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got, err := ListMail(client)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake server never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if len(got) != 1 || got[0].Uid() != "real-uid-1" {
+		t.Fatalf("ListMail() = %v, want exactly 1 entry (uid=real-uid-1) -- the wrong-typed uid entry must be rejected, not silently coerced to uid=\"\"", got)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping mail entry with wrong-typed uid field") {
+		t.Errorf("expected a wrong-typed-uid warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping mail entry with no uid field") {
+		t.Errorf("wrong-typed uid must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
+// TestGroupUnclaimedByTypeWrongTypedTypeFieldIsRejected is the round-28 regression test for
+// requireFieldType (buildings.go), exercised here at groupUnclaimedByType's own type guard: before
+// this round's fix, requirePresentField only checked presence, never that type's concrete decoded
+// SFS type actually matched what Mail.Type() (GetInt) accepts. A present-but-wrong-typed type
+// (e.g. the server sending it as a UtfString instead of an Int) used to silently pass that
+// presence-only guard and then coerce to int32(0) via GetInt's own zero-value fallback -- merging
+// that mail into a genuinely-type=0 batch it doesn't belong to.
+//
+// The input here has one reward-bearing mail with a wrong-typed type field and a separate,
+// genuinely-well-typed type=0 reward-bearing mail -- proving these two are no longer conflated:
+// exactly one distinct type (0) with exactly the genuine mail's uid must come back.
+//
+// Mutation check: reverting groupUnclaimedByType's `requireFieldType(m.Raw, "type", "mail reward",
+// sfsFieldKindInt)` back to `requirePresentField(m.Raw, "type", "mail reward")` makes this test
+// fail with both uids merged under byType[0].
+func TestGroupUnclaimedByTypeWrongTypedTypeFieldIsRejected(t *testing.T) {
+	wrongTyped := NewSFSObject()
+	wrongTyped.PutUtfString("uid", "wrong-type-1")
+	wrongTyped.PutUtfString("type", "not-an-int") // wrong SFS type: type must be an Int
+	wrongTyped.PutInt("rewardStatus", 0)
+
+	genuineZero := NewSFSObject()
+	genuineZero.PutUtfString("uid", "genuine-zero-1")
+	genuineZero.PutInt("type", 0)
+	genuineZero.PutInt("rewardStatus", 0)
+
+	mail := []Mail{{Raw: wrongTyped}, {Raw: genuineZero}}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := groupUnclaimedByType(mail)
+	slog.SetDefault(orig)
+
+	if len(got) != 1 {
+		t.Fatalf("got %d distinct types, want 1 (only the genuine type=0 entry -- the wrong-typed one must be rejected, not merged into the same type=0 batch)", len(got))
+	}
+	if len(got[0]) != 1 || got[0][0] != "genuine-zero-1" {
+		t.Errorf("type 0: got %v, want [genuine-zero-1] -- wrong-type-1 (wrong-typed type field) must not appear", got[0])
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping mail reward entry with wrong-typed type field") {
+		t.Errorf("expected a wrong-typed-type warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping mail reward entry with no type field") {
+		t.Errorf("wrong-typed type must log as wrong-typed, not as missing -- got log:\n%s", logged)
 	}
 }
 

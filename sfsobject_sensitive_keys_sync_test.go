@@ -34,16 +34,26 @@ import (
 //   - Config/session bookkeeping, not identity: "configVersion", "configNumber", "netType",
 //     "country", "fromCountry", "suggestCountry", "timeoffset", "lat" (a location-authorized
 //     *flag*, not a coordinate -- see identity.go's BuildLoginParams comment on this field),
-//     "referrer", "deeplinkParams", "google_available", "googlePlay", "gmLogin",
+//     "referrer", "deeplinkParams", "google_available", "gmLogin",
 //     "delete_account_status", "forbidden_froce_merge", "isUseLz4", "isAll", "count", "time",
 //     "clientseq", "firstCmd", "serverId".
 //   - Entity/gameplay identifiers that identify something but aren't bearer credentials --
 //     the same class sfsobject.go's own top comment already carves "gameUid" out for
 //     ("identifies an account but isn't a bearer credential by itself"): "gameUid" itself,
-//     "un" (username), "zn" (zone name), "uuid" (a building instance id, buildings.go), "uid"
+//     "zn" (zone name), "uuid" (a building instance id, buildings.go), "uid"
 //     (a visitor/entity id, visitors.go), "uids" (a comma-joined list of mail message ids,
 //     mail.go), "type"/"action"/"option"/"operate"/"scienceId" (numeric gameplay
 //     action/type discriminators, alliance.go/buildings.go/mail.go/visitors.go).
+//
+// NOTE: "un" (the classic SFS2X username field) and "googlePlay" (part of the Google-identity
+// cluster) used to be listed here as reviewed-safe, but round 28's audit reclassified both as
+// PII/identity fields that belong in sensitiveSFSKeys instead (sfsobject.go) -- "un" is the
+// server's real returned account username, a live cleartext-username leak login.go used to log
+// unconditionally at Info level; "googlePlay" sits in the same reviewed-sensitive cluster as its
+// neighbors googleName/androidDid. See sfsobject.go's sensitiveSFSKeys doc comments on those two
+// entries for the full reasoning. Left out of this map now (rather than kept here AND added to
+// sensitiveSFSKeys) specifically so TestKnownNonSensitiveSFSKeysDoesNotOverlapSensitiveSFSKeys
+// below keeps catching this exact kind of drift.
 //
 // See TestSensitiveSFSKeysCoversAllLiteralPutCallSites's doc comment for what happens when a
 // future key lands in neither this map nor sensitiveSFSKeys.
@@ -71,7 +81,6 @@ var knownNonSensitiveSFSKeys = map[string]bool{
 	"fromCountry":           true,
 	"gameUid":               true,
 	"gmLogin":               true,
-	"googlePlay":            true,
 	"google_available":      true,
 	"isAll":                 true,
 	"isUseLz4":              true,
@@ -101,7 +110,6 @@ var knownNonSensitiveSFSKeys = map[string]bool{
 	"type":                  true,
 	"uid":                   true,
 	"uids":                  true,
-	"un":                    true,
 	"uuid":                  true,
 	"versionCode":           true,
 	"zn":                    true,

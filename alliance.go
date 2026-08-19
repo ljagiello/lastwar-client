@@ -38,6 +38,15 @@ func HelpAllianceMembers(conn *GameConn) error {
 	return err
 }
 
+// allianceGiftPremium and allianceGiftRegular are the two independently-claimed Alliance Gifts
+// panel tabs' `type` values -- see ClaimAllianceGifts' doc comment immediately below for how each
+// was confirmed (only allianceGiftRegular via a direct live packet capture; allianceGiftPremium on
+// the strength of the decompiled handler's tip-string branch alone).
+const (
+	allianceGiftPremium int32 = 1
+	allianceGiftRegular int32 = 2
+)
+
 // ClaimAllianceGifts sends `alliance.reward.allreceive` -- confirmed live
 // via a real packet capture of the actual game client tapping "Claim All"
 // on the Alliance Gifts panel. Like HelpAllianceMembers, this is a true
@@ -68,11 +77,6 @@ func HelpAllianceMembers(conn *GameConn) error {
 // errorCode (if any) looks like. If a future run ever surfaces an
 // unexpected fatal error specifically on the type=1 branch, capture it and
 // register the real code here rather than guessing at one now.
-const (
-	allianceGiftPremium int32 = 1
-	allianceGiftRegular int32 = 2
-)
-
 func ClaimAllianceGifts(conn *GameConn) error {
 	const cmd = "alliance.reward.allreceive"
 	var errs []error
@@ -201,7 +205,7 @@ func DonateRecommendedAllianceTech(conn *GameConn) error {
 // immediately on the first state==1 match, so there's no unbounded OUTPUT growth to worry about,
 // only unbounded scan/log cost -- a hostile peer responding to science.data.refresh with an array
 // where many/all entries have state==1 but a missing scienceId would otherwise cause
-// requirePresentField's Warn to fire on every single one, with no bound, since the raw
+// requireFieldType's Warn to fire on every single one, with no bound, since the raw
 // allianceScience array is bounded only by sfsobject.go's much larger maxDecodedNodes=300,000
 // decode budget. Same gap-class as visitors.go's ParseInitVisitors (round 26) and ListMail's
 // mailListRawItemCap (mail.go), applied here. Set generously above the live-confirmed ~45 real
@@ -218,6 +222,13 @@ const allianceScienceRawItemCap = 1000
 // entry hits a `continue` that doesn't advance any output-based counter, so without this cap a
 // hostile/misbehaving peer could force an unbounded scan/log cost regardless of how quickly a real
 // recommended entry would otherwise be found.
+//
+// scienceId is guarded via requireFieldType, not just requirePresentField (round 28): a state==1
+// entry whose scienceId is present but the WRONG concrete SFS type (e.g. sent as a string) used to
+// pass a presence-only guard and then silently coerce to scienceId=0 via GetInt's own zero-value
+// fallback -- indistinguishable from a genuine scienceId=0, and enough to make
+// DonateRecommendedAllianceTech send a real al.science.donate request against the wrong tech. See
+// TestFindRecommendedTechWrongTypedScienceIdIsRejected (alliance_test.go).
 func findRecommendedTech(arr *SFSArray) (scienceId int32, found bool) {
 	if len(arr.items) > allianceScienceRawItemCap {
 		slog.Warn("alliance tech tree: allianceScience array longer than raw-item scan cap; truncating scan", "arrayLen", len(arr.items), "cap", allianceScienceRawItemCap)
@@ -233,7 +244,7 @@ func findRecommendedTech(arr *SFSArray) (scienceId int32, found bool) {
 		if tech.GetInt("state") != 1 {
 			continue
 		}
-		if !requirePresentField(tech, "scienceId", "allianceScience") {
+		if !requireFieldType(tech, "scienceId", "allianceScience", sfsFieldKindInt) {
 			continue
 		}
 		return tech.GetInt("scienceId"), true

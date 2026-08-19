@@ -419,10 +419,9 @@ func (d *deviceIdentity) AirKey() string {
 	return "lwDid_" + base64.StdEncoding.EncodeToString([]byte(d.DeviceID))
 }
 
-// LoginParams builds the full ~50-field SFSObject for the base SFS zone
-// login (dossier §05 / §2.3). uid is empty on a brand-new device (the
-// server assigns one back via GSL's serverList[].gameUid, which the caller
-// should pass in as gameUid once known).
+// LoginParamsInput holds the fields BuildLoginParams (below) needs to build the base SFS zone
+// login request. uid is empty on a brand-new device (the server assigns one back via GSL's
+// serverList[].gameUid, which the caller should pass in as gameUid once known).
 type LoginParamsInput struct {
 	FutureID    int32
 	DeviceID    string
@@ -487,6 +486,9 @@ type iosAnalyticsBlob struct {
 	LwZone          string `json:"lw_zone"`
 }
 
+// BuildLoginParams builds the full ~50-field SFSObject for the base SFS zone login (dossier §05 /
+// §2.3). uid is empty on a brand-new device (the server assigns one back via GSL's
+// serverList[].gameUid, which the caller should pass in as gameUid once known).
 func BuildLoginParams(in LoginParamsInput) *SFSObject {
 	now := time.Now().Unix()
 	cmdBaseTime := strconv.FormatInt(now, 10)

@@ -257,6 +257,16 @@ func allianceScienceEntryNullScienceId(state int32) *SFSObject {
 	return e
 }
 
+// allianceScienceEntryWrongTypedScienceId builds a state==1 entry whose scienceId field is present
+// but has the WRONG concrete SFS type -- a UtfString rather than an Int -- as opposed to
+// allianceScienceEntryNullScienceId's explicitly-null (but correctly-typed-as-absent) case above.
+func allianceScienceEntryWrongTypedScienceId(state int32) *SFSObject {
+	e := NewSFSObject()
+	e.PutUtfString("scienceId", "not-an-int") // wrong SFS type: scienceId must be an Int
+	e.PutInt("state", state)
+	return e
+}
+
 // allianceScienceRefreshResponse builds a science.data.refresh response carrying the given
 // allianceScience entries.
 func allianceScienceRefreshResponse(entries ...*SFSObject) *SFSObject {
@@ -308,6 +318,14 @@ func TestFindRecommendedTech(t *testing.T) {
 
 		if id, found := findRecommendedTech(arr); found {
 			t.Errorf("findRecommendedTech() = (%d, true), want found=false (explicit-null scienceId must not fall through to scienceId=0)", id)
+		}
+	})
+	t.Run("state==1 entry with wrong-typed scienceId is skipped, not returned as 0", func(t *testing.T) {
+		arr := NewSFSArray()
+		arr.AddSFSObject(allianceScienceEntryWrongTypedScienceId(1))
+
+		if id, found := findRecommendedTech(arr); found {
+			t.Errorf("findRecommendedTech() = (%d, true), want found=false (wrong-typed scienceId must not fall through to scienceId=0)", id)
 		}
 	})
 	t.Run("non-object array item is skipped, not fatal", func(t *testing.T) {
@@ -380,6 +398,100 @@ func TestFindRecommendedTechCapsRawItemsExamined(t *testing.T) {
 	if !strings.Contains(logged, "allianceScience array longer than raw-item scan cap") {
 		t.Errorf("expected a warning about the allianceScience array exceeding the raw-item scan cap, got log:\n%s", logged)
 	}
+}
+
+// TestFindRecommendedTechWrongTypedScienceIdIsRejected is the round-28 regression test for
+// requireFieldType (buildings.go), exercised here at findRecommendedTech's own scienceId guard:
+// before this round's fix, requirePresentField only checked presence, never that scienceId's
+// concrete decoded SFS type actually matched what GetInt accepts. A present-but-wrong-typed
+// scienceId (e.g. the server sending it as a string instead of an Int) used to silently pass that
+// presence-only guard and then coerce to int32(0) via GetInt's own zero-value fallback --
+// indistinguishable from a genuine scienceId=0, and enough to make DonateRecommendedAllianceTech
+// send a real al.science.donate request against scienceId=0 instead of the actually-intended tech.
+//
+// The array here has ONLY a wrong-typed state==1 entry -- no genuine fallback match -- so found
+// must come back false, not (0, true), and a "wrong-typed scienceId" warning, not a "missing
+// scienceId" one, must be logged.
+//
+// Mutation check: reverting findRecommendedTech's `requireFieldType(tech, "scienceId",
+// "allianceScience", sfsFieldKindInt)` back to `requirePresentField(tech, "scienceId",
+// "allianceScience")` makes this test fail with found=true, id=0 instead of found=false.
+func TestFindRecommendedTechWrongTypedScienceIdIsRejected(t *testing.T) {
+	arr := NewSFSArray()
+	arr.AddSFSObject(allianceScienceEntryWrongTypedScienceId(1))
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	id, found := findRecommendedTech(arr)
+	slog.SetDefault(orig)
+
+	if found {
+		t.Fatalf("findRecommendedTech() = (%d, true), want found=false (scienceId is wrong-typed -- must not be coerced to 0)", id)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping allianceScience entry with wrong-typed scienceId field") {
+		t.Errorf("expected a wrong-typed-scienceId warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping allianceScience entry with no scienceId field") {
+		t.Errorf("wrong-typed scienceId must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
+// TestFindRecommendedTechRawItemCapBoundary is the round-28 boundary-condition regression test for
+// allianceScienceRawItemCap: TestFindRecommendedTechCapsRawItemsExamined above overshoots the cap
+// by 5x, so it would not catch a production ">"-to-">=" regression in the truncation-warning
+// condition (`len(arr.items) > allianceScienceRawItemCap`). This drives both sides of that boundary
+// directly: a well-typed, state==1 entry placed at the LAST position within the cap must still be
+// found (proving the cap didn't clip early), while the identical entry placed one position PAST the
+// cap must not be (proving the cap fired exactly there, not one item late).
+func TestFindRecommendedTechRawItemCapBoundary(t *testing.T) {
+	buildArr := func(n, recommendedAt int) *SFSArray {
+		arr := NewSFSArray()
+		for i := 0; i < n; i++ {
+			if i == recommendedAt {
+				arr.AddSFSObject(allianceScienceEntry(999, 1))
+			} else {
+				arr.AddSFSObject(allianceScienceEntry(int32(i), 0))
+			}
+		}
+		return arr
+	}
+
+	t.Run("exactly cap items: recommended entry at the last position is still found, no truncation warning", func(t *testing.T) {
+		arr := buildArr(allianceScienceRawItemCap, allianceScienceRawItemCap-1)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		id, found := findRecommendedTech(arr)
+		slog.SetDefault(orig)
+
+		if !found || id != 999 {
+			t.Fatalf("findRecommendedTech() = (%d, %v), want (999, true) (the recommended entry sits exactly at the cap's last examined position)", id, found)
+		}
+		if strings.Contains(buf.String(), "longer than raw-item scan cap") {
+			t.Errorf("unexpected truncation warning at exactly-cap boundary:\n%s", buf.String())
+		}
+	})
+
+	t.Run("cap+1 items: recommended entry one past the cap is not found, truncation warning fires", func(t *testing.T) {
+		arr := buildArr(allianceScienceRawItemCap+1, allianceScienceRawItemCap) // recommended entry is the (cap+1)th, at index==cap
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		id, found := findRecommendedTech(arr)
+		slog.SetDefault(orig)
+
+		if found {
+			t.Fatalf("findRecommendedTech() = (%d, true), want found=false (the recommended entry sits one position past the cap, so it must never be examined)", id)
+		}
+		if !strings.Contains(buf.String(), "allianceScience array longer than raw-item scan cap; truncating scan") {
+			t.Errorf("expected a truncation warning at cap+1, got:\n%s", buf.String())
+		}
+	})
 }
 
 // TestDonateRecommendedAllianceTechNoAllianceScienceField checks the first documented no-op

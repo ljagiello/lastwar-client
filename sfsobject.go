@@ -98,8 +98,10 @@ func (o *SFSObject) PutSFSObject(key string, val *SFSObject) {
 }
 func (o *SFSObject) PutSFSArray(key string, val *SFSArray) { o.put(key, SFSValue{sfsArrayType, val}) }
 
-// Get helpers for decoded responses.
-func (o *SFSObject) Has(key string) bool             { _, ok := o.values[key]; return ok }
+// Has reports whether key is present in the decoded object.
+func (o *SFSObject) Has(key string) bool { _, ok := o.values[key]; return ok }
+
+// Get returns the raw SFSValue stored under key, and whether it was present.
 func (o *SFSObject) Get(key string) (SFSValue, bool) { v, ok := o.values[key]; return v, ok }
 func (o *SFSObject) GetString(key string) string {
 	if v, ok := o.values[key]; ok {
@@ -213,6 +215,14 @@ var sensitiveSFSKeys = map[string]bool{
 	// of a request/response carrying this field masks it instead of printing a real email
 	// address in cleartext.
 	"mail": true,
+	// un is the classic SFS2X username field -- the server's real returned account username
+	// (env.Content.GetString("un") on the base zone Login response, checked in login.go). Same PII
+	// class as mail immediately above: the operator's own real account name, not a bearer
+	// credential, but must be masked so any current/future StringRedacted() dump of a decoded
+	// response doesn't print it in cleartext. crossserver.go's LWDEBUG_DUMP_LOGIN debug dump of
+	// loginContent.StringRedacted() documents itself, in its own comment, as "Redacted, not a raw
+	// dump" -- this entry is what makes that claim actually true for "un".
+	"un": true,
 	// The following are the device/advertising-identifier PII cluster documented in
 	// docs/live-validation.mdx's "complete Login params field list" section (IMEI, AndroidID,
 	// androidDid, gaid, afuid, firebaseId, distinct_id) and its iOS reconnect-fix section (idfa,
@@ -245,6 +255,12 @@ var sensitiveSFSKeys = map[string]bool{
 	// BuildLoginParams constructs (PutUtfString("googleName", "")). More directly PII than a
 	// device/tracking identifier: it's a real person's name, not just an identifier for one.
 	"googleName": true,
+	// googlePlay sits in the same Google-identity field cluster identity.go's BuildLoginParams
+	// constructs consecutively with googleName/gcmRegisterId immediately above/below (set in this
+	// order: googlePlay, androidDid, googleName, deeplinkParams, pfId) -- same "only ever sent as
+	// an empty-string placeholder by this Go client today, but a real captured non-Go-client login
+	// decoded via -decode-stream would leak it in cleartext" reasoning as its neighbors.
+	"googlePlay": true,
 	// mt sits in the same field cluster per docs/live-validation.mdx's "complete Login params
 	// field list" (`AndroidID, IMEI, psh, mt, deviceId, airKey, ...`) -- undocumented meaning, but
 	// the same "not yet leaking from this Go client's own placeholder traffic, but a real captured
@@ -297,6 +313,66 @@ func isSensitiveSFSKey(k string) bool {
 	return sensitiveSFSKeysLower[strings.ToLower(k)]
 }
 
+// maxFormattedNodes bounds the total number of key/item nodes a single top-level StringRedacted()
+// call (and the String()/GoString() methods that delegate to it) will examine before truncating
+// with a visible marker -- independent of maxDecodedNodes below, which only bounds DECODE-time cost
+// for one wire payload, not a later format/log walk of an object that's already sitting in memory.
+// Two real gaps this closes:
+//
+//  1. requirePresentField (buildings.go/mail.go/alliance.go/visitors.go) calls o.String() (->
+//     StringRedacted()) on a SINGLE array item when a required field is missing. That one item's
+//     own internal node count is bounded only by the overall maxDecodedNodes=300,000 decode budget
+//     for the WHOLE payload -- none of this repo's own raw-item-scan-count caps (buildings.go's
+//     maxRawBuildingItemsPerPush, mail.go's mailListRawItemCap, alliance.go's
+//     allianceScienceRawItemCap, ...) bound a single item's own internal subtree size, only the
+//     OUTER array's item count. So a single call to String() on one such item could still walk up
+//     to ~300,000 nodes.
+//  2. conn.go's logCommandResult calls msg.Params.String()/.StringRedacted() unconditionally on
+//     EVERY command response, as an eager Go function-call argument to slog -- executed regardless
+//     of the configured log level (slog only skips emitting the log LINE; it does not skip
+//     evaluating arguments already passed to it).
+//
+// Both mean an already-decoded SFSObject/SFSArray, however large, can reach a String()/
+// StringRedacted() call with no format-time cost bound of its own. This budget is deliberately
+// independent of maxDecodedNodes -- it exists purely to keep the cost of ONE format call bounded,
+// including for an object built programmatically via Put*/Add* (which has no decode-time bound
+// applied to it at all, since maxDecodedNodes/chargeNodes only run inside DecodeObject's read
+// path).
+const maxFormattedNodes = 50_000
+
+// formatTruncatedMarker is appended to StringRedacted()'s output, in place of the remaining
+// keys/items, once a single top-level call's maxFormattedNodes budget runs out -- an explicit,
+// visible marker rather than silently dropping the rest of the data, matching this file's existing
+// fail-safe conventions (e.g. redactSFSValue's "[REDACTED N items]"/"[REDACTED N fields]" shapes).
+const formatTruncatedMarker = "...[truncated: exceeded maxFormattedNodes format budget]"
+
+// formatBudget tracks the remaining format-time node budget across one top-level StringRedacted()
+// call's full recursive descent through nested SFSObject/SFSArray values. It is a single counter
+// threaded through every recursive call reached from that one top-level call
+// (stringRedactedBudgeted below and formatSFSValueRedacted), deliberately NOT reset at each nested
+// level: an object made of many small nested objects/arrays (rather than one large flat one) must
+// still cost no more in total than maxFormattedNodes, or the budget wouldn't actually bound the
+// cost of the call as a whole.
+type formatBudget struct {
+	remaining int
+}
+
+func newFormatBudget() *formatBudget {
+	return &formatBudget{remaining: maxFormattedNodes}
+}
+
+// charge consumes one unit of budget for one key/item about to be formatted, and reports whether
+// budget remains. Once exhausted, every subsequent charge() call keeps returning false (remaining
+// is never decremented below the point it first hit zero), so a caller doesn't need to special-case
+// "already truncated" separately from "just ran out".
+func (fb *formatBudget) charge() bool {
+	if fb.remaining <= 0 {
+		return false
+	}
+	fb.remaining--
+	return true
+}
+
 // StringRedacted is *SFSObject's safe-to-log dump (and, since String()/GoString() delegate to this
 // method, is the real implementation behind both too): a decoded server response or outgoing
 // request can carry a live loginKey/accessToken/airKey/shumeiBoxId in cleartext (this protocol has
@@ -310,14 +386,40 @@ func isSensitiveSFSKey(k string) bool {
 // A nil receiver (e.g. from a hypothetical future PutSFSObject(key, nil) call reached recursively,
 // or a bare nil *SFSObject handed straight to fmt) returns the safe literal "<nil>" instead of
 // dereferencing o.keys/o.values and panicking.
+//
+// Each top-level call gets its own fresh maxFormattedNodes budget (see formatBudget's doc comment
+// for why that budget must then stay shared, not reset, across the whole recursive descent this
+// call kicks off) -- so this call's own cost is bounded regardless of how large or deeply nested o
+// (or anything reachable from it) turns out to be.
 func (o *SFSObject) StringRedacted() string {
+	if o == nil {
+		return "<nil>"
+	}
+	return o.stringRedactedBudgeted(newFormatBudget())
+}
+
+// stringRedactedBudgeted is StringRedacted's real implementation, parameterized over a formatBudget
+// shared across the whole recursive descent from one top-level StringRedacted()/String()/GoString()
+// call. formatSFSValueRedacted's *SFSObject case calls back into this (not the public
+// StringRedacted()) for exactly this reason: StringRedacted() itself always allocates a brand-new
+// budget, which would let a nested object reset the counter instead of continuing to spend down the
+// same one.
+func (o *SFSObject) stringRedactedBudgeted(fb *formatBudget) string {
 	if o == nil {
 		return "<nil>"
 	}
 	var b bytes.Buffer
 	b.WriteString("{")
-	for i, k := range o.keys {
-		if i > 0 {
+	wrote := false
+	for _, k := range o.keys {
+		if !fb.charge() {
+			if wrote {
+				b.WriteString(", ")
+			}
+			b.WriteString(formatTruncatedMarker)
+			break
+		}
+		if wrote {
 			b.WriteString(", ")
 		}
 		v := o.values[k]
@@ -328,8 +430,9 @@ func (o *SFSObject) StringRedacted() string {
 		if isSensitiveSFSKey(k) {
 			fmt.Fprintf(&b, "%s=%s", safeKey, redactSFSValue(v))
 		} else {
-			fmt.Fprintf(&b, "%s=%s", safeKey, formatSFSValueRedacted(v))
+			fmt.Fprintf(&b, "%s=%s", safeKey, formatSFSValueRedacted(v, fb))
 		}
+		wrote = true
 	}
 	b.WriteString("}")
 	return b.String()
@@ -378,8 +481,13 @@ func sanitizeForTerminal(s string) string {
 // formatSFSValueRedacted recurses into nested SFSObject/SFSArray values (rather than printing
 // their Go pointer) so StringRedacted's output is actually useful for inspecting arrays-of-objects
 // like `accountArr`/`defaultBuilds`, while staying redacted at every level via *SFSObject's own
-// StringRedacted() method for nested objects (each carries its own keys, so recursing into it
+// stringRedactedBudgeted logic for nested objects (each carries its own keys, so recursing into it
 // correctly re-applies the sensitiveSFSKeys check at that level).
+//
+// fb is the calling top-level StringRedacted() call's shared formatBudget (see its doc comment) --
+// threaded through every recursive call this function makes, including into the nested *SFSObject
+// case below, so a single top-level call's total formatting cost stays bounded by maxFormattedNodes
+// regardless of how the nodes are distributed across nesting levels.
 //
 // The *SFSArray case is deliberately NOT delegated to (*SFSArray).StringRedacted() -- that method
 // is the bare/standalone entry point (used when an *SFSArray is reached with no enclosing key at
@@ -397,24 +505,33 @@ func sanitizeForTerminal(s string) string {
 // A nil *SFSObject/*SFSArray is handled explicitly here, ahead of the delegated/recursive call, as
 // defense-in-depth alongside StringRedacted()'s own nil guard on each type -- neither path
 // dereferences a nil pointer.
-func formatSFSValueRedacted(v SFSValue) string {
+func formatSFSValueRedacted(v SFSValue, fb *formatBudget) string {
 	switch val := v.Val.(type) {
 	case *SFSObject:
 		if val == nil {
 			return "<nil>"
 		}
-		return val.StringRedacted()
+		return val.stringRedactedBudgeted(fb)
 	case *SFSArray:
 		if val == nil {
 			return "<nil>"
 		}
 		var b bytes.Buffer
 		b.WriteString("[")
-		for i, item := range val.items {
-			if i > 0 {
+		wrote := false
+		for _, item := range val.items {
+			if !fb.charge() {
+				if wrote {
+					b.WriteString(", ")
+				}
+				b.WriteString(formatTruncatedMarker)
+				break
+			}
+			if wrote {
 				b.WriteString(", ")
 			}
-			b.WriteString(formatSFSValueRedacted(item))
+			b.WriteString(formatSFSValueRedacted(item, fb))
+			wrote = true
 		}
 		b.WriteString("]")
 		return b.String()

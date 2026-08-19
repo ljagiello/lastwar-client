@@ -25,7 +25,7 @@ func TestStringRedactedMasksSensitiveKeys(t *testing.T) {
 
 	o := NewSFSObject()
 	o.PutUtfString("at", secretAccessTok)
-	o.PutUtfString("un", "player-one")
+	o.PutUtfString("nickname", "player-one")
 	o.PutSFSArray("accountArr", arr)
 
 	got := o.StringRedacted()
@@ -67,7 +67,7 @@ func TestStringRedactedMasksNewSensitiveKeys(t *testing.T) {
 	o.PutUtfString("deviceId", secretDeviceId)
 	o.PutUtfString("chatToken", secretChatToken)
 	o.PutUtfString("tk", secretTk)
-	o.PutUtfString("un", "player-one")
+	o.PutUtfString("nickname", "player-one")
 
 	got := o.StringRedacted()
 
@@ -93,7 +93,7 @@ func TestStringRedactedMasksSensitivePrimitiveArray(t *testing.T) {
 
 	strObj := NewSFSObject()
 	strObj.put("loginKey", SFSValue{sfsUtfStringArray, secretStrings})
-	strObj.PutUtfString("un", "player-one")
+	strObj.PutUtfString("nickname", "player-one")
 
 	gotStr := strObj.StringRedacted()
 	for _, s := range secretStrings {
@@ -142,7 +142,7 @@ func TestStringRedactedMasksAllPrimitiveArrayTypes(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			o := NewSFSObject()
 			o.put("loginKey", SFSValue{c.sfsType, c.val})
-			o.PutUtfString("un", "player-one")
+			o.PutUtfString("nickname", "player-one")
 
 			got := o.StringRedacted()
 
@@ -226,7 +226,7 @@ func TestFmtVerbAutoInvokesStringerSafely(t *testing.T) {
 
 	o := NewSFSObject()
 	o.PutUtfString("loginKey", secretLoginKey)
-	o.PutUtfString("un", "player-one")
+	o.PutUtfString("nickname", "player-one")
 
 	// %v is the classic implicit-Stringer verb -- no ".String()" substring appears anywhere in
 	// this call.
@@ -278,7 +278,7 @@ func TestStringRedactedMasksSensitiveRawSFSArray(t *testing.T) {
 
 	o := NewSFSObject()
 	o.PutSFSArray("loginKey", arr)
-	o.PutUtfString("un", "player-one")
+	o.PutUtfString("nickname", "player-one")
 
 	got := o.StringRedacted()
 
@@ -322,7 +322,7 @@ func TestStringRedactedMasksMailAndDeviceIdentifierPII(t *testing.T) {
 	for key, val := range secrets {
 		o.PutUtfString(key, val)
 	}
-	o.PutUtfString("un", "player-one")
+	o.PutUtfString("nickname", "player-one")
 
 	got := o.StringRedacted()
 
@@ -346,7 +346,7 @@ func TestGoStringVerbNeverLeaksSecret(t *testing.T) {
 
 	o := NewSFSObject()
 	o.PutUtfString("loginKey", secretLoginKey)
-	o.PutUtfString("un", "player-one")
+	o.PutUtfString("nickname", "player-one")
 
 	got := fmt.Sprintf("%#v", o)
 	if strings.Contains(got, secretLoginKey) {
@@ -408,7 +408,7 @@ func TestNilNestedValueDoesNotPanic(t *testing.T) {
 		var nilObj *SFSObject
 		o := NewSFSObject()
 		o.PutSFSObject("child", nilObj)
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		var got string
 		func() {
@@ -428,7 +428,7 @@ func TestNilNestedValueDoesNotPanic(t *testing.T) {
 		var nilArr *SFSArray
 		o := NewSFSObject()
 		o.PutSFSArray("child", nilArr)
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		var got string
 		func() {
@@ -566,7 +566,7 @@ func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			o := NewSFSObject()
 			c.put(o, "verifyCode")
-			o.PutUtfString("un", "player-one")
+			o.PutUtfString("nickname", "player-one")
 
 			got := o.StringRedacted()
 
@@ -587,7 +587,7 @@ func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
 	t.Run("PutBool", func(t *testing.T) {
 		o := NewSFSObject()
 		o.PutBool("verifyCode", true)
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		got := o.StringRedacted()
 		if !strings.Contains(got, "verifyCode=[REDACTED]") {
@@ -605,7 +605,7 @@ func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
 	t.Run("sfsFloat (bare float32, only reachable via decode)", func(t *testing.T) {
 		o := NewSFSObject()
 		o.put("verifyCode", SFSValue{sfsFloat, float32(90210.5)})
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		got := o.StringRedacted()
 		if strings.Contains(got, "90210.5") {
@@ -622,7 +622,7 @@ func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
 	t.Run("sfsNull (nil, only reachable via decode)", func(t *testing.T) {
 		o := NewSFSObject()
 		o.put("verifyCode", SFSValue{sfsNull, nil})
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		got := o.StringRedacted()
 		if !strings.Contains(got, "verifyCode=[REDACTED]") {
@@ -650,7 +650,7 @@ func TestStringRedactedMasksCaseVariantSensitiveKeys(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			o := NewSFSObject()
 			o.PutUtfString(key, secretLoginKey)
-			o.PutUtfString("un", "player-one")
+			o.PutUtfString("nickname", "player-one")
 
 			got := o.StringRedacted()
 			if strings.Contains(got, secretLoginKey) {
@@ -680,7 +680,7 @@ func TestRedactSFSValueMasksNestedSFSObjectUnderSensitiveKey(t *testing.T) {
 
 	o := NewSFSObject()
 	o.PutSFSObject("loginKey", inner)
-	o.PutUtfString("un", "player-one")
+	o.PutUtfString("nickname", "player-one")
 
 	got := o.StringRedacted()
 
@@ -706,7 +706,7 @@ func TestRedactSFSValueNilPointerUnderSensitiveKeyDoesNotPanic(t *testing.T) {
 		var nilArr *SFSArray
 		o := NewSFSObject()
 		o.PutSFSArray("loginKey", nilArr)
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		var got string
 		func() {
@@ -726,7 +726,7 @@ func TestRedactSFSValueNilPointerUnderSensitiveKeyDoesNotPanic(t *testing.T) {
 		var nilObj *SFSObject
 		o := NewSFSObject()
 		o.PutSFSObject("loginKey", nilObj)
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		var got string
 		func() {
@@ -770,7 +770,7 @@ func TestStringRedactedMasksFix4SensitiveKeys(t *testing.T) {
 	for key, val := range secrets {
 		o.PutUtfString(key, val)
 	}
-	o.PutUtfString("un", "player-one")
+	o.PutUtfString("nickname", "player-one")
 
 	got := o.StringRedacted()
 
@@ -799,7 +799,7 @@ func TestEncodeObjectNilNestedValueReturnsErrorNotPanic(t *testing.T) {
 		var nilObj *SFSObject
 		o := NewSFSObject()
 		o.PutSFSObject("child", nilObj)
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		var err error
 		func() {
@@ -819,7 +819,7 @@ func TestEncodeObjectNilNestedValueReturnsErrorNotPanic(t *testing.T) {
 		var nilArr *SFSArray
 		o := NewSFSObject()
 		o.PutSFSArray("child", nilArr)
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		var err error
 		func() {
@@ -883,7 +883,7 @@ func TestStringRedactedSanitizesTerminalEscapeSequences(t *testing.T) {
 	t.Run("ordinary non-sensitive field value", func(t *testing.T) {
 		o := NewSFSObject()
 		o.PutUtfString("motd", "hello"+titleInjection+csiInjection+"world")
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		got := o.StringRedacted()
 
@@ -906,7 +906,7 @@ func TestStringRedactedSanitizesTerminalEscapeSequences(t *testing.T) {
 
 		o := NewSFSObject()
 		o.PutUtfString("loginKey", secret)
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		got := o.StringRedacted()
 
@@ -918,7 +918,7 @@ func TestStringRedactedSanitizesTerminalEscapeSequences(t *testing.T) {
 	t.Run("field key name itself", func(t *testing.T) {
 		o := NewSFSObject()
 		o.PutUtfString(titleInjection+"evilkey", "some-value")
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		got := o.StringRedacted()
 
@@ -930,7 +930,7 @@ func TestStringRedactedSanitizesTerminalEscapeSequences(t *testing.T) {
 	t.Run("newline and tab stay readable", func(t *testing.T) {
 		o := NewSFSObject()
 		o.PutUtfString("motd", "line one\nline two\tindented")
-		o.PutUtfString("un", "player-one")
+		o.PutUtfString("nickname", "player-one")
 
 		got := o.StringRedacted()
 
@@ -1006,5 +1006,113 @@ func TestSFSValueStringAndGoStringRedactSecret(t *testing.T) {
 	}
 	if got := v.GoString(); strings.Contains(got, secretLoginKey) {
 		t.Errorf("SFSValue.GoString() leaks a real secret: %s", got)
+	}
+}
+
+// TestStringRedactedMasksRound28SensitiveKeys is the round-28 regression test for reclassifying
+// "un" (the classic SFS2X username field -- the server's real returned account username, which
+// login.go used to log in cleartext at Info level on every successful login) and "googlePlay"
+// (part of the Google-identity field cluster identity.go's BuildLoginParams constructs alongside
+// the already-recognized googleName/androidDid) as sensitive. Both used to sit in
+// sfsobject_sensitive_keys_sync_test.go's knownNonSensitiveSFSKeys allowlist instead; see
+// sensitiveSFSKeys' own doc comments on these two entries (sfsobject.go) for the full reasoning.
+func TestStringRedactedMasksRound28SensitiveKeys(t *testing.T) {
+	const secretUsername = "secret-real-account-username-must-not-leak"
+	const secretGooglePlay = "secret-googleplay-value-must-not-leak"
+
+	o := NewSFSObject()
+	o.PutUtfString("un", secretUsername)
+	o.PutUtfString("googlePlay", secretGooglePlay)
+	o.PutUtfString("nickname", "ordinary-field-still-visible")
+
+	got := o.StringRedacted()
+
+	if strings.Contains(got, secretUsername) {
+		t.Errorf("StringRedacted leaks the un (username) field in cleartext: %s", got)
+	}
+	if strings.Contains(got, secretGooglePlay) {
+		t.Errorf("StringRedacted leaks the googlePlay field in cleartext: %s", got)
+	}
+	if !strings.Contains(got, "ordinary-field-still-visible") {
+		t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+	}
+}
+
+// TestStringRedactedFormatBudgetBoundsLargeArray is the round-28 regression test for the MAJOR
+// format-time-budget finding: before this fix, StringRedacted()/formatSFSValueRedacted() had ZERO
+// format-time cost bound of their own -- maxDecodedNodes only bounds DECODE-time cost for one wire
+// payload, not a later format/log walk of an object that's already sitting in memory. That gap is
+// most starkly real for an object built PROGRAMMATICALLY via Put*/Add*, as this test does (not via
+// DecodeObject): maxDecodedNodes/chargeNodes only ever run inside DecodeObject's read path, so such
+// an object had no size cap anywhere before this fix, regardless of how it's later formatted. This
+// builds an *SFSArray with far more items than maxFormattedNodes and proves a single
+// StringRedacted() call on it is now bounded in both output size and the number of items it
+// actually walks, rather than scaling with the array's real size.
+func TestStringRedactedFormatBudgetBoundsLargeArray(t *testing.T) {
+	const itemCount = 200_000 // comfortably more than maxFormattedNodes (50_000)
+
+	arr := NewSFSArray()
+	for i := 0; i < itemCount; i++ {
+		arr.AddInt(int32(i))
+	}
+
+	o := NewSFSObject()
+	o.PutSFSArray("buildingList", arr) // an ordinary, non-sensitive field name
+
+	got := o.StringRedacted()
+
+	if !strings.Contains(got, formatTruncatedMarker) {
+		t.Fatalf("StringRedacted() on a %d-item array did not truncate -- expected the visible %q marker in the output (%d bytes)", itemCount, formatTruncatedMarker, len(got))
+	}
+	// A generous ceiling on output size: each formatted int item is at most a handful of bytes
+	// (e.g. ", 49998"), so maxFormattedNodes items plus object/array framing and the marker should
+	// stay comfortably under this regardless of exactly how many digits the largest formatted
+	// value takes -- the point is proving the output does NOT scale with itemCount, not pinning an
+	// exact byte count.
+	const maxReasonableOutputBytes = 10 * maxFormattedNodes
+	if len(got) > maxReasonableOutputBytes {
+		t.Errorf("StringRedacted() output is %d bytes, want at most %d -- a single call must not scale with the real item count (%d)", len(got), maxReasonableOutputBytes, itemCount)
+	}
+	// An item near the end of the array must NOT appear -- proving the walk itself stopped early,
+	// not merely that the already-fully-formatted text got chopped off afterward.
+	lateItem := fmt.Sprintf("%d", itemCount-1)
+	if strings.Contains(got, lateItem) {
+		t.Errorf("StringRedacted() output contains item %q from near the end of a %d-item array -- the format walk did not actually stop at the budget", lateItem, itemCount)
+	}
+	// The first item must still be present, confirming this isn't simply an empty/broken output.
+	if !strings.Contains(got, "buildingList=[0,") {
+		t.Errorf("StringRedacted() output is missing the first array item, want it present before truncation kicks in: %.200s", got)
+	}
+}
+
+// TestStringRedactedFormatBudgetBoundsManyTopLevelKeys is
+// TestStringRedactedFormatBudgetBoundsLargeArray's sibling for the OTHER loop the same fix bounds:
+// stringRedactedBudgeted's own top-level key loop (SFSObject.StringRedacted()), not just
+// formatSFSValueRedacted's array-item loop. A hand-built object with far more distinct keys than
+// maxFormattedNodes -- again built via ordinary Put* calls, not decoded off the wire -- must
+// truncate the same way.
+func TestStringRedactedFormatBudgetBoundsManyTopLevelKeys(t *testing.T) {
+	const keyCount = 200_000
+
+	o := NewSFSObject()
+	for i := 0; i < keyCount; i++ {
+		o.PutInt(fmt.Sprintf("k%06d", i), int32(i))
+	}
+
+	got := o.StringRedacted()
+
+	if !strings.Contains(got, formatTruncatedMarker) {
+		t.Fatalf("StringRedacted() on a %d-key object did not truncate -- expected the visible %q marker in the output (%d bytes)", keyCount, formatTruncatedMarker, len(got))
+	}
+	const maxReasonableOutputBytes = 15 * maxFormattedNodes
+	if len(got) > maxReasonableOutputBytes {
+		t.Errorf("StringRedacted() output is %d bytes, want at most %d -- a single call must not scale with the real key count (%d)", len(got), maxReasonableOutputBytes, keyCount)
+	}
+	lateKey := fmt.Sprintf("k%06d", keyCount-1)
+	if strings.Contains(got, lateKey) {
+		t.Errorf("StringRedacted() output contains key %q from near the end of a %d-key object -- the format walk did not actually stop at the budget", lateKey, keyCount)
+	}
+	if !strings.Contains(got, "k000000=0") {
+		t.Errorf("StringRedacted() output is missing the first key, want it present before truncation kicks in: %.200s", got)
 	}
 }
