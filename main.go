@@ -37,7 +37,7 @@ func main() {
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
 	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- the refresh response's server list also REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and the fresh access token REPLACES any explicitly-passed -cs-at")
-	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at, skipping any GSL call entirely (e.g. one captured live from a real client)")
+	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at (e.g. one captured live from a real client) -- a cheap CheckVersion call is still made, to enable mid-login redirect-refresh capability, but no other GSL call happens unless -cs-rt is also set")
 	csIOS := fs.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
 	handshake := fs.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
 	configPath := fs.String("config", "", "path to a session config JSON (see config.example.json); if unset, auto-loads "+defaultSessionConfigPath()+" when present. Explicit -cs-* flags override individual config fields.")
@@ -116,6 +116,26 @@ func main() {
 		*csAt = applyOverride(cfg.AccessToken, *csAt)
 		if !csIOSSetExplicitly {
 			*csIOS = cfg.IOSMode
+		}
+	}
+
+	// Symmetric to the -email/-code-pipe-ignored warnings just below (for the opposite direction):
+	// if any -cs-* flag OTHER than -cs-ip/-cs-rt was explicitly set on the command line but the
+	// cross-server dispatch branch below won't actually be taken, that flag is otherwise silently
+	// discarded and this falls through to the full guest/email login flow instead -- easy to miss
+	// (e.g. a typo'd -cs-ip that got dropped by config merging, or -cs-at set while forgetting
+	// -cs-rt) without any warning. Checked here, after config merging, so a config-supplied ip
+	// correctly counts as "cross-server WILL be taken" and doesn't produce a false warning.
+	if *csIP == "" && *csRt == "" {
+		var ignoredCSFlags []string
+		fs.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei", "cs-ios":
+				ignoredCSFlags = append(ignoredCSFlags, f.Name)
+			}
+		})
+		if len(ignoredCSFlags) > 0 {
+			slog.Warn("ignoring -cs-* flags because neither -cs-ip nor -cs-rt is set (falling through to the normal guest/email login flow instead of cross-server reconnect)", "ignoredFlags", ignoredCSFlags)
 		}
 	}
 
@@ -305,8 +325,14 @@ func runCrossServerTest(o crossServerTestOpts) {
 		lsr, err := GetServerList(gslHTTPClient, gslGateHost, gslRSAPub, deviceID, GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
 		if err != nil {
 			slog.Error("GSL refresh failed", "error", err)
-			// Exit code 2 marks authentication/session failures specifically -- see the matching comment in main() above.
-			os.Exit(2)
+			// Exit code 2 marks a confirmed server-side auth rejection specifically -- see the
+			// matching comment in main() above. A network/HTTP/decode/decrypt failure that never
+			// reached a confirmed rejection is just a generic failure (1), matching the two
+			// sibling ErrAuthRejected-gated exits elsewhere in this file.
+			if errors.Is(err, ErrAuthRejected) {
+				os.Exit(2)
+			}
+			os.Exit(1)
 		}
 		slog.Info("GSL refresh response", "code", lsr.Code, "serverListLen", len(lsr.ServerList))
 		if lsr.At != nil {

@@ -152,6 +152,16 @@ type AccountServerInfo struct {
 }
 
 type LoginServerListRespon struct {
+	// Code is logged on every call site (see login.go and main.go's "GSL getserverlist
+	// response"/"GSL refresh response" log lines) but, unlike CheckVersionResponse.Code (checked
+	// against "" in CheckVersion above), it is NOT checked for a rejection value here: this
+	// endpoint's own success-vs-rejection code values haven't been confirmed live yet -- no
+	// captured getserverlist.php response with a real rejection has been observed, and this
+	// project's own history has twice been burned by guessing at unconfirmed server behavior
+	// instead of waiting for evidence. Left deliberately open rather than guessed at, mirroring
+	// alliance.go's honestly-left-open donation-cooldown gap (see
+	// DonateRecommendedAllianceTech's doc comment) -- a future round should add a check here once
+	// a real rejection response for this specific endpoint has actually been captured.
 	Code             int                `json:"code"`
 	ServerList       []LoginServerInfo  `json:"serverList"`
 	LoginServer      *AccountServerInfo `json:"loginServer"`

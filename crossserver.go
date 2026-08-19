@@ -207,9 +207,28 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 				freshLsr, err := GetServerList(p.HTTPClient, p.GateHost, p.RSAPub, p.DeviceID, GSLOpt{Opt: "fix"}, "", p.GameUid)
 				if err != nil {
 					slog.Error("GSL refresh failed; following redirect with stale access token anyway", "error", err)
-				} else if freshLsr.At != nil {
-					p.AccessTok = freshLsr.At.Token
-					slog.Info("fresh access token acquired", "tokenLen", len(p.AccessTok))
+				} else {
+					if freshLsr.At != nil {
+						p.AccessTok = freshLsr.At.Token
+						slog.Info("fresh access token acquired", "tokenLen", len(p.AccessTok))
+					}
+					// The same refresh response also carries the account's current
+					// gameUid (serverList[0].gameUid) -- propagate it the same way as
+					// AccessTok above. Without this, p.GameUid stays pinned to whatever
+					// the caller originally passed in even when the GSL refresh (issued
+					// specifically because this account just got redirected to a new
+					// shard) reports a different one, and the stale value is what ends up
+					// folded into SecurityCode and sent as `un` on the redialed
+					// connection. Only overwrite on a non-empty value -- an empty
+					// gameUid here is more likely an unpopulated field than a real
+					// "clear the uid" instruction, and clobbering a known-good value with
+					// "" is not a safe default to guess at.
+					if len(freshLsr.ServerList) > 0 {
+						if newGameUid := freshLsr.ServerList[0].GameUid; newGameUid != "" && newGameUid != p.GameUid {
+							slog.Info("serverInfo redirect: gameUid changed on GSL refresh", "oldGameUid", p.GameUid, "newGameUid", newGameUid)
+							p.GameUid = newGameUid
+						}
+					}
 				}
 			} else {
 				slog.Warn("following serverInfo redirect with UNREFRESHED access token -- no HTTPClient/RSAPub/GateHost given to DoCrossServerLogin, so it cannot fetch a fresh one before redialing; if this redial fails with ec=28/E011, this reused token is the first thing to suspect")

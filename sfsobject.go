@@ -253,7 +253,11 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 		// wire and length-prefixed with a 4-byte count instead of 2 (mirrors readValuePayload's
 		// sfsText case).
 		b := []byte(v.Val.(string))
-		writeInt32(buf, int32(len(b)))
+		n, err := int32Count(len(b), "text bytes")
+		if err != nil {
+			return err
+		}
+		writeInt32(buf, n)
 		buf.Write(b)
 		return nil
 	case sfsBoolArray:
@@ -275,7 +279,11 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 		// Unlike every other array type (which use a 2-byte count), ByteArray uses a bare 4-byte
 		// int count (mirrors readValuePayload's sfsByteArray case -- see the comment there).
 		b := v.Val.([]byte)
-		writeInt32(buf, int32(len(b)))
+		n, err := int32Count(len(b), "byte array items")
+		if err != nil {
+			return err
+		}
+		writeInt32(buf, n)
 		buf.Write(b)
 		return nil
 	case sfsShortArray:
@@ -399,6 +407,16 @@ func int16Count(n int, what string) (int16, error) {
 		return 0, fmt.Errorf("sfsobject: too many %s to encode (%d, max 32767)", what, n)
 	}
 	return int16(n), nil
+}
+
+// int32Count converts a length to int32 for a wire count field, returning an error instead of
+// silently wrapping into a wrong count if the value is ever too large to represent. Reachable
+// from server-controlled data, so it must not crash the process.
+func int32Count(n int, what string) (int32, error) {
+	if n > math.MaxInt32 {
+		return 0, fmt.Errorf("sfsobject: too many %s to encode (%d, max %d)", what, n, math.MaxInt32)
+	}
+	return int32(n), nil
 }
 
 // writeUtfString returns an error instead of panicking when s is too long to length-prefix with

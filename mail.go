@@ -140,13 +140,33 @@ func ClaimAllMail(conn *GameConn) error {
 	for i, m := range mail {
 		allUIDs[i] = m.Uid()
 	}
-	const readBatchSize = 100
-	for i := 0; i < len(allUIDs); i += readBatchSize {
-		end := min(i+readBatchSize, len(allUIDs))
+	// readBatchSize caps how many mail uids go into a single "mail.read.status.betch" or
+	// "mail.reward.batch" request. maxUIDsBytes additionally caps the byte length of each
+	// batch's joined "uids" string, keeping it safely under the wire format's 65535-byte
+	// string-length limit -- past that, sfsobject.go's encoder (writeUtfString) now returns a
+	// clean error rather than panicking, but that's still a batch-encode failure that drops the
+	// whole batch for this run, so it's worth avoiding rather than merely surviving.
+	// readBatchSize alone isn't enough protection here: a mail uid is a server-supplied string
+	// that can itself be up to 65535 bytes, so a handful of large uids -- or a mail backlog with
+	// many same-type unclaimed rewards -- can blow the joined length even well under 100 items.
+	// Shared by both batch loops below since both send a comma-joined "uids" field subject to
+	// the same limit.
+	const (
+		readBatchSize = 100
+		maxUIDsBytes  = 60000
+	)
+	for i := 0; i < len(allUIDs); {
+		end := i
+		batchBytes := 0
+		for end < len(allUIDs) && end-i < readBatchSize && (end == i || batchBytes+len(allUIDs[end])+1 <= maxUIDsBytes) {
+			batchBytes += len(allUIDs[end]) + 1 // +1 for the joining comma
+			end++
+		}
 		readParams := NewSFSObject()
 		readParams.PutUtfString("uids", strings.Join(allUIDs[i:end], ","))
 		_, err := sendAndWait(conn, fmt.Sprintf("mail read-status (batch %d, size %d)", i, end-i), "mail.read.status.betch", readParams)
 		errs = append(errs, err)
+		i = end
 	}
 	slog.Info("marked mail as read", "count", len(allUIDs))
 
@@ -155,20 +175,12 @@ func ClaimAllMail(conn *GameConn) error {
 		slog.Info("no unclaimed mail rewards found", "totalMail", len(mail))
 		return errors.Join(errs...)
 	}
-	// maxRewardUIDsBytes keeps each joined "uids" string safely under the
-	// wire format's 65535-byte string-length limit (sfsobject.go's encoder
-	// panics past that). readBatchSize alone isn't enough protection here:
-	// a mail uid is a server-supplied string that can itself be up to
-	// 65535 bytes, so a handful of large uids -- or a mail backlog with
-	// many same-type unclaimed rewards -- can blow the joined length even
-	// well under 100 items.
-	const maxRewardUIDsBytes = 60000
 	for mailType, uids := range byType {
 		slog.Info("claiming mail reward", "type", mailType, "count", len(uids))
 		for i := 0; i < len(uids); {
 			end := i
 			batchBytes := 0
-			for end < len(uids) && end-i < readBatchSize && (end == i || batchBytes+len(uids[end])+1 <= maxRewardUIDsBytes) {
+			for end < len(uids) && end-i < readBatchSize && (end == i || batchBytes+len(uids[end])+1 <= maxUIDsBytes) {
 				batchBytes += len(uids[end]) + 1 // +1 for the joining comma
 				end++
 			}

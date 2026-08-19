@@ -180,7 +180,7 @@ func findRecommendedTech(arr *SFSArray) (scienceId int32, found bool) {
 		if tech.GetInt("state") != 1 {
 			continue
 		}
-		if !tech.Has("scienceId") {
+		if !requirePresentField(tech, "scienceId", "allianceScience") {
 			continue
 		}
 		return tech.GetInt("scienceId"), true

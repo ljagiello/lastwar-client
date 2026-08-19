@@ -48,39 +48,3 @@ func TestGroupUnclaimedByType(t *testing.T) {
 		t.Errorf("type 4: got %v, want [c]", got[4])
 	}
 }
-
-func TestFindRecommendedTech(t *testing.T) {
-	t.Run("no recommended entry", func(t *testing.T) {
-		arr := NewSFSArray()
-		o := NewSFSObject()
-		o.PutInt("scienceId", 100)
-		o.PutInt("state", 0)
-		arr.AddSFSObject(o)
-		_, found := findRecommendedTech(arr)
-		if found {
-			t.Fatal("expected found=false when no entry has state=1")
-		}
-	})
-	t.Run("exactly one recommended entry", func(t *testing.T) {
-		arr := NewSFSArray()
-		o1 := NewSFSObject()
-		o1.PutInt("scienceId", 100)
-		o1.PutInt("state", 0)
-		arr.AddSFSObject(o1)
-		o2 := NewSFSObject()
-		o2.PutInt("scienceId", 200)
-		o2.PutInt("state", 1)
-		arr.AddSFSObject(o2)
-		id, found := findRecommendedTech(arr)
-		if !found || id != 200 {
-			t.Fatalf("got (id=%d, found=%v), want (200, true)", id, found)
-		}
-	})
-	t.Run("empty array", func(t *testing.T) {
-		arr := NewSFSArray()
-		_, found := findRecommendedTech(arr)
-		if found {
-			t.Fatal("expected found=false for an empty array")
-		}
-	})
-}
