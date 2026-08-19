@@ -290,6 +290,25 @@ func TestByteArrayRejectsNegativeCount(t *testing.T) {
 	}
 }
 
+// TestTextRejectsNegativeCount mirrors TestByteArrayRejectsNegativeCount: sfsText shares
+// sfsByteArray's bare 4-byte length prefix, and now shares its explicit negative-length guard
+// too, so a corrupt/hostile length produces the same specific, tag-appropriate error instead of
+// falling through to readBytes' generic negative-length check.
+func TestTextRejectsNegativeCount(t *testing.T) {
+	negOne := int32(-1)
+	var buf []byte
+	buf = binary.BigEndian.AppendUint32(buf, uint32(negOne))
+	r := &sfsReader{data: buf}
+	_, err := r.readValuePayload(sfsText)
+	if err == nil {
+		t.Fatal("expected an error for a negative text count, got nil")
+	}
+	wantMsg := "sfsobject: text negative size: -1"
+	if err.Error() != wantMsg {
+		t.Fatalf("error = %q, want %q", err.Error(), wantMsg)
+	}
+}
+
 func TestGetIntGetLongCoercion(t *testing.T) {
 	o := NewSFSObject()
 	o.PutByte("b", 7)

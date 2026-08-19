@@ -32,6 +32,14 @@ type CrossServerLoginResult struct {
 	// save this, not the original input, so the next run doesn't retry a token
 	// this connection already knows was superseded.
 	AccessTok string
+
+	// GameUid is the FINAL gameUid actually logged in with -- this differs
+	// from CrossServerLoginParams.GameUid whenever a serverInfo redirect was
+	// followed and the mid-redirect GSL refresh (see below) returned a
+	// changed gameUid. Callers that persist connection details (e.g. a
+	// session config file) should save this, not the original input, so the
+	// next run targets the role's current gameUid instead of a stale one.
+	GameUid string
 }
 
 // CrossServerLoginParams mirrors the fields UIRoleLoginView:OnClickLogin
@@ -243,7 +251,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		}
 
 		conn.conn.SetReadDeadline(time.Time{})
-		return &CrossServerLoginResult{Conn: conn, Content: env.Content, Addr: addr, Zone: zone, AccessTok: p.AccessTok}, nil
+		return &CrossServerLoginResult{Conn: conn, Content: env.Content, Addr: addr, Zone: zone, AccessTok: p.AccessTok, GameUid: p.GameUid}, nil
 	}
 }
 

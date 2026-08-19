@@ -70,25 +70,17 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(*logLevel)})))
 
 	csIOSSetExplicitly := false
-	var ignoredInDecodeMode []string
+	var visitedFlags []string
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "cs-ios" {
 			csIOSSetExplicitly = true
 		}
-		// -decode-label is honored in -decode-stream mode (it labels that mode's own output), and
-		// -log-level is honored in every mode (it configures slog before any of this runs) -- every
-		// other flag that was explicitly set is dead weight in -decode-stream mode, since that mode
-		// never logs in, connects, or touches a session config at all. flag.Visit only visits flags
-		// actually set on the command line, so this naturally covers any flag added in the future
-		// without needing its name added here too.
-		if f.Name != "decode-stream" && f.Name != "decode-label" && f.Name != "log-level" {
-			ignoredInDecodeMode = append(ignoredInDecodeMode, f.Name)
-		}
+		visitedFlags = append(visitedFlags, f.Name)
 	})
 
 	if *decodeStream != "" {
-		if len(ignoredInDecodeMode) > 0 {
-			slog.Warn("ignoring other flags because -decode-stream is set (no login or network connection happens in this mode)", "ignoredFlags", ignoredInDecodeMode)
+		if ignored := decodeModeIgnoredFlags(visitedFlags); len(ignored) > 0 {
+			slog.Warn("ignoring other flags because -decode-stream is set (no login or network connection happens in this mode)", "ignoredFlags", ignored)
 		}
 		runDecode(*decodeLabel, *decodeStream)
 		return
@@ -127,15 +119,8 @@ func main() {
 	// -cs-rt) without any warning. Checked here, after config merging, so a config-supplied ip
 	// correctly counts as "cross-server WILL be taken" and doesn't produce a false warning.
 	if *csIP == "" && *csRt == "" {
-		var ignoredCSFlags []string
-		fs.Visit(func(f *flag.Flag) {
-			switch f.Name {
-			case "cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei", "cs-ios":
-				ignoredCSFlags = append(ignoredCSFlags, f.Name)
-			}
-		})
-		if len(ignoredCSFlags) > 0 {
-			slog.Warn("ignoring -cs-* flags because neither -cs-ip nor -cs-rt is set (falling through to the normal guest/email login flow instead of cross-server reconnect)", "ignoredFlags", ignoredCSFlags)
+		if ignored := ignoredCrossServerFlags(visitedFlags); len(ignored) > 0 {
+			slog.Warn("ignoring -cs-* flags because neither -cs-ip nor -cs-rt is set (falling through to the normal guest/email login flow instead of cross-server reconnect)", "ignoredFlags", ignored)
 		}
 	}
 
@@ -206,6 +191,54 @@ func main() {
 	}
 
 	slog.Info("client exiting")
+}
+
+// decodeModeIgnoredFlags returns which of the given visited (explicitly set on the command line)
+// flag names are dead weight in -decode-stream mode. -decode-label is honored there (it labels
+// that mode's own output), and -log-level is honored in every mode (it configures slog before any
+// of this runs) -- every other explicitly-set flag, including -decode-stream itself, is ignored,
+// since -decode-stream mode never logs in, connects, or touches a session config at all. Taking the
+// already-visited names as a plain slice (rather than calling flag.FlagSet.Visit itself) is what
+// makes this testable without spawning a subprocess or building a real FlagSet.
+func decodeModeIgnoredFlags(visited []string) []string {
+	var ignored []string
+	for _, name := range visited {
+		if name != "decode-stream" && name != "decode-label" && name != "log-level" {
+			ignored = append(ignored, name)
+		}
+	}
+	return ignored
+}
+
+// crossServerFlagNames are the -cs-* flags whose only effect is on the cross-server reconnect path
+// dispatched from -cs-ip/-cs-rt (see runCrossServerTest) -- -cs-ip and -cs-rt themselves are
+// excluded since those two are what GATE that path, not flags merely consumed once it's taken. Kept
+// as a package-level map (rather than inlined in ignoredCrossServerFlags) so a test can cross-check
+// it against the FlagSet's actual -cs-* declarations and catch the two ways it can drift: a new
+// -cs-* flag added to the FlagSet but forgotten here, or a stale name left here after a flag is
+// renamed/removed.
+var crossServerFlagNames = map[string]bool{
+	"cs-at":       true,
+	"cs-port":     true,
+	"cs-zone":     true,
+	"cs-gameuid":  true,
+	"cs-deviceid": true,
+	"cs-shumei":   true,
+	"cs-ios":      true,
+}
+
+// ignoredCrossServerFlags returns which of the given visited (explicitly set on the command line)
+// flag names are -cs-* flags that get silently discarded when neither -cs-ip nor -cs-rt is set --
+// see the call site in main() for why that combination falls through to the plain guest/email login
+// flow instead of cross-server reconnect.
+func ignoredCrossServerFlags(visited []string) []string {
+	var ignored []string
+	for _, name := range visited {
+		if crossServerFlagNames[name] {
+			ignored = append(ignored, name)
+		}
+	}
+	return ignored
 }
 
 // parseLogLevel maps a -log-level flag value to an slog.Level, defaulting to Info for the empty
@@ -335,6 +368,17 @@ func runCrossServerTest(o crossServerTestOpts) {
 			os.Exit(1)
 		}
 		slog.Info("GSL refresh response", "code", lsr.Code, "serverListLen", len(lsr.ServerList))
+		if lsr.At == nil && len(lsr.ServerList) == 0 {
+			// A nil error only means the HTTP round-trip and envelope decrypt succeeded -- gsl.go
+			// deliberately doesn't validate lsr.Code yet (no live evidence exists for what a
+			// semantically-rejected-but-HTTP-200 refresh looks like on this endpoint). Neither a
+			// fresh access token nor a server list means this response is useless: falling through
+			// would silently reuse the stale accessTok/ip/port/zone/gameUid already in scope,
+			// producing a confusing downstream DoCrossServerLogin failure instead of failing clearly
+			// here, at the point where the actual problem is known.
+			slog.Error("GSL refresh returned no usable data -- likely rejected server-side, recapture the refresh token", "code", lsr.Code)
+			os.Exit(1)
+		}
 		if lsr.At != nil {
 			if o.at != "" {
 				slog.Warn("ignoring -cs-at because -cs-rt is set (the GSL refresh response's access token replaces it)")
@@ -380,7 +424,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 				if newHost != ip || newPort != port || result.Zone != zone {
 					updated := &SessionConfig{
 						IP: newHost, Port: newPort, Zone: result.Zone,
-						GameUid: gameUid, DeviceID: deviceID,
+						GameUid: result.GameUid, DeviceID: deviceID,
 						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
 						IOSMode: o.iosMode,
 					}

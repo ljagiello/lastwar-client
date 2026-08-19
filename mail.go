@@ -149,24 +149,19 @@ func ClaimAllMail(conn *GameConn) error {
 	// readBatchSize alone isn't enough protection here: a mail uid is a server-supplied string
 	// that can itself be up to 65535 bytes, so a handful of large uids -- or a mail backlog with
 	// many same-type unclaimed rewards -- can blow the joined length even well under 100 items.
-	// Shared by both batch loops below since both send a comma-joined "uids" field subject to
-	// the same limit.
+	// Shared by both batch loops below (via batchByCountAndBytes) since both send a comma-joined
+	// "uids" field subject to the same limit.
 	const (
 		readBatchSize = 100
 		maxUIDsBytes  = 60000
 	)
-	for i := 0; i < len(allUIDs); {
-		end := i
-		batchBytes := 0
-		for end < len(allUIDs) && end-i < readBatchSize && (end == i || batchBytes+len(allUIDs[end])+1 <= maxUIDsBytes) {
-			batchBytes += len(allUIDs[end]) + 1 // +1 for the joining comma
-			end++
-		}
+	offset := 0
+	for _, batch := range batchByCountAndBytes(allUIDs, readBatchSize, maxUIDsBytes) {
 		readParams := NewSFSObject()
-		readParams.PutUtfString("uids", strings.Join(allUIDs[i:end], ","))
-		_, err := sendAndWait(conn, fmt.Sprintf("mail read-status (batch %d, size %d)", i, end-i), "mail.read.status.betch", readParams)
+		readParams.PutUtfString("uids", strings.Join(batch, ","))
+		_, err := sendAndWait(conn, fmt.Sprintf("mail read-status (batch %d, size %d)", offset, len(batch)), "mail.read.status.betch", readParams)
 		errs = append(errs, err)
-		i = end
+		offset += len(batch)
 	}
 	slog.Info("marked mail as read", "count", len(allUIDs))
 
@@ -177,22 +172,39 @@ func ClaimAllMail(conn *GameConn) error {
 	}
 	for mailType, uids := range byType {
 		slog.Info("claiming mail reward", "type", mailType, "count", len(uids))
-		for i := 0; i < len(uids); {
-			end := i
-			batchBytes := 0
-			for end < len(uids) && end-i < readBatchSize && (end == i || batchBytes+len(uids[end])+1 <= maxUIDsBytes) {
-				batchBytes += len(uids[end]) + 1 // +1 for the joining comma
-				end++
-			}
+		offset := 0
+		for _, batch := range batchByCountAndBytes(uids, readBatchSize, maxUIDsBytes) {
 			rewardParams := NewSFSObject()
-			rewardParams.PutUtfString("uids", strings.Join(uids[i:end], ","))
+			rewardParams.PutUtfString("uids", strings.Join(batch, ","))
 			rewardParams.PutInt("type", mailType)
-			_, err := sendAndWait(conn, fmt.Sprintf("mail reward-batch (type %d, batch %d, size %d)", mailType, i, end-i), "mail.reward.batch", rewardParams)
+			_, err := sendAndWait(conn, fmt.Sprintf("mail reward-batch (type %d, batch %d, size %d)", mailType, offset, len(batch)), "mail.reward.batch", rewardParams)
 			errs = append(errs, err)
-			i = end
+			offset += len(batch)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// batchByCountAndBytes splits uids into consecutive batches, each capped at maxCount items and
+// at maxBytes for the sum of (len(uid)+1) across the batch -- the "+1" accounting for the comma
+// that will join them into a single wire string (see ClaimAllMail's readBatchSize/maxUIDsBytes
+// doc comment for why both caps are needed). A batch always admits at least one uid even if that
+// uid alone exceeds maxBytes, so no single oversized uid can stall the loop forever; the resulting
+// over-limit batch is still expected to fail cleanly at encode time downstream rather than being
+// silently dropped here.
+func batchByCountAndBytes(uids []string, maxCount, maxBytes int) [][]string {
+	var batches [][]string
+	for i := 0; i < len(uids); {
+		end := i
+		batchBytes := 0
+		for end < len(uids) && end-i < maxCount && (end == i || batchBytes+len(uids[end])+1 <= maxBytes) {
+			batchBytes += len(uids[end]) + 1 // +1 for the joining comma
+			end++
+		}
+		batches = append(batches, uids[i:end])
+		i = end
+	}
+	return batches
 }
 
 // groupUnclaimedByType buckets mail with an unclaimed reward by its type field -- pulled out of

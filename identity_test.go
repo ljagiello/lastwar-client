@@ -165,6 +165,20 @@ func TestLoadOrCreateDeviceIdentityWarnsOnLooseGameUidPermissions(t *testing.T) 
 	}
 }
 
+// TestAirKeyMatchesKnownValue is AirKey()'s counterpart to selftest_test.go's
+// TestPackageSignMatchesKnownValue -- AirKey() is just as wire-format-critical (it's the
+// `lw_airKey`/`airKey` value the server echoes back and validates, per identity.go's AirKey doc
+// comment and BuildLoginParams' usage), so it deserves the same golden-value rigor rather than
+// only a round-trip/shape check.
+func TestAirKeyMatchesKnownValue(t *testing.T) {
+	d := &deviceIdentity{DeviceID: "abcdef0123456789abcdef0123456789_n3d"}
+	// base64.StdEncoding of the DeviceID above, computed independently.
+	const want = "lwDid_YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlfbjNk"
+	if got := d.AirKey(); got != want {
+		t.Errorf("AirKey() = %q, want %q", got, want)
+	}
+}
+
 // TestLoadOrCreateDeviceIdentityRoundTrip confirms the full persisted-state lifecycle: a fresh
 // HOME creates a new device identity, SaveGameUid/SaveUsername persist their values to disk at
 // 0600, and a second load picks up exactly what was saved -- the same guarantee config_test.go's

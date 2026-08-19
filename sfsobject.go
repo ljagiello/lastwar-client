@@ -587,6 +587,9 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		if err != nil {
 			return SFSValue{}, err
 		}
+		if n < 0 {
+			return SFSValue{}, fmt.Errorf("sfsobject: text negative size: %d", n)
+		}
 		b, err := r.readBytes(int(n))
 		if err != nil {
 			return SFSValue{}, err

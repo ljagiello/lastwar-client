@@ -247,9 +247,31 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			freshLsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, freshOpt, "", ident.GameUid)
 			if err != nil {
 				slog.Error("GSL refresh failed; following redirect with stale token anyway", "error", err)
-			} else if freshLsr.At != nil {
-				accessTok = freshLsr.At.Token
-				slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
+			} else {
+				if freshLsr.At != nil {
+					accessTok = freshLsr.At.Token
+					slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
+				}
+				// The same refresh response also carries the account's current
+				// gameUid (serverList[0].gameUid) -- propagate it the same way as
+				// accessTok above. Without this, gameUid stays pinned to whatever
+				// it was before this redirect even when the GSL refresh (issued
+				// specifically because this account just got redirected to a new
+				// shard) reports a different one. Only overwrite on a non-empty
+				// value -- an empty gameUid here is more likely an unpopulated
+				// field than a real "clear the uid" instruction, and clobbering a
+				// known-good value with "" is not a safe default to guess at. See
+				// DoCrossServerLogin's matching redirect path in crossserver.go,
+				// which had this same gap.
+				if len(freshLsr.ServerList) > 0 {
+					if newGameUid := freshLsr.ServerList[0].GameUid; newGameUid != "" && newGameUid != gameUid {
+						slog.Info("serverInfo redirect: gameUid changed on GSL refresh", "oldGameUid", gameUid, "newGameUid", newGameUid)
+						gameUid = newGameUid
+						if err := ident.SaveGameUid(gameUid); err != nil {
+							slog.Warn("failed to persist gameUid", "error", err)
+						}
+					}
+				}
 			}
 			// A redirect is a deterministic server instruction, not a
 			// flaky timeout -- don't let it consume the one real
