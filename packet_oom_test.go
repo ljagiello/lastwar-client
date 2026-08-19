@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"io"
 	"testing"
 )
 
@@ -85,5 +87,53 @@ func TestReadPacketRejectsZlibBombOutput(t *testing.T) {
 
 	if _, err := ReadPacket(bytes.NewReader(packet)); err == nil {
 		t.Fatal("expected ReadPacket to reject a zlib payload whose inflated size exceeds maxFrameSize, got nil error")
+	}
+}
+
+// Confirms ReadPacket does not misclassify a mid-frame truncation as a clean
+// end-of-stream. Per io.ReadFull's documented contract, a read that consumes
+// zero bytes returns bare io.EOF regardless of whether earlier io.ReadFull
+// calls in that same ReadPacket invocation already consumed real frame
+// bytes -- so a capture cut off exactly on a field-read boundary mid-frame
+// (here: right after a would-be second frame's header byte, but before its
+// length field) produces the exact same bare io.EOF as a genuine clean
+// end-of-stream, even though a real header byte was already consumed. This
+// is the truncation shape tools/reassemble_stream.py's documented output
+// (a live TCP stream cut off at some arbitrary point mid-capture) actually
+// produces. Without the fix in ReadPacket, decode.go's DecodeStreamFile
+// would see this bare io.EOF, its `errors.Is(err, io.EOF)` check would
+// match, and it would wrongly report "reached end of stream cleanly" for a
+// truncated/corrupt capture.
+func TestReadPacketMidFrameTruncationIsNotClassifiedAsCleanEOF(t *testing.T) {
+	valid, err := EncodePacket([]byte("hello"))
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+
+	// Append just a bare header byte for a would-be second frame -- no
+	// forward/bigSized/compressed flags set -- so the stream ends exactly
+	// on the real protocol boundary between the header field (already
+	// fully read) and the 2-byte length field that would come next, rather
+	// than at an arbitrary byte count.
+	truncated := append(append([]byte{}, valid...), hdrBinary|hdrEncrypted)
+	r := bytes.NewReader(truncated)
+
+	// First read recovers the genuine, complete first frame.
+	body, err := ReadPacket(r)
+	if err != nil {
+		t.Fatalf("ReadPacket (first frame): unexpected error: %v", err)
+	}
+	if string(body) != "hello" {
+		t.Fatalf("ReadPacket (first frame): got body %q, want %q", body, "hello")
+	}
+
+	// Second read only has the lone header byte of a truncated frame left
+	// -- it must NOT be reported as a clean end-of-stream.
+	if _, err := ReadPacket(r); err == nil {
+		t.Fatal("ReadPacket (truncated second frame): expected an error, got nil")
+	} else if errors.Is(err, io.EOF) {
+		t.Fatalf("ReadPacket (truncated second frame): error satisfies errors.Is(err, io.EOF) -- a mid-frame truncation was misclassified as a clean end-of-stream: %v", err)
+	} else if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("ReadPacket (truncated second frame): expected errors.Is(err, io.ErrUnexpectedEOF), got: %v", err)
 	}
 }

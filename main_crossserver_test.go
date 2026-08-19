@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -125,7 +128,7 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 	gameHost, gamePort := splitHostPortInt(t, gameAddr)
 
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
-		Code: 0,
+		Code: "0",
 		ServerList: []LoginServerInfo{
 			{IP: gameHost, Port: gamePort, Zone: freshZone, GameUid: freshGameUid},
 		},
@@ -172,5 +175,71 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 	}
 	if got.GameUid != freshGameUid {
 		t.Errorf("persisted GameUid = %q, want %q (the refreshed server list's gameUid)", got.GameUid, freshGameUid)
+	}
+}
+
+// TestRunCrossServerTestExitsWhenIPEmpty is the regression test for this round's fix: the
+// firstHost(ip) == "" pre-flight check added to runCrossServerTest alongside its existing
+// port <= 0 check (see main.go). Without that check, an empty ip reaches
+// crossserver.go's addr := fmt.Sprintf("%s:%d", firstHost(p.IP), p.Port) as bare ":<port>" --
+// and Go's "host:port" dial syntax resolves an empty host to the LOOPBACK interface, so this
+// never failed with any "no host" indication at all: it silently attempted a real TCP connection
+// to 127.0.0.1/::1 and returned a misleading "connection refused" (still exit code 1, but via
+// DoCrossServerLogin's generic "cross-server login failed" path, not a message that says what's
+// actually missing).
+//
+// This specifically reproduces the reachable path the fix's comment documents: a bare -cs-rt
+// with no -cs-ip (and no session config supplying one) leaves ip empty in scope, and
+// refreshHasUsableData only requires EITHER a fresh access token OR a non-empty server list --
+// not both -- so a GSL opt=refresh response carrying a fresh access token but an EMPTY server
+// list passes that check and falls through with ip left exactly as empty as it started.
+//
+// runCrossServerTest calls os.Exit(1) directly on this path (matching the sibling port <= 0
+// check's own posture), so it can't be driven to completion in-process without also killing this
+// test binary. This uses the standard re-exec-the-test-binary-as-a-subprocess idiom (as used by
+// e.g. the Go standard library's own os/exec tests) instead: LASTWAR_TEST_HELPER_PROCESS=1 gates
+// a branch that actually calls runCrossServerTest and lets it exit, while the outer test spawns
+// that as a child process and asserts on its exit code AND stderr message -- the message check is
+// what actually distinguishes the fixed "no ip given" exit from the pre-fix "connection refused"
+// exit, since both are exit code 1.
+func TestRunCrossServerTestExitsWhenIPEmpty(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{
+			Code:       "0",
+			ServerList: nil, // deliberately empty -- the exact case this test targets
+			At:         &LoginToken{Token: "fresh-token-but-no-server-list"},
+		})
+		useFakeGSLServer(t, gsl)
+
+		// ip is deliberately left unset, as if -cs-rt were passed alone with no -cs-ip and no
+		// session config supplying one.
+		runCrossServerTest(crossServerTestOpts{
+			port: 18888,
+			rt:   "some-refresh-token",
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will
+		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
+		// this silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestExitsWhenIPEmpty$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	const wantMsg = "no ip given"
+	if !strings.Contains(stderr.String(), wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the pre-fix behavior instead falls through to a misleading \"connection refused\" dial failure)", stderr.String(), wantMsg)
 	}
 }

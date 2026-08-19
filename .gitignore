@@ -44,3 +44,14 @@ go.work.sum
 *.lastwar_goclient_session.json
 .lastwar_goclient_*
 config.local.json
+
+# Raw packet-capture artifacts from docs/capturing-and-decoding-traffic.mdx's documented
+# capture-and-decode workflow (tcpdump -> reassemble_stream.py -> -decode-stream). These are
+# unencrypted wire bytes of a real Login request/response -- more sensitive than the session
+# config above, since they carry loginKey/airKey/deviceId/shumeiBoxId in the raw, same risk
+# class, same defensive-backstop reasoning.
+*.pcap
+*.pcapng
+capture.pcap
+*_c2s.bin
+*_s2c.bin

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/aes"
 	"testing"
 )
 
@@ -64,6 +65,41 @@ func TestAESECBRoundTrip(t *testing.T) {
 	ct2, _ := aesECBEncryptPKCS7(plain, key)
 	if !bytes.Equal(ct, ct2) {
 		t.Errorf("expected deterministic ECB output for identical input")
+	}
+}
+
+// TestPkcs7UnpadRejectsPadLenAboveBlockSize covers the RFC 5652 requirement
+// that a PKCS7 pad length can never exceed the cipher's block size (16 bytes
+// for the AES-256-ECB use here -- see aesECBDecryptPKCS7's bs := block.BlockSize()).
+// pkcs7Unpad's old bound only checked padLen <= len(data), which a
+// corrupted/garbage multi-block ciphertext could satisfy while still being
+// well beyond one block, silently stripping far more than real padding.
+func TestPkcs7UnpadRejectsPadLenAboveBlockSize(t *testing.T) {
+	key := md5HexKey("test-salt-value-1234")
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	bs := block.BlockSize()
+
+	// Craft a multi-block plaintext (13 blocks = 208 bytes) whose final byte
+	// -- the claimed pad length -- is 200: bigger than the block size (16)
+	// but still <= len(data), so the pre-fix bound check would have accepted
+	// it. Encrypt it directly (bypassing pkcs7Pad) so that decrypting via
+	// aesECBDecryptPKCS7 reproduces this exact "corrupted" plaintext, with
+	// its last byte intact, for pkcs7Unpad to evaluate.
+	plain := make([]byte, bs*13)
+	plain[len(plain)-1] = 200
+	if len(plain) < 200 {
+		t.Fatalf("test setup: plaintext too short for claimed pad length")
+	}
+	ct := make([]byte, len(plain))
+	for i := 0; i < len(plain); i += bs {
+		block.Encrypt(ct[i:i+bs], plain[i:i+bs])
+	}
+
+	if _, err := aesECBDecryptPKCS7(ct, key); err == nil {
+		t.Fatalf("expected error for pad length %d exceeding block size %d, got nil", 200, bs)
 	}
 }
 

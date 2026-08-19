@@ -331,7 +331,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		conn.Close()
 		return nil, err
 	}
-	slog.Info("sent account.login.send.verify.code", "email", opts.Email)
+	slog.Info("sent account.login.send.verify.code", "emailLen", len(opts.Email))
 
 	msg, err := waitForCmd(conn, 15*time.Second, "account.login.send.verify.code", "push.account.send.verify.code")
 	if err != nil {
@@ -343,7 +343,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		return nil, fmt.Errorf("SEND-CODE FAILED: errorCode=%v full=%s: %w", ec.Val, msg.Params.StringRedacted(), ErrAuthRejected)
 	}
 	slog.Info("server accepted", "response", msg.Params.StringRedacted())
-	slog.Info("verification code should now be arriving", "email", opts.Email)
+	slog.Info("verification code should now be arriving", "emailLen", len(opts.Email))
 
 	slog.Info("step 7: waiting for verification code")
 	var code string

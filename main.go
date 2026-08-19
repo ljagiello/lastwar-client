@@ -474,6 +474,24 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 
+	// Symmetric to the port <= 0 check just below, but arguably more important to catch here
+	// rather than downstream: crossserver.go's addr := fmt.Sprintf("%s:%d", firstHost(p.IP),
+	// p.Port) collapses an empty ip to just ":<port>", and Go's "host:port" dial syntax treats an
+	// empty host as the LOOPBACK interface -- so this doesn't fail cleanly at all, it silently
+	// attempts a real TCP connection to 127.0.0.1/::1 and returns a misleading "connection
+	// refused" instead of any indication that no host was ever given. Reachable in practice: a
+	// bare -cs-rt with no -cs-ip (and no session config supplying one) leaves ip empty here, and
+	// if the GSL opt=refresh response's server list comes back empty, refreshHasUsableData's own
+	// check above only guards against BOTH a missing access token AND a missing server list --
+	// an empty server list alone, alongside a fresh access token, still passes that check and
+	// falls through with ip left exactly as empty as it started. Checked here, after the -cs-rt
+	// refresh block above (which can replace ip with a fresh server list entry), so a config/flag
+	// omission that IS resolved by -cs-rt doesn't false-positive.
+	if firstHost(ip) == "" {
+		slog.Error("cross-server login: no ip given (pass -cs-ip or a session config with ip)")
+		os.Exit(1)
+	}
+
 	// DoCrossServerLogin validates AccessTok itself (see its own p.AccessTok == "" check) but has
 	// no equivalent check for Port -- an unset/zero port isn't caught there, it's only caught much
 	// later by the OS dial call, producing a cryptic "dial tcp 127.0.0.1:0: connect: can't assign

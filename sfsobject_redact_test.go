@@ -295,6 +295,200 @@ func TestStringRedactedMasksSensitiveRawSFSArray(t *testing.T) {
 	}
 }
 
+// TestStringRedactedMasksMailAndDeviceIdentifierPII is the round-15 regression test for Fixes 1-2:
+// sensitiveSFSKeys was missing "mail" (the real user email address login.go's email-verification
+// flow puts under this literal SFS key, PutUtfString("mail", opts.Email)) and the device/
+// advertising-identifier PII cluster docs/live-validation.mdx documents as real fields a genuine
+// (non-Go-client) Login request carries (IMEI, AndroidID, androidDid, idfa, idfv, gaid, afuid,
+// firebaseId, distinct_id). Neither leaks from this Go client's own outgoing traffic today (which
+// only ever sends these as empty-string placeholders), but decode.go's -decode-stream tool would
+// have printed real values for these fields in cleartext when decoding a genuinely captured
+// non-Go-client login, since StringRedacted() had no way to mask a key that isn't in the map.
+func TestStringRedactedMasksMailAndDeviceIdentifierPII(t *testing.T) {
+	secrets := map[string]string{
+		"mail":        "secret-real-user-email-must-not-leak@example.com",
+		"IMEI":        "secret-imei-must-not-leak-123456789012345",
+		"AndroidID":   "secret-androidid-must-not-leak-abcdef0123456789",
+		"androidDid":  "secret-androiddid-must-not-leak-fedcba9876543210",
+		"idfa":        "secret-idfa-must-not-leak-00000000-1111-2222-3333-444444444444",
+		"idfv":        "secret-idfv-must-not-leak-55555555-6666-7777-8888-999999999999",
+		"gaid":        "secret-gaid-must-not-leak-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"afuid":       "secret-afuid-must-not-leak-ffffffff000011112222333344445555",
+		"firebaseId":  "secret-firebaseid-must-not-leak-abc123def456ghi789",
+		"distinct_id": "secret-distinctid-must-not-leak-xyz987uvw654rst321",
+	}
+
+	o := NewSFSObject()
+	for key, val := range secrets {
+		o.PutUtfString(key, val)
+	}
+	o.PutUtfString("un", "player-one")
+
+	got := o.StringRedacted()
+
+	for key, secret := range secrets {
+		if strings.Contains(got, secret) {
+			t.Errorf("StringRedacted leaks %q's PII value in cleartext: %s", key, got)
+		}
+	}
+	if !strings.Contains(got, "player-one") {
+		t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+	}
+}
+
+// TestGoStringVerbNeverLeaksSecret is the round-15 regression test for Fix 3: *SFSObject satisfied
+// fmt.Stringer safely (round 14) but not fmt.GoStringer, so fmt.Sprintf("%#v", obj) fell through to
+// Go's default reflection-based struct formatter, dumping every internal field -- including the
+// unexported values map holding a live loginKey/accessToken/etc -- completely raw. Adding GoString()
+// (delegating to StringRedacted(), mirroring String()) closes that gap.
+func TestGoStringVerbNeverLeaksSecret(t *testing.T) {
+	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-via-goformat-1234567890"
+
+	o := NewSFSObject()
+	o.PutUtfString("loginKey", secretLoginKey)
+	o.PutUtfString("un", "player-one")
+
+	got := fmt.Sprintf("%#v", o)
+	if strings.Contains(got, secretLoginKey) {
+		t.Errorf("fmt.Sprintf(\"%%#v\", o) leaks a secret via GoStringer/reflection fallback: %s", got)
+	}
+	// A reflection-based struct dump would print the unexported field name "values" verbatim (e.g.
+	// "&main.SFSObject{values:map[...". If GoString() is missing or not being invoked, this
+	// substring shows up; if GoString() is correctly wired, the output is StringRedacted()'s
+	// {key=value, ...} shape instead, which never contains this literal field name.
+	if strings.Contains(got, "values:map[") {
+		t.Errorf("fmt.Sprintf(\"%%#v\", o) fell through to Go's reflection-based struct formatter instead of GoString(): %s", got)
+	}
+	if !strings.Contains(got, "player-one") {
+		t.Errorf("fmt.Sprintf(\"%%#v\", o) must not mask ordinary non-sensitive fields, got: %s", got)
+	}
+}
+
+// TestBareSFSArrayNeverLeaksViaFmtVerbs is the round-15 regression test for Fix 4: *SFSArray (the
+// wrapper type sfsArrayType decodes into) had no String()/StringRedacted()/GoString() methods at
+// all, so handing a bare *SFSArray (not wrapped in a parent SFSObject) directly to %v/%s/%#v/
+// Println fell through to Go's default reflection-based formatter, printing its raw items
+// (including any embedded strings) unredacted. Every current call site ranges over .items directly
+// instead of logging the array value itself, so this was latent rather than actively exploited --
+// but it's a real gap now that SFSObject itself is safe.
+func TestBareSFSArrayNeverLeaksViaFmtVerbs(t *testing.T) {
+	const secretItem = "secret-bare-array-item-must-not-leak-abcdef123456"
+
+	arr := NewSFSArray()
+	arr.add(SFSValue{sfsUtfString, secretItem})
+	arr.add(SFSValue{sfsUtfString, "ordinary-item"})
+
+	cases := map[string]string{
+		"%v":  fmt.Sprintf("%v", arr),
+		"%s":  fmt.Sprintf("%s", arr),
+		"%#v": fmt.Sprintf("%#v", arr),
+	}
+	for verb, got := range cases {
+		if strings.Contains(got, secretItem) {
+			t.Errorf("fmt.Sprintf(%q, arr) on a bare *SFSArray leaks a raw scalar item: %s", verb, got)
+		}
+	}
+
+	var buf bytes.Buffer
+	fmt.Fprintln(&buf, arr)
+	if strings.Contains(buf.String(), secretItem) {
+		t.Errorf("fmt.Fprintln(w, arr) on a bare *SFSArray leaks a raw scalar item: %s", buf.String())
+	}
+}
+
+// TestNilNestedValueDoesNotPanic is the round-15 regression test for Fix 5: formatSFSValueRedacted
+// (and StringRedacted() itself, on both *SFSObject and *SFSArray) used to have no nil check, so a
+// nil *SFSObject/*SFSArray -- whether reached as a nested value inside a parent object/array, or
+// called on directly -- would panic with a nil pointer dereference instead of returning a safe
+// string. Not reachable from any current call site or from decoded server data (DecodeObject always
+// constructs real objects), but a latent crash-on-future-mistake vector, e.g. a hypothetical future
+// PutSFSObject(key, nil) call.
+func TestNilNestedValueDoesNotPanic(t *testing.T) {
+	t.Run("nil *SFSObject nested inside a parent SFSObject", func(t *testing.T) {
+		var nilObj *SFSObject
+		o := NewSFSObject()
+		o.PutSFSObject("child", nilObj)
+		o.PutUtfString("un", "player-one")
+
+		var got string
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("StringRedacted panicked on a nested nil *SFSObject: %v", r)
+				}
+			}()
+			got = o.StringRedacted()
+		}()
+		if !strings.Contains(got, "<nil>") {
+			t.Errorf("StringRedacted() on a nested nil *SFSObject = %q, want it to contain \"<nil>\"", got)
+		}
+	})
+
+	t.Run("nil *SFSArray nested inside a parent SFSObject", func(t *testing.T) {
+		var nilArr *SFSArray
+		o := NewSFSObject()
+		o.PutSFSArray("child", nilArr)
+		o.PutUtfString("un", "player-one")
+
+		var got string
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("StringRedacted panicked on a nested nil *SFSArray: %v", r)
+				}
+			}()
+			got = o.StringRedacted()
+		}()
+		if !strings.Contains(got, "<nil>") {
+			t.Errorf("StringRedacted() on a nested nil *SFSArray = %q, want it to contain \"<nil>\"", got)
+		}
+	})
+
+	t.Run("StringRedacted directly on a nil *SFSObject", func(t *testing.T) {
+		var nilObj *SFSObject
+		var got string
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("StringRedacted panicked being called directly on a nil *SFSObject: %v", r)
+				}
+			}()
+			got = nilObj.StringRedacted()
+		}()
+		if got != "<nil>" {
+			t.Errorf("nilObj.StringRedacted() = %q, want %q", got, "<nil>")
+		}
+		if s := nilObj.String(); s != "<nil>" {
+			t.Errorf("nilObj.String() = %q, want %q", s, "<nil>")
+		}
+		if gs := nilObj.GoString(); gs != "<nil>" {
+			t.Errorf("nilObj.GoString() = %q, want %q", gs, "<nil>")
+		}
+	})
+
+	t.Run("StringRedacted directly on a nil *SFSArray", func(t *testing.T) {
+		var nilArr *SFSArray
+		var got string
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("StringRedacted panicked being called directly on a nil *SFSArray: %v", r)
+				}
+			}()
+			got = nilArr.StringRedacted()
+		}()
+		if got != "<nil>" {
+			t.Errorf("nilArr.StringRedacted() = %q, want %q", got, "<nil>")
+		}
+		if s := nilArr.String(); s != "<nil>" {
+			t.Errorf("nilArr.String() = %q, want %q", s, "<nil>")
+		}
+		if gs := nilArr.GoString(); gs != "<nil>" {
+			t.Errorf("nilArr.GoString() = %q, want %q", gs, "<nil>")
+		}
+	})
+}
+
 // TestDecodeLargeByteArrayFieldNotChargedAgainstMaxDecodedNodes is the round-14 regression test for
 // Fix 3: sfsByteArray's decode case used to call chargeNodes(int(n)) for the raw byte count,
 // treating every decoded byte as a separate "node" toward the flat maxDecodedNodes(300_000) budget

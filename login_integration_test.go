@@ -109,7 +109,7 @@ func TestLoginGuestHappyPath(t *testing.T) {
 	host, port := splitHostPortInt(t, addr)
 
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
-		Code:       0,
+		Code:       "0",
 		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
 		At:         &LoginToken{Token: "tok-1"},
 	})
@@ -163,14 +163,14 @@ func TestLoginRedirectRefreshesGameUid(t *testing.T) {
 	gsl := newFakeGSLServer(t,
 		// Initial GSL call (opt=new): points at the first fake server, on the old gameUid.
 		LoginServerListRespon{
-			Code:       0,
+			Code:       "0",
 			ServerList: []LoginServerInfo{{IP: oldHost, Port: oldPort, Zone: "APS1", GameUid: oldGameUid}},
 			At:         &LoginToken{Token: "tok-1"},
 		},
 		// Mid-redirect refresh (opt=fix): the account has since moved to a new gameUid -- this is
 		// the value that must propagate into the persisted identity, per this round's fix.
 		LoginServerListRespon{
-			Code:       0,
+			Code:       "0",
 			ServerList: []LoginServerInfo{{GameUid: newGameUid}},
 			At:         &LoginToken{Token: "tok-fresh"},
 		},
@@ -251,7 +251,7 @@ func TestLoginTooManyRedirects(t *testing.T) {
 
 	host, port := splitHostPortInt(t, addrs[0])
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
-		Code:       0,
+		Code:       "0",
 		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS0", GameUid: "uid-1"}},
 		At:         &LoginToken{Token: "tok-1"},
 	})
@@ -382,7 +382,7 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 	// no loginKey/gameUid drives gslOptFor to opt=new, which is what keeps Login() off the
 	// opt=="login" fast-path return and routes it into the email-verification steps below.
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
-		Code:       0,
+		Code:       "0",
 		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
 		At:         &LoginToken{Token: "tok-1"},
 	})
@@ -526,7 +526,7 @@ func TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey(t *testing.T) {
 	host, port := splitHostPortInt(t, addr)
 
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
-		Code:       0,
+		Code:       "0",
 		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
 		At:         &LoginToken{Token: "tok-1"},
 	})
@@ -624,7 +624,7 @@ func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
 	// opt=new, which keeps Login() off the opt=="login" fast-path return and routes it into the
 	// email-verification steps below.
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
-		Code:       0,
+		Code:       "0",
 		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
 		At:         &LoginToken{Token: "tok-1"},
 	})
@@ -686,5 +686,114 @@ func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
 	}
 	if !strings.Contains(logged, "airKeyLen") {
 		t.Errorf("Login()'s logged output is missing the airKeyLen replacement key -- the \"air key\" log line may not have fired at all:\n%s", logged)
+	}
+}
+
+// TestLoginRedactsEmailInLogs is this round's regression test for a third credential-leak fix in
+// Login()'s email-verification flow, sitting alongside the code/deviceId/airKey fixes
+// TestLoginRedactsCodeDeviceIdAndAirKeyInLogs already covers: two log lines --
+// "sent account.login.send.verify.code" and "verification code should now be arriving" -- used to
+// log opts.Email directly via a plain "email" slog attribute, in cleartext, at default Info level
+// on every email-verification login. This is a raw Go string field, so it entirely bypassed the
+// SFSObject-level redaction system (which only ever sees opts.Email once it's already been put onto
+// an SFSObject as "mail", a separate, non-overlapping instance of the same value -- see
+// sfsobject.go's sensitiveSFSKeys). Fixed to log emailLen instead, matching this exact function's
+// own established pattern for DeviceID/AirKey just above.
+//
+// Mirrors TestLoginRedactsCodeDeviceIdAndAirKeyInLogs's structure: same fake server flow, same
+// Info-level capture via a swapped slog.Default(), same email-verification path (the only flow that
+// exercises these two log lines at all).
+func TestLoginRedactsEmailInLogs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const testEmail = "player@example.com"
+	const testCode = "654321"
+
+	pipePath := mkfifoT(t, t.TempDir(), "code.pipe")
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		// Step 4: base zone Login -- plain success, immediately followed by the `init` push, same
+		// as TestLoginEmailVerificationPath, so Login() falls through into the email-verification
+		// steps this test cares about.
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+			return
+		}
+
+		// Step 6: account.login.send.verify.code request, then its ack -- this is the request whose
+		// "sent account.login.send.verify.code" log line is the first of the two under test.
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		ack := NewSFSObject()
+		ack.PutBool("success", true)
+		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
+			return
+		}
+
+		// Step 8: account.login.new (type=0, mail+code+deviceId+airKey), then its terse ack.
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		finishAck := NewSFSObject()
+		finishAck.PutBool("success", true)
+		if err := server.SendExtension("account.login.new", finishAck); err != nil {
+			return
+		}
+
+		push := NewSFSObject()
+		push.PutUtfString("loginKey", "test-login-key")
+		push.PutUtfString("gameUid", "real-uid-1")
+		_ = server.SendExtension("push.account.login.new", push)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	// GameUid empty deliberately (same as TestLoginEmailVerificationPath): drives gslOptFor to
+	// opt=new, which keeps Login() off the opt=="login" fast-path return and routes it into the
+	// email-verification steps below.
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	go func() {
+		f, err := os.OpenFile(pipePath, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(testCode + "\n")
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{Email: testEmail, CodePipe: pipePath})
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	defer result.Conn.Close()
+
+	logged := buf.String()
+
+	if strings.Contains(logged, testEmail) {
+		t.Errorf("Login()'s logged output leaks the raw email %q in cleartext:\n%s", testEmail, logged)
+	}
+	wantEmailLen := fmt.Sprintf("emailLen=%d", len(testEmail))
+	if !strings.Contains(logged, wantEmailLen) {
+		t.Errorf("Login()'s logged output is missing %q -- the email-verification log lines may not have fired, or logged the wrong length:\n%s", wantEmailLen, logged)
 	}
 }

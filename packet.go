@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -110,6 +111,28 @@ func EncodePacket(body []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// readFrameField performs io.ReadFull for a frame field read that happens
+// AFTER a packet's leading header byte has already been successfully read.
+// Per io.ReadFull's documented contract, a read that consumes zero bytes
+// returns bare io.EOF regardless of whether earlier io.ReadFull calls in
+// this same ReadPacket invocation already consumed real frame bytes -- so a
+// capture truncated exactly on a field-read boundary mid-frame (e.g. right
+// after the header but before the length field) would otherwise produce the
+// exact same bare io.EOF as a genuine clean end-of-stream. This helper
+// converts that bare io.EOF into io.ErrUnexpectedEOF so callers such as
+// DecodeStreamFile's `errors.Is(err, io.EOF)` check correctly classify only
+// a genuine stream-start EOF (the header read, which does NOT use this
+// helper) as clean, while any mid-frame truncation surfaces as a real error.
+func readFrameField(r io.Reader, buf []byte) error {
+	if _, err := io.ReadFull(r, buf); err != nil {
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return err
+	}
+	return nil
+}
+
 // ReadPacket reads one framed packet from r and returns the decoded,
 // decompressed SFSObject body bytes.
 func ReadPacket(r io.Reader) ([]byte, error) {
@@ -121,7 +144,7 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 
 	if header&hdrForward != 0 {
 		var sid [2]byte
-		if _, err := io.ReadFull(r, sid[:]); err != nil {
+		if err := readFrameField(r, sid[:]); err != nil {
 			return nil, fmt.Errorf("read forward sid: %w", err)
 		}
 	}
@@ -129,13 +152,13 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 	var length uint32
 	if header&hdrBigSized != 0 {
 		var lb [4]byte
-		if _, err := io.ReadFull(r, lb[:]); err != nil {
+		if err := readFrameField(r, lb[:]); err != nil {
 			return nil, fmt.Errorf("read big length: %w", err)
 		}
 		length = binary.BigEndian.Uint32(lb[:])
 	} else {
 		var lb [2]byte
-		if _, err := io.ReadFull(r, lb[:]); err != nil {
+		if err := readFrameField(r, lb[:]); err != nil {
 			return nil, fmt.Errorf("read length: %w", err)
 		}
 		length = uint32(binary.BigEndian.Uint16(lb[:]))
@@ -148,7 +171,7 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 	hasZstdLen := header&hdrCompressed != 0 && header&hdrUseLZ4 != 0
 	if hasZstdLen {
 		var lb [4]byte
-		if _, err := io.ReadFull(r, lb[:]); err != nil {
+		if err := readFrameField(r, lb[:]); err != nil {
 			return nil, fmt.Errorf("read uncompressed length: %w", err)
 		}
 		uncompressedLen = binary.BigEndian.Uint32(lb[:])
@@ -158,7 +181,7 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 	}
 
 	body := make([]byte, length)
-	if _, err := io.ReadFull(r, body); err != nil {
+	if err := readFrameField(r, body); err != nil {
 		return nil, fmt.Errorf("read body (%d bytes): %w", length, err)
 	}
 

@@ -108,7 +108,7 @@ func aesECBDecryptPKCS7(ciphertext, key []byte) ([]byte, error) {
 	for i := 0; i < len(ciphertext); i += bs {
 		block.Decrypt(out[i:i+bs], ciphertext[i:i+bs])
 	}
-	return pkcs7Unpad(out)
+	return pkcs7Unpad(out, bs)
 }
 
 func pkcs7Pad(data []byte, blockSize int) []byte {
@@ -121,13 +121,16 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 	return padded
 }
 
-func pkcs7Unpad(data []byte) ([]byte, error) {
+func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("pkcs7Unpad: empty input")
 	}
 	padLen := int(data[len(data)-1])
 	if padLen <= 0 || padLen > len(data) {
 		return nil, fmt.Errorf("pkcs7Unpad: invalid padding byte %d", padLen)
+	}
+	if padLen > blockSize {
+		return nil, fmt.Errorf("pkcs7Unpad: padding byte %d exceeds block size %d", padLen, blockSize)
 	}
 	for _, b := range data[len(data)-padLen:] {
 		if int(b) != padLen {

@@ -111,62 +111,34 @@ func (o *SFSObject) GetLong(key string) int64 {
 	return 0
 }
 
-// unsafeRawString is the raw, unredacted dump of o -- it does NOT satisfy fmt.Stringer (the name
-// deliberately isn't "String") specifically so that handing a *SFSObject to fmt's %v/%s verbs, a
-// Print-family function, or slog's Any-kind attribute formatting can never auto-invoke this and
-// leak a live credential. It is only ever called explicitly, from formatSFSValue's recursive case
-// (the raw dump path used by unsafeRawString itself, for nested objects). String() below is NOT
-// one of those callers -- it delegates to StringRedacted() instead. Do not call this from outside
-// sfsobject.go; if you need a full-fidelity dump for local debugging, prefer StringRedacted() at a
-// call site that's already confirmed safe, or add the field to sensitiveSFSKeys if it's genuinely
-// a credential.
-func (o *SFSObject) unsafeRawString() string {
-	var b bytes.Buffer
-	b.WriteString("{")
-	for i, k := range o.keys {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		v := o.values[k]
-		fmt.Fprintf(&b, "%s=%s", k, formatSFSValue(v))
-	}
-	b.WriteString("}")
-	return b.String()
-}
-
 // String makes *SFSObject satisfy fmt.Stringer safely: it delegates to StringRedacted() rather
-// than the raw unsafeRawString() dump, so any code path that hands a *SFSObject to fmt's %v/%s
-// verbs, a Print-family function, or slog's Any-kind attribute formatting -- all of which
-// auto-invoke Stringer with zero literal ".String()" text in the source, a pattern
+// than a raw, unredacted dump, so any code path that hands a *SFSObject to fmt's %v/%s verbs, a
+// Print-family function, or slog's Any-kind attribute formatting -- all of which auto-invoke
+// Stringer with zero literal ".String()" text in the source, a pattern
 // credential_leak_lint_test.go's text-scanning approach structurally cannot see -- is redacted by
 // construction instead of leaking a live loginKey/accessToken/airKey/etc. This means an ordinary,
 // idiomatic fmt.Errorf("...: %v", someSFSObject) or slog.Info("resp", "params", someSFSObject) is
 // safe by default, closing the gap for good rather than only for today's known call sites.
+//
+// Round 14 introduced this delegation (the pre-round-14 String() was itself the raw, unredacted
+// dump, later renamed to the unexported unsafeRawString()). Round 15 deleted unsafeRawString() and
+// its formatSFSValue() recursion helper entirely, once the round-15 audit (via `go run
+// golang.org/x/tools/cmd/deadcode@latest .`) confirmed nothing called them anymore -- String() has
+// delegated straight to StringRedacted() since round 14, so the raw-dump path had been unreachable
+// dead code (0% test coverage) ever since.
 func (o *SFSObject) String() string {
 	return o.StringRedacted()
 }
 
-// formatSFSValue recurses into nested SFSObject/SFSArray values instead of
-// printing their Go pointer, so unsafeRawString() dumps are actually useful for
-// inspecting arrays-of-objects like `accountArr`/`defaultBuilds`.
-func formatSFSValue(v SFSValue) string {
-	switch val := v.Val.(type) {
-	case *SFSObject:
-		return val.unsafeRawString()
-	case *SFSArray:
-		var b bytes.Buffer
-		b.WriteString("[")
-		for i, item := range val.items {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(formatSFSValue(item))
-		}
-		b.WriteString("]")
-		return b.String()
-	default:
-		return fmt.Sprintf("%v", val)
-	}
+// GoString makes *SFSObject satisfy fmt.GoStringer -- the interface Go's %#v verb uses -- the same
+// way String() above satisfies fmt.Stringer. Without this, %#v on a *SFSObject falls through to
+// Go's default reflection-based struct formatter, which dumps every internal field (including the
+// unexported values map) completely raw, printing a live loginKey/accessToken/etc. in full
+// cleartext. No live %#v usage exists anywhere in this repo today, but it's an extremely common,
+// idiomatic Go debugging verb any future contributor might reach for without realizing SFSObject
+// needs special handling -- this closes that gap the same way round 14 closed the %v/Stringer one.
+func (o *SFSObject) GoString() string {
+	return o.StringRedacted()
 }
 
 // sensitiveSFSKeys lists the field names this protocol is known to carry live credentials/tokens
@@ -205,18 +177,51 @@ var sensitiveSFSKeys = map[string]bool{
 	// this stays as defense-in-depth in case a future field embeds something sensitive inside
 	// this or another opaque string value.
 	"ta": true,
+	// mail is the operator's own real email address, put there by login.go's email-verification
+	// flow (PutUtfString("mail", opts.Email), both the account.login.send.verify.code and
+	// account.login.new call sites). It's PII -- the account operator's own email address -- not
+	// a bearer credential, but is added defensively so any current/future StringRedacted() dump
+	// of a request/response carrying this field masks it instead of printing a real email
+	// address in cleartext.
+	"mail": true,
+	// The following are the device/advertising-identifier PII cluster documented in
+	// docs/live-validation.mdx's "complete Login params field list" section (IMEI, AndroidID,
+	// androidDid, gaid, afuid, firebaseId, distinct_id) and its iOS reconnect-fix section (idfa,
+	// idfv) as real fields a genuine (non-Go-client) Login request carries. identity.go's own
+	// BuildLoginParams currently only ever sends these as empty-string placeholders (this Go
+	// client doesn't have real values for them), so today's Go-client-originated traffic leaks
+	// nothing under these keys -- but decode.go's -decode-stream tool (this repo's own documented
+	// tool for decoding a REAL captured non-Go-client login) would print real values for these
+	// fields in cleartext, since StringRedacted() has no way to mask a key that isn't in this
+	// map. Not bearer credentials -- device/tracking identifiers -- added so a real captured
+	// login decoded via -decode-stream doesn't leak them.
+	"IMEI":        true,
+	"AndroidID":   true,
+	"androidDid":  true,
+	"idfa":        true,
+	"idfv":        true,
+	"gaid":        true,
+	"afuid":       true,
+	"firebaseId":  true,
+	"distinct_id": true,
 }
 
-// StringRedacted is unsafeRawString()'s safe-to-log twin (and, since String() now delegates to
-// this method, is the real implementation behind String() too): a decoded server response or
-// outgoing request can carry a live loginKey/accessToken/airKey/shumeiBoxId in cleartext (this
-// protocol has no separate "credentials" envelope -- they're ordinary fields mixed in with
-// gameplay data), and unsafeRawString()'s fully generic dump has no way to tell those fields apart
-// from an ordinary uid or building level. StringRedacted walks the same structure but masks any
-// key in sensitiveSFSKeys (recursing into nested SFSObject/SFSArray values the same way
-// formatSFSValue does) instead of printing its value, so a call site that wants to log/error-wrap
-// a full decoded object for debugging can do so without risking a credential leak.
+// StringRedacted is *SFSObject's safe-to-log dump (and, since String()/GoString() delegate to this
+// method, is the real implementation behind both too): a decoded server response or outgoing
+// request can carry a live loginKey/accessToken/airKey/shumeiBoxId in cleartext (this protocol has
+// no separate "credentials" envelope -- they're ordinary fields mixed in with gameplay data).
+// StringRedacted walks o's fields and masks any key in sensitiveSFSKeys (recursing into nested
+// SFSObject/SFSArray values via formatSFSValueRedacted) instead of printing its value, so a call
+// site that wants to log/error-wrap a full decoded object for debugging can do so without risking a
+// credential leak.
+//
+// A nil receiver (e.g. from a hypothetical future PutSFSObject(key, nil) call reached recursively,
+// or a bare nil *SFSObject handed straight to fmt) returns the safe literal "<nil>" instead of
+// dereferencing o.keys/o.values and panicking.
 func (o *SFSObject) StringRedacted() string {
+	if o == nil {
+		return "<nil>"
+	}
 	var b bytes.Buffer
 	b.WriteString("{")
 	for i, k := range o.keys {
@@ -234,12 +239,39 @@ func (o *SFSObject) StringRedacted() string {
 	return b.String()
 }
 
-// formatSFSValueRedacted is formatSFSValue's redacted twin, used by StringRedacted.
+// formatSFSValueRedacted recurses into nested SFSObject/SFSArray values (rather than printing
+// their Go pointer) so StringRedacted's output is actually useful for inspecting arrays-of-objects
+// like `accountArr`/`defaultBuilds`, while staying redacted at every level via *SFSObject's own
+// StringRedacted() method for nested objects (each carries its own keys, so recursing into it
+// correctly re-applies the sensitiveSFSKeys check at that level).
+//
+// The *SFSArray case is deliberately NOT delegated to (*SFSArray).StringRedacted() -- that method
+// is the bare/standalone entry point (used when an *SFSArray is reached with no enclosing key at
+// all, e.g. a future call site that extracts and logs an array value directly) and blanket-masks
+// every item defensively for exactly that reason. An array reached HERE, though, is always a value
+// already sitting under a specific key inside a parent SFSObject whose StringRedacted() has
+// already checked that key against sensitiveSFSKeys (a sensitive key's array value never reaches
+// this function at all -- SFSObject.StringRedacted() routes those through redactSFSValue's own
+// *SFSArray case instead, which blanket-masks). So an array reached here is known-non-sensitive by
+// construction, and recursing item-by-item (rather than blanket-masking) is what keeps
+// StringRedacted's output actually useful for inspecting ordinary gameplay arrays-of-objects like
+// `accountArr`/`defaultBuilds`/`buildingList` -- blanket-masking here would make those always print
+// "[REDACTED N items]" regardless of content, gutting the tool for the overwhelming common case.
+//
+// A nil *SFSObject/*SFSArray is handled explicitly here, ahead of the delegated/recursive call, as
+// defense-in-depth alongside StringRedacted()'s own nil guard on each type -- neither path
+// dereferences a nil pointer.
 func formatSFSValueRedacted(v SFSValue) string {
 	switch val := v.Val.(type) {
 	case *SFSObject:
+		if val == nil {
+			return "<nil>"
+		}
 		return val.StringRedacted()
 	case *SFSArray:
+		if val == nil {
+			return "<nil>"
+		}
 		var b bytes.Buffer
 		b.WriteString("[")
 		for i, item := range val.items {
@@ -318,6 +350,40 @@ func NewSFSArray() *SFSArray { return &SFSArray{} }
 func (a *SFSArray) add(v SFSValue)              { a.items = append(a.items, v) }
 func (a *SFSArray) AddInt(val int32)            { a.add(SFSValue{sfsInt, val}) }
 func (a *SFSArray) AddSFSObject(val *SFSObject) { a.add(SFSValue{sfsObjectType, val}) }
+
+// String makes *SFSArray satisfy fmt.Stringer safely, mirroring SFSObject.String(): it delegates
+// to StringRedacted() rather than printing raw item contents, so handing a bare *SFSArray (one not
+// wrapped in a parent SFSObject -- every current call site instead ranges over .items directly, so
+// this was a latent rather than actively exploited gap) to fmt's %v/%s verbs, a Print-family
+// function, or slog's Any-kind attribute formatting can't leak a sensitive item in cleartext.
+func (a *SFSArray) String() string {
+	return a.StringRedacted()
+}
+
+// GoString makes *SFSArray satisfy fmt.GoStringer, mirroring SFSObject.GoString(): without this,
+// %#v on a bare *SFSArray falls through to Go's default reflection-based formatter, dumping its
+// unexported items slice raw.
+func (a *SFSArray) GoString() string {
+	return a.StringRedacted()
+}
+
+// StringRedacted is *SFSArray's safe-to-log dump for the bare/standalone case -- called directly
+// on an *SFSArray with no enclosing SFSObject key to check against sensitiveSFSKeys (String()/
+// GoString() above both delegate here). Unlike formatSFSValueRedacted's *SFSArray case (used when
+// an array is reached as a value already sitting under a specific, already-checked key inside a
+// parent object), this method has no key context at all to lean on -- a caller could be logging an
+// array extracted from anywhere, including a sensitive field's value. With no way to tell, it
+// blanket-masks every item unconditionally, the same conservative "[REDACTED N items]" shape
+// redactSFSValue already uses for a sensitive key's *SFSArray value, rather than risk printing an
+// item that turns out to be sensitive.
+//
+// A nil receiver returns the safe literal "<nil>" instead of dereferencing a.items and panicking.
+func (a *SFSArray) StringRedacted() string {
+	if a == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("[REDACTED %d items]", len(a.items))
+}
 
 // ---- Encoding ----
 

@@ -23,6 +23,14 @@ import (
 // is logged. This exists so we can experiment with many candidate
 // commands against one authenticated session instead of re-running the
 // full email-verification login for every test.
+//
+// Only flat scalar param values are supported: strings, bools, and
+// numbers. Nested JSON objects/arrays (e.g. {"heroes":[1,2,3]}) are
+// rejected by putJSONValue and abort the send -- even though the
+// underlying protocol does use array-shaped params for some real
+// commands (see docs/military-battle.mdx's PutSFSArray usage). There is
+// no workaround via this control FIFO today; such commands cannot be
+// exercised through -interactive.
 func RunInteractive(conn *GameConn, controlPipe string) {
 	slog.Info("interactive mode: reading commands", "controlPipe", controlPipe)
 	slog.Info(`format: cmd.name {"key":"value"} (params optional)`)

@@ -531,7 +531,7 @@ func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
 	// moved to a new gameUid as part of the same migration that triggered the redirect below.
 	gslServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := LoginServerListRespon{
-			Code:       0,
+			Code:       "0",
 			ServerList: []LoginServerInfo{{GameUid: newGameUid}},
 			At:         &LoginToken{Token: newAccessTok},
 		}

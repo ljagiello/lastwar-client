@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/url"
 	"os"
 	"regexp"
 	"testing"
@@ -78,5 +79,25 @@ func TestEncodeFormSortedOrderMatchesGetServerListFields(t *testing.T) {
 		if !setFields[name] {
 			t.Errorf("encodeFormSorted's `order` whitelist includes %q but GetServerList never calls form.Set(%q, ...) -- remove it, or check whether the field was renamed in GetServerList", name, name)
 		}
+	}
+}
+
+// TestEncodeFormSortedRejectsUnknownFormKey is the runtime counterpart to
+// TestEncodeFormSortedOrderMatchesGetServerListFields above. That test only catches drift between
+// `order` and GetServerList's form.Set(...) calls as they exist in gsl.go's source right now --
+// it can't protect against a stray key reaching encodeFormSorted some other way (a future caller
+// that isn't GetServerList, a typo'd field name added without a matching source-regexp update,
+// etc). This test proves encodeFormSorted itself refuses to silently drop a field it doesn't
+// recognize: any key in the form url.Values that `order` doesn't cover must produce an error, not
+// a silently-shorter request body (see encodeFormSorted's doc comment in gsl.go for the
+// silent-field-drop precedent this guards against).
+func TestEncodeFormSortedRejectsUnknownFormKey(t *testing.T) {
+	form := url.Values{}
+	form.Set("uuid", "test-uuid")
+	form.Set("totallyUnknownField", "some-value")
+
+	got, err := encodeFormSorted(form)
+	if err == nil {
+		t.Fatalf("encodeFormSorted: expected an error for a form key absent from `order`, got nil (encoded = %q)", got)
 	}
 }

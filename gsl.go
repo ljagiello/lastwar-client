@@ -162,7 +162,15 @@ type LoginServerListRespon struct {
 	// alliance.go's honestly-left-open donation-cooldown gap (see
 	// DonateRecommendedAllianceTech's doc comment) -- a future round should add a check here once
 	// a real rejection response for this specific endpoint has actually been captured.
-	Code             int                `json:"code"`
+	//
+	// Code is flexString, not a bare int, matching CheckVersionResponse.Code and
+	// LoginServerInfo.Status: this project has confirmed live that CheckVersionResponse.Code (a
+	// sibling endpoint's own `code` field) comes back as either a JSON string or a bare number
+	// depending on context (see flexString's doc comment). getserverlist.php's `code` hasn't
+	// itself been observed doing this yet, but if it ever does, a bare int here would make
+	// json.Unmarshal fail with an opaque type-mismatch error instead of surfacing the real
+	// rejection code -- flexString tolerates both shapes without guessing at what either one means.
+	Code             flexString         `json:"code"`
 	ServerList       []LoginServerInfo  `json:"serverList"`
 	LoginServer      *AccountServerInfo `json:"loginServer"`
 	LastLoggedServer flexString         `json:"lastLoggedServer"`
@@ -362,11 +370,25 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 // through a local file with no format validation, so it's the one value
 // here that isn't inherently safe by construction, but the check applies to
 // every field at the one point they all funnel through.
+//
+// A key present in `form` but absent from `order` is also rejected (rather
+// than silently skipped, which is what the loop below would otherwise do):
+// this is the exact silent-field-drop failure mode this project has already
+// been bitten by once before, just via a different mechanism -- see
+// TestEncodeFormSortedOrderMatchesGetServerListFields (gsl_form_sync_test.go)
+// for the source-level drift check that normally keeps `order` and
+// GetServerList's form.Set(...) calls in sync today. That test only catches
+// drift between the two hand-maintained lists as they exist in gsl.go's
+// source; this check is the runtime backstop that fires no matter how a
+// stray key ends up in `form` (a future caller, a typo'd field name, etc.),
+// turning what would otherwise be a silently vanished field into an
+// immediately diagnosable error.
 func encodeFormSorted(form url.Values) (string, error) {
 	order := []string{"uuid", "airKey", "loginFlag", "country", "is3D", "lang", "simOp", "platform",
 		"isSimulator", "zone", "gameuid", "newServer", "openCountry", "opt", "loginKey", "rt"}
 	var b strings.Builder
 	first := true
+	consumed := 0
 	for _, k := range order {
 		v, ok := form[k]
 		if !ok || len(v) == 0 {
@@ -382,6 +404,10 @@ func encodeFormSorted(form url.Values) (string, error) {
 		b.WriteString(k)
 		b.WriteByte('=')
 		b.WriteString(v[0])
+		consumed++
+	}
+	if consumed != len(form) {
+		return "", fmt.Errorf("encodeFormSorted: form has %d field(s) but only %d are known to the `order` whitelist -- a field would be silently dropped from the outgoing GSL request", len(form), consumed)
 	}
 	return b.String(), nil
 }

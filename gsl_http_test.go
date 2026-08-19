@@ -75,7 +75,7 @@ func TestGetServerListAgainstFakeServer(t *testing.T) {
 		// just returns a plain (unencrypted) response, which GetServerList already supports as
 		// a fallback when no "bin" field is present in the top-level response.
 		resp := LoginServerListRespon{
-			Code: 0,
+			Code: "0",
 			ServerList: []LoginServerInfo{
 				{ID: 1, Name: "test-server", IP: "1.2.3.4", Port: 17783, Zone: "APS1", GameUid: "g1", Status: "0"},
 			},
@@ -176,10 +176,12 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 	t.Run("plaintext fallback type-mismatched", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Valid JSON with no "bin" field (so GetServerList falls to the plaintext-fallback
-			// branch), but "code" is a string where LoginServerListRespon.Code expects an int --
-			// the same kind of live server-side type flip this repo's own history has already
-			// hit once before (see LoginServerListRespon's Code doc comment).
-			fmt.Fprintf(w, `{"code":"bad-type carries %s","serverList":[]}`, fakeToken)
+			// branch), but "serverList" is a string where LoginServerListRespon.ServerList expects
+			// a JSON array -- a genuine type mismatch that still fails json.Unmarshal. (This used
+			// to type-mismatch "code" instead, but Code is now flexString -- see its doc comment --
+			// and flexString.UnmarshalJSON never returns an error, so a string-typed "code" no
+			// longer forces a decode failure here.)
+			fmt.Fprintf(w, `{"code":"0","serverList":"bad-type carries %s"}`, fakeToken)
 		}))
 		defer server.Close()
 
@@ -246,7 +248,11 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 				return
 			}
 			key := md5HexKey(string(salt))
-			reply := fmt.Sprintf(`{"code":"bad-type carries %s","serverList":[]}`, fakeToken)
+			// Same "serverList" type mismatch as the plaintext-fallback subtest above (see its
+			// comment for why "code" no longer works for this now that Code is flexString), just
+			// routed through the real AES envelope so this exercises the decrypted-plaintext
+			// decode-failure branch instead.
+			reply := fmt.Sprintf(`{"code":"0","serverList":"bad-type carries %s"}`, fakeToken)
 			encReply, err := aesECBEncryptPKCS7([]byte(reply), key)
 			if err != nil {
 				t.Errorf("aes encrypt reply: %v", err)
@@ -264,6 +270,46 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 			t.Errorf("GetServerList error leaks the raw decrypted response: %v", err)
 		}
 	})
+}
+
+// TestGetServerListCodeAcceptsStringOrNumber proves LoginServerListRespon.Code decodes both a
+// string-typed and a bare-number `code` field without error, mirroring
+// TestFlexStringUnmarshalJSON's coverage of flexString's string/number tolerance but exercised
+// through LoginServerListRespon (and the full GetServerList round-trip) specifically. This is a
+// regression guard for the Code int -> flexString change (see LoginServerListRespon's doc
+// comment): getserverlist.php's `code` field hasn't itself been observed flipping type live yet,
+// but its sibling endpoint (CheckVersionResponse.Code) has, and a bare int here would make a live
+// string-typed code fail json.Unmarshal with an opaque type-mismatch error instead of decoding.
+func TestGetServerListCodeAcceptsStringOrNumber(t *testing.T) {
+	tests := []struct {
+		name     string
+		codeJSON string // raw JSON for the "code" field, embedded verbatim into the fake response
+		want     string
+	}{
+		{"string code", `"0"`, "0"},
+		{"numeric code", `301`, "301"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			priv, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"code":%s,"serverList":[]}`, tt.codeJSON)
+			}))
+			defer server.Close()
+
+			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			if err != nil {
+				t.Fatalf("GetServerList: %v", err)
+			}
+			if lsr.Code.String() != tt.want {
+				t.Errorf("Code = %q, want %q", lsr.Code.String(), tt.want)
+			}
+		})
+	}
 }
 
 // testRSAPubKeyDER generates a throwaway RSA keypair and returns its public key as base64 DER,
