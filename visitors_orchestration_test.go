@@ -481,6 +481,64 @@ func TestParseInitVisitorsClampsInflatedMaxNumToUpperBound(t *testing.T) {
 	}
 }
 
+// TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput is the round-26 regression test for
+// ParseInitVisitors' iteration-count fix (visitors.go): the round-24/25 cap (maxVisitorsDefensiveCeiling
+// / maxVisitorsUpperBound) only ever bounded the number of VALID entries appended to the returned
+// slice -- the loop's break condition was `len(out) >= limit`, checked only after a successful
+// requirePresentField pass. A malformed entry (missing the required "uid" field) hit a `continue`
+// that didn't advance len(out) at all, so it never counted against the cap, even though
+// requirePresentField itself logs a Warn for every single one of them. Since the raw `visitor.list`
+// array is bounded only by sfsobject.go's much larger maxDecodedNodes=300,000 decode budget, a
+// hostile peer could pad visitor.list with malformed entries and force ParseInitVisitors to scan (and
+// log-warn on) all of them regardless of how small the configured cap was.
+//
+// The init push here supplies a small maxNum well under maxVisitorsDefensiveCeiling, and a
+// visitor.list made entirely of malformed entries (no "uid" field) numbering far more than that cap.
+// Since every entry is malformed, len(out) stays 0 throughout the whole scan -- so the old
+// `len(out) >= limit` break condition would never fire, and the loop would examine (and
+// requirePresentField would log a warning for) every one of the wantMalformed entries instead of
+// stopping at maxNum. Counting the "skipping visitor.list entry with no uid field" warnings actually
+// logged, rather than just asserting len(out), is what makes this test capable of catching the
+// unbounded-scan regression at all: len(out) would be 0 either way, fixed or broken.
+//
+// Mutation check: reverting the loop's `for i, item := range arr.items { if i >= limit { break }
+// ...}` in visitors.go back to `for _, item := range arr.items { if len(out) >= limit { break } ...}`
+// makes this test fail with a logged-warning count of wantMalformed instead of maxNum.
+func TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput(t *testing.T) {
+	const (
+		maxNum        = 3
+		wantMalformed = maxNum * 50 // far more malformed entries than the cap
+	)
+
+	list := NewSFSArray()
+	for i := 0; i < wantMalformed; i++ {
+		v := NewSFSObject()
+		v.PutInt("eventId", 3000+int32(i)) // deliberately no "uid" field
+		v.PutInt("visitorId", 6)
+		list.AddSFSObject(v)
+	}
+	visitor := NewSFSObject()
+	visitor.PutInt("maxNum", maxNum)
+	visitor.PutSFSArray("list", list)
+	params := NewSFSObject()
+	params.PutSFSObject("visitor", visitor)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	out := ParseInitVisitors(params)
+	slog.SetDefault(orig)
+
+	if len(out) != 0 {
+		t.Fatalf("ParseInitVisitors parsed %d visitors, want 0 (every entry in this test is malformed -- missing uid)", len(out))
+	}
+
+	gotWarnings := strings.Count(buf.String(), "skipping visitor.list entry with no uid field")
+	if gotWarnings != maxNum {
+		t.Errorf("ParseInitVisitors logged %d \"missing uid\" warnings, want exactly %d (the cap on RAW items examined, not just valid ones appended) -- input had %d malformed entries; the loop must stop scanning after the first %d regardless of how many turned out valid", gotWarnings, maxNum, wantMalformed, maxNum)
+	}
+}
+
 // eofConnWithWrites is a minimal net.Conn whose every Read returns bare io.EOF -- like
 // conn_wait_test.go's eofConn, simulating a peer's graceful close at the live-connection level -- but
 // unlike eofConn (which embeds a nil net.Conn and would panic if any other method were called), Write

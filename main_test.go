@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -417,5 +419,253 @@ func TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogic
 	}
 	if !strings.Contains(log, "stat control pipe failed") {
 		t.Errorf("subprocess stderr = %s\nwant RunInteractive's own bogus-control-pipe failure -- confirms the exit code 1 came from there, not from some earlier, different failure", log)
+	}
+}
+
+// writeMalformedOversizedFrame writes a single malformed packet header directly on server's raw
+// connection: a declared body length over maxFrameSize (packet.go's own "frame body too large"
+// guard, mirroring packet_oom_test.go's TestReadPacketRejectsOversizedDeclaredLength). ReadPacket
+// rejects this using only the header's length field, before ever attempting to read (let alone
+// allocate) a length-sized body -- so no body bytes are actually consumed here, and the
+// underlying byte stream stays synchronized for whatever request/response traffic follows this
+// call. The resulting client-side error is a plain fmt.Errorf ("frame body too large: ..."), not
+// wrapped in packet.go's net.Error-satisfying deadConnError (that type is reserved for genuine
+// connection death, io.EOF/io.ErrUnexpectedEOF) -- exactly the "still-healthy connection hitting
+// one bad frame" shape round 26's FetchBuildings-call-site fix targets.
+//
+// Takes no *testing.T deliberately, matching serveFakeGameServer's own established pattern
+// (crossserver_test.go): the fake server handlers that call this run in a background goroutine
+// that may still be executing after the test function itself has returned, and calling T methods
+// from such a goroutine is unsafe.
+func writeMalformedOversizedFrame(server *GameConn) {
+	var hdr bytes.Buffer
+	hdr.WriteByte(hdrBinary | hdrEncrypted | hdrBigSized)
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], maxFrameSize+1)
+	hdr.Write(lb[:])
+	_, _ = server.conn.Write(hdr.Bytes())
+}
+
+// mainFetchBuildingsFailureFakeGameServer answers the base zone Login normally, then sends an
+// `init` push with an empty building_new (0 buildings, satisfying Login()'s own waitForInitPush
+// fast -- gotInit=true, buildings=nil -- instead of waiting out the full 45s initPushTimeout for a
+// genuine silence timeout), which is what actually reaches main()'s zero-buildings FetchBuildings
+// fallback call site. It then writes a single malformed oversized frame directly on the
+// connection (writeMalformedOversizedFrame above): FetchBuildings' fallback call reads this as
+// its very first envelope and returns a plain, non-net.Error decode failure immediately, instead
+// of burning the fallback's own 12s timeout.
+func mainFetchBuildingsFailureFakeGameServer() func(*GameConn) {
+	return func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		loginResp := NewSFSObject()
+		loginResp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, loginResp); err != nil {
+			return
+		}
+		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+			return
+		}
+		writeMalformedOversizedFrame(server)
+	}
+}
+
+// TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive is the round-26
+// regression test for Fix 1's second call site: FetchBuildings' fallback call in main() itself
+// (as opposed to runCrossServerTest's twin call site, covered separately by
+// TestRunCrossServerTestFetchBuildingsFailureWithInteractiveReachesRunInteractive in
+// main_crossserver_test.go) used to unconditionally os.Exit(1) on ANY FetchBuildings error, with
+// zero reference to whether -interactive was requested -- the exact same bug class round 25's
+// shouldAbortBeforeInteractive fix closed for CollectAll's two call sites, just at this sibling
+// call site one function up that fix never touched.
+//
+// Mirrors TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogicError's own
+// end-to-end shape (a full guest login through a fake GSL server and a fake game server, -interactive
+// pointed at a path that can never become a real FIFO so RunInteractive's own startup log proves
+// this call site was reached before it fails fast on its os.Stat check), but targets the sibling
+// FetchBuildings call site instead of CollectAll's.
+func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		addr := startFakeGameServer(t, mainFetchBuildingsFailureFakeGameServer())
+		host, port := splitHostPortInt(t, addr)
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{
+			Code:       "0",
+			ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+			At:         &LoginToken{Token: "tok-1"},
+		})
+		useFakeGSLServer(t, gsl)
+
+		os.Args = []string{"lastwar-client", "-interactive", "/nonexistent/lastwar-test-control-pipe"}
+		main()
+		// Only reached if main() fails to exit -- the outer assertions below will then see a
+		// clean (non-error) subprocess exit and fail with a clear message instead of this
+		// silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1 (RunInteractive's own os.Stat failure on the bogus control pipe path); stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+
+	log := stderr.String()
+	if !strings.Contains(log, "fetch buildings failed") {
+		t.Errorf("subprocess stderr = %s\nwant it to log FetchBuildings' fallback failure", log)
+	}
+	if !strings.Contains(log, "frame body too large") {
+		t.Errorf("subprocess stderr = %s\nwant the logged error to be the plain decode failure (not a net.Error timeout) -- otherwise this test isn't actually exercising the non-net-error path shouldAbortBeforeInteractive exists for", log)
+	}
+	if !strings.Contains(log, "interactive mode: reading commands") {
+		t.Errorf("subprocess stderr = %s\nwant it to contain RunInteractive's startup log -- proof main()'s FetchBuildings fallback call site actually reached RunInteractive instead of unconditionally aborting on the fetch failure", log)
+	}
+	if !strings.Contains(log, "stat control pipe failed") {
+		t.Errorf("subprocess stderr = %s\nwant RunInteractive's own bogus-control-pipe failure -- confirms the exit code 1 came from there, not from some earlier, different failure", log)
+	}
+}
+
+// mainZeroBuildingsFallbackFakeGameServer answers Login normally, then sends an `init` push
+// carrying a malformed/empty building_new (0 buildings) alongside a normal, non-empty
+// visitor.list (one visitor, uid 777) -- both parsed from the very same init push (see
+// ParseInitBuildings/ParseInitVisitors), so this is a real reachable state, not a contrived one.
+// It then writes a single malformed oversized frame (writeMalformedOversizedFrame above): main()'s
+// zero-buildings FetchBuildings fallback call reads this as its very first envelope and returns
+// immediately with 0 buildings AND 0 visitors of its own -- the exact shape round 26's Fix 4
+// targets, where an unconditional visitors overwrite would silently discard the real, already-known
+// visitor list obtained above. Finally it answers CollectAll's fixed request sequence generically
+// (mirroring mainCollectInteractiveFakeGameServer's own pattern), recording the uid any
+// "visitor.operate" request carries into gotVisitorUID so the test can confirm GreetVisitors
+// actually ran against the ORIGINAL visitor list, not the fallback's empty one.
+func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*GameConn) {
+	return func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		loginResp := NewSFSObject()
+		loginResp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, loginResp); err != nil {
+			return
+		}
+
+		v := NewSFSObject()
+		v.PutLong("uid", 777)
+		v.PutInt("eventId", 1)
+		list := NewSFSArray()
+		list.AddSFSObject(v)
+		visitorObj := NewSFSObject()
+		visitorObj.PutSFSArray("list", list)
+		initParams := NewSFSObject()
+		initParams.PutSFSObject("visitor", visitorObj) // building_new deliberately omitted -- 0 buildings
+		if err := server.SendExtension("init", initParams); err != nil {
+			return
+		}
+
+		writeMalformedOversizedFrame(server)
+
+		// CollectAll's 8 fixed sub-actions issue 9 requests total when buildings/visitors are both
+		// empty (see mainCollectInteractiveFakeGameServer's own doc comment for the per-action
+		// breakdown: idle x2, mail-list x1, help-all x1, gifts x2, tech-refresh x1, vip x2) -- plus
+		// one more here for GreetVisitors' single visitor.operate call, since this test's whole
+		// point is that the ORIGINAL non-empty visitors slice from Login() survives into CollectAll
+		// despite the fallback FetchBuildings call above returning 0 visitors of its own.
+		const wantRequests = 10
+		for i := 0; i < wantRequests; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				return
+			}
+			resp := NewSFSObject()
+			replyCmd := msg.Cmd
+			switch msg.Cmd {
+			case "visitor.operate":
+				*gotVisitorUID = msg.Params.GetLong("uid")
+				resp.PutBool("success", true)
+			case "chat.get.system.mails":
+				// ListMail waits under a distinct push cmd, not an echo of the request.
+				replyCmd = "push.chat.get.system.mails"
+			case "science.data.refresh":
+				// No "allianceScience" field: DonateRecommendedAllianceTech reads that as "no tech
+				// tree data" and returns nil without a second al.science.donate call.
+			default: // lw.pve.idle.reward, al.help.all, alliance.reward.allreceive, vip.*
+				resp.PutBool("success", true)
+			}
+			_ = server.SendExtension(replyCmd, resp)
+		}
+	}
+}
+
+// TestMainZeroBuildingsFallbackPreservesNonEmptyVisitors is the round-26 regression test for Fix
+// 4: the zero-buildings fallback re-fetch (main.go) used to unconditionally overwrite the already-
+// obtained visitors slice too, even though the trigger condition only tested buildings' length.
+// Both buildings and visitors come from the same Login()/waitForInitPush call, so an init push
+// with a malformed/partial building_new (0 buildings) alongside a normal, non-empty visitor.list
+// is a real reachable state -- and since the bootstrap init push fires once per session,
+// FetchBuildings' own fallback call has no second init push to observe and (in this test) fails
+// fast with a decode error, returning visitors=nil -- which, before this fix, silently clobbered
+// the real, already-known visitors before CollectAll ever ran.
+//
+// This drives a full guest login (fake GSL + fake game server) with -collect and -interactive both
+// set (so the fallback's own non-net.Error decode failure doesn't itself abort the run before
+// CollectAll runs -- see TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive
+// above, Fix 1's sibling regression test), and confirms the fake server actually received a
+// "visitor.operate" request for uid 777 -- the ORIGINAL visitor from Login()'s own init-push
+// parse, not the fallback's empty result -- proving CollectAll ran against the preserved slice.
+func TestMainZeroBuildingsFallbackPreservesNonEmptyVisitors(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		var gotVisitorUID int64
+		addr := startFakeGameServer(t, mainZeroBuildingsFallbackFakeGameServer(&gotVisitorUID))
+		host, port := splitHostPortInt(t, addr)
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{
+			Code:       "0",
+			ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+			At:         &LoginToken{Token: "tok-1"},
+		})
+		useFakeGSLServer(t, gsl)
+
+		os.Args = []string{"lastwar-client", "-collect", "-interactive", "/nonexistent/lastwar-test-control-pipe"}
+		main()
+		// main() always os.Exits before returning on this path (RunInteractive's own os.Stat
+		// failure on the bogus control pipe) -- if gotVisitorUID were wrong, the assertion below
+		// (running in the PARENT process, after this child exits) is what catches it; nothing
+		// further needs to happen in this branch itself.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMainZeroBuildingsFallbackPreservesNonEmptyVisitors$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1 (RunInteractive's own os.Stat failure on the bogus control pipe path); stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+
+	log := stderr.String()
+	if !strings.Contains(log, "attempting visitor greet") || !strings.Contains(log, "\"uid\":777") {
+		t.Errorf("subprocess stderr = %s\nwant GreetVisitors' own \"attempting visitor greet\" log for uid 777 -- proof CollectAll ran against the ORIGINAL non-empty visitors slice from Login(), not the fallback FetchBuildings call's empty one", log)
 	}
 }

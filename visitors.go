@@ -100,6 +100,19 @@ const maxVisitorsUpperBound = 300
 // longer than the cap actually applied is separately logged as a Warn too: both are signals worth
 // knowing about (a misbehaving/hostile peer, or this client's live-confirmed maxNum assumption
 // having drifted), not something to silently truncate away.
+//
+// The cap bounds the number of RAW `visitor.list` items examined (round 26), not merely the number
+// of valid ones appended to the returned slice. Before round 26, the loop below only stopped once
+// len(out) reached limit -- so a malformed entry (not an *SFSObject, or missing the required "uid"
+// field via requirePresentField) hit a `continue` that didn't count against the cap at all, since it
+// never reached the append. requirePresentField itself logs a Warn per malformed entry, and the raw
+// `arr.items` slice is bounded only by sfsobject.go's much larger maxDecodedNodes=300,000 decode
+// budget -- so a hostile peer could pad visitor.list with up to ~300,000 minimal malformed entries
+// (e.g. objects with no "uid" field) and force this function to scan and log-warn on every single one
+// regardless of how small `limit` was configured, even though the returned slice (and therefore
+// GreetVisitors' own worst-case cost, see maxVisitorsDefensiveCeiling's doc comment above) really was
+// still capped. There's no legitimate reason to look at more raw items than the output cap already
+// enforces, so the loop below now stops after examining `limit` items total, valid or not.
 func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	var out []Visitor
 	v, ok := initParams.Get("visitor")
@@ -132,8 +145,8 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 		slog.Warn("visitor.list longer than cap; truncating", "listLen", len(arr.items), "cap", limit)
 	}
 
-	for _, item := range arr.items {
-		if len(out) >= limit {
+	for i, item := range arr.items {
+		if i >= limit {
 			break
 		}
 		vi, ok := item.Val.(*SFSObject)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"strings"
@@ -200,6 +201,55 @@ func TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope(t *testing.T) {
 	// blocking through the full artificial read delay first.
 	if elapsed < readDelay {
 		t.Errorf("DoHandshake returned after %v, want at least readDelay (%v): it must have blocked through the slow first read before hitting the deadline-elapsed check", elapsed, readDelay)
+	}
+}
+
+// TestDoHandshakeReadEnvelopeFailure is the round-26 regression test for DoHandshake's genuine
+// ReadEnvelope-failure branch (conn.go: the "read handshake response" error-wrapping return inside
+// DoHandshake's read loop) -- go tool cover -func showed DoHandshake at 87.5% statement coverage,
+// vs. 100% for waitFor's (login.go) equivalent branch, because none of the other DoHandshake tests
+// exercise it: they either succeed cleanly, wrap ErrAuthRejected, or (
+// TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope above) deliberately use a fake conn whose
+// SetReadDeadline is a no-op specifically so that test's error comes from the wall-clock check, never
+// from ReadEnvelope itself returning an error.
+//
+// Mirrors TestWaitForInitPushConnectionFailure's approach (conn_wait_test.go) rather than
+// eofConn/delayedFirstReadConn: the fake server reads (and discards) the real outgoing
+// HandshakeRequest -- proving SendEnvelope itself succeeded first -- then closes its end of the pipe
+// without ever replying. Per net.Pipe's own semantics (net/pipe.go), closing one end delivers io.EOF,
+// not io.ErrClosedPipe, to the other end's pending/future Reads, so the client's subsequent
+// ReadEnvelope call fails genuinely (not via any deadline/timeout path). packet.go's
+// wrapIfClosed/deadConnError then turns that into a net.Error with Timeout()==false, so asserting
+// errors.Is(err, io.EOF) and errors.As(err, &netErr) here proves DoHandshake's
+// "read handshake response: %w" wrap survives both all the way out to the caller -- exactly what a
+// future caller doing the same net.Error/Timeout() distinction sendAndWait's callers already rely on
+// (containsNonTimeoutNetError, buildings.go) would depend on.
+func TestDoHandshakeReadEnvelopeFailure(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	go func() {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		server.conn.Close() // close without replying: forces a genuine ReadEnvelope failure, not a timeout
+	}()
+
+	_, err := client.DoHandshake(500 * time.Millisecond)
+	if err == nil {
+		t.Fatal("expected an error when ReadEnvelope genuinely fails mid-handshake, got nil")
+	}
+	if !strings.Contains(err.Error(), "read handshake response") {
+		t.Errorf("err = %v, want it to include DoHandshake's \"read handshake response\" wrapping prefix", err)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("err = %v, want errors.Is(err, io.EOF) to still hold through DoHandshake's wrap", err)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error -- proving DoHandshake's wrap preserves this for a future errors.As(err, &netErr) caller", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- a genuinely closed connection must be distinguishable from DoHandshake's own benign deadline-elapsed timeout (see TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope)")
 	}
 }
 

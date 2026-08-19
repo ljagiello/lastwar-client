@@ -313,6 +313,55 @@ func TestCrossServerFlagNamesMatchesDeclarations(t *testing.T) {
 	}
 }
 
+// TestStringFlagSwallowGuardNamesMatchesDeclarations is the drift test for
+// stringFlagSwallowGuardNames (round 25's swallow-value-guard allow-list, main.go), mirroring
+// TestCrossServerFlagNamesMatchesDeclarations' own pattern just above: it scans main.go's own
+// source for every fs.String flag declaration -- real ground truth for what's actually registered
+// on the FlagSet in main(), rather than a second hand-maintained list that would just reproduce
+// the same drift risk this test exists to catch -- and asserts stringFlagSwallowGuardNames' keys
+// exactly match. This fails if a future fs.String flag is added to main() without also adding it
+// to the guard map (silently missing swallowed-flag-value protection for it), or if a stale name
+// is left in the guard map after a flag is renamed/removed.
+//
+// cs-port is deliberately excluded from this comparison, and from stringFlagSwallowGuardNames
+// itself: it's declared with fs.Int, not fs.String (see main.go), so the `fs\.String\(...\)`
+// regexp below never matches it in the first place. stringFlagSwallowGuardNames' own doc comment
+// explains why an fs.Int flag doesn't need this guard anyway -- a swallowed flag name there
+// already fails fs.Parse's own int conversion, a case TestMainFlagParseExitCodes' "malformed flag
+// value" subtest already covers. The explicit check below just pins that assumption down, so a
+// future change to cs-port's declared type (fs.Int -> fs.String) doesn't silently invalidate it
+// instead of being caught here.
+func TestStringFlagSwallowGuardNamesMatchesDeclarations(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	re := regexp.MustCompile(`fs\.String\("([a-z-]+)"`)
+	matches := re.FindAllStringSubmatch(string(src), -1)
+	if len(matches) == 0 {
+		t.Fatal("found zero fs.String flag declarations in main.go -- the regexp is likely out of sync with how flags are declared there")
+	}
+	declared := make(map[string]bool, len(matches))
+	for _, m := range matches {
+		declared[m[1]] = true
+	}
+
+	if declared["cs-port"] {
+		t.Fatal("cs-port matched the fs.String regexp -- it's supposed to be declared fs.Int and excluded from stringFlagSwallowGuardNames; if it was retyped to fs.String, add it to stringFlagSwallowGuardNames and update this test's doc comment")
+	}
+
+	for name := range declared {
+		if !stringFlagSwallowGuardNames[name] {
+			t.Errorf("flag %q is declared fs.String on the FlagSet in main() but missing from stringFlagSwallowGuardNames -- add it there (see detectSwallowedFlagValue's doc comment for what this guard protects against)", name)
+		}
+	}
+	for name := range stringFlagSwallowGuardNames {
+		if !declared[name] {
+			t.Errorf("stringFlagSwallowGuardNames recognizes %q but no such fs.String flag is declared on the FlagSet in main() -- remove it, or check whether the flag was renamed", name)
+		}
+	}
+}
+
 // TestShouldAbortBeforeInteractive is the fast, deterministic unit test of the decision extracted
 // from both -collect call sites (main() and runCrossServerTest) as this round's Fix 1:
 // shouldAbortBeforeInteractive(err, interactiveRequested) in main.go. See its doc comment there for

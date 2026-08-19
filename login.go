@@ -618,10 +618,56 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 			continue
 		}
 		if msg.Cmd == "init" {
-			return ParseInitBuildings(msg.Params), ParseInitVisitors(msg.Params), true, nil
+			return dedupeBuildings(ParseInitBuildings(msg.Params)), dedupeVisitors(ParseInitVisitors(msg.Params)), true, nil
 		}
 		slog.Debug("skipped push while waiting for init", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
 	}
+}
+
+// dedupeBuildings drops repeated-uuid entries from bs, keeping only the first occurrence of each --
+// the same per-uuid dedup semantics buildings.go's FetchBuildings has applied via its
+// seenBuildingUUIDs/appendBuilding closures since round 12 (see that function's doc comments for the
+// full rationale: a building uuid appearing more than once in a single init push would otherwise
+// cause CollectAll to issue a real, redundant building.production.collect network request for the
+// same uuid twice).
+//
+// waitForInitPush -- not FetchBuildings -- is the PRIMARY init-push path: Login() calls it directly,
+// and FetchBuildings is only a fallback reached when this path's result comes back empty. Before
+// round 26, waitForInitPush returned ParseInitBuildings' raw output with no deduplication at all, so
+// the primary path lacked the protection the fallback path has had since round 12. This closes that
+// gap without touching buildings.go's own closures, which live in a different function and are out
+// of scope for this fix.
+func dedupeBuildings(bs []Building) []Building {
+	var out []Building
+	seen := make(map[int64]bool, len(bs))
+	for _, b := range bs {
+		uuid := b.Uuid()
+		if seen[uuid] {
+			continue
+		}
+		seen[uuid] = true
+		out = append(out, b)
+	}
+	return out
+}
+
+// dedupeVisitors is dedupeBuildings' sibling for Visitor.Uid -- see that function's doc comment for
+// the full rationale (buildings.go's seenVisitorUUIDs/appendVisitor has applied the identical
+// protection to FetchBuildings' fallback path since round 12; GreetVisitors issues one real
+// visitor.operate network call per slice entry with no dedup of its own, so a doubled visitor list
+// here means a doubled real network call per uid, round 26).
+func dedupeVisitors(vs []Visitor) []Visitor {
+	var out []Visitor
+	seen := make(map[int64]bool, len(vs))
+	for _, v := range vs {
+		uid := v.Uid()
+		if seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // deadlineExceededError is waitFor's own wall-clock-deadline-elapsed outcome: the loop read at

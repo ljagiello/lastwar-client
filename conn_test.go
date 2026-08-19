@@ -75,13 +75,24 @@ func newTestExtMsgWithStatus(cmd string, errorCode any, status int32, hasStatus 
 }
 
 func TestLogCommandResultClassification(t *testing.T) {
-	// logCommandResult only logs; this smoke-tests all three classification branches
-	// (success, benign errorCode, real-failure errorCode) run without panicking. The benign case
-	// must use 602026's actual documented cmd (building.production.collect) -- since
-	// benignErrorCodes entries are cmd-scoped, pairing 602026 with an arbitrary "test.cmd" would
-	// silently exercise the failure branch instead of the benign one.
+	// logCommandResult only logs; this smoke-tests all four branches its switch/if-else can
+	// actually take (round 26: the previous "all three" wording only covered outcomeSuccess,
+	// outcomeBenign-with-a-code, and outcomeFailure -- missing logCommandResult's inner else,
+	// the outcomeBenign-with-an-EMPTY-errorCode case, i.e. the building.production.collect
+	// status=0-with-no-errorCode log line -- which was untested by this test, or any other test
+	// in the suite):
+	//   1. outcomeSuccess
+	//   2. outcomeBenign with a non-empty errorCode
+	//   3. outcomeBenign with no errorCode (the status=0 heuristic, via newTestExtMsgWithStatus)
+	//   4. outcomeFailure
+	// Classification logic itself is asserted precisely by TestClassifyResponse above; this just
+	// runs each branch through the real logger without panicking. Both benign cases must use their
+	// actual documented cmd (building.production.collect) -- since both the errorCode scoping and
+	// the status=0 heuristic are cmd-scoped, pairing either with an arbitrary "test.cmd" would
+	// silently exercise a different branch than intended.
 	logCommandResult("test success", newTestExtMsg("test.cmd", nil))
 	logCommandResult("test benign", newTestExtMsg("building.production.collect", "602026"))
+	logCommandResult("test benign no code", newTestExtMsgWithStatus("building.production.collect", nil, 0, true))
 	logCommandResult("test real failure", newTestExtMsg("test.cmd", "999999"))
 }
 

@@ -159,7 +159,6 @@ func (g *GSLCrypto) EncryptRequest(plainForm string) (uuid string, data string, 
 	if err != nil {
 		return "", "", err
 	}
-	g.salt = salt
 
 	// uuid = urlsafe_b64( RSA_PKCS1v15( salt ) )
 	// PKCS1v15 is what the server actually speaks (confirmed from the
@@ -178,6 +177,17 @@ func (g *GSLCrypto) EncryptRequest(plainForm string) (uuid string, data string, 
 		return "", "", fmt.Errorf("aes encrypt form: %w", err)
 	}
 	data = urlSafeB64Encode(enc)
+
+	// Only commit the new salt once both encryption steps have actually succeeded and produced a
+	// ciphertext that will be sent to the server (round 26 fix): setting g.salt eagerly right
+	// after randomSalt, as this used to do, left a failed EncryptRequest call (RSA or AES error
+	// below) with g.salt pointing at a salt value that was never sent anywhere. DecryptResponse's
+	// only guard is an empty-string check on g.salt, so that stale-but-non-empty salt would
+	// silently pass the guard on a later call and fail deep inside pkcs7Unpad instead of with the
+	// intended "no salt in scope" error. Not reachable via any current call site (gsl.go's
+	// GetServerList allocates a fresh GSLCrypto per call and returns immediately on error), but a
+	// future retry loop or instance-reuse refactor would walk right into it.
+	g.salt = salt
 	return uuid, data, nil
 }
 

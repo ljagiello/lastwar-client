@@ -129,6 +129,117 @@ func TestLoginGuestHappyPath(t *testing.T) {
 	}
 }
 
+// fakeInitPushServerWithDuplicateUUIDs mirrors fakeInitPushServer above, but the `init` push it
+// sends carries a building_new array with building uuid 111 repeated (plus a distinct uuid 222), and
+// a visitor.list array with visitor uid 444 repeated (plus a distinct uid 555) -- reproducing a peer
+// that resends the same building/visitor entry within a single init push. See
+// TestLoginDedupesInitPushBuildingsAndVisitors, the round 26 regression test this exists for.
+func fakeInitPushServerWithDuplicateUUIDs() func(*GameConn) {
+	return func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+
+		b1 := NewSFSObject()
+		b1.PutLong("uuid", 111)
+		b1.PutInt("bId", BuildingFarmland)
+		b1Dup := NewSFSObject()
+		b1Dup.PutLong("uuid", 111)
+		b1Dup.PutInt("bId", BuildingFarmland)
+		b2 := NewSFSObject()
+		b2.PutLong("uuid", 222)
+		b2.PutInt("bId", BuildingIronMine)
+		buildingArr := NewSFSArray()
+		buildingArr.AddSFSObject(b1)
+		buildingArr.AddSFSObject(b1Dup)
+		buildingArr.AddSFSObject(b2)
+
+		v1 := NewSFSObject()
+		v1.PutLong("uid", 444)
+		v1.PutInt("eventId", 2001)
+		v1Dup := NewSFSObject()
+		v1Dup.PutLong("uid", 444)
+		v1Dup.PutInt("eventId", 2001)
+		v2 := NewSFSObject()
+		v2.PutLong("uid", 555)
+		v2.PutInt("eventId", 2002)
+		visitorList := NewSFSArray()
+		visitorList.AddSFSObject(v1)
+		visitorList.AddSFSObject(v1Dup)
+		visitorList.AddSFSObject(v2)
+		visitorObj := NewSFSObject()
+		visitorObj.PutSFSArray("list", visitorList)
+
+		init := NewSFSObject()
+		init.PutSFSArray("building_new", buildingArr)
+		init.PutSFSObject("visitor", visitorObj)
+		_ = server.SendExtension("init", init)
+	}
+}
+
+// TestLoginDedupesInitPushBuildingsAndVisitors is the regression test for round 26's fix to
+// waitForInitPush -- the PRIMARY init-push path used on every login (Login() calls it directly;
+// FetchBuildings in buildings.go is only a fallback reached when this path's result comes back
+// empty). Before this fix, waitForInitPush returned ParseInitBuildings/ParseInitVisitors' raw output
+// with no per-uuid deduplication at all, unlike FetchBuildings' own
+// seenBuildingUUIDs/seenVisitorUUIDs-backed dedup (round 12). A fake server whose `init` push repeats
+// one building uuid and one visitor uid must therefore still leave Login()'s returned
+// Buildings/Visitors slices with that uuid/uid present exactly once, not once per repetition --
+// otherwise CollectAll/GreetVisitors would issue a real, redundant network request for the same uuid
+// twice (see dedupeBuildings/dedupeVisitors in login.go).
+func TestLoginDedupesInitPushBuildingsAndVisitors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	addr := startFakeGameServer(t, fakeInitPushServerWithDuplicateUUIDs())
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	result, err := Login(LoginOptions{})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	defer result.Conn.Close()
+
+	if len(result.Buildings) != 2 {
+		t.Fatalf("got %d buildings, want 2 (uuid 111 deduped from 2 occurrences to 1, plus uuid 222)", len(result.Buildings))
+	}
+	seenB := map[int64]int{}
+	for _, b := range result.Buildings {
+		seenB[b.Uuid()]++
+	}
+	if seenB[111] != 1 {
+		t.Errorf("building uuid 111 appears %d times in result.Buildings, want 1", seenB[111])
+	}
+	if seenB[222] != 1 {
+		t.Errorf("building uuid 222 appears %d times in result.Buildings, want 1", seenB[222])
+	}
+
+	if len(result.Visitors) != 2 {
+		t.Fatalf("got %d visitors, want 2 (uid 444 deduped from 2 occurrences to 1, plus uid 555)", len(result.Visitors))
+	}
+	seenV := map[int64]int{}
+	for _, v := range result.Visitors {
+		seenV[v.Uid()]++
+	}
+	if seenV[444] != 1 {
+		t.Errorf("visitor uid 444 appears %d times in result.Visitors, want 1", seenV[444])
+	}
+	if seenV[555] != 1 {
+		t.Errorf("visitor uid 555 appears %d times in result.Visitors, want 1", seenV[555])
+	}
+}
+
 // TestLoginConnectionFailureWhileWaitingForInit is the integration-level regression test for
 // round 17's fix in Login() itself (the "if initErr != nil { ...; conn.Close(); return nil,
 // fmt.Errorf(...) }" block in step 5, right after the waitForInitPush call): a genuine connection

@@ -22,12 +22,20 @@ import (
 // so this exact case was silently dropped. It also covers round 13's Fix 3: the same class of
 // bug for GameUid, which was never compared at all until this round.
 //
+// It also covers round 26's fix: origHost is normalized through firstHost before the comparison
+// (see crossServerSaveBackNeeded's own doc comment), so a pipe-delimited multi-host origHost
+// (e.g. "host-a|host-b", the shape -cs-ip/session-config's own help text documents as supported)
+// connecting cleanly to the FIRST host is correctly recognized as "nothing changed" instead of
+// spuriously reporting a save is needed.
+//
 // Mutation-testing note: reverting crossServerSaveBackNeeded to its pre-round-12 form (dropping
 // the `newAccessTok != origAccessTok` term, i.e. `return newHost != origHost || newPort !=
 // origPort || newZone != origZone`) makes the "access token alone changed" case below return
 // false instead of true, failing this test. Likewise, dropping the `newGameUid != origGameUid`
-// term makes the "only GameUid changed" case below return false instead of true. Both prove the
-// test actually exercises the corresponding fix rather than passing vacuously.
+// term makes the "only GameUid changed" case below return false instead of true. Dropping the
+// `origHost = firstHost(origHost)` normalization makes the pipe-delimited-origHost case below
+// return true instead of false. All three prove the test actually exercises the corresponding
+// fix rather than passing vacuously.
 func TestCrossServerSaveBackNeeded(t *testing.T) {
 	cases := []struct {
 		name                                                                              string
@@ -82,6 +90,21 @@ func TestCrossServerSaveBackNeeded(t *testing.T) {
 			newHost: "1.2.3.4", newPort: 100, newZone: "APS1", newAccessTok: "tok", newGameUid: "uid-fresh",
 			origHost: "1.2.3.4", origPort: 100, origZone: "APS1", orig: "tok", origGameUid: "uid-stale",
 			want: true,
+		},
+		{
+			// This is the round-26 regression case: origHost is a pipe-delimited multi-host
+			// fallback list (exactly what -cs-ip/session-config's own help text documents as
+			// supported, e.g. "host-a|host-b"), and newHost is firstHost(origHost) -- i.e. a clean
+			// connection to the FIRST host, with no redirect and no other change at all. Before
+			// this round's fix, crossServerSaveBackNeeded compared newHost against the RAW,
+			// un-normalized origHost, so a single resolved host could never string-equal a
+			// pipe-delimited list and this case spuriously returned true, permanently collapsing
+			// the operator's configured multi-host resilience list down to one host in the
+			// persisted session config on the very first run.
+			name:    "pipe-delimited origHost, newHost is firstHost(origHost) -- no save needed",
+			newHost: "host-a", newPort: 100, newZone: "APS1", newAccessTok: "tok", newGameUid: "uid1",
+			origHost: "host-a|host-b", origPort: 100, origZone: "APS1", orig: "tok", origGameUid: "uid1",
+			want: false,
 		},
 	}
 	for _, c := range cases {
@@ -806,5 +829,88 @@ func TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive(t *testing
 	const wantReachedInteractive = "interactive mode: reading commands"
 	if !strings.Contains(stderr.String(), wantReachedInteractive) {
 		t.Errorf("subprocess stderr = %s\nwant it to contain %q -- this is the actual regression this test targets: before this round's fix, CollectAll's error triggered os.Exit(1) before RunInteractive was ever reached, so this line would never appear", stderr.String(), wantReachedInteractive)
+	}
+}
+
+// crossServerFetchBuildingsFailureServer answers the Login request normally, then writes a single
+// malformed oversized frame directly on the raw connection (writeMalformedOversizedFrame,
+// main_test.go): a declared body length over maxFrameSize (packet.go's own "frame body too large"
+// guard). DoCrossServerLogin only ever reads the Login response itself before returning, so
+// runCrossServerTest's own FetchBuildings call is the very first read this malformed frame can
+// reach -- it errors immediately with a plain, non-net.Error decode failure instead of burning
+// FetchBuildings' own 15s timeout.
+func crossServerFetchBuildingsFailureServer() func(*GameConn) {
+	return func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		writeMalformedOversizedFrame(server)
+	}
+}
+
+// TestRunCrossServerTestFetchBuildingsFailureWithInteractiveReachesRunInteractive is the round-26
+// regression test for Fix 1's first call site: FetchBuildings' fallback call in runCrossServerTest
+// used to unconditionally os.Exit(1) on ANY FetchBuildings error, with zero reference to whether
+// -interactive was requested -- the exact same bug class round 25's shouldAbortBeforeInteractive
+// fix closed for CollectAll's two call sites, just at this sibling call site one function up that
+// fix never touched. See TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive
+// (main_test.go) for the twin regression test at main()'s own equivalent call site.
+//
+// Mirrors TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive's own end-to-end shape
+// just above (drive runCrossServerTest directly via the re-exec-subprocess idiom, -interactive
+// pointed at a path that can never become a real FIFO so RunInteractive's own startup log proves
+// this call site was reached before it fails fast on its os.Stat check), but targets the
+// FetchBuildings call site instead of CollectAll's.
+func TestRunCrossServerTestFetchBuildingsFailureWithInteractiveReachesRunInteractive(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		gameAddr := startFakeGameServer(t, crossServerFetchBuildingsFailureServer())
+		gameHost, gamePort := splitHostPortInt(t, gameAddr)
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		useFakeGSLServer(t, gsl)
+
+		runCrossServerTest(crossServerTestOpts{
+			ip: gameHost, port: gamePort, zone: "APS1", gameUid: "uid-1", at: "tok-1",
+			interactive: t.TempDir() + "/does-not-exist-fifo",
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will then
+		// see a clean (non-error) subprocess exit and fail with a clear message instead of this
+		// silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestFetchBuildingsFailureWithInteractiveReachesRunInteractive$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1 (RunInteractive's own os.Stat failure on the bogus control pipe path); stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+
+	log := stderr.String()
+	if !strings.Contains(log, "fetch buildings failed") {
+		t.Errorf("subprocess stderr = %s\nwant it to log FetchBuildings' failure", log)
+	}
+	if !strings.Contains(log, "frame body too large") {
+		t.Errorf("subprocess stderr = %s\nwant the logged error to be the plain decode failure (not a net.Error timeout) -- otherwise this test isn't actually exercising the non-net-error path shouldAbortBeforeInteractive exists for", log)
+	}
+	if !strings.Contains(log, "interactive mode: reading commands") {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q -- this is the actual regression this test targets: before this round's fix, FetchBuildings' error triggered os.Exit(1) before RunInteractive was ever reached, so this line would never appear", log, "interactive mode: reading commands")
+	}
+	if !strings.Contains(log, "stat control pipe failed") {
+		t.Errorf("subprocess stderr = %s\nwant RunInteractive's own bogus-control-pipe failure -- confirms the exit code 1 came from there, not from some earlier, different failure", log)
 	}
 }

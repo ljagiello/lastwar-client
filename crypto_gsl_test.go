@@ -5,6 +5,8 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -75,5 +77,54 @@ func TestGSLCryptoRoundTrip(t *testing.T) {
 	}
 	if gotReply != serverReply {
 		t.Fatalf("got reply %q, want %q", gotReply, serverReply)
+	}
+}
+
+// TestGSLCryptoEncryptRequestFailurePreservesSalt is the round 26 regression test: EncryptRequest
+// used to set g.salt to the freshly generated salt *before* the RSA and AES encryption steps that
+// can still fail, so a failed call left g.salt pointing at a salt value that was never actually
+// sent to the server. DecryptResponse's only guard against operating without a real salt is an
+// empty-string check on g.salt, so that stale-but-unused salt would silently satisfy the guard and
+// blow up later with a confusing pkcs7Unpad error instead of the intended "no salt in scope"
+// message. This drives EncryptRequest's RSA step to fail deterministically -- without needing a
+// malformed key that could panic checkPub -- by using a structurally valid but undersized RSA
+// public key: rsa.EncryptPKCS1v15 computes k = pub.Size() and rejects any message where
+// k-11 < len(msg) before doing any real RSA math, so a tiny modulus is enough to force
+// ErrMessageTooLong for our 20-byte salt.
+func TestGSLCryptoEncryptRequestFailurePreservesSalt(t *testing.T) {
+	tinyPub := &rsa.PublicKey{N: big.NewInt(3233), E: 17}
+
+	// Case 1: a prior successful EncryptRequest already left a real salt in scope. A subsequent
+	// failing call must leave that salt completely untouched -- not overwritten with the new,
+	// never-sent salt.
+	gc := NewGSLCrypto(tinyPub)
+	const preSalt = "pre-existing-salt-from-a-prior-successful-call"
+	gc.salt = preSalt
+
+	if _, _, err := gc.EncryptRequest("uuid=test-device&opt=new"); err == nil {
+		t.Fatalf("EncryptRequest: expected error from undersized RSA key, got nil")
+	}
+	if gc.salt != preSalt {
+		t.Fatalf("gc.salt after failed EncryptRequest = %q, want unchanged %q", gc.salt, preSalt)
+	}
+
+	// Case 2: no prior successful call, so g.salt starts empty. A failing EncryptRequest call
+	// must leave it empty, and a subsequent DecryptResponse call must still get the intended
+	// "no salt in scope" error rather than proceeding with a stale, never-sent salt into a
+	// confusing downstream pkcs7Unpad failure.
+	gc2 := NewGSLCrypto(tinyPub)
+	if _, _, err := gc2.EncryptRequest("uuid=test-device&opt=new"); err == nil {
+		t.Fatalf("EncryptRequest: expected error from undersized RSA key, got nil")
+	}
+	if gc2.salt != "" {
+		t.Fatalf("gc2.salt after failed EncryptRequest = %q, want empty", gc2.salt)
+	}
+
+	_, err := gc2.DecryptResponse("irrelevant-bin-field")
+	if err == nil {
+		t.Fatalf("DecryptResponse after failed EncryptRequest: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no salt in scope") {
+		t.Fatalf("DecryptResponse after failed EncryptRequest: got error %q, want it to contain %q", err.Error(), "no salt in scope")
 	}
 }

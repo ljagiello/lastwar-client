@@ -113,7 +113,7 @@ func main() {
 	// was ever passed on the command line) -- computed once, up front, so the swallowed-flag-
 	// value check inside the fs.Visit callback just below can test whether a suspicious value is
 	// genuinely another flag's name, not merely a plausible-looking string. See
-	// detectSwallowedFlagValue's own doc comment (this round's Fix 1, the MAJOR finding) for the
+	// detectSwallowedFlagValue's own doc comment (round 25's Fix 1, the MAJOR finding) for the
 	// full mechanism this guards against.
 	registeredFlagNames := make(map[string]bool)
 	fs.VisitAll(func(f *flag.Flag) { registeredFlagNames[f.Name] = true })
@@ -260,10 +260,30 @@ func main() {
 		// kept at a single attempt rather than a retry loop. This is just one
 		// last chance to catch a late `init` before giving up entirely.
 		slog.Info("fetching building list (push.init.build)")
-		buildings, visitors, err = FetchBuildings(conn, 12*time.Second)
-		if err != nil {
-			slog.Error("fetch buildings failed", "error", err)
-			os.Exit(1)
+		fbBuildings, fbVisitors, fbErr := FetchBuildings(conn, 12*time.Second)
+		buildings = fbBuildings
+		// Login()'s own init-push parse (ParseInitBuildings/ParseInitVisitors, buildings.go/
+		// visitors.go) can populate a non-empty visitors slice even when building_new comes back
+		// empty/malformed -- both are parsed from the very same bootstrap init push, but are
+		// otherwise independent fields. That bootstrap init push fires once per session, so this
+		// fallback FetchBuildings call has no second init push left to observe: it will most
+		// likely time out and return visitors=nil. Only let its result replace visitors when
+		// Login() didn't already obtain a real, non-empty one -- an unconditional overwrite here
+		// would silently discard already-known visitors before CollectAll ever runs (round 26).
+		if len(visitors) == 0 {
+			visitors = fbVisitors
+		}
+		if fbErr != nil {
+			slog.Error("fetch buildings failed", "error", fbErr)
+			// See shouldAbortBeforeInteractive's own doc comment: this call site is reached over
+			// a connection Login() itself already established and used successfully, so a
+			// FetchBuildings failure here that isn't evidence of a genuinely dead connection
+			// (e.g. a decode/parse failure on one bad frame, not wrapped in a net.Error) must not
+			// silently discard an explicit -interactive request -- the exact same bug class
+			// round 25 closed for CollectAll's two call sites, applied here too (round 26).
+			if shouldAbortBeforeInteractive(fbErr, *interactive != "") {
+				os.Exit(1)
+			}
 		}
 	}
 	slog.Info("got buildings", "count", len(buildings))
@@ -289,20 +309,31 @@ func main() {
 	slog.Info("client exiting")
 }
 
-// shouldAbortBeforeInteractive decides, at both -collect call sites (main() and
-// runCrossServerTest), whether a non-nil CollectAll error should os.Exit(1) right there or fall
-// through to the "if -interactive is set, stay connected" check a few lines later.
+// shouldAbortBeforeInteractive decides, at the two -collect call sites (main() and
+// runCrossServerTest) AND, since round 26, the two sibling FetchBuildings fallback call sites
+// right above each of those (main()'s zero-buildings fallback, and runCrossServerTest's own
+// unconditional post-login FetchBuildings call), whether a non-nil error there should os.Exit(1)
+// right there or fall through to the "if -interactive is set, stay connected" check a few lines
+// later.
 //
 // CollectAll's own doc comment (see buildings.go) is explicit that it issues one independent
 // request per fixed action plus one per collectible building, and a sendAndWait net.Error with
 // Timeout()==true on any one of them is "a normal, expected timeout on one action's response, not
 // evidence the connection is dead" -- not proof the connection, or the rest of the collect run,
-// is actually broken. Before this fix, BOTH call sites treated every non-nil CollectAll error
-// identically to a genuinely dead connection: os.Exit(1) before ever reaching the -interactive
-// check below. An operator who explicitly passed -interactive alongside -collect -- intending to
-// stay connected afterward regardless of whether every single collect action succeeded -- had that
-// explicit request silently discarded on what, given how many independent requests one collect run
-// issues, is not a rare edge case.
+// is actually broken. Before round 25's fix, both -collect call sites treated every non-nil
+// CollectAll error identically to a genuinely dead connection: os.Exit(1) before ever reaching the
+// -interactive check below. An operator who explicitly passed -interactive alongside -collect --
+// intending to stay connected afterward regardless of whether every single collect action
+// succeeded -- had that explicit request silently discarded on what, given how many independent
+// requests one collect run issues, is not a rare edge case.
+//
+// Round 26 found the identical bug class one function up, at both FetchBuildings call sites: a
+// plain decode/parse error (e.g. packet.go's "frame body too large", never wrapped in a
+// net.Error) on one bad frame, over an otherwise still-healthy connection, used to unconditionally
+// os.Exit(1) there too -- discarding an explicit -interactive request even though RunInteractive
+// only needs the conn (not buildings/visitors) to proceed. Reusing this same function, rather than
+// inventing a second, near-identical one, keeps both pairs of call sites' notion of "genuinely
+// fatal" identical.
 //
 // containsNonTimeoutNetError(err) (buildings.go) is CollectAll's own internal test for "genuinely
 // fatal": a real net.Error with Timeout()==false anywhere in err's tree, as opposed to an ordinary
@@ -413,7 +444,7 @@ var stringFlagSwallowGuardNames = map[string]bool{
 	"config": true, "decode-stream": true, "decode-label": true, "log-level": true,
 }
 
-// detectSwallowedFlagValue is the pure decision at the heart of this round's Fix 1 (the MAJOR
+// detectSwallowedFlagValue is the pure decision at the heart of round 25's Fix 1 (the MAJOR
 // finding): whether an explicitly-visited flag's own value is itself the name of another flag
 // actually registered on the FlagSet, once any leading dash(es) are stripped from that value.
 //
@@ -556,10 +587,26 @@ func serverListOverrideFlags(ip string, ipExplicit bool, port int, portExplicit 
 // either, so a -cs-rt refresh that changed ONLY GameUid (leaving host/port/zone/accessTok
 // unchanged) was silently never persisted.
 //
+// Bug fixed here (round 26): origHost is normalized through firstHost (gsl.go) below, before the
+// comparison, rather than compared as the raw string the caller captured it as. -cs-ip/session-
+// config's ip value legitimately supports a pipe-delimited multi-host fallback list (e.g.
+// "host-a|host-b", documented in -cs-ip's own help text), and every dial path already normalizes
+// this via firstHost before actually connecting (see crossserver.go) -- but newHost here is
+// always a single resolved host, parsed from the actual dialed address via net.SplitHostPort.
+// Comparing that single resolved host against a raw, un-normalized pipe-delimited origHost meant
+// an operator-supplied "host-a|host-b" that connected cleanly to the FIRST host, with NO redirect
+// and no other change, still spuriously reported "save needed" purely because the resolved
+// single host could never string-equal the original pipe-delimited value -- permanently
+// collapsing the operator's configured multi-host resilience list down to one host in the
+// persisted session config on the very first run. Normalizing here, inside this function, rather
+// than only at the call site, means this comparison is correct regardless of what shape any
+// caller's origHost happens to be in.
+//
 // Taking every value as a plain argument (rather than closing over runCrossServerTest's locals)
 // is what makes all of these mistakes structurally impossible to reintroduce silently, and what
 // makes this testable without spinning up fake GSL/game servers.
 func crossServerSaveBackNeeded(newHost string, newPort int, newZone, newAccessTok, newGameUid, origHost string, origPort int, origZone, origAccessTok, origGameUid string) bool {
+	origHost = firstHost(origHost)
 	return newHost != origHost || newPort != origPort || newZone != origZone || newAccessTok != origAccessTok || newGameUid != origGameUid
 }
 
@@ -778,7 +825,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			srv := lsr.ServerList[0]
 			if overridden := serverListOverrideFlags(ip, o.ipExplicit, port, o.portExplicit, zone, o.zoneExplicit, gameUid, o.gameUidExplicit); len(overridden) > 0 {
 				// Symmetric to the "ignoring -cs-at" WARN above, for the same reason (and, as of
-				// this round's fix to serverListOverrideFlags, genuinely the same check: both
+				// round 25's fix to serverListOverrideFlags, genuinely the same check: both
 				// require the flag to have been explicitly typed AND to carry a real, non-zero
 				// value, not just *Explicit alone): an operator-supplied value is about to be
 				// silently replaced. Only escalated to WARN when it's actually overriding
@@ -890,7 +937,14 @@ func runCrossServerTest(o crossServerTestOpts) {
 	buildings, visitors, err := FetchBuildings(conn, 15*time.Second)
 	if err != nil {
 		slog.Error("fetch buildings failed", "error", err)
-		os.Exit(1)
+		// See shouldAbortBeforeInteractive's own doc comment: the exact same bug class round 25
+		// closed for CollectAll's two call sites -- a FetchBuildings failure here that isn't
+		// evidence of a genuinely dead connection (e.g. a decode/parse failure on one bad frame,
+		// not wrapped in a net.Error) must not silently discard an explicit -interactive request
+		// (round 26).
+		if shouldAbortBeforeInteractive(err, o.interactive != "") {
+			os.Exit(1)
+		}
 	}
 	slog.Info("got buildings", "count", len(buildings))
 	if o.listBuildings || !o.collect {
