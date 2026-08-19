@@ -1039,6 +1039,29 @@ func TestStringRedactedMasksRound28SensitiveKeys(t *testing.T) {
 	}
 }
 
+// TestStringRedactedMasksGameUserName is the round-31 regression test for reclassifying
+// "gameUserName" as sensitive: it's "un"'s exact sibling on the OTHER login path (login.go's
+// push.account.login.new response, vs. "un" on the base-zone Login response) -- both carry the
+// identical real-account-username value and are persisted via the same ident.SaveUsername() call,
+// but only "un" was added to sensitiveSFSKeys in round 28. See sensitiveSFSKeys' own doc comment on
+// "gameUserName" (sfsobject.go) for the full reasoning.
+func TestStringRedactedMasksGameUserName(t *testing.T) {
+	const secretUsername = "secret-real-game-username-must-not-leak"
+
+	o := NewSFSObject()
+	o.PutUtfString("gameUserName", secretUsername)
+	o.PutUtfString("nickname", "ordinary-field-still-visible")
+
+	got := o.StringRedacted()
+
+	if strings.Contains(got, secretUsername) {
+		t.Errorf("StringRedacted leaks the gameUserName field in cleartext: %s", got)
+	}
+	if !strings.Contains(got, "ordinary-field-still-visible") {
+		t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+	}
+}
+
 // TestStringRedactedFormatBudgetBoundsLargeArray is the round-28 regression test for the MAJOR
 // format-time-budget finding: before this fix, StringRedacted()/formatSFSValueRedacted() had ZERO
 // format-time cost bound of their own -- maxDecodedNodes only bounds DECODE-time cost for one wire

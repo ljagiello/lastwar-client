@@ -1290,6 +1290,77 @@ func TestLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
 	}
 }
 
+// TestLoginRedirectWrongTypedZoneIsWarned is the round-31 regression test for the MINOR
+// testing-rigor finding that login.go's own base-zone Login() redirect branch had no wrong-typed-
+// zone regression test -- only crossserver.go's sibling branch did
+// (TestDoCrossServerLoginRedirectWrongTypedZoneIsWarned, crossserver_test.go), even though both
+// call the identical shared redirectZone helper (login.go). Mirrors that test's technique end to
+// end through Login(): the first fake server's serverInfo carries a WELL-typed ip/port (so the
+// redirect is actually followed) but a WRONG-typed zone (PutInt instead of PutUtfString), and a
+// second fake server (fakeInitPushServer) completes the redialed login. Proves (1) the redirect to
+// the new address is still followed despite the wrong-typed zone, (2) the zone itself stays at its
+// pre-redirect value (the desync risk redirectZone's own doc comment describes: a followed ip/port
+// redirect paired with a silently-stale zone), and (3) a Warn mentioning the wrong-typed zone is
+// logged, not silence.
+func TestLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	gotSecondZone := make(chan string, 1)
+	newAddr := startFakeGameServer(t, fakeInitPushServer(gotSecondZone))
+	newHost, newPort := splitHostPortInt(t, newAddr)
+
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		si := NewSFSObject()
+		si.PutUtfString("ip", newHost) // well-typed: the redirect must still be followed
+		si.PutInt("port", int32(newPort))
+		si.PutInt("zone", 999) // wrong-typed: a real zone is always a UTF string, never a number
+		resp := NewSFSObject()
+		resp.PutSFSObject("serverInfo", si)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	oldHost, oldPort := splitHostPortInt(t, oldAddr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: oldHost, Port: oldPort, Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{})
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("Login: %v (a wrong-typed zone must not be a fatal error -- the redirect itself still follows on the well-typed ip/port)", err)
+	}
+	defer result.Conn.Close()
+
+	select {
+	case zn := <-gotSecondZone:
+		if zn != "APS1" {
+			t.Errorf("second server saw Login zn=%q, want %q (unchanged/stale -- the wrong-typed zone can't overwrite it, which is exactly the desync risk this test documents: a followed ip/port redirect paired with a stale zone)", zn, "APS1")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-redirect fake server never received a Login request")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "wrong-typed") || !strings.Contains(logged, "zone") {
+		t.Errorf("expected a Warn log mentioning the wrong-typed zone field, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "reconnecting to new address") {
+		t.Errorf("expected the serverInfo redirect to still have been followed (ip/port are well-typed, only zone is wrong-typed), but the log shows none was:\n%s", logged)
+	}
+}
+
 // TestLoginBaseZoneSendFailureIsNonTimeoutNetError is the round-30 regression test for the
 // TESTING-RIGOR finding that login.go's base-zone Login() send (the conn.SendEnvelope call
 // wrapped in sendStageError, conn.go) had zero test coverage -- a coverage profile showed

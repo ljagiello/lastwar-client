@@ -19,13 +19,39 @@ func TestParseLogLevel(t *testing.T) {
 		{"warn", slog.LevelWarn},
 		{"warning", slog.LevelWarn},
 		{"error", slog.LevelError},
-		{"bogus", slog.LevelInfo}, // unrecognized -- falls back to info (with a stderr warning)
+		{"bogus", slog.LevelInfo}, // unrecognized -- falls back to info (with an slog.Warn)
 		{"", slog.LevelInfo},      // the flag's own default -- falls back to info, no warning
 	}
 	for _, c := range cases {
 		if got := parseLogLevel(c.in); got != c.want {
 			t.Errorf("parseLogLevel(%q) = %v, want %v", c.in, got, c.want)
 		}
+	}
+}
+
+// TestParseLogLevelUnrecognizedValueWarnsViaSlogNotStderr is the round-31 regression test for the
+// MAJOR finding that an unrecognized -log-level value used to bypass slog entirely and print a raw
+// plain-text line directly to stderr via fmt.Fprintf -- breaking the all-JSON log stream invariant
+// main()'s very first statement (installing a placeholder JSON handler before any flag is even
+// declared) exists specifically to guarantee. Captures slog's output through a JSON handler (the
+// same shape main() itself installs) and asserts the diagnostic reaches THAT sink, structured, with
+// no direct stderr write racing it.
+func TestParseLogLevelUnrecognizedValueWarnsViaSlogNotStderr(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	if got := parseLogLevel("bogus"); got != slog.LevelInfo {
+		t.Errorf("parseLogLevel(%q) = %v, want %v", "bogus", got, slog.LevelInfo)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, `"level":"WARN"`) {
+		t.Errorf("expected a JSON-formatted WARN log line, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "bogus") {
+		t.Errorf("expected the log line to name the offending value %q, got:\n%s", "bogus", logged)
 	}
 }
 

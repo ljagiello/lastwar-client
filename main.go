@@ -669,10 +669,16 @@ func crossServerSaveBackNeeded(newHost string, newPort int, newZone, newAccessTo
 }
 
 // parseLogLevel maps a -log-level flag value to an slog.Level, defaulting to Info for the empty
-// string (the flag's own default) and for anything unrecognized -- but an unrecognized value (e.g.
-// a typo) is reported to stderr first, since slog isn't configured yet at the point this runs: its
-// return value is what configures slog's own level a moment later in main(), so there's no logger
-// to slog.Warn through yet.
+// string (the flag's own default) and for anything unrecognized. An unrecognized value (e.g. a
+// typo) is reported via slog.Warn, not fmt.Fprintf: the placeholder JSON handler main() installs
+// as its very first statement (before any flag is even declared, let alone parsed) is already
+// slog's live default by the time this function runs, so there's no structural reason to bypass it
+// -- doing so would print one stray plain-text line into an otherwise all-JSON log stream, exactly
+// the invariant that placeholder handler exists to guarantee. The Warn fires through that
+// placeholder handler (Info-level, so a Warn is never filtered) rather than the correctly-leveled
+// one this function's own return value goes on to configure a moment later in main() -- fine, since
+// this diagnostic is about the flag value itself, not something a -log-level=error run would want
+// silenced.
 func parseLogLevel(s string) slog.Level {
 	switch strings.ToLower(s) {
 	case "debug":
@@ -684,7 +690,7 @@ func parseLogLevel(s string) slog.Level {
 	case "", "info":
 		return slog.LevelInfo
 	default:
-		fmt.Fprintf(os.Stderr, "unrecognized -log-level %q, defaulting to info (valid values: debug, info, warn (or its alias warning), error)\n", s)
+		slog.Warn("unrecognized -log-level value, defaulting to info", "value", s, "validValues", "debug, info, warn (or its alias warning), error")
 		return slog.LevelInfo
 	}
 }

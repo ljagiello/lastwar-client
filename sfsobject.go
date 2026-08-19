@@ -275,6 +275,18 @@ var sensitiveSFSKeys = map[string]bool{
 	// loginContent.StringRedacted() documents itself, in its own comment, as "Redacted, not a raw
 	// dump" -- this entry is what makes that claim actually true for "un".
 	"un": true,
+	// gameUserName is "un"'s exact sibling on the OTHER login path: login.go's Login() reads two
+	// distinct server-returned username fields carrying the identical real-account-username value
+	// in the same flow -- "un" on the base-zone Login response, and "gameUserName" on the
+	// post-email-verification push.account.login.new response (msg2.Params.GetString("gameUserName")),
+	// both persisted via the identical ident.SaveUsername() call. Round 31 fix: this key was missing
+	// here despite "un"'s own doc comment above making the identical PII argument for it -- unlike
+	// the placeholder-only device/tracking-identifier cluster below, gameUserName carries a genuine
+	// value from a real server response in this client's own normal operation today, and
+	// result.Account (msg2.Params, unredacted) is handed back to every caller of Login(). Without
+	// this entry, decode.go's -decode-stream tool (which calls StringRedacted() unconditionally on
+	// every decoded packet) would print a real captured account's username in cleartext.
+	"gameUserName": true,
 	// The following are the device/advertising-identifier PII cluster documented in
 	// docs/live-validation.mdx's "complete Login params field list" section (IMEI, AndroidID,
 	// androidDid, gaid, afuid, firebaseId, distinct_id) and its iOS reconnect-fix section (idfa,

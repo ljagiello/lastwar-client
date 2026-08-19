@@ -649,9 +649,21 @@ func (w *writeFailConn) Write([]byte) (int, error) { return 0, w.err }
 // way this test's error can surface is via the send failure itself, and only a fix that returns
 // immediately on that failure -- not one that just logs and keeps waiting -- can make this test
 // pass promptly instead of timing out the full window.
+//
+// Round 31 fix: this test used to inject a plain errors.New(...) (not a net.Error) as writeErr,
+// and its only net.Error-related assertion was "if errors.As(err, &netErr) && netErr.Timeout()"
+// with no t.Fatalf requiring errors.As to succeed first -- so with sendStageError's wrap REMOVED,
+// the raw errors.New(...) doesn't satisfy net.Error at all, errors.As fails, the && short-circuits
+// false, and the whole Timeout() check is silently skipped rather than failing the test: the test
+// passed identically whether or not the round-30 sendStageError wrap actually existed. Now injects
+// fakeTimeoutNetError{} (a genuine net.Error with Timeout()==true, mirroring
+// TestSendAndWaitWriteStageFailureIsNonTimeoutNetError's own technique above) and requires
+// errors.As to succeed via t.Fatalf before asserting Timeout()==false -- a pattern that WOULD catch
+// the wrap's removal, since removing it would leave the raw fakeTimeoutNetError's Timeout()==true
+// value visible straight through errors.As.
 func TestWaitForInitPushSendExtensionFailure(t *testing.T) {
 	client, _ := newPipeGameConnPair(t) // server intentionally left idle: no reply, no close
-	writeErr := errors.New("simulated write failure (e.g. half-open connection)")
+	writeErr := fakeTimeoutNetError{msg: "simulated write failure (e.g. half-open connection)"}
 	client.conn = &writeFailConn{Conn: client.conn, err: writeErr}
 
 	const window = 200 * time.Millisecond
@@ -669,8 +681,11 @@ func TestWaitForInitPushSendExtensionFailure(t *testing.T) {
 		t.Errorf("err = %v, want it to wrap/equal the SendExtension failure %v", err, writeErr)
 	}
 	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		t.Errorf("err = %v, want a genuine send-failure error, not a timeout error", err)
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error (via sendStageError's wrap)", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- a send-stage failure must be distinguishable from a benign wait-stage timeout, even though the underlying write failure itself reports Timeout()==true (mirroring a real deadline-exceeded net.Conn.Write)")
 	}
 	// The active pull only fires at the halfway point (window/2), so the earliest this can
 	// possibly return is ~window/2, not immediately from start -- but it must return well before

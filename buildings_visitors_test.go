@@ -257,6 +257,136 @@ func TestFetchBuildingsPushInitBuildCapsRawItemsExamined(t *testing.T) {
 	}
 }
 
+// TestFetchBuildingsPushInitBuildWrongTypedUUIDIsRejected is the round-31 regression test closing
+// the last of buildings.go's three sibling uuid/bId-guarded inline loops still missing wrong-typed
+// coverage: ParseInitBuildings (building_new) and push.add.building both already had
+// TestParseInitBuildingsWrongTypedUUIDIsRejected/TestFetchBuildingsPushAddBuildingWrongTypedUUIDIsRejected;
+// push.init.build's defaultBuilds loop only had raw-item-cap coverage
+// (TestFetchBuildingsPushInitBuildCapsRawItemsExamined above), which exercises a DIFFERENT bug
+// class (missing uuid, not present-but-wrong-typed) and would not catch a regression in this
+// loop's requireFieldType guard specifically. Mirrors
+// TestFetchBuildingsPushAddBuildingWrongTypedUUIDIsRejected's technique exactly, but wraps each
+// entry in the "buildInfo" nesting push.init.build's own wire shape requires (see
+// TestFetchBuildingsPushInitBuildCapsRawItemsExamined above for the same wrapping).
+func TestFetchBuildingsPushInitBuildWrongTypedUUIDIsRejected(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wrongTyped := NewSFSObject()
+		wrongTyped.PutUtfString("uuid", "not-a-long") // wrong SFS type: a uuid must be a Long
+		wrongTyped.PutInt("bId", BuildingFarmland)
+		wrongTypedWrapper := NewSFSObject()
+		wrongTypedWrapper.PutSFSObject("buildInfo", wrongTyped)
+
+		genuineZero := NewSFSObject()
+		genuineZero.PutLong("uuid", 0) // a real, well-typed uuid that happens to be zero
+		genuineZero.PutInt("bId", BuildingIronMine)
+		genuineZeroWrapper := NewSFSObject()
+		genuineZeroWrapper.PutSFSObject("buildInfo", genuineZero)
+
+		arr := NewSFSArray()
+		arr.AddSFSObject(wrongTypedWrapper)
+		arr.AddSFSObject(genuineZeroWrapper)
+		params := NewSFSObject()
+		params.PutSFSArray("defaultBuilds", arr)
+		_ = server.SendExtension("push.init.build", params)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	buildings, _, err := FetchBuildings(client, 150*time.Millisecond)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished sending push.init.build")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil", err)
+	}
+	if len(buildings) != 1 {
+		t.Fatalf("got %d buildings, want 1 (only the genuine, well-typed uuid=0 entry -- the string-typed one must be rejected, not silently coerced to uuid=0 too)", len(buildings))
+	}
+	if buildings[0].Uuid() != 0 || buildings[0].BId() != BuildingIronMine {
+		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=0 bId=%d entry", buildings[0].Uuid(), buildings[0].BId(), BuildingIronMine)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping push.init.build entry with wrong-typed uuid field") {
+		t.Errorf("expected a wrong-typed-uuid warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping push.init.build entry with no uuid field") {
+		t.Errorf("wrong-typed uuid must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
+// TestFetchBuildingsPushInitBuildWrongTypedBIdIsRejected is
+// TestFetchBuildingsPushInitBuildWrongTypedUUIDIsRejected's sibling for the bId half of the
+// identical guard pair, mirroring TestFetchBuildingsPushAddBuildingWrongTypedBIdIsRejected's
+// technique the same way its uuid counterpart above mirrors
+// TestFetchBuildingsPushAddBuildingWrongTypedUUIDIsRejected's.
+func TestFetchBuildingsPushInitBuildWrongTypedBIdIsRejected(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wrongTyped := NewSFSObject()
+		wrongTyped.PutLong("uuid", 111)
+		wrongTyped.PutUtfString("bId", "not-an-int") // wrong SFS type: bId must be an Int
+		wrongTypedWrapper := NewSFSObject()
+		wrongTypedWrapper.PutSFSObject("buildInfo", wrongTyped)
+
+		genuineZero := NewSFSObject()
+		genuineZero.PutLong("uuid", 222)
+		genuineZero.PutInt("bId", 0) // a real, well-typed bId that happens to be zero (an unknown type)
+		genuineZeroWrapper := NewSFSObject()
+		genuineZeroWrapper.PutSFSObject("buildInfo", genuineZero)
+
+		arr := NewSFSArray()
+		arr.AddSFSObject(wrongTypedWrapper)
+		arr.AddSFSObject(genuineZeroWrapper)
+		params := NewSFSObject()
+		params.PutSFSArray("defaultBuilds", arr)
+		_ = server.SendExtension("push.init.build", params)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	buildings, _, err := FetchBuildings(client, 150*time.Millisecond)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished sending push.init.build")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil", err)
+	}
+	if len(buildings) != 1 {
+		t.Fatalf("got %d buildings, want 1 (only the genuine, well-typed bId=0 entry -- the string-typed one must be rejected, not silently coerced to bId=0 too)", len(buildings))
+	}
+	if buildings[0].Uuid() != 222 || buildings[0].BId() != 0 {
+		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=222 bId=0 entry", buildings[0].Uuid(), buildings[0].BId())
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping push.init.build entry with wrong-typed bId field") {
+		t.Errorf("expected a wrong-typed-bId warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping push.init.build entry with no bId field") {
+		t.Errorf("wrong-typed bId must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
 // TestParseInitBuildingsWrongTypedUUIDIsRejected is the round-28 regression test for
 // requireFieldType (buildings.go): before this round's fix, requirePresentField only checked that
 // a field was present and non-nil, never that its concrete decoded SFS type actually matched what

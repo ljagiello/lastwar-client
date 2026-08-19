@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -274,6 +275,17 @@ func findServerInfo(content *SFSObject) *SFSObject {
 // straight through. Now checked against math.MinInt32/MaxInt32 before converting, degrading to
 // the same 0 fallback this function already uses for an absent/empty field, exactly like GetInt's
 // own fix. See TestGetIntFlexibleRejectsOutOfInt32RangeString (redirect_helpers_test.go).
+//
+// Round 31 fix: this function used to have no diagnostic at all for a present-but-genuinely-
+// anomalous field -- either a non-empty string that isn't a valid integer literal, or a value of
+// some other Go type entirely (bool, float, nested object, ...) that neither the int-shaped nor
+// string-shaped path above recognizes -- silently falling all the way through to the same 0
+// fallback used for a merely-absent field, with zero signal distinguishing the two. This is the
+// identical present-but-wrong-typed-vs-genuinely-absent distinction login.go's redirectIP/
+// redirectZone (reading the ip/zone siblings on this SAME serverInfo object) already warn on --
+// both functions' own doc comments cite this function's port-string precedent as the reason that
+// distinction matters, but the precedent itself was never given the matching diagnostic. Added
+// below, without changing either success path's existing behavior at all.
 func getIntFlexible(o *SFSObject, key string) int32 {
 	if n := o.GetInt(key); n != 0 {
 		return n
@@ -285,6 +297,17 @@ func getIntFlexible(o *SFSObject, key string) int32 {
 			}
 			return int32(n)
 		}
+		slog.Warn("serverInfo redirect: field present as a non-numeric string, falling back to 0",
+			"key", key, "value", s)
+		return 0
+	}
+	// Neither GetInt nor GetString produced anything -- either key is genuinely absent (silent,
+	// the ordinary case) or it's present with some other Go type entirely, which neither accessor
+	// recognizes -- warn only for the latter.
+	if v, ok := o.Get(key); ok && v.Val != nil &&
+		!sfsFieldKindAccepts(sfsFieldKindInt, v.Val) && !sfsFieldKindAccepts(sfsFieldKindString, v.Val) {
+		slog.Warn("serverInfo redirect: field present but wrong-typed (neither numeric nor string) -- falling back to 0",
+			"key", key, "goType", fmt.Sprintf("%T", v.Val), "raw", o.StringRedacted())
 	}
 	return 0
 }

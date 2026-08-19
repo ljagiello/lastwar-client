@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -131,6 +134,57 @@ func TestGetIntFlexibleRejectsOutOfInt32RangeString(t *testing.T) {
 			t.Errorf("getIntFlexible(%q) = %d, want %d (an in-range numeric string must still round-trip normally)", strconv.FormatInt(v, 10), got, int32(v))
 		}
 	}
+}
+
+// TestGetIntFlexibleWarnsOnWrongTypedField is the round-31 regression test for the MINOR finding
+// that getIntFlexible had no diagnostic at all for a present-but-genuinely-anomalous field --
+// either a non-empty string that isn't a valid integer literal, or a value of some other Go type
+// entirely (bool/float/nested object) that neither the int-shaped nor string-shaped success path
+// recognizes -- silently falling through to the same 0 fallback used for a merely-absent field.
+// Proves both new anomaly cases now warn, while a genuinely-absent field and legitimately-zero
+// in-range/string values (already covered by TestGetIntFlexible) stay silent.
+func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
+	run := func(t *testing.T, setup func(o *SFSObject)) string {
+		t.Helper()
+		o := NewSFSObject()
+		setup(o)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := getIntFlexible(o, "port")
+		slog.SetDefault(orig)
+
+		if got != 0 {
+			t.Errorf("getIntFlexible = %d, want 0", got)
+		}
+		return buf.String()
+	}
+
+	t.Run("non-numeric string warns", func(t *testing.T) {
+		logged := run(t, func(o *SFSObject) { o.PutUtfString("port", "not-a-number") })
+		if !strings.Contains(logged, "non-numeric") {
+			t.Errorf("expected a Warn mentioning the non-numeric string, got:\n%s", logged)
+		}
+	})
+	t.Run("wrong Go type warns", func(t *testing.T) {
+		logged := run(t, func(o *SFSObject) { o.PutBool("port", true) })
+		if !strings.Contains(logged, "wrong-typed") {
+			t.Errorf("expected a Warn mentioning the wrong-typed field, got:\n%s", logged)
+		}
+	})
+	t.Run("absent stays silent", func(t *testing.T) {
+		logged := run(t, func(o *SFSObject) {})
+		if logged != "" {
+			t.Errorf("expected no log output for a genuinely-absent field, got:\n%s", logged)
+		}
+	})
+	t.Run("legitimate zero stays silent", func(t *testing.T) {
+		logged := run(t, func(o *SFSObject) { o.PutInt("port", 0) })
+		if logged != "" {
+			t.Errorf("expected no log output for a legitimately-zero, correctly-typed field, got:\n%s", logged)
+		}
+	})
 }
 
 func TestServerIDFromZone(t *testing.T) {

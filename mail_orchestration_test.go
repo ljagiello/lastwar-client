@@ -451,6 +451,14 @@ func TestListMailWarnsOnWrongTypedLastMailTime(t *testing.T) {
 	if !strings.Contains(logged, "wrong-typed") {
 		t.Errorf("expected the warning to identify the field as wrong-typed (not missing/null), got log:\n%s", logged)
 	}
+	// Round-31 regression: this call site used to also call warnIfWrongTypedField (login.go)
+	// alongside the specific message above, producing a redundant SECOND "level=WARN" line for the
+	// one malformed field -- contradicting round 30's own stated intent that the specific message
+	// be this call site's sole diagnostic. Counting occurrences (not just presence) is what would
+	// have caught that regression.
+	if n := strings.Count(logged, "level=WARN"); n != 1 {
+		t.Errorf("expected exactly 1 WARN log line for the single wrong-typed lastMailTime field, got %d:\n%s", n, logged)
+	}
 }
 
 // TestListMailWarnsOnNonBoolMoreField is the regression test for this round's fix to ListMail's

@@ -154,19 +154,26 @@ var dialGame = DialGame
 
 // warnIfWrongTypedField logs a Warn when o has field present (non-nil) but its concrete decoded
 // Go type isn't one kind's corresponding GetLong/GetInt/GetString accessor (sfsobject.go) actually
-// reads -- distinct from field being genuinely absent, which every call site below already,
-// correctly, treats as "nothing to persist" and stays silent about. Unlike buildings.go's
-// requireFieldType (which collapses missing-vs-wrong-typed into the same Warn+reject, appropriate
-// for a hard list-entry reject), this only adds a diagnostic for the wrong-typed case: these call
-// sites' own GetString-then-compare-to-"" pattern is a deliberate "nothing to do" fallback, not a
-// hard rejection, so an absent field must not itself log anything.
+// reads -- distinct from field being genuinely absent, which every call site already, correctly,
+// treats as "nothing to do" and stays silent about. Unlike buildings.go's requireFieldType (which
+// collapses missing-vs-wrong-typed into the same Warn+reject, appropriate for a hard list-entry
+// reject), this only adds a diagnostic for the wrong-typed case: an absent field must not itself
+// log anything.
+//
+// context names the caller for the log line's benefit -- deliberately generic wording (not
+// "...persist...", which fit only this function's original login.go call sites, all genuinely
+// persistence reads): round 30 reused this same helper for mail.go call sites that have nothing to
+// do with persistence (HasUnclaimedReward's rewardStatus classification, ListMail's lastMailTime
+// pagination cursor), and the old hardcoded "persist" wording produced nonsensical log lines like
+// "skipping mail reward status persist: rewardStatus field present but wrong-typed" there. Fixed
+// (round 31) by dropping the persistence-specific word from the template entirely.
 func warnIfWrongTypedField(o *SFSObject, field, context string, kind sfsFieldKind) {
 	v, ok := o.Get(field)
 	if !ok || v.Val == nil {
 		return
 	}
 	if !sfsFieldKindAccepts(kind, v.Val) {
-		slog.Warn("skipping "+context+" persist: "+field+" field present but wrong-typed",
+		slog.Warn("skipping "+context+": "+field+" field present but wrong-typed",
 			"field", field, "goType", fmt.Sprintf("%T", v.Val))
 	}
 }

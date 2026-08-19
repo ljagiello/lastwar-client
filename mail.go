@@ -239,17 +239,19 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		// per-array-entry loop), so requireFieldType's own "skipping list mail page entry with
 		// no/wrong-typed lastMailTime field" log line was actively misleading (nothing is
 		// skipped), and doubled up with the more specific warning immediately below into a
-		// redundant double-Warn on every wrong-typed value. Now uses the same presence-
-		// silent/warn-only-on-wrong-type shape as HasUnclaimedReward's own round-30 fix (mail.go)
-		// and ParseInitVisitors' maxNum handling (visitors.go): presence is checked directly and
-		// silently, warnIfWrongTypedField (login.go) fires a Warn only for the present-but-wrong-
-		// typed case, and the specific "missing/null/wrong-typed" diagnostic below -- not
-		// requireFieldType's generic one -- remains the single, primary warning for this call
-		// site, covering both the missing and wrong-typed cases exactly as before. See
-		// TestListMailWarnsOnWrongTypedLastMailTime and TestListMailWarnsOnMissingLastMailTime.
+		// redundant double-Warn on every wrong-typed value.
+		//
+		// Fixed again (round 31): round 30's fix intended for the specific "missing/null/
+		// wrong-typed" diagnostic below to be this call site's SOLE warning, but still also called
+		// warnIfWrongTypedField (login.go) alongside it -- which itself unconditionally warns on
+		// the wrong-typed case, reintroducing the exact double-Warn round 30's own doc comment
+		// (above) claimed to have eliminated. Presence and type are now checked directly and
+		// silently via a plain Get + sfsFieldKindAccepts, with NO call to warnIfWrongTypedField --
+		// the specific message below is genuinely this call site's only warning for both the
+		// missing and wrong-typed cases. See TestListMailWarnsOnWrongTypedLastMailTime (updated to
+		// assert exactly one Warn line) and TestListMailWarnsOnMissingLastMailTime.
 		lastMailTimeV, lastMailTimePresent := msg.Params.Get("lastMailTime")
 		lastMailTimeOK := lastMailTimePresent && lastMailTimeV.Val != nil && sfsFieldKindAccepts(sfsFieldKindLong, lastMailTimeV.Val)
-		warnIfWrongTypedField(msg.Params, "lastMailTime", "list mail page", sfsFieldKindLong)
 		if !lastMailTimeOK {
 			slog.Warn("list mail: response reported more=true but lastMailTime is missing/null/wrong-typed, reqTime will reset to 0 for the next page instead of the real cursor value", "page", page, "collectedSoFar", len(all))
 		}
