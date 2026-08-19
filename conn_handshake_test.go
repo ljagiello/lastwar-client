@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -128,6 +130,76 @@ func TestDoHandshakeSkipRedactsCredentialFields(t *testing.T) {
 
 	if logged := buf.String(); strings.Contains(logged, secretLoginKey) {
 		t.Errorf("DoHandshake's skip-and-log fallback leaks the raw loginKey in cleartext:\n%s", logged)
+	}
+}
+
+// TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope is the regression test for DoHandshake's
+// wall-clock-deadline-elapsed exit (conn.go: the `if remaining <= 0` check at the top of its read
+// loop). Before this round's fix, that branch returned a bare fmt.Errorf -- not a net.Error --
+// reproducing, in this independent read loop, the exact bug class round 23's
+// TestWaitForDeadlineElapsedAfterNonMatchingEnvelope (conn_wait_test.go) fixed for waitFor. Both of
+// DoHandshake's current callers (login.go, crossserver.go) happen to treat any non-nil error as an
+// unconditional hard abort today, so this doesn't yet change observable behavior -- but the
+// invariant (every benign timeout outcome from a read loop in this package must satisfy net.Error
+// with Timeout()==true, exactly like sendAndWait's/waitFor's ordinary per-read timeout does) must
+// hold here too, before some future caller starts relying on it.
+//
+// This is only reachable when the loop has already iterated at least once -- i.e. a non-matching
+// envelope was successfully read and skipped -- and the deadline elapses on a LATER iteration.
+// Constructed deterministically via delayedFirstReadConn (conn_wait_test.go, same package, reused
+// verbatim) rather than racing a tight timing window: the first real read deliberately takes far
+// longer than the full DoHandshake timeout before returning a valid non-matching envelope, while
+// SetReadDeadline is a no-op the whole time -- so the read always "succeeds" (no genuine per-read
+// network timeout is even possible here), and by the time DoHandshake's loop goes back to the top,
+// the wall-clock deadline has already, unambiguously elapsed.
+func TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope(t *testing.T) {
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() {
+		c1.Close()
+		c2.Close()
+	})
+
+	const timeout = 30 * time.Millisecond
+	const readDelay = 10 * timeout // comfortably longer than the whole DoHandshake timeout
+
+	wrapped := &delayedFirstReadConn{Conn: c1, delay: readDelay}
+	client := &GameConn{conn: wrapped, reader: bufio.NewReaderSize(wrapped, 4096)}
+	server := &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
+
+	go func() {
+		// Read (and discard) the outgoing HandshakeRequest, then send something that does NOT
+		// match controllerSystem/actionHandshake -- this drives DoHandshake's loop into its
+		// skip-and-log fallback branch on its first iteration, exactly like a real out-of-order
+		// push would, before the deadline elapses on the (deliberately slow) second read.
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		unrelated := NewSFSObject()
+		unrelated.PutUtfString("noise", "an unrelated push, not the handshake response")
+		_ = server.SendEnvelope(controllerExtension, actionLogin, unrelated)
+	}()
+
+	start := time.Now()
+	got, err := client.DoHandshake(timeout)
+	elapsed := time.Since(start)
+
+	if got != nil {
+		t.Fatalf("expected no handshake response (only an unrelated envelope was ever sent), got %+v", got)
+	}
+	if err == nil {
+		t.Fatal("expected an error once the deadline elapsed after the non-matching envelope was skipped, got nil")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Errorf("err = %v (%T), want a net.Error with Timeout()=true -- DoHandshake's deadline-elapsed branch must satisfy net.Error just like waitFor's identical branch does, so callers that later start doing errors.As(err, &netErr) checks treat it as benign rather than fatal", err, err)
+	}
+	// delayedFirstReadConn's SetReadDeadline is a deliberate no-op, so the real per-read network
+	// timeout mechanism can never fire in this test -- confirmed by construction, not just by the
+	// net.Error assertion above. elapsed must be at least readDelay: DoHandshake can only have
+	// returned after actually reading (and skipping) the non-matching envelope, which required
+	// blocking through the full artificial read delay first.
+	if elapsed < readDelay {
+		t.Errorf("DoHandshake returned after %v, want at least readDelay (%v): it must have blocked through the slow first read before hitting the deadline-elapsed check", elapsed, readDelay)
 	}
 }
 

@@ -71,15 +71,35 @@ func (v Visitor) StartTime() int64 { return v.Raw.GetLong("startTime") }
 // open-ended hang.
 const maxVisitorsDefensiveCeiling = 25
 
+// maxVisitorsUpperBound is a hardcoded, non-server-trusting upper sanity bound on the init push's
+// own `visitor.maxNum` field (see the Visitor doc comment above). Before this existed,
+// ParseInitVisitors trusted maxNum verbatim as long as it was > 0, which let a hostile or
+// misbehaving -cs-ip peer simply set maxNum to an enormous value -- paired with a matching number of
+// visitor.list entries, well within sfsobject.go's maxDecodedNodes=300,000 decode budget -- and
+// completely defeat maxVisitorsDefensiveCeiling's own protection. That was the wrong model to begin
+// with: an attacker-controlled field is not itself an enforcement mechanism against that same
+// attacker, precisely the reasoning buildings.go's maxCollectibleBuildingsPerRun doc comment gives
+// for never deferring to a server-sent count at all. This bound closes that gap while still trusting
+// maxNum for its intended purpose: set well above both the live-confirmed maxNum=5 and
+// maxVisitorsDefensiveCeiling=25 -- generously large, in the same spirit as
+// maxCollectibleBuildingsPerRun=300, so a legitimately bigger real maxNum from a future game update
+// wouldn't be needlessly clamped -- while still finite, so GreetVisitors' worst-case sequential
+// runtime against a peer that never responds stays bounded (300 * defaultCmdTimeout (8s, conn.go)
+// caps the worst case at ~40 minutes instead of an open-ended hang).
+const maxVisitorsUpperBound = 300
+
 // ParseInitVisitors extracts the current visitor list from the bare `init`
 // bootstrap push's `visitor.list` field -- a sibling of `building_new` in
 // the same payload, see the Visitor doc comment above.
 //
-// The list is capped at the init push's own `maxNum` field when present and sane (> 0), falling
-// back to maxVisitorsDefensiveCeiling otherwise -- see that constant's doc comment for the full
-// threat-model rationale. A server-sent list longer than the cap actually applied is itself logged
-// as a Warn: that's a signal worth knowing about (a misbehaving/hostile peer, or this client's
-// live-confirmed maxNum assumption having drifted), not something to silently truncate away.
+// The list is capped at the init push's own `maxNum` field when present and sane (> 0), itself
+// clamped to maxVisitorsUpperBound (see that constant's doc comment -- maxNum is server-supplied and
+// therefore not trustworthy as an enforcement mechanism on its own), falling back to
+// maxVisitorsDefensiveCeiling when maxNum is absent, unparseable, or <= 0. A maxNum exceeding
+// maxVisitorsUpperBound is itself logged as a Warn before being clamped, and a server-sent list
+// longer than the cap actually applied is separately logged as a Warn too: both are signals worth
+// knowing about (a misbehaving/hostile peer, or this client's live-confirmed maxNum assumption
+// having drifted), not something to silently truncate away.
 func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	var out []Visitor
 	v, ok := initParams.Get("visitor")
@@ -102,6 +122,11 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	limit := maxVisitorsDefensiveCeiling
 	if maxNum := visitorObj.GetInt("maxNum"); maxNum > 0 {
 		limit = int(maxNum)
+		if limit > maxVisitorsUpperBound {
+			slog.Warn("visitor.maxNum exceeds upper sanity bound; clamping",
+				"maxNum", maxNum, "cap", maxVisitorsUpperBound)
+			limit = maxVisitorsUpperBound
+		}
 	}
 	if len(arr.items) > limit {
 		slog.Warn("visitor.list longer than cap; truncating", "listLen", len(arr.items), "cap", limit)

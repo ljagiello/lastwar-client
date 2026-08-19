@@ -112,6 +112,39 @@ func TestClaimAllianceGiftsAbortsRemainingTypesOnNetError(t *testing.T) {
 	}
 }
 
+// TestClaimAllianceGiftsAbortsRemainingTypesOnRealGracefulClose is the round-25
+// regression-safety-gap closer for TestClaimAllianceGiftsAbortsRemainingTypesOnNetError above -- see
+// that test's sibling, TestCollectAllAbortsRemainingActionsOnRealGracefulClose
+// (buildings_orchestration_test.go), for the full rationale: fakeNetErrConn injects an
+// already-a-net.Error fake, never exercising the real bare-io.EOF-through-ReadPacket-through-
+// deadConnError conversion path (packet.go's wrapIfClosed/deadConnError, round 24).
+//
+// realEOFConn (buildings_orchestration_test.go, same package) drives a real io.EOF through an actual
+// GameConn instead, mirroring conn_wait_test.go's TestReadEnvelopeGracefulCloseIsNonTimeoutNetError,
+// so ClaimAllianceGifts' very first request -- the Premium (type=1) claim -- fails via the real
+// deadConnError conversion, not a synthetic net.Error stand-in. Same setup and expected shape as
+// TestClaimAllianceGiftsAbortsRemainingTypesOnNetError: exactly 1 write before the abort fires.
+func TestClaimAllianceGiftsAbortsRemainingTypesOnRealGracefulClose(t *testing.T) {
+	fake := &realEOFConn{}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := ClaimAllianceGifts(client)
+
+	if err == nil {
+		t.Fatal("ClaimAllianceGifts() = nil, want a non-nil error (the fake connection's every Read returns io.EOF)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("ClaimAllianceGifts() error = %v, want it to wrap a net.Error (deadConnError, via packet.go's wrapIfClosed)", err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("ClaimAllianceGifts() error's net.Error has Timeout()==true, want false (a graceful close is a genuine dead connection, not an ordinary timeout)")
+	}
+	if got := fake.writeCount(); got != 1 {
+		t.Errorf("fake connection saw %d writes, want exactly 1 (only the Premium/type=1 request -- ClaimAllianceGifts should have aborted before the Regular/type=2 request)", got)
+	}
+}
+
 // TestClaimAllianceGiftsContinuesAfterNetErrorTimeoutOnFirstType is the round-21 regression test
 // proving the net.Error early-abort in ClaimAllianceGifts (alliance.go) only fires for a genuine
 // (non-timeout) net.Error: sendAndWait's ordinary "no matching response within

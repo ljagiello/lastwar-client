@@ -410,7 +410,12 @@ func TestLoadOrCreateDeviceIdentitySelfHealsStaleEmptyDeviceIDFile(t *testing.T)
 // forever. The device-id file is pre-created empty (so the initial readTrimmed sees "" and takes
 // the id=="" branch, and createDeviceIDStateFile's O_CREATE|O_EXCL deterministically fails with
 // os.IsExist since the file already exists), and a background goroutine populates it with real
-// content 10ms later, comfortably inside the ~50ms total retry window. Unlike
+// content 3ms later. That's long enough after the goroutine starts that the initial readTrimmed
+// (which happens within microseconds, before the goroutine's sleep even elapses) still reliably
+// observes "" and takes the retry path, but it leaves a wide (~22ms) margin before the retry
+// loop's first post-sleep re-read at deviceIDEmptyRetryDelay (~25ms) -- unlike a delay close to
+// 25ms, real-world scheduling/CI/-race jitter can't plausibly eat a 22ms margin, so this isn't a
+// race against the production timing the way a tighter delay would be. Unlike
 // TestLoadOrCreateDeviceIdentitySelfHealsStaleEmptyDeviceIDFile's file (which stays empty and
 // must self-heal), content that shows up mid-retry must win outright -- the self-heal path added
 // by that fix must never fire here, let alone overwrite it.
@@ -425,7 +430,7 @@ func TestLoadOrCreateDeviceIdentityUsesGenuineConcurrentWriterContent(t *testing
 
 	const wantID = "concurrent-writer-device-id_n3d"
 	go func() {
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(3 * time.Millisecond)
 		_ = os.WriteFile(path, []byte(wantID), 0o600)
 	}()
 

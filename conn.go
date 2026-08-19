@@ -293,7 +293,11 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return nil, fmt.Errorf("timed out waiting for handshake response")
+			// deadlineExceededError (login.go): satisfies net.Error with Timeout()==true, same as
+			// waitFor's identical wall-clock-elapsed-after-a-skipped-envelope branch (round 23).
+			// A bare fmt.Errorf here would reproduce that exact bug in this independent read loop
+			// -- see TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope below.
+			return nil, deadlineExceededError{}
 		}
 		c.conn.SetReadDeadline(time.Now().Add(remaining))
 		env, err := c.ReadEnvelope()

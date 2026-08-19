@@ -80,7 +80,7 @@ Big-endian throughout. A standalone serialized object is self-describing — it 
 | 5 | `LONG` | 8 bytes, signed |
 | 6 | `FLOAT` | 4 bytes, IEEE-754 |
 | 7 | `DOUBLE` | 8 bytes, IEEE-754 |
-| 8 | `UTF_STRING` | u16 byte-length + UTF-8 (max 32767 B) |
+| 8 | `UTF_STRING` | u16 byte-length + UTF-8 (max 65535 B) |
 | 10 | `BYTE_ARRAY` | i32 count + N × element — the one array type that skips the shared size helper; the decompiled Unity SDK's `BinDecode_BYTE_ARRAY` calls a bare 4-byte `ReadInt` instead of `GetTypedArraySize`. A genuine SFS2X wire-format asymmetry, confirmed decoding the live 313KB init payload. |
 | 9, 11–16 | `*_ARRAY` | i16 count + N × element (`GetTypedArraySize`) |
 | 17 | `SFS_ARRAY` | i16 count, then N × (tag + payload), recursive |

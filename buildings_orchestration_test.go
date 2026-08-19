@@ -906,6 +906,83 @@ func TestCollectAllAbortsRemainingActionsOnNetError(t *testing.T) {
 	}
 }
 
+// realEOFConn is a minimal net.Conn whose every Read returns bare io.EOF, mirroring
+// conn_wait_test.go's eofConn (round 24) but adding write-counting like fakeNetErrConn above --
+// needed here to prove exactly how many requests were sent before an abort fired. This closes a
+// round-25 regression-safety gap: fakeNetErrConn's Read fails with an already-a-net.Error fake, but
+// a real net.Conn's graceful-close Read failure is bare io.EOF, which does NOT itself implement
+// net.Error -- only packet.go's wrapIfClosed/deadConnError (round 24) converts it into one. Driving
+// a real io.EOF through an actual GameConn, as this type does, is what proves that conversion path
+// is wired all the way through to each orchestration entry point below, not just exercised in
+// isolation (conn_wait_test.go's TestReadEnvelopeGracefulCloseIsNonTimeoutNetError). Defined here
+// (not per-file) so alliance_test.go and interactive_orchestration_test.go can reuse it too, the
+// same way they already reuse fakeNetErrConn/fakeNetError/fakeNetAddr.
+type realEOFConn struct {
+	mu     sync.Mutex
+	writes int
+}
+
+func (c *realEOFConn) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (c *realEOFConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	c.writes++
+	c.mu.Unlock()
+	return len(b), nil
+}
+
+func (c *realEOFConn) writeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
+}
+
+func (c *realEOFConn) Close() error                     { return nil }
+func (c *realEOFConn) LocalAddr() net.Addr              { return fakeNetAddr{} }
+func (c *realEOFConn) RemoteAddr() net.Addr             { return fakeNetAddr{} }
+func (c *realEOFConn) SetDeadline(time.Time) error      { return nil }
+func (c *realEOFConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *realEOFConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestCollectAllAbortsRemainingActionsOnRealGracefulClose is the round-25 regression-safety-gap
+// closer for TestCollectAllAbortsRemainingActionsOnNetError above. That test -- like every other
+// orchestration-level net.Error early-abort test in this package (ClaimAllMail's,
+// ClaimAllianceGifts', handleInteractiveLine's) -- injects fakeNetErrConn, an already-a-net.Error
+// fake standing in for a dead connection. None of them actually exercise the real
+// bare-io.EOF-through-ReadPacket-through-deadConnError conversion path round 24 fixed
+// (packet.go's wrapIfClosed/deadConnError) -- so a future regression anywhere between packet.go and
+// CollectAll (a new buffering wrapper, wrapIfClosed dropped at one call site, etc.) would go
+// completely undetected by the existing synthetic-fake test alone.
+//
+// realEOFConn's every Read returns bare io.EOF -- the actual shape a real net.Conn produces for a
+// peer's graceful TCP close -- fed through a real GameConn exactly like conn_wait_test.go's
+// TestReadEnvelopeGracefulCloseIsNonTimeoutNetError, so this drives the real conversion end-to-end
+// through CollectAll rather than a synthetic stand-in. Same setup and expected shape as
+// TestCollectAllAbortsRemainingActionsOnNetError: exactly 1 write (CollectIdleReward's first
+// request) before the abort fires.
+func TestCollectAllAbortsRemainingActionsOnRealGracefulClose(t *testing.T) {
+	fake := &realEOFConn{}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	buildings := []Building{newTestBuilding(501, BuildingFarmland, 2)}
+
+	err := CollectAll(client, buildings, nil)
+
+	if err == nil {
+		t.Fatal("CollectAll() = nil, want a non-nil error (the fake connection's every Read returns io.EOF)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("CollectAll() error = %v, want it to wrap a net.Error (deadConnError, via packet.go's wrapIfClosed)", err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("CollectAll() error's net.Error has Timeout()==true, want false (a graceful close is a genuine dead connection, not an ordinary timeout)")
+	}
+	if got := fake.writeCount(); got != 1 {
+		t.Errorf("fake connection saw %d writes, want exactly 1 (only CollectIdleReward's first request -- CollectAll should have aborted before any other sub-action or building collect)", got)
+	}
+}
+
 // TestCollectAllContinuesRemainingActionsOnNetErrorTimeout is the round-21 regression test for the
 // fix to CollectAll's net.Error early-abort (buildings.go): a net.Error whose Timeout() is true is
 // sendAndWait's ordinary "no matching response within defaultCmdTimeout (8s)" outcome (confirmed by

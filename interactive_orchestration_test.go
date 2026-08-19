@@ -427,3 +427,47 @@ func TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits(t *testing.T) {
 		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the same phrasing used by the adjacent SendExtension-failure fatal exit)", stderr.String(), wantMsg)
 	}
 }
+
+// TestHandleInteractiveLineWaitForCmdRealGracefulCloseExits is the round-25 regression-safety-gap
+// closer for TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits above -- see that test's
+// sibling, TestCollectAllAbortsRemainingActionsOnRealGracefulClose
+// (buildings_orchestration_test.go), for the full rationale: fakeNetErrConn injects an
+// already-a-net.Error fake, never exercising the real bare-io.EOF-through-ReadPacket-through-
+// deadConnError conversion path (packet.go's wrapIfClosed/deadConnError, round 24).
+//
+// realEOFConn (buildings_orchestration_test.go, same package) drives a real io.EOF through an actual
+// GameConn instead, mirroring conn_wait_test.go's TestReadEnvelopeGracefulCloseIsNonTimeoutNetError,
+// so waitForCmd's read fails via the real deadConnError conversion -- what a real peer's graceful TCP
+// close actually produces -- not a synthetic net.Error stand-in. Same subprocess re-exec idiom as
+// TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits above: handleInteractiveLine calls
+// os.Exit(1) directly on this path, so it can't be driven to completion in-process without also
+// killing this test binary.
+func TestHandleInteractiveLineWaitForCmdRealGracefulCloseExits(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		fake := &realEOFConn{}
+		conn := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+		handleInteractiveLine(conn, `some.command`)
+		// Only reached if handleInteractiveLine fails to exit -- the outer assertions below will
+		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
+		// this silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHandleInteractiveLineWaitForCmdRealGracefulCloseExits$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	const wantMsg = "connection appears dead"
+	if !strings.Contains(stderr.String(), wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the same phrasing used by the adjacent SendExtension-failure fatal exit)", stderr.String(), wantMsg)
+	}
+}

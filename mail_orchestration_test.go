@@ -1240,6 +1240,57 @@ func TestClaimAllMailAbortsRemainingBatchesOnNetError(t *testing.T) {
 	}
 }
 
+// TestClaimAllMailAbortsRemainingBatchesOnRealGracefulClose is the round-25 regression-safety-gap
+// closer for TestClaimAllMailAbortsRemainingBatchesOnNetError above -- see that test's sibling,
+// TestCollectAllAbortsRemainingActionsOnRealGracefulClose (buildings_orchestration_test.go), for the
+// full rationale: scriptedNetErrConn's post-drain tail is fakeNetError{}, an already-a-net.Error
+// fake, never exercising the real bare-io.EOF-through-ReadPacket-through-deadConnError conversion
+// path (packet.go's wrapIfClosed/deadConnError, round 24).
+//
+// Reuses sequencedConn/connTurn (this file, above) rather than introducing a new fixture type:
+// sequencedConn's per-turn err field already supports scripting any error mid-sequence, so a turn
+// carrying err: io.EOF -- what a real net.Conn actually produces for a peer's graceful close, not a
+// synthetic net.Error stand-in -- after the ListMail response bytes is exactly what's needed here,
+// fed through a real GameConn exactly like conn_wait_test.go's
+// TestReadEnvelopeGracefulCloseIsNonTimeoutNetError. Same setup and expected shape as
+// TestClaimAllMailAbortsRemainingBatchesOnNetError: 150 same-type unclaimed mail (splitting the
+// read-status loop into two batches), then a real io.EOF on the first read-status batch's read.
+// Exactly 2 writes: the ListMail request, then the one read-status batch request that hits the real
+// io.EOF and aborts before batch 2 or the reward-claim loop are ever attempted.
+func TestClaimAllMailAbortsRemainingBatchesOnRealGracefulClose(t *testing.T) {
+	const total = 150
+	const mailType = int32(3)
+	listResp := NewSFSObject()
+	arr := NewSFSArray()
+	for i := 0; i < total; i++ {
+		arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
+	}
+	listResp.PutSFSArray("msg", arr)
+	listResp.PutBool("more", false)
+
+	fake := &sequencedConn{turns: []connTurn{
+		{bytes: encodeResponse(t, "push.chat.get.system.mails", listResp)},
+		{err: io.EOF},
+	}}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := ClaimAllMail(client)
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (the read-status batch call hits a real io.EOF)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("ClaimAllMail() error = %v, want it to wrap a net.Error (deadConnError, via packet.go's wrapIfClosed)", err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("ClaimAllMail() error's net.Error has Timeout()==true, want false (a graceful close is a genuine dead connection, not an ordinary timeout)")
+	}
+	if got := fake.writeCount(); got != 2 {
+		t.Errorf("fake connection saw %d writes, want exactly 2 (list-mail request + first read-status batch only -- ClaimAllMail should have aborted before read-status batch 2 or any reward-claim batch)", got)
+	}
+}
+
 // TestClaimAllMailSkipsReadStatusOnListMailNetError is the round-18 regression test for
 // ClaimAllMail's ListMail-net.Error check (mail.go): immediately after the ListMail call,
 // ClaimAllMail now checks whether ListMail's own returned error is itself a net.Error and, if so,

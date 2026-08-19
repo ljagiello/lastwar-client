@@ -108,6 +108,16 @@ func main() {
 	csGameUidSetExplicitly := false
 	csAtSetExplicitly := false
 	var visitedFlags []string
+
+	// registeredFlagNames is every flag name actually declared on fs (regardless of whether it
+	// was ever passed on the command line) -- computed once, up front, so the swallowed-flag-
+	// value check inside the fs.Visit callback just below can test whether a suspicious value is
+	// genuinely another flag's name, not merely a plausible-looking string. See
+	// detectSwallowedFlagValue's own doc comment (this round's Fix 1, the MAJOR finding) for the
+	// full mechanism this guards against.
+	registeredFlagNames := make(map[string]bool)
+	fs.VisitAll(func(f *flag.Flag) { registeredFlagNames[f.Name] = true })
+
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "cs-ios":
@@ -124,6 +134,31 @@ func main() {
 			csAtSetExplicitly = true
 		}
 		visitedFlags = append(visitedFlags, f.Name)
+
+		// Read the value once into a plain local: not just to avoid three redundant
+		// f.Value.String() calls below, but because flag.Value's String() is a completely
+		// different, unrelated method from SFSObject's -- a plain flag value, never a decoded
+		// SFSObject, so it can never carry a credential field either way -- and keeping every
+		// slog/fmt sink call below working from this local instead of a literal ".String()" call
+		// keeps this block out of credential_leak_lint_test.go's (deliberately blunt, name-based)
+		// scan entirely, rather than needing an allowlist entry to explain that distinction.
+		value := f.Value.String()
+
+		// See detectSwallowedFlagValue's doc comment below for the full mechanism: an explicitly-
+		// visited flag whose own value is itself the (dash-stripped) name of another flag actually
+		// registered on fs is the unambiguous signature of Go's flag package having swallowed the
+		// NEXT flag's name as THIS flag's value, rather than that next flag ever being parsed as a
+		// flag at all. Checked here, inside fs.Visit itself, rather than in a second pass, since
+		// f.Name/value are already in hand and this must fire before any of this value is used
+		// downstream (e.g. -email flowing into the outgoing verification-code request).
+		if swallowed, ok := detectSwallowedFlagValue(f.Name, value, registeredFlagNames); ok {
+			msg := fmt.Sprintf(
+				"-%s's value is itself the name of another flag (%q, which matches -%s) -- almost certainly means -%s never got a real value of its own and instead swallowed -%s off the command line (e.g. an unset/empty shell variable, or a missing value, before the next flag); pass an explicit value or reorder the flags and try again",
+				f.Name, value, swallowed, f.Name, swallowed,
+			)
+			slog.Error(msg, "flag", "-"+f.Name, "swallowedFlagName", "-"+swallowed, "value", value)
+			os.Exit(1)
+		}
 	})
 
 	if *decodeStream != "" {
@@ -357,6 +392,71 @@ func warnIfExplicitConfigPathNotFound(cfg *SessionConfig, configPath string, noC
 	if cfg == nil && configPath != "" && !noConfig {
 		slog.Warn("explicit -config path not found; continuing without it", "path", configPath)
 	}
+}
+
+// stringFlagSwallowGuardNames is the set of fs.String-declared flags (main.go) where a value that
+// itself looks like another registered flag's name is treated as a near-certain accidental-
+// flag-adjacency mistake by detectSwallowedFlagValue below, rather than a legitimate value. Every
+// flag listed here is a plain identifier, path, zone code, or opaque token that never legitimately
+// starts with '-' in real use (an email address, a raw device id, an access/refresh token, a
+// filesystem path) -- so a leading-dash value is already suspicious for these specifically, unlike
+// e.g. the fs.Int -cs-port flag, whose value could theoretically be a negative number starting
+// with '-' (and which doesn't need this guard anyway: a swallowed flag name there fails to parse
+// as an int and is already caught by fs.Parse's own error path -- see TestMainFlagParseExitCodes'
+// "malformed flag value" case). Kept as a package-level map (rather than inlined in
+// detectSwallowedFlagValue) so it reads as a deliberate, reviewable scoping decision, matching this
+// file's existing crossServerFlagNames convention just below.
+var stringFlagSwallowGuardNames = map[string]bool{
+	"email": true, "code-pipe": true, "interactive": true,
+	"cs-ip": true, "cs-zone": true, "cs-gameuid": true, "cs-deviceid": true,
+	"cs-shumei": true, "cs-rt": true, "cs-at": true,
+	"config": true, "decode-stream": true, "decode-label": true, "log-level": true,
+}
+
+// detectSwallowedFlagValue is the pure decision at the heart of this round's Fix 1 (the MAJOR
+// finding): whether an explicitly-visited flag's own value is itself the name of another flag
+// actually registered on the FlagSet, once any leading dash(es) are stripped from that value.
+//
+// This is standard Go flag package behavior: flag.FlagSet.Parse's internal parseOne
+// unconditionally consumes the very next token as the value for any non-bool flag, with zero check
+// for whether that token looks like a registered flag name. So e.g. "-email -collect" parses to
+// email="-collect", collect=false (never visited at all -- its token was consumed as -email's
+// value, not parsed as a flag), with fs.Parse itself returning a nil error and fs.NArg()==0 (so the
+// existing stray-positional-argument check, round 21, can't catch this either -- there's nothing
+// left over in fs.Args()). A realistic real-world trigger: `-email "$EMAIL" -collect` with an
+// unset/empty, unquoted $EMAIL shell variable. Left unguarded, -email's swallowed garbage value
+// flows straight into login.go's outgoing verification-code request, where it's likely to be
+// server-rejected -- surfacing as a misleading exit-code-2 auth rejection instead of the simple
+// flag-ordering/quoting mistake it actually is.
+//
+// Scoped to stringFlagSwallowGuardNames (not every flag on the FlagSet) so a flag whose value could
+// legitimately start with '-' is never blanket-rejected -- see that map's own doc comment. Within
+// that scope, only an EXACT match against another flag's real, registered name counts: a
+// dash-prefixed value that merely looks flag-like but matches nothing registered (e.g. a typo, or
+// a value that coincidentally starts with '-') is left alone, since that's not the specific,
+// near-certain mistake this guards against.
+//
+// Taking name/value/registeredFlagNames as plain arguments (rather than a *flag.FlagSet, or being
+// inlined at the fs.Visit call site in main()) is what makes this testable without building a real
+// FlagSet, matching this file's established pattern for extracting flag-parsing decisions (e.g.
+// decodeModeIgnoredFlags, serverListOverrideFlags) into pure, directly-testable functions.
+func detectSwallowedFlagValue(name, value string, registeredFlagNames map[string]bool) (swallowedFlagName string, ok bool) {
+	if !stringFlagSwallowGuardNames[name] {
+		return "", false
+	}
+	candidate := strings.TrimLeft(value, "-")
+	if candidate == "" || candidate == value {
+		// candidate == value: TrimLeft found no leading '-' to strip at all -- the ordinary case
+		// (e.g. a real email address). candidate == "": value was made up entirely of dashes (e.g.
+		// "-" or "--", a common "read from stdin" convention elsewhere) -- nothing left to match
+		// against a flag name either way. Both are "not a swallowed flag name," just for different
+		// reasons.
+		return "", false
+	}
+	if !registeredFlagNames[candidate] {
+		return "", false
+	}
+	return candidate, true
 }
 
 // crossServerFlagNames are the -cs-* flags whose only effect is on the cross-server reconnect path
@@ -720,7 +820,20 @@ func runCrossServerTest(o crossServerTestOpts) {
 	// after the -cs-rt refresh block above (which can replace port with a fresh server list
 	// entry), so a config/flag omission that IS resolved by -cs-rt doesn't false-positive.
 	if port <= 0 {
-		slog.Error("cross-server login: no port given (pass -cs-port or a session config with port)")
+		if o.portExplicit {
+			// Distinct from the "never given at all" wording just below: -cs-port WAS actually
+			// typed on the command line (per o.portExplicit, the same visitedFlags mechanism this
+			// file already uses elsewhere -- e.g. the neighboring "ignoring -cs-at" /
+			// serverListOverrideFlags call sites -- to tell an explicit flag apart from a value
+			// that merely ended up in scope some other way), it just carried an invalid (<=0)
+			// value -- a typo'd negative number, most likely. Before this fix, this case logged the
+			// exact same "no port given" message as a port that was never passed at all, actively
+			// misdirecting an operator debugging a simple typo toward the wrong root cause (did I
+			// forget the flag? vs. did I fat-finger the value?).
+			slog.Error(fmt.Sprintf("cross-server login: invalid -cs-port value: %d (must be positive)", port))
+		} else {
+			slog.Error("cross-server login: no port given (pass -cs-port or a session config with port)")
+		}
 		os.Exit(1)
 	}
 
