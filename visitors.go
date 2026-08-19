@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 )
 
 // Visitor is a city visitor NPC ("greet visitors") -- confirmed live via a
@@ -105,6 +106,17 @@ func GreetVisitors(conn *GameConn, visitors []Visitor) error {
 		params.PutInt("operate", 1)
 		_, err := sendAndWait(conn, fmt.Sprintf("visitor greet response (uid %d)", v.Uid()), "visitor.operate", params)
 		errs = append(errs, err)
+		// A net.Error here means the underlying TCP connection itself is known-dead, so every
+		// remaining visitor in this loop is already doomed to independently burn a full
+		// defaultCmdTimeout before failing the exact same way -- same root cause as CollectAll's
+		// own net.Error early-abort (buildings.go), mirrored here. The blast radius is bounded
+		// either way: `visitors` comes from the `init` push's `visitor.list`, capped live at
+		// maxNum=5 (see the Visitor doc comment above), so this only ever saves waiting out at
+		// most ~4 extra timeouts, not an open-ended list.
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			break
+		}
 	}
 	return errors.Join(errs...)
 }

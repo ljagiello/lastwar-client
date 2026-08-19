@@ -82,34 +82,69 @@ func applyOverride(base, override string) string {
 }
 
 // loadEffectiveConfig resolves which session config file (if any) to use:
-// an explicit -config path if given, else the default path if it exists.
-// Returns (nil, "") if neither applies -- not an error, since running from
-// bare -cs-* flags (or the plain email/loginKey flow) is still valid.
+// an explicit -config path if given, else the default path. Returns (nil,
+// "") when the resolved path genuinely has no file yet -- not an error,
+// since running from bare -cs-* flags (or the plain email/loginKey flow) is
+// still valid for a brand-new setup.
+//
+// This calls LoadSessionConfig(path) directly for the default path too
+// (previously it did a separate os.Stat(path) pre-check first, and treated
+// every stat error -- ENOENT or not -- as "nothing to load"). That pre-check
+// is gone: checking os.IsNotExist(err) on LoadSessionConfig's own result
+// covers "file genuinely doesn't exist" just as well, without a second
+// syscall or the TOCTOU gap between a passing stat and the read that
+// followed it.
 func loadEffectiveConfig(explicitPath string) (*SessionConfig, string) {
 	path := explicitPath
 	if path == "" {
 		path = defaultSessionConfigPath()
-		if _, err := os.Stat(path); err != nil {
-			if !os.IsNotExist(err) {
-				slog.Warn("default session config path exists but could not be stat'd; continuing without it", "path", path, "error", err)
-			}
-			return nil, ""
-		}
 	}
 	cfg, err := LoadSessionConfig(path)
 	if err != nil {
-		if explicitPath != "" {
-			// An explicitly-requested config is fatal if unreadable.
-			slog.Error("load session config failed", "path", path, "error", err)
-			os.Exit(1)
+		if os.IsNotExist(err) {
+			// Genuinely no config at this path yet -- an expected, common
+			// case for both an explicit -config path and the default path.
+			// Continue silently; the caller falls back to bare -cs-* flags
+			// or the plain email/loginKey flow.
+			return nil, ""
 		}
-		// The default path is silent when the file is simply absent (an
-		// expected, common case), but this branch is only reached when
-		// os.Stat above already confirmed the file DOES exist -- so a
-		// parse failure here means "present but corrupt," a materially
-		// different and actionable condition worth a warning, not silence.
-		slog.Warn("default session config exists but failed to load; continuing without it", "path", path, "error", err)
-		return nil, ""
+		// Any other error -- permission denied, I/O failure, a directory
+		// sitting where the file was expected, corrupt JSON, an NFS/network-
+		// home glitch, etc. -- must never be treated the same as "absent".
+		// Doing so used to let a stat/read hiccup on the default session-
+		// config path get silently swallowed (with, at best, an
+		// easy-to-miss WARN) and fall through to (nil, ""), which the
+		// caller (main.go) can't tell apart from the legitimate first-run
+		// case -- silently diverting what was meant to be a session-based
+		// reconnect into a completely different guest/email login flow
+		// under a different, unrelated device identity. This is the exact
+		// class of bug round 16 fixed in identity.go's
+		// loadOrCreateDeviceIdentity/readTrimmed: a non-ENOENT failure
+		// reading an EXISTING file is never silently treated as "nothing
+		// there yet".
+		//
+		// Both the explicit -config path and the default path fail loudly
+		// here via os.Exit(1), not just the explicit one:
+		//   - -config is a deliberate, explicit request, so a real failure
+		//     reading it obviously shouldn't be swallowed.
+		//   - The default path is consulted unconditionally on every run
+		//     (unless -no-config is passed), exactly like identity.go's
+		//     device-id/gameUid/loginKey state files that loadOrCreateDeviceIdentity
+		//     reads unconditionally and fails hard (via its caller's
+		//     os.Exit(1)) on any non-ENOENT error. This function's own
+		//     signature -- (*SessionConfig, string), no error return -- gives
+		//     it no way to hand a distinguishable failure back to main.go for
+		//     the caller to decide on; silently returning (nil, "") here
+		//     would be indistinguishable from the legitimate first-run case
+		//     and let main.go proceed straight into a wrong-identity login.
+		//     An operator who genuinely doesn't want default session-config
+		//     handling at all already has an explicit, deliberate opt-out
+		//     (-no-config) that skips this function entirely -- so failing
+		//     hard here on a persistent glitch doesn't trap them without a
+		//     way out; it just means -no-config is what they should be
+		//     passing instead of relying on this to silently no-op.
+		slog.Error("load session config failed", "path", path, "error", err)
+		os.Exit(1)
 	}
 	return cfg, path
 }

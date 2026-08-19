@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bufio"
+	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -153,5 +156,44 @@ func TestGreetVisitorsAggregatesErrorsAndSkipsBenign(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "999999") {
 		t.Errorf("aggregated error = %v, want it to mention the genuine failure's errorCode 999999", err)
+	}
+}
+
+// TestGreetVisitorsAbortsRemainingVisitorsOnNetError is the round-17 regression test for
+// GreetVisitors' net.Error early-abort (visitors.go), mirroring
+// TestCollectAllAbortsRemainingActionsOnNetError (buildings_orchestration_test.go) -- same root
+// cause (a dead connection dooms every subsequent sendAndWait call to independently burn a full
+// timeout before failing the same way), just scoped to the per-visitor loop instead of CollectAll's
+// batch-of-sub-actions loop. fakeNetErrConn, fakeNetError, and fakeNetAddr are all package-level
+// (buildings_orchestration_test.go) and reused here as-is.
+//
+// The fake connection's Read always fails with fakeNetError, so GreetVisitors' very first
+// `visitor.operate` call fails immediately with a wrapped net.Error. Only that one request should
+// ever be sent: if GreetVisitors didn't break early, it would go on to attempt every remaining
+// visitor in the (maxNum-capped, see the Visitor doc comment in visitors.go) list in turn.
+//
+// Mutation check: reverting GreetVisitors' net.Error break in visitors.go back to the old flat
+// `errs = append(errs, err)`-only loop makes this test fail with writeCount() == 3 instead of 1.
+func TestGreetVisitorsAbortsRemainingVisitorsOnNetError(t *testing.T) {
+	fake := &fakeNetErrConn{}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	visitors := []Visitor{
+		newTestVisitor(3001, 2001, 6),
+		newTestVisitor(3002, 2002, 6),
+		newTestVisitor(3003, 2003, 6),
+	}
+
+	err := GreetVisitors(client, visitors)
+
+	if err == nil {
+		t.Fatal("GreetVisitors() = nil, want a non-nil error (the fake connection's every Read fails)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Errorf("GreetVisitors() error = %v, want it to wrap a net.Error (the failure that triggered the break)", err)
+	}
+	if got := fake.writeCount(); got != 1 {
+		t.Errorf("fake connection saw %d writes, want exactly 1 (only the first visitor's request -- GreetVisitors should have aborted before attempting the other two)", got)
 	}
 }

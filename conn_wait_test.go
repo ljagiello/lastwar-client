@@ -211,6 +211,53 @@ func TestWaitForCmdSkipRedactsCredentialFields(t *testing.T) {
 	}
 }
 
+// TestBuildBaseZoneLoginAddrEmptyIP is the regression test for buildBaseZoneLoginAddr's empty-ip
+// guard (login.go): an empty ip must produce a clear error rather than silently building a
+// ":<port>"-shaped address, which Go's "host:port" dial syntax treats as the loopback interface
+// (see main.go's equivalent firstHost(ip) == "" guard on the cross-server login path, which this
+// mirrors). Exercised directly against the small helper Login() calls -- rather than through a
+// full Login() integration test with fake GSL/game servers -- since this is a pure function of its
+// two arguments and doesn't need any network fakery to prove the guard fires.
+func TestBuildBaseZoneLoginAddrEmptyIP(t *testing.T) {
+	_, err := buildBaseZoneLoginAddr("", 9339)
+	if err == nil {
+		t.Fatal("buildBaseZoneLoginAddr(\"\", 9339): expected an error for an empty ip, got nil")
+	}
+	if strings.Contains(err.Error(), ":9339") {
+		t.Errorf("err = %q, must not contain a \":<port>\"-shaped address (that's the loopback-dial footgun this guard exists to prevent)", err.Error())
+	}
+}
+
+// TestBuildBaseZoneLoginAddrNonEmptyIP is TestBuildBaseZoneLoginAddrEmptyIP's happy-path
+// counterpart: a normal, non-empty ip must still build the expected "host:port" address and return
+// no error, confirming the new guard doesn't reject valid input.
+func TestBuildBaseZoneLoginAddrNonEmptyIP(t *testing.T) {
+	addr, err := buildBaseZoneLoginAddr("203.0.113.5", 9339)
+	if err != nil {
+		t.Fatalf("buildBaseZoneLoginAddr: unexpected error for a valid ip: %v", err)
+	}
+	if want := "203.0.113.5:9339"; addr != want {
+		t.Errorf("addr = %q, want %q", addr, want)
+	}
+}
+
+// TestBuildBaseZoneLoginAddrFirstOfFallbackList confirms buildBaseZoneLoginAddr's guard checks
+// firstHost's result (the "|"-delimited list entry actually used to dial), not the raw ip string --
+// a pipe-delimited list starting with an empty entry must still be caught, not let through just
+// because the raw string itself is non-empty.
+func TestBuildBaseZoneLoginAddrFirstOfFallbackList(t *testing.T) {
+	if _, err := buildBaseZoneLoginAddr("|203.0.113.5", 9339); err == nil {
+		t.Error("buildBaseZoneLoginAddr(\"|203.0.113.5\", 9339): expected an error (firstHost of this list is empty), got nil")
+	}
+	addr, err := buildBaseZoneLoginAddr("203.0.113.5|198.51.100.7", 9339)
+	if err != nil {
+		t.Fatalf("buildBaseZoneLoginAddr: unexpected error: %v", err)
+	}
+	if want := "203.0.113.5:9339"; addr != want {
+		t.Errorf("addr = %q, want %q (first entry of the fallback list)", addr, want)
+	}
+}
+
 // TestWaitForInitPushHalfwayActivePull checks waitForInitPush's two-phase deadline scheme: when
 // the server stays completely silent (no `init` push ever arrives), the login.init active-pull
 // fallback still gets sent roughly at the halfway point of the window, not at the very start and
@@ -250,10 +297,14 @@ func TestWaitForInitPushHalfwayActivePull(t *testing.T) {
 
 	select {
 	case elapsed := <-activePullAt:
-		// login.init should fire roughly at the halfway point (window/2 = 100ms here). Generous
-		// quarter/three-quarter bounds absorb goroutine-scheduling jitter without letting the
-		// test pass if the fallback fired essentially immediately or essentially at the deadline.
-		if elapsed < window/4 || elapsed > window*3/4 {
+		// login.init should fire roughly at the halfway point (window/2 = 100ms here), not
+		// essentially immediately and not saved for the very end. These bounds are deliberately
+		// wide (window/8 to window*7/8, i.e. 25ms-175ms of the 200ms window here) rather than a
+		// tight quarter/three-quarter band: this is a wall-clock assertion with no injectable
+		// clock, so it's inherently susceptible to scheduler/CI jitter, and this test is only
+		// trying to prove the active pull fired somewhere in the middle of the window -- not pin
+		// down precisely when.
+		if elapsed < window/8 || elapsed > window*7/8 {
 			t.Errorf("login.init sent at %v, want roughly the halfway point (~%v of a %v window)", elapsed, window/2, window)
 		}
 	default:

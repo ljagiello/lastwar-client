@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 )
 
@@ -187,6 +188,20 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 // instead of returning early, so the rest of this function runs its
 // normal batch-claiming logic against whatever partial `mail` slice
 // ListMail managed to collect.
+//
+// Bug fixed here (round 17): the read-status and reward-claim batch loops below never checked
+// whether a batch's sendAndWait failure was a net.Error -- a genuine connection-level failure
+// (e.g. a silently dead/blackholed TCP connection), as opposed to a well-formed response carrying
+// a decoded (possibly non-benign) errorCode. Without that check, a dead connection burned one full
+// defaultCmdTimeout PER REMAINING BATCH instead of aborting immediately: ListMail's own maxPages
+// cap alone means up to 20 pages' worth of 100-uid read-status batches, plus one reward-claim
+// batch per distinct mail type in byType. Both loops now mirror CollectAll's identical
+// errors.As-against-net.Error early-abort (buildings.go) exactly: append the triggering error to
+// errs first (so the caller's aggregated error still reports what happened), then break. The
+// reward-claim loop is additionally skipped in full if the read-status loop's break was a
+// net.Error abort -- the connection is already known-dead at that point, so there is no reason to
+// attempt any reward-claim batch at all. An ordinary decoded errorCode failure (not a net.Error)
+// must still NOT abort either loop -- see TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError.
 func ClaimAllMail(conn *GameConn) error {
 	var errs []error
 
@@ -222,6 +237,13 @@ func ClaimAllMail(conn *GameConn) error {
 	)
 	offset := 0
 	readFailed := false
+	// readAbortedByNetErr tracks whether the loop below stopped early because a batch failed with
+	// a net.Error (the underlying connection is known-dead), as opposed to running out of batches
+	// normally or stopping only after an ordinary decoded errorCode failure (which must NOT abort
+	// the loop -- see CollectAll's identical distinction in buildings.go). When true, the
+	// reward-claim loop further down is skipped entirely: attempting it against an already-dead
+	// connection would just burn one more defaultCmdTimeout per remaining batch for no benefit.
+	readAbortedByNetErr := false
 	for _, batch := range batchByCountAndBytes(allUIDs, readBatchSize, maxUIDsBytes) {
 		readParams := NewSFSObject()
 		readParams.PutUtfString("uids", strings.Join(batch, ","))
@@ -231,15 +253,26 @@ func ClaimAllMail(conn *GameConn) error {
 		}
 		errs = append(errs, err)
 		offset += len(batch)
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			readAbortedByNetErr = true
+			break
+		}
 	}
 	// Only claim the full count succeeded if every read-status batch above actually did -- a
 	// failure still surfaces via this function's final errors.Join regardless, but this line
 	// specifically must not overstate what happened. If any batch failed, log the attempt (not a
-	// completed fact) instead.
+	// completed fact) instead, using offset (uids actually submitted in an attempted batch, which
+	// still includes the batch that failed) rather than len(allUIDs) -- a net.Error abort above
+	// means offset can now be less than the full identified count, and len(allUIDs) would overstate
+	// how much was actually attempted in that case.
 	if readFailed {
-		slog.Warn("mark mail as read had failures", "attempted", len(allUIDs))
+		slog.Warn("mark mail as read had failures", "attempted", offset)
 	} else {
 		slog.Info("marked mail as read", "count", len(allUIDs))
+	}
+	if readAbortedByNetErr {
+		return errors.Join(errs...)
 	}
 
 	byType := groupUnclaimedByType(mail)
@@ -247,6 +280,7 @@ func ClaimAllMail(conn *GameConn) error {
 		slog.Info("no unclaimed mail rewards found", "totalMail", len(mail))
 		return errors.Join(errs...)
 	}
+rewardLoop:
 	for mailType, uids := range byType {
 		slog.Info("claiming mail reward", "type", mailType, "count", len(uids))
 		offset := 0
@@ -257,6 +291,15 @@ func ClaimAllMail(conn *GameConn) error {
 			_, err := sendAndWait(conn, fmt.Sprintf("mail reward-batch (type %d, batch %d, size %d)", mailType, offset, len(batch)), "mail.reward.batch", rewardParams)
 			errs = append(errs, err)
 			offset += len(batch)
+			var netErr net.Error
+			if errors.As(err, &netErr) {
+				// The connection is known-dead: stop this type's remaining batches AND every
+				// other still-unprocessed type in byType, same reasoning as the read-status loop
+				// above and CollectAll's net.Error early-abort (buildings.go). A labeled break is
+				// used (rather than a flag checked at the top of the outer loop) since this needs
+				// to exit both the inner batch loop and the outer per-type loop in one step.
+				break rewardLoop
+			}
 		}
 	}
 	return errors.Join(errs...)

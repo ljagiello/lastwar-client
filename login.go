@@ -48,6 +48,27 @@ func gslOptFor(ident *deviceIdentity) GSLOpt {
 	}
 }
 
+// buildBaseZoneLoginAddr builds the "host:port" dial address for the base zone SFS2X connection
+// from a GSL server list entry, guarding against an empty ip: Go's "host:port" dial syntax treats
+// an empty host as the loopback interface, so an unguarded fmt.Sprintf("%s:%d", "", port) wouldn't
+// fail cleanly at all -- it would silently attempt a real TCP connection to 127.0.0.1/::1 and
+// return a misleading "connection refused" instead of any indication that no host was ever given.
+// Mirrors main.go's equivalent `if firstHost(ip) == "" { ...; os.Exit(1) }` guard on the
+// cross-server login path, adapted to return an error rather than exit since this is a
+// library-style function.
+//
+// Not observed live: reachable only if gsl.go's applyLoginServerFallback synthesizes an empty-IP
+// ServerList[0] entry, which itself requires LoginServer.IP to also be empty -- a low-probability,
+// nested-unconfirmed-conditions scenario. Guarded anyway since the failure mode (silently dialing
+// loopback) is confusing enough to be worth a clear error over a cryptic one.
+func buildBaseZoneLoginAddr(ip string, port int) (string, error) {
+	host := firstHost(ip)
+	if host == "" {
+		return "", fmt.Errorf("no ip in GSL server list entry (an empty host would dial the loopback interface instead of failing clearly)")
+	}
+	return fmt.Sprintf("%s:%d", host, port), nil
+}
+
 // Login runs the full bootstrap: HTTP check-version, GSL getserverlist,
 // SFS2X TCP connect, base zone login, and -- unless a persisted loginKey
 // lets GSL resolve the account directly -- the email verification-code
@@ -104,7 +125,10 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			slog.Warn("failed to persist gameUid", "error", err)
 		}
 	}
-	addr := fmt.Sprintf("%s:%d", firstHost(stateSrv.IP), stateSrv.Port)
+	addr, err := buildBaseZoneLoginAddr(stateSrv.IP, stateSrv.Port)
+	if err != nil {
+		return nil, fmt.Errorf("login: %w", err)
+	}
 	serverID := serverIDFromZone(zone)
 
 	// Steps 3-5 (dial, login, wait-for-init) were originally a retry loop
@@ -293,11 +317,16 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		if initErr != nil {
 			// A real connection failure (reset, EOF, decode error, ...) surfaced while waiting --
 			// distinct from a genuine silence-until-deadline timeout (initErr == nil in that case).
-			// See waitForInitPush's doc comment for why this distinction matters.
+			// See waitForInitPush's doc comment for why this distinction matters: unlike a plain
+			// timeout, where falling through to "giving up... continuing anyway" below is the right
+			// call (the connection itself is still presumably fine, it just never got `init`), this
+			// means conn is definitely dead -- fail fast instead of returning a nominally-successful
+			// LoginResult that wraps a broken connection with no indication anything went wrong.
 			slog.Error("no init push: connection failed while waiting", "error", initErr, "timeoutMs", initPushTimeout.Milliseconds())
-		} else {
-			slog.Error("no init push within timeout", "timeoutMs", initPushTimeout.Milliseconds())
+			conn.Close()
+			return nil, fmt.Errorf("login: connection failed while waiting for init push: %w", initErr)
 		}
+		slog.Error("no init push within timeout", "timeoutMs", initPushTimeout.Milliseconds())
 	}
 	if !gotInit {
 		slog.Warn("giving up on init after all attempts; continuing anyway, building list may be empty")

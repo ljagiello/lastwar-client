@@ -594,6 +594,73 @@ func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
 			t.Errorf("StringRedacted should mask a PutBool scalar value under a sensitive key via the fail-closed [REDACTED] fallback, got: %s", got)
 		}
 	})
+
+	// sfsFloat (bare float32) and sfsNull (nil) are checked separately from the table-driven cases
+	// above: neither has a PutFloat/PutNull helper anywhere in this codebase, so unlike
+	// PutInt/PutLong/PutDouble/PutByte/PutShort above, they're only reachable by constructing an
+	// SFSValue directly -- e.g. a value decoded off the wire via readValuePayload's sfsFloat/sfsNull
+	// cases -- which same-package tests can already do via the unexported `put` method. The code
+	// already handles both correctly (redactSFSValue's fail-closed fallback covers any shape it
+	// doesn't explicitly recognize as safe), but neither shape had a regression test proving it.
+	t.Run("sfsFloat (bare float32, only reachable via decode)", func(t *testing.T) {
+		o := NewSFSObject()
+		o.put("verifyCode", SFSValue{sfsFloat, float32(90210.5)})
+		o.PutUtfString("un", "player-one")
+
+		got := o.StringRedacted()
+		if strings.Contains(got, "90210.5") {
+			t.Errorf("StringRedacted leaks a bare float32 value under a sensitive key in cleartext: %s", got)
+		}
+		if !strings.Contains(got, "verifyCode=[REDACTED]") {
+			t.Errorf("StringRedacted should mask a bare float32 value under a sensitive key via the fail-closed [REDACTED] fallback, got: %s", got)
+		}
+		if !strings.Contains(got, "player-one") {
+			t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+		}
+	})
+
+	t.Run("sfsNull (nil, only reachable via decode)", func(t *testing.T) {
+		o := NewSFSObject()
+		o.put("verifyCode", SFSValue{sfsNull, nil})
+		o.PutUtfString("un", "player-one")
+
+		got := o.StringRedacted()
+		if !strings.Contains(got, "verifyCode=[REDACTED]") {
+			t.Errorf("StringRedacted should mask a nil value under a sensitive key via the fail-closed [REDACTED] fallback, got: %s", got)
+		}
+		if !strings.Contains(got, "player-one") {
+			t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+		}
+	})
+}
+
+// TestStringRedactedMasksCaseVariantSensitiveKeys is the round-17 regression test for Fix 1:
+// StringRedacted's sensitiveSFSKeys lookup used to be an exact-case Go map lookup with no
+// case-folding. interactive.go's putJSONValue takes a JSON object key from the operator's
+// control-FIFO line verbatim, with no case normalization, so a casing variant of a known-sensitive
+// key (e.g. an operator typing "LoginKey" instead of the registered "loginKey") bypassed
+// redactSFSValue entirely and fell through to formatSFSValueRedacted's plain
+// fmt.Sprintf("%v", val) -- printing a secret typed under a mis-cased key in full cleartext in
+// local logs. isSensitiveSFSKey (sfsobject.go) now compares case-insensitively instead.
+func TestStringRedactedMasksCaseVariantSensitiveKeys(t *testing.T) {
+	const secretLoginKey = "secret-case-variant-loginkey-must-not-leak-abcdef123456"
+
+	cases := []string{"LoginKey", "LOGINKEY", "loginkey", "lOgInKeY"}
+	for _, key := range cases {
+		t.Run(key, func(t *testing.T) {
+			o := NewSFSObject()
+			o.PutUtfString(key, secretLoginKey)
+			o.PutUtfString("un", "player-one")
+
+			got := o.StringRedacted()
+			if strings.Contains(got, secretLoginKey) {
+				t.Errorf("StringRedacted leaks a secret under the case-variant key %q (registered as \"loginKey\") in cleartext: %s", key, got)
+			}
+			if !strings.Contains(got, "player-one") {
+				t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+			}
+		})
+	}
 }
 
 // TestRedactSFSValueMasksNestedSFSObjectUnderSensitiveKey is the round-16 regression test for Fix

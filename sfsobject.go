@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 )
 
 // SFS2X SFSDataType tags, per the reverse-engineered wire format (see dossier §04).
@@ -240,12 +241,41 @@ var sensitiveSFSKeys = map[string]bool{
 	// bearer tokens or PII, so this decision doesn't need re-deriving next round.
 }
 
+// sensitiveSFSKeysLower is a case-insensitive lookup mirror of sensitiveSFSKeys, built once (at
+// package init, from sensitiveSFSKeys' own literal keys) rather than lowercasing sensitiveSFSKeys
+// itself in place -- see isSensitiveSFSKey's doc comment for why a case-insensitive check is
+// needed, and why sensitiveSFSKeys' own keys stay exact-case for any other/future reader of that
+// map.
+var sensitiveSFSKeysLower = buildSensitiveSFSKeysLower()
+
+func buildSensitiveSFSKeysLower() map[string]bool {
+	m := make(map[string]bool, len(sensitiveSFSKeys))
+	for k := range sensitiveSFSKeys {
+		m[strings.ToLower(k)] = true
+	}
+	return m
+}
+
+// isSensitiveSFSKey reports whether k names a known-sensitive field, case-insensitively against
+// sensitiveSFSKeys' registered (exact-case) key names. A plain `sensitiveSFSKeys[k]` map lookup is
+// exact-case only: interactive.go's putJSONValue takes a JSON object key from the operator's
+// control-FIFO line verbatim, with no case normalization, so a casing variant of a known-sensitive
+// key (e.g. an operator typing "LoginKey" instead of the registered "loginKey") would bypass
+// redactSFSValue entirely and fall through to formatSFSValueRedacted's plain
+// fmt.Sprintf("%v", val) -- printing a secret typed under a mis-cased key in full cleartext in
+// local logs. Comparing against sensitiveSFSKeysLower closes that gap while leaving
+// sensitiveSFSKeys' own keys unchanged.
+func isSensitiveSFSKey(k string) bool {
+	return sensitiveSFSKeysLower[strings.ToLower(k)]
+}
+
 // StringRedacted is *SFSObject's safe-to-log dump (and, since String()/GoString() delegate to this
 // method, is the real implementation behind both too): a decoded server response or outgoing
 // request can carry a live loginKey/accessToken/airKey/shumeiBoxId in cleartext (this protocol has
 // no separate "credentials" envelope -- they're ordinary fields mixed in with gameplay data).
-// StringRedacted walks o's fields and masks any key in sensitiveSFSKeys (recursing into nested
-// SFSObject/SFSArray values via formatSFSValueRedacted) instead of printing its value, so a call
+// StringRedacted walks o's fields and masks any key matching sensitiveSFSKeys (checked
+// case-insensitively via isSensitiveSFSKey -- see its doc comment), recursing into nested
+// SFSObject/SFSArray values via formatSFSValueRedacted instead of printing its value, so a call
 // site that wants to log/error-wrap a full decoded object for debugging can do so without risking a
 // credential leak.
 //
@@ -263,7 +293,7 @@ func (o *SFSObject) StringRedacted() string {
 			b.WriteString(", ")
 		}
 		v := o.values[k]
-		if sensitiveSFSKeys[k] {
+		if isSensitiveSFSKey(k) {
 			fmt.Fprintf(&b, "%s=%s", k, redactSFSValue(v))
 		} else {
 			fmt.Fprintf(&b, "%s=%s", k, formatSFSValueRedacted(v))

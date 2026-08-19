@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -703,5 +708,378 @@ func TestClaimAllMailReadStatusFailureLoggingDoesNotOverclaim(t *testing.T) {
 
 	if logged := buf.String(); strings.Contains(logged, "marked mail as read") {
 		t.Errorf("log claims \"marked mail as read\" (a completed fact) despite the read-status batch failing:\n%s", logged)
+	}
+}
+
+// recordingConn is a minimal net.Conn whose Write appends every byte to buf and whose Read always
+// fails with io.EOF (it is never actually read from in this file -- Read only exists to satisfy the
+// net.Conn interface). It exists purely to obtain the exact wire-format bytes SendExtension/
+// EncodeObject produce for a canned response, without needing a live goroutine-synchronized
+// net.Pipe round trip: wrap it in a bare &GameConn{conn: rec} (SendExtension/SendEnvelope only ever
+// touch GameConn.conn, never GameConn.reader, so a nil reader is fine here) and call SendExtension
+// on that to fill buf, then hand buf.Bytes() to scriptedNetErrConn below.
+type recordingConn struct {
+	buf bytes.Buffer
+}
+
+func (c *recordingConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c *recordingConn) Write(p []byte) (int, error)      { return c.buf.Write(p) }
+func (c *recordingConn) Close() error                     { return nil }
+func (c *recordingConn) LocalAddr() net.Addr              { return fakeNetAddr{} }
+func (c *recordingConn) RemoteAddr() net.Addr             { return fakeNetAddr{} }
+func (c *recordingConn) SetDeadline(time.Time) error      { return nil }
+func (c *recordingConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *recordingConn) SetWriteDeadline(time.Time) error { return nil }
+
+// scriptedNetErrConn serves pre-recorded bytes (typically produced via recordingConn above, wired
+// through a real SendExtension call so the bytes are genuinely wire-format-correct) for as many
+// Read calls as it takes to drain them, then permanently flips to returning fakeNetError (borrowed
+// from buildings_orchestration_test.go's fakeNetErrConn/fakeNetError/fakeNetAddr -- same package,
+// so directly visible here) for every Read call after that.
+//
+// This is what lets TestClaimAllMailAbortsRemainingBatchesOnNetError below script "the ListMail
+// round trip succeeds, then the connection goes dead" without either (a) a live net.Pipe server
+// goroutine that would need to duck out mid-conversation in a way that still produces a genuine
+// net.Error rather than a plain io.ErrClosedPipe/io.EOF (closing a net.Pipe end does the latter,
+// not the former -- see FetchBuildings' own real-I/O-error-vs-net.Error distinction in
+// buildings.go), or (b) waiting out a real defaultCmdTimeout (conn.go's plain 8*time.Second const,
+// not overridable from a test -- see TestSendAndWaitTimeoutNoResponse's doc comment in
+// conn_wait_test.go for why that's established as too slow for this test file's fast/deterministic
+// bar). Writes always succeed and are counted, exactly like fakeNetErrConn, so a test can prove
+// exactly how many requests were sent before ClaimAllMail's net.Error early-abort fired.
+type scriptedNetErrConn struct {
+	mu     sync.Mutex
+	remain []byte
+	writes int
+}
+
+func (c *scriptedNetErrConn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.remain) == 0 {
+		return 0, fakeNetError{}
+	}
+	n := copy(p, c.remain)
+	c.remain = c.remain[n:]
+	return n, nil
+}
+
+func (c *scriptedNetErrConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	c.writes++
+	c.mu.Unlock()
+	return len(p), nil
+}
+
+func (c *scriptedNetErrConn) writeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
+}
+
+func (c *scriptedNetErrConn) Close() error                     { return nil }
+func (c *scriptedNetErrConn) LocalAddr() net.Addr              { return fakeNetAddr{} }
+func (c *scriptedNetErrConn) RemoteAddr() net.Addr             { return fakeNetAddr{} }
+func (c *scriptedNetErrConn) SetDeadline(time.Time) error      { return nil }
+func (c *scriptedNetErrConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *scriptedNetErrConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestClaimAllMailAbortsRemainingBatchesOnNetError is the round-17 regression test for Fix 1:
+// ClaimAllMail's read-status batch loop (mail.go) must check for a net.Error and break instead of
+// attempting every remaining batch, mirroring CollectAll's identical check in buildings.go (see
+// TestCollectAllAbortsRemainingActionsOnNetError, buildings_orchestration_test.go). It must also
+// skip the reward-claim loop entirely once that happens, rather than attempting it against an
+// already-known-dead connection.
+//
+// Unlike TestCollectAllAbortsRemainingActionsOnNetError, this can't just hand ClaimAllMail a
+// fakeNetErrConn whose every Read fails from the very first call: ClaimAllMail's first network
+// action is ListMail, and that has to genuinely succeed (returning real mail) before there's
+// anything for the read-status/reward-claim batch loops to even iterate over. So this uses
+// scriptedNetErrConn instead: the ListMail round trip gets a real, valid canned response (150
+// same-type unclaimed-reward mail entries -- enough that batchByCountAndBytes' readBatchSize=100
+// item cap splits them into two read-status batches, 100 then 50, and would likewise split the
+// reward-claim loop's one distinct type into two batches if that loop were ever reached), and every
+// Read after that (i.e., every batch call, in either loop) fails immediately with a net.Error.
+//
+// If the fix fires correctly, exactly 2 writes happen: the ListMail request, then the first (and
+// only) read-status batch request, which fails and breaks the loop before batch 2 is ever
+// attempted -- and the reward-claim loop (which would otherwise find all 150 mail entries
+// unclaimed, same type) never starts at all.
+//
+// Mutation check, isolating each half of the fix: dropping only the read-status loop's `break`
+// (while leaving `readAbortedByNetErr = true` and the post-loop skip-reward-loop check both intact)
+// still attempts read-status batch 2 -- which also fails with a net.Error and re-sets the same
+// already-true flag -- before the skip check correctly skips the reward loop, so this shows up as
+// writeCount()==3, not 2. Dropping only the post-loop `if readAbortedByNetErr { return ... }` skip
+// (while leaving both loops' own per-batch break intact) lets groupUnclaimedByType run and the
+// reward loop start, but that loop's own net.Error break still limits it to exactly one attempted
+// batch, so this also shows up as writeCount()==3. Reverting the whole fix back to the old
+// unconditional-append-no-break shape in both loops shows up as writeCount()==5 (list-mail + both
+// read-status batches + both reward-claim batches, every one of which independently fails against
+// the same always-erroring connection but none of which stops the loop).
+func TestClaimAllMailAbortsRemainingBatchesOnNetError(t *testing.T) {
+	rec := &recordingConn{}
+	recorder := &GameConn{conn: rec}
+
+	const total = 150
+	const mailType = int32(3)
+	listResp := NewSFSObject()
+	arr := NewSFSArray()
+	for i := 0; i < total; i++ {
+		arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
+	}
+	listResp.PutSFSArray("msg", arr)
+	listResp.PutBool("more", false)
+	if err := recorder.SendExtension("push.chat.get.system.mails", listResp); err != nil {
+		t.Fatalf("build canned list-mail response: %v", err)
+	}
+
+	fake := &scriptedNetErrConn{remain: rec.buf.Bytes()}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := ClaimAllMail(client)
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (the read-status batch call fails with a net.Error)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Errorf("ClaimAllMail() error = %v, want it to wrap a net.Error (the failure that triggered the abort)", err)
+	}
+	if got := fake.writeCount(); got != 2 {
+		t.Errorf("fake connection saw %d writes, want exactly 2 (list-mail request + first read-status batch only -- ClaimAllMail should have aborted before read-status batch 2 or any reward-claim batch)", got)
+	}
+}
+
+// TestClaimAllMailClaimsRewardsForEachDistinctType is the round-17 regression test for Fix 2: every
+// existing ClaimAllMail test's fixture data happens to produce at most one distinct type in byType,
+// so the intended cross-type behavior of the per-mail-type reward-claim loop (mail.go, iterating
+// byType) had zero direct test coverage even though it looked correct by inspection. This uses two
+// distinct unclaimed-reward mail types (3 and 9) and asserts a separate mail.reward.batch request --
+// carrying the correct type field and exactly that type's uids, in original list order -- is sent
+// for each, proving the loop genuinely iterates every entry in byType rather than, say, sending only
+// one batch total or merging every type's uids into a single request.
+func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	mails := []*SFSObject{
+		newTestMailObj("t3-a", 3, 0),
+		newTestMailObj("t3-b", 3, 0),
+		newTestMailObj("t9-a", 9, 0),
+		newTestMailObj("t9-b", 9, 0),
+		newTestMailObj("t9-c", 9, 0),
+	}
+	wantByType := map[int32][]string{
+		3: {"t3-a", "t3-b"},
+		9: {"t9-a", "t9-b", "t9-c"},
+	}
+
+	gotByType := make(map[int32][]string)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read list-mail request: %v", err)
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
+			return
+		}
+		listResp := NewSFSObject()
+		arr := NewSFSArray()
+		for _, mo := range mails {
+			arr.AddSFSObject(mo)
+		}
+		listResp.PutSFSArray("msg", arr)
+		listResp.PutBool("more", false)
+		if err := server.SendExtension("push.chat.get.system.mails", listResp); err != nil {
+			return
+		}
+
+		// One read-status batch covering all 5 uids (well under readBatchSize=100).
+		env, err = server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read read-status request: %v", err)
+			return
+		}
+		if msg, ok = env.AsExtension(); !ok || msg.Cmd != "mail.read.status.betch" {
+			t.Errorf("read-status request malformed: %+v ok=%v", msg, ok)
+			return
+		}
+		readResp := NewSFSObject()
+		readResp.PutBool("success", true)
+		if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
+			return
+		}
+
+		// Two reward-claim batches, one per distinct type -- byType map iteration order is not
+		// guaranteed by Go, so this reads whichever type comes first without assuming an order.
+		for i := 0; i < len(wantByType); i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("read mail.reward.batch request %d: %v", i, err)
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok || msg.Cmd != "mail.reward.batch" {
+				t.Errorf("mail.reward.batch request %d malformed: %+v ok=%v", i, msg, ok)
+				return
+			}
+			mailType := msg.Params.GetInt("type")
+			var uids []string
+			if s := msg.Params.GetString("uids"); s != "" {
+				uids = strings.Split(s, ",")
+			}
+			gotByType[mailType] = uids
+			resp := NewSFSObject()
+			resp.PutBool("success", true)
+			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	err := ClaimAllMail(client)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never finished all expected requests")
+	}
+
+	if err != nil {
+		t.Fatalf("ClaimAllMail() = %v, want nil", err)
+	}
+	if len(gotByType) != len(wantByType) {
+		t.Fatalf("server saw mail.reward.batch requests for %d distinct types, want %d: got %v", len(gotByType), len(wantByType), gotByType)
+	}
+	for mailType, wantUids := range wantByType {
+		gotUids, ok := gotByType[mailType]
+		if !ok {
+			t.Errorf("no mail.reward.batch request seen for type %d", mailType)
+			continue
+		}
+		if len(gotUids) != len(wantUids) {
+			t.Errorf("type %d: got uids %v, want %v", mailType, gotUids, wantUids)
+			continue
+		}
+		for i, uid := range wantUids {
+			if gotUids[i] != uid {
+				t.Errorf("type %d uids[%d] = %q, want %q", mailType, i, gotUids[i], uid)
+			}
+		}
+	}
+}
+
+// TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError proves the reward-claim loop's
+// existing no-short-circuit-on-business-errors behavior (an ordinary decoded errorCode failure gets
+// appended to errs with no break, unlike this round's new net.Error break -- see mail.go's
+// ClaimAllMail) actually holds ACROSS distinct mail types, not merely within one type's own internal
+// batches the way TestClaimAllMailItemCountBatching/TestClaimAllMailByteLengthBatching already cover
+// for a single type. The fake server answers list-mail and read-status normally, then fails
+// whichever mail.reward.batch request it receives first with a genuine (non-benign) errorCode --
+// byType map iteration order is randomized by Go, so this deliberately does not assume which of the
+// two types' requests arrives first -- and answers the second (whichever type that turns out to be)
+// with success. Both requests must still be sent (proving the loop didn't stop after the first
+// type's failure), and the aggregated error must mention the failure.
+func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	mails := []*SFSObject{
+		newTestMailObj("t3-a", 3, 0),
+		newTestMailObj("t9-a", 9, 0),
+	}
+
+	var seenTypes []int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read list-mail request: %v", err)
+			return
+		}
+		if msg, ok := env.AsExtension(); !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("list-mail request malformed")
+			return
+		}
+		listResp := NewSFSObject()
+		arr := NewSFSArray()
+		for _, mo := range mails {
+			arr.AddSFSObject(mo)
+		}
+		listResp.PutSFSArray("msg", arr)
+		listResp.PutBool("more", false)
+		if err := server.SendExtension("push.chat.get.system.mails", listResp); err != nil {
+			return
+		}
+
+		env, err = server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read read-status request: %v", err)
+			return
+		}
+		if msg, ok := env.AsExtension(); !ok || msg.Cmd != "mail.read.status.betch" {
+			t.Errorf("read-status request malformed")
+			return
+		}
+		readResp := NewSFSObject()
+		readResp.PutBool("success", true)
+		if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
+			return
+		}
+
+		for i := 0; i < 2; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("read mail.reward.batch request %d: %v", i, err)
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok || msg.Cmd != "mail.reward.batch" {
+				t.Errorf("mail.reward.batch request %d malformed", i)
+				return
+			}
+			seenTypes = append(seenTypes, msg.Params.GetInt("type"))
+			resp := NewSFSObject()
+			if i == 0 {
+				resp.PutUtfString("errorCode", "999999") // genuine failure, not benign -- whichever type this is
+			} else {
+				resp.PutBool("success", true)
+			}
+			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	err := ClaimAllMail(client)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never finished all expected requests")
+	}
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (the first reward-batch request got a genuine failure)")
+	}
+	if !strings.Contains(err.Error(), "999999") {
+		t.Errorf("ClaimAllMail() error = %v, want it to mention the reward-batch failure's errorCode 999999", err)
+	}
+	if len(seenTypes) != 2 {
+		t.Fatalf("server saw %d mail.reward.batch requests, want 2 -- the loop must not stop after the first type's failure", len(seenTypes))
+	}
+	if seenTypes[0] == seenTypes[1] {
+		t.Fatalf("both mail.reward.batch requests used the same type %d, want one request each for types 3 and 9", seenTypes[0])
+	}
+	gotTypes := map[int32]bool{seenTypes[0]: true, seenTypes[1]: true}
+	if !gotTypes[3] || !gotTypes[9] {
+		t.Errorf("mail.reward.batch types seen = %v, want exactly {3, 9}", seenTypes)
 	}
 }

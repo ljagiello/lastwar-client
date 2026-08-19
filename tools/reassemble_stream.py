@@ -9,7 +9,7 @@ Example:
     python3 reassemble_stream.py capture.pcap 5 2600:1700:7278:2310:b196:704a:ef39:e353 stream5
     # writes stream5_c2s.bin and stream5_s2c.bin
 
-See the docsite page "Capturing and decoding traffic" for how to find the
+See the docs page "Capturing and decoding traffic" for how to find the
 right <tcp_stream_index> and <client_ip> for a given capture (they're
 different every time) before running this script.
 
