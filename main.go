@@ -62,6 +62,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Go's flag package stops parsing at the first token that doesn't start with '-' and silently
+	// stashes everything from there on as "positional" arguments (fs.Args()) instead of treating it
+	// as an error -- fs.Parse above returns a nil error for e.g. `lastwar-client collect`, exactly as
+	// if "collect" were never there at all. Left unchecked, that's a real trap: the single most
+	// likely real-world cause is an operator typo'ing a flag without its leading dash (e.g. `collect`
+	// instead of `-collect`), and today that silently proceeds into a full guest-login run instead of
+	// catching what's almost certainly a mistake. slog isn't configured yet at this point (that
+	// happens further below, after the -version short-circuit), so this reports via stderr directly,
+	// matching parseLogLevel's own fmt.Fprintf-to-stderr convention for the same reason.
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "unexpected argument(s): %s (missing a leading '-' on a flag? see -help)\n", strings.Join(fs.Args(), " "))
+		os.Exit(1)
+	}
+
 	// -version intentionally bypasses the ignored-flags warning machinery below (decodeModeIgnoredFlags,
 	// ignoredCrossServerFlags, the -config/-no-config check, the -email/-code-pipe check, and
 	// warnIfDecodeLabelIgnored): it returns here, before fs.Visit populates visitedFlags below, so
@@ -151,6 +165,7 @@ func main() {
 			*csIOS = cfg.IOSMode
 		}
 	}
+	warnIfExplicitConfigPathNotFound(cfg, *configPath, *noConfig)
 
 	// Symmetric to the -email/-code-pipe-ignored warnings just below (for the opposite direction):
 	// if any -cs-* flag OTHER than -cs-ip/-cs-rt was explicitly set on the command line but the
@@ -264,6 +279,35 @@ func decodeModeIgnoredFlags(visited []string) []string {
 func warnIfDecodeLabelIgnored(decodeStream, decodeLabel string) {
 	if decodeStream == "" && decodeLabel != "" {
 		slog.Warn("ignoring -decode-label because -decode-stream is not set")
+	}
+}
+
+// warnIfExplicitConfigPathNotFound logs a warning when an explicit -config path was given but
+// loadEffectiveConfig came back with nothing to load there (cfg == nil) -- config.go's own
+// loadEffectiveConfig returns (nil, "") on os.IsNotExist(err) identically for both an explicit
+// -config path and the auto-derived default path (deliberately -- see its doc comment: a first run
+// with no config yet is a normal, expected case for the default path), so main() itself has to be
+// the one to tell those two situations apart and only warn about the explicit one. An operator
+// running unattended (cron, etc.) with a typo'd or moved -config path would otherwise get zero
+// diagnostic: the run just silently degrades into an unrelated guest-identity flow.
+//
+// Deliberately not fatal/os.Exit: this could still be a legitimate "not created yet" first run
+// (e.g. a fresh deploy pointing -config at a path a prior step hasn't written yet), so a WARN visible
+// even at the default log level is the right bar -- giving visibility without forcing a behavior
+// change for what may be intentional.
+//
+// noConfig is passed separately (rather than relying on cfg alone) because main() only calls
+// loadEffectiveConfig at all when -no-config is NOT set -- with -no-config set, cfg is nil for a
+// completely different, already-warned-about reason (see the "ignoring -config because -no-config is
+// also set" warning above this call site), not because the explicit path was missing; this must not
+// double-warn or misattribute that case.
+//
+// Taking cfg/configPath/noConfig as plain arguments (rather than being inlined at the call site in
+// main()) is what makes this testable via slog output capture, matching warnIfDecodeLabelIgnored's
+// own pattern just above.
+func warnIfExplicitConfigPathNotFound(cfg *SessionConfig, configPath string, noConfig bool) {
+	if cfg == nil && configPath != "" && !noConfig {
+		slog.Warn("explicit -config path not found; continuing without it", "path", configPath)
 	}
 }
 
@@ -554,6 +598,16 @@ func runCrossServerTest(o crossServerTestOpts) {
 			} else {
 				slog.Warn("GSL refresh response carried no access token -- continuing with the session config's access token, unrefreshed", "accessTokLen", len(o.at))
 			}
+		} else {
+			// Symmetric to the o.at != "" branch just above, for the opposite (and worse) case: the
+			// refresh call succeeded (refreshHasUsableData already confirmed it returned SOMETHING
+			// actionable, just not an access token) and there was no -cs-at/session-config access
+			// token in scope to begin with either. That leaves accessTok as the empty string it
+			// already was -- unlike the "unrefreshed but present" case above, this isn't a stale
+			// token, it's LITERALLY no token at all, and the DoCrossServerLogin call below will very
+			// likely fail (it validates AccessTok == "" itself). Worth flagging clearly here, at the
+			// point where the actual cause is known, rather than only via that downstream failure.
+			slog.Warn("GSL refresh response carried no access token, and none was already set -- this run has zero access token and will very likely fail downstream", "code", lsr.Code)
 		}
 		if len(lsr.ServerList) > 0 {
 			srv := lsr.ServerList[0]

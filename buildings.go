@@ -17,7 +17,7 @@ import (
 // equals its base type id regardless of level (level is a separate `lv`
 // field).
 //
-// The original 6 requested buildings (below) plus 6 more CONFIRMED live via
+// The original 6 requested buildings (below) plus 7 more CONFIRMED live via
 // direct testing against the real account: Oil Well, Drone Parts Workshop,
 // Component Factory, and 4 Season 6 "Spore Factory" tiers all responded to
 // building.production.collect with real collections (status=1).

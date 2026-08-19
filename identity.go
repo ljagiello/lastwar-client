@@ -187,13 +187,18 @@ const (
 	deviceIDEmptyRetryDelay    = 25 * time.Millisecond
 )
 
-// atomicWriteDeviceIDStateFile self-heals a stale empty device-id file by writing a fresh
-// identity via write-temp-then-rename instead of a plain O_WRONLY reopen. A plain reopen could
-// race and clobber a slow-but-genuine concurrent writer's partial content; rename within the same
-// directory is atomic on POSIX filesystems, so any concurrent reader sees either the old (empty)
-// content or the complete new content, never a torn write. fsync-ing the temp file before the
-// rename ensures the content is durable before the rename makes it visible.
-func atomicWriteDeviceIDStateFile(path, id string) error {
+// atomicWriteStateFile writes content to path via write-temp-then-rename instead of a plain
+// O_WRONLY/O_TRUNC reopen (what os.WriteFile does under the hood). A plain truncate-then-write
+// leaves a window -- open+truncate, then the write itself, as separate syscalls with no fsync --
+// where a crash/OOM-kill/power-loss mid-write leaves a zero-length or partially-written file
+// behind, or (for a concurrent writer instead of a crash) could race and clobber a
+// slow-but-genuine concurrent writer's partial content. Rename within the same directory is
+// atomic on POSIX filesystems, so any reader sees either the old complete content or the new
+// complete content, never a torn write. fsync-ing the temp file before the rename ensures the
+// content is durable before the rename makes it visible. Shared by both the device-id
+// self-heal path below and saveStateFile (loginKey/gameUid/username) -- every persisted
+// device-identity state file gets the same torn-write protection, not just the device id.
+func atomicWriteStateFile(path, content string) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -201,7 +206,7 @@ func atomicWriteDeviceIDStateFile(path, id string) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath) // no-op once the rename below succeeds -- the path no longer exists
-	if _, err := tmp.WriteString(id); err != nil {
+	if _, err := tmp.WriteString(content); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -271,7 +276,7 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 					// that every subsequent run would repeat forever until a human intervened by
 					// hand.
 					slog.Warn("device id state file exists but is empty after retries; self-healing with a fresh identity", "path", deviceIDStatePath(), "attempts", deviceIDEmptyRetryAttempts)
-					if err := atomicWriteDeviceIDStateFile(deviceIDStatePath(), id); err != nil {
+					if err := atomicWriteStateFile(deviceIDStatePath(), id); err != nil {
 						return nil, fmt.Errorf("self-heal empty device id file: %w", err)
 					}
 				} else {
@@ -329,15 +334,18 @@ func warnIfLoosePermissions(path string) {
 	}
 }
 
-// saveStateFile writes data to path with 0600 permissions, then explicitly chmods it to 0600
-// as well -- os.WriteFile's mode argument only applies on file creation, so an existing file
-// left world/group-readable would otherwise stay that way forever. Mirrors config.go's
-// SaveSessionConfig fix for the same gotcha.
+// saveStateFile persists data to path (used by SaveLoginKey/SaveGameUid/SaveUsername) via the
+// same write-temp-then-rename atomicWriteStateFile helper the device-id state file already uses
+// -- a plain os.WriteFile does a truncate-open + write + close as separate syscalls with no
+// fsync and no rename, so a crash/OOM-kill/power-loss mid-write could leave a zero-length or
+// partially-written loginKey/gameUid/username file behind, the same class of bug the device-id
+// file was hardened against. As a side effect of always writing through a fresh 0600 temp file
+// and renaming it into place, this also settles the "existing file left world/group-readable"
+// gotcha os.WriteFile has (its mode argument only applies on file creation): rename replaces the
+// target's inode outright, so the destination always ends up with the temp file's 0600 bits
+// regardless of what permissions the file being replaced had.
 func saveStateFile(path, data string) error {
-	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
+	return atomicWriteStateFile(path, data)
 }
 
 func (d *deviceIdentity) SaveLoginKey(key string) error {

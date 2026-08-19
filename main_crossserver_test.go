@@ -445,3 +445,75 @@ func TestRunCrossServerTestAtWarningAttribution(t *testing.T) {
 		}
 	})
 }
+
+// TestRunCrossServerTestNoAccessTokenAtAllWarning is the regression test for this round's Fix 3:
+// the "o.at != "" but lsr.At is nil" case just above (see TestRunCrossServerTestAtWarningAttribution)
+// already logs a WARN when a GSL refresh leaves a possibly-stale token in place unrefreshed -- but
+// the symmetric, strictly worse case (o.at was ALREADY empty -- no -cs-at, no session-config access
+// token at all -- AND the refresh response's lsr.At is also nil) used to log nothing at all. That
+// leaves accessTok as the empty string it already was, which DoCrossServerLogin's own
+// `p.AccessTok == ""` check rejects immediately (before ever dialing) -- but until this fix, an
+// operator watching the log (even at a trimmed -log-level=warn) would get zero indication of why
+// until that later, less specific-sounding failure. This drives runCrossServerTest with o.at left
+// empty and a GSL refresh response that carries a non-empty server list (so refreshHasUsableData
+// stays true and this reaches the access-token branch at all, per refreshHasUsableData's own
+// doc comment/test) but no At token.
+//
+// Because DoCrossServerLogin's AccessTok=="" check fails fast with a plain error (not
+// ErrAuthRejected), runCrossServerTest's own generic error path calls os.Exit(1) -- so, like
+// TestRunCrossServerTestExitsWhenIPEmpty and TestRunCrossServerTestExitsCode2WhenRefreshHasNoUsableData
+// above, this can't be driven to completion in-process without also killing this test binary, and
+// uses the same re-exec-the-test-binary-as-a-subprocess idiom instead. No fake game server is needed
+// (unlike this file's other end-to-end runCrossServerTest tests): DoCrossServerLogin returns its
+// error before ever dialing one, so the server list's IP/port here are just placeholders.
+func TestRunCrossServerTestNoAccessTokenAtAllWarning(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{
+			Code: "0",
+			// A non-empty server list keeps refreshHasUsableData true even though At is left nil
+			// below -- this is the exact shape that reaches the "no access token" branch without
+			// failing earlier on refreshHasUsableData's own check. The IP/port are placeholders:
+			// DoCrossServerLogin's AccessTok=="" check rejects before ever dialing this address.
+			ServerList: []LoginServerInfo{
+				{IP: "192.0.2.1", Port: 12345, Zone: "APS-REAL", GameUid: "uid-real"},
+			},
+			At: nil,
+		})
+		useFakeGSLServer(t, gsl)
+
+		runCrossServerTest(crossServerTestOpts{
+			// o.at deliberately left empty -- no -cs-at flag, no session-config access token either.
+			at: "",
+			rt: "some-refresh-token",
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will then
+		// see a clean (non-error) subprocess exit and fail with a clear message instead of this
+		// silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestNoAccessTokenAtAllWarning$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1 (DoCrossServerLogin's plain AccessTok==\"\" error, not a confirmed auth rejection); stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	log := stderr.String()
+	const wantMsg = "GSL refresh response carried no access token, and none was already set"
+	if !strings.Contains(log, wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the new warning for the o.at==\"\" case)", log, wantMsg)
+	}
+	if strings.Contains(log, "continuing with the original -cs-at unrefreshed") ||
+		strings.Contains(log, "continuing with the session config's access token, unrefreshed") {
+		t.Errorf("subprocess stderr = %s\nwant the o.at==\"\" branch's own distinct wording, not the sibling o.at!=\"\" branch's \"unrefreshed\" wording (there's no stale token here to be unrefreshed, there's no token at all)", log)
+	}
+}

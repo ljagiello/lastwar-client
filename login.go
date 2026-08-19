@@ -57,12 +57,21 @@ func gslOptFor(ident *deviceIdentity) GSLOpt {
 // equivalent `if firstHost(ip) == "" { ...; os.Exit(1) }` guard on the cross-server login path,
 // adapted to return an error rather than exit since this is a library-style function.
 //
+// Also guards against a non-positive port, mirroring main.go's own separate `if port <= 0 { ...;
+// os.Exit(1) }` pre-flight check on the cross-server login path (which validates the CLI-supplied
+// initial port only -- it does not, and cannot, cover this function's mid-login serverInfo
+// redirect call site below, where the port comes from the server at runtime). Without this guard,
+// a redirect payload with a missing or unparseable `port` field -- gsl.go's getIntFlexible
+// silently returns 0 for either case rather than erroring -- would sail through and produce a
+// "host:0" address instead of a clear error, same failure class as the empty-host case above.
+//
 // Used at two call sites in this file: the initial dial address built from GSL's server list, and
-// the mid-login serverInfo redirect branch below (which had this exact gap until round 18 -- the
-// redirect's ip is a fresh value the server hands back mid-login, not something a caller or an
-// earlier check can pre-validate, so the guard has to live here, not just at the first call site).
-// crossserver.go's DoCrossServerLogin reuses this same helper for its own, byte-for-byte identical
-// redirect branch rather than duplicating the guard.
+// the mid-login serverInfo redirect branch below (which had this exact gap until round 18 for the
+// host half, and round 19 for the port half -- the redirect's ip/port are fresh values the server
+// hands back mid-login, not something a caller or an earlier check can pre-validate, so the guard
+// has to live here, not just at the first call site). crossserver.go's DoCrossServerLogin reuses
+// this same helper for its own, byte-for-byte identical redirect branch rather than duplicating
+// the guard.
 //
 // The GSL-entry call site itself is not observed live: reachable only if gsl.go's
 // applyLoginServerFallback synthesizes an empty-IP ServerList[0] entry, which itself requires
@@ -73,6 +82,9 @@ func buildBaseZoneLoginAddr(ip string, port int) (string, error) {
 	host := firstHost(ip)
 	if host == "" {
 		return "", fmt.Errorf("no ip in GSL server list entry (an empty host would dial the loopback interface instead of failing clearly)")
+	}
+	if port <= 0 {
+		return "", fmt.Errorf("no valid port in GSL server list entry (port=%d would silently build a bogus \"host:0\"-shaped address instead of failing clearly)", port)
 	}
 	return fmt.Sprintf("%s:%d", host, port), nil
 }
@@ -493,7 +505,16 @@ func redact(s string) string {
 // error, ...) when the wait ended for some other reason -- mirroring
 // waitFor's sibling helper, which returns its own ReadEnvelope error
 // verbatim rather than collapsing every failure mode into one generic
-// "gave up" outcome.
+// "gave up" outcome. A failed SendExtension for the login.init active-pull
+// fallback itself is treated identically to a failed ReadEnvelope: it's
+// returned immediately as this same terminal connection-failure result,
+// not merely logged and fallen through into the next blocking read. A
+// half-open connection can surface a local write error fast while the
+// following ReadEnvelope genuinely blocks until the deadline -- without
+// this, that scenario would misreport a definite, already-logged
+// connection failure as an ordinary silence-until-deadline timeout,
+// denying the caller (Login) the fail-fast behavior it's specifically
+// built around the initErr!=nil case for.
 func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visitor, bool, error) {
 	deadline := time.Now().Add(timeout)
 	halfway := time.Now().Add(timeout / 2)
@@ -511,7 +532,12 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 			req.PutInt("_id", 2)
 			req.PutUtfString("dataConfigMd5", "")
 			if err := conn.SendExtension("login.init", req); err != nil {
+				// Same terminal treatment as a failed ReadEnvelope below: a failed send is a
+				// definite, already-observed connection failure, not something to merely log and
+				// keep waiting past -- see this function's doc comment for why falling through
+				// here would misreport it as a plain timeout instead.
 				slog.Error("login.init send failed", "error", err)
+				return nil, nil, false, err
 			}
 		}
 

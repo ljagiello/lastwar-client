@@ -193,8 +193,13 @@ func TestLoginConnectionFailureWhileWaitingForInit(t *testing.T) {
 	// Same rationale as TestWaitForInitPushConnectionFailure's own elapsed-time check: a connection
 	// failure should surface promptly, not after waiting out the full 45s initPushTimeout window --
 	// proving Login() actually took the initErr!=nil fail-fast branch rather than, say, coincidentally
-	// timing out and then erroring for some unrelated reason.
-	if elapsed > 45*time.Second {
+	// timing out and then erroring for some unrelated reason. A bound of 45s itself would be toothless
+	// here: in every way this fix could regress, the err==nil check above already fails the test long
+	// before elapsed is ever computed against a 45s bound. 5s is generous for a local fake-server
+	// round trip while still being far short of the full window, so it actually catches a "fell
+	// through to the slow giving-up path but still happened to error for an unrelated reason" scenario
+	// the err==nil check alone wouldn't.
+	if elapsed > 5*time.Second {
 		t.Errorf("Login took %v, want it to fail promptly on connection failure rather than waiting out the full init-push timeout window", elapsed)
 	}
 }

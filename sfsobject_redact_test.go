@@ -857,3 +857,154 @@ func TestEncodeObjectNilNestedValueReturnsErrorNotPanic(t *testing.T) {
 		}
 	})
 }
+
+// TestStringRedactedSanitizesTerminalEscapeSequences is the round-19 regression test for Fix 1
+// (MAJOR): decoded server strings used to reach StringRedacted()'s output completely raw --
+// formatSFSValueRedacted's default case was a bare fmt.Sprintf("%v", val) and redactSFSValue's
+// string case returned redact(s) unmodified, neither stripping nor escaping control characters. A
+// malicious server or crafted capture file could embed a raw ESC (0x1b)/BEL (0x07)-based ANSI
+// terminal-title-injection sequence in any decoded string field, and it would reach the operator's
+// screen unescaped the moment that value flowed into decode.go's -decode-stream tool or
+// buildings.go's PrintBuildings (both plain fmt.Printf sinks with no escaping of their own).
+// sanitizeForTerminal (sfsobject.go) now escapes every C0 control byte other than newline/tab
+// (plus DEL) as a visible "\xHH" sequence at every leaf point a raw string reaches
+// StringRedacted()'s output: an ordinary field's value (formatSFSValueRedacted's default case), a
+// sensitive field's redact()-shortened value (redactSFSValue), and a decoded field's KEY name
+// itself (StringRedacted()'s own loop).
+func TestStringRedactedSanitizesTerminalEscapeSequences(t *testing.T) {
+	// A classic xterm OSC-0 "set window title" injection, terminated by BEL -- the same
+	// ESC(0x1b)]0;...BEL(0x07) shape a real terminal-spoofing attack would use to overwrite the
+	// operator's window/tab title with fake text.
+	const titleInjection = "\x1b]0;PWNED-BY-SERVER\x07"
+	// A CSI erase/cursor/color sequence -- ESC(0x1b) followed by '[' -- used for e.g. faking error
+	// text at an arbitrary screen position or wiping what's already on screen.
+	const csiInjection = "\x1b[2J\x1b[H\x1b[31mFAKE ERROR: connection lost\x1b[0m"
+
+	t.Run("ordinary non-sensitive field value", func(t *testing.T) {
+		o := NewSFSObject()
+		o.PutUtfString("motd", "hello"+titleInjection+csiInjection+"world")
+		o.PutUtfString("un", "player-one")
+
+		got := o.StringRedacted()
+
+		if strings.Contains(got, "\x1b") || strings.Contains(got, "\x07") {
+			t.Errorf("StringRedacted lets a raw ESC/BEL byte through in an ordinary field's value: %q", got)
+		}
+		if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
+			t.Errorf("sanitization must not eat the surrounding non-control text, got: %q", got)
+		}
+		if !strings.Contains(got, "player-one") {
+			t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %q", got)
+		}
+	})
+
+	t.Run("sensitive field value surviving redact()'s first4...last4 shortening", func(t *testing.T) {
+		// redact() keeps the first 4 and last 4 bytes of a long string -- place the injection at
+		// both ends so it survives into the shortened output regardless of exactly how redact()
+		// slices it.
+		secret := titleInjection + "middle-of-a-very-long-secret-value-padding-out-the-string" + titleInjection
+
+		o := NewSFSObject()
+		o.PutUtfString("loginKey", secret)
+		o.PutUtfString("un", "player-one")
+
+		got := o.StringRedacted()
+
+		if strings.Contains(got, "\x1b") || strings.Contains(got, "\x07") {
+			t.Errorf("StringRedacted lets a raw ESC/BEL byte through in a sensitive field's redacted value: %q", got)
+		}
+	})
+
+	t.Run("field key name itself", func(t *testing.T) {
+		o := NewSFSObject()
+		o.PutUtfString(titleInjection+"evilkey", "some-value")
+		o.PutUtfString("un", "player-one")
+
+		got := o.StringRedacted()
+
+		if strings.Contains(got, "\x1b") || strings.Contains(got, "\x07") {
+			t.Errorf("StringRedacted lets a raw ESC/BEL byte through in a decoded field's KEY name: %q", got)
+		}
+	})
+
+	t.Run("newline and tab stay readable", func(t *testing.T) {
+		o := NewSFSObject()
+		o.PutUtfString("motd", "line one\nline two\tindented")
+		o.PutUtfString("un", "player-one")
+
+		got := o.StringRedacted()
+
+		if !strings.Contains(got, "line one\nline two\tindented") {
+			t.Errorf("sanitizeForTerminal should leave plain newline/tab bytes alone for readability, got: %q", got)
+		}
+	})
+}
+
+// TestEncodeObjectNilTopLevelReturnsErrorNotPanic is the round-19 regression test for Fix 2:
+// EncodeObject(nil) used to panic with a nil pointer dereference on the `len(o.keys)` access
+// inside its int16Count call, instead of returning a clean error -- inconsistent with this file's
+// own nil-guard hardening on writeValuePayload's sfsObjectType/sfsArrayType cases (round 16, see
+// TestEncodeObjectNilNestedValueReturnsErrorNotPanic above, which covers a nil value NESTED inside
+// a valid parent object -- a different code path from the top-level `o` itself being nil) and on
+// StringRedacted/formatSFSValueRedacted/redactSFSValue (rounds 15-16), all of which already handle
+// a nil *SFSObject/*SFSArray gracefully. This test covers the top-level EncodeObject(nil) call,
+// which none of the existing nil-related tests exercised.
+func TestEncodeObjectNilTopLevelReturnsErrorNotPanic(t *testing.T) {
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("EncodeObject(nil) panicked instead of returning a clean error: %v", r)
+			}
+		}()
+		_, err = EncodeObject(nil)
+	}()
+	if err == nil {
+		t.Fatal("EncodeObject(nil) should return an error, got nil")
+	}
+}
+
+// TestSFSValueStringAndGoStringRedactSecret is the round-19 regression test for Fix 3: SFSValue
+// (the type Get() returns) had no String()/GoString() redaction guard, unlike *SFSObject/*SFSArray
+// which got exactly this treatment in rounds 14-15. fmt.Sprintf("%v", someValue) on a raw SFSValue
+// extracted via o.Get("loginKey") used to fall through to Go's default reflection-based struct
+// formatter and print the real secret sitting in its exported Val field in full cleartext --
+// currently latent (no call site in the repo formats a bare SFSValue this way today; every
+// .Get() call type-asserts .Val or recurses into a nested object/array instead), matching the same
+// "no live call site today, but an idiomatic future call would leak" shape that justified the
+// SFSObject/SFSArray fixes in rounds 14-15. SFSValue.String()/GoString() now blanket-mask,
+// mirroring bare *SFSArray.StringRedacted()'s own "no key context to lean on" reasoning.
+func TestSFSValueStringAndGoStringRedactSecret(t *testing.T) {
+	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-via-bare-sfsvalue-1234567890"
+
+	o := NewSFSObject()
+	o.PutUtfString("loginKey", secretLoginKey)
+
+	v, ok := o.Get("loginKey")
+	if !ok {
+		t.Fatal(`Get("loginKey") returned ok=false`)
+	}
+
+	if got := fmt.Sprintf("%v", v); strings.Contains(got, secretLoginKey) {
+		t.Errorf("fmt.Sprintf(\"%%v\", sfsValue) leaks a real secret via the default reflection-based struct formatter: %s", got)
+	}
+	if got := fmt.Sprintf("%s", v); strings.Contains(got, secretLoginKey) {
+		t.Errorf("fmt.Sprintf(\"%%s\", sfsValue) leaks a real secret via implicit Stringer auto-invocation: %s", got)
+	}
+	if got := fmt.Sprintf("%#v", v); strings.Contains(got, secretLoginKey) {
+		t.Errorf("fmt.Sprintf(\"%%#v\", sfsValue) leaks a real secret via the default reflection-based struct formatter: %s", got)
+	}
+
+	var buf bytes.Buffer
+	fmt.Fprintln(&buf, v)
+	if strings.Contains(buf.String(), secretLoginKey) {
+		t.Errorf("fmt.Fprintln(w, sfsValue) leaks a real secret via implicit Stringer auto-invocation: %s", buf.String())
+	}
+
+	if got := v.String(); strings.Contains(got, secretLoginKey) {
+		t.Errorf("SFSValue.String() leaks a real secret: %s", got)
+	}
+	if got := v.GoString(); strings.Contains(got, secretLoginKey) {
+		t.Errorf("SFSValue.GoString() leaks a real secret: %s", got)
+	}
+}

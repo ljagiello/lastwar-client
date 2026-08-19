@@ -76,16 +76,22 @@ func newTestExtMsgWithStatus(cmd string, errorCode any, status int32, hasStatus 
 
 func TestLogCommandResultClassification(t *testing.T) {
 	// logCommandResult only logs; this smoke-tests all three classification branches
-	// (success, benign errorCode, real-failure errorCode) run without panicking.
+	// (success, benign errorCode, real-failure errorCode) run without panicking. The benign case
+	// must use 602026's actual documented cmd (building.production.collect) -- since
+	// benignErrorCodes entries are cmd-scoped, pairing 602026 with an arbitrary "test.cmd" would
+	// silently exercise the failure branch instead of the benign one.
 	logCommandResult("test success", newTestExtMsg("test.cmd", nil))
-	logCommandResult("test benign", newTestExtMsg("test.cmd", "602026"))
+	logCommandResult("test benign", newTestExtMsg("building.production.collect", "602026"))
 	logCommandResult("test real failure", newTestExtMsg("test.cmd", "999999"))
 }
 
 // TestClassifyResponse asserts classifyResponse's actual (outcome, code) return value directly,
 // including that the status=0-with-no-errorCode benign heuristic is scoped to
 // building.production.collect only -- for every other command a status=0 response with no
-// errorCode is a real success, not a no-op (see classifyResponse's doc comment in conn.go).
+// errorCode is a real success, not a no-op (see classifyResponse's doc comment in conn.go) -- and
+// that every benignErrorCodes entry is likewise scoped to its own documented cmd(s): the same
+// numeric/string errorCode value on an unrelated cmd must fall through to outcomeFailure rather
+// than being silently reclassified as outcomeBenign.
 func TestClassifyResponse(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -128,14 +134,49 @@ func TestClassifyResponse(t *testing.T) {
 			wantCode:    "",
 		},
 		{
-			name:        "errorCode is a known benignErrorCodes entry -> benign",
-			cmd:         "vip.reward.get",
+			name:        "602026 on its documented cmd (building.production.collect) -> benign",
+			cmd:         "building.production.collect",
 			errorCode:   "602026",
 			wantOutcome: outcomeBenign,
 			wantCode:    "602026",
 		},
 		{
-			name:        "errorCode is not in benignErrorCodes -> failure",
+			name:        "602026 on an unrelated cmd -> failure (errorCode scoping must not leak across commands)",
+			cmd:         "vip.reward.get",
+			errorCode:   "602026",
+			wantOutcome: outcomeFailure,
+			wantCode:    "602026",
+		},
+		{
+			name:        "120289 on vip.add.login.score (one of its two documented cmds) -> benign",
+			cmd:         "vip.add.login.score",
+			errorCode:   "120289",
+			wantOutcome: outcomeBenign,
+			wantCode:    "120289",
+		},
+		{
+			name:        "120289 on vip.get.every.day.reward (the other documented cmd) -> benign",
+			cmd:         "vip.get.every.day.reward",
+			errorCode:   "120289",
+			wantOutcome: outcomeBenign,
+			wantCode:    "120289",
+		},
+		{
+			name:        "visitor_err_coming on its documented cmd (visitor.operate) -> benign",
+			cmd:         "visitor.operate",
+			errorCode:   "visitor_err_coming",
+			wantOutcome: outcomeBenign,
+			wantCode:    "visitor_err_coming",
+		},
+		{
+			name:        "120471 on its documented cmd (al.science.donate) -> benign",
+			cmd:         "al.science.donate",
+			errorCode:   "120471",
+			wantOutcome: outcomeBenign,
+			wantCode:    "120471",
+		},
+		{
+			name:        "errorCode is not in benignErrorCodes at all -> failure",
 			cmd:         "vip.reward.get",
 			errorCode:   "999999",
 			wantOutcome: outcomeFailure,

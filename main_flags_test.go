@@ -108,6 +108,54 @@ func TestWarnIfDecodeLabelIgnored(t *testing.T) {
 	}
 }
 
+// TestWarnIfExplicitConfigPathNotFound is the regression test for this round's Fix 2:
+// config.go's loadEffectiveConfig returns (nil, "") identically for both an explicit -config path
+// and the auto-derived default path when the resolved file genuinely doesn't exist yet (see its own
+// doc comment for why that's correct, shared behavior) -- but before this round's fix, main() never
+// logged anything to distinguish those two cases, so a typo'd or moved -config path silently
+// degraded into an unrelated guest-identity run with zero diagnostic. This pins down that the new
+// warning fires only for the explicit-path-genuinely-missing case, and stays silent for every other
+// combination: a successfully loaded config, the default path (no -config at all), and -config
+// stacked with -no-config (already covered by its own separate, pre-existing warning).
+func TestWarnIfExplicitConfigPathNotFound(t *testing.T) {
+	cases := []struct {
+		name        string
+		cfg         *SessionConfig
+		configPath  string
+		noConfig    bool
+		wantWarning bool
+	}{
+		{"explicit -config path given, not found -> warns", nil, "/no/such/config.json", false, true},
+		{"explicit -config path given, loaded successfully -> no warning", &SessionConfig{}, "/some/config.json", false, false},
+		{"no -config given (default path), default absent -> stays silent, as today", nil, "", false, false},
+		{"no -config given, default loaded successfully -> no warning", &SessionConfig{}, "", false, false},
+		{
+			"explicit -config path given but -no-config also set -> no warning (already covered by the -config/-no-config warning)",
+			nil, "/no/such/config.json", true, false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			defer slog.SetDefault(orig)
+
+			warnIfExplicitConfigPathNotFound(c.cfg, c.configPath, c.noConfig)
+
+			got := strings.Contains(buf.String(), "explicit -config path not found")
+			if got != c.wantWarning {
+				t.Errorf("warnIfExplicitConfigPathNotFound(cfg=%v, configPath=%q, noConfig=%v): warning present = %v, want %v (log output: %s)",
+					c.cfg, c.configPath, c.noConfig, got, c.wantWarning, buf.String())
+			}
+			if c.wantWarning && !strings.Contains(buf.String(), c.configPath) {
+				t.Errorf("warnIfExplicitConfigPathNotFound(cfg=%v, configPath=%q, noConfig=%v): warning doesn't name the path (log output: %s)",
+					c.cfg, c.configPath, c.noConfig, buf.String())
+			}
+		})
+	}
+}
+
 func TestRefreshHasUsableData(t *testing.T) {
 	cases := []struct {
 		name       string

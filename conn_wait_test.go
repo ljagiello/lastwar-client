@@ -77,7 +77,11 @@ func TestSendAndWaitBenignErrorCode(t *testing.T) {
 		readAndReply(server, "", resp)
 	}()
 
-	msg, err := sendAndWait(client, "test benign", "test.cmd", NewSFSObject())
+	// cmd must be "building.production.collect" here, not an arbitrary synthetic name: round 19
+	// scoped benignErrorCodes by cmd (conn.go), and 602026 is documented as scoped exclusively to
+	// this one cmd -- readAndReply echoes back whatever cmd the client sent, so this must match for
+	// classifyResponse to actually take the benign path this test means to exercise.
+	msg, err := sendAndWait(client, "test benign", "building.production.collect", NewSFSObject())
 	if err != nil {
 		t.Fatalf("sendAndWait returned an error for a benign errorCode: %v", err)
 	}
@@ -258,6 +262,20 @@ func TestBuildBaseZoneLoginAddrFirstOfFallbackList(t *testing.T) {
 	}
 }
 
+// TestBuildBaseZoneLoginAddrZeroPort is the round-19 regression test for
+// buildBaseZoneLoginAddr's port guard: a zero (or negative) port must produce a clear error
+// rather than silently building a "host:0"-shaped address. Mirrors
+// TestBuildBaseZoneLoginAddrEmptyIP's structure for the port half of the same guard function.
+func TestBuildBaseZoneLoginAddrZeroPort(t *testing.T) {
+	_, err := buildBaseZoneLoginAddr("203.0.113.5", 0)
+	if err == nil {
+		t.Fatal("buildBaseZoneLoginAddr(\"203.0.113.5\", 0): expected an error for a zero port, got nil")
+	}
+	if strings.Contains(err.Error(), "203.0.113.5:0") {
+		t.Errorf("err = %q, must not contain a \"host:0\"-shaped address (that's the footgun this guard exists to prevent)", err.Error())
+	}
+}
+
 // TestLoginRedirectRejectsEmptyRedirectIP is the round-18 regression test for the same
 // firstHost-without-emptiness-check gap crossserver_test.go's
 // TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP covers on the DoCrossServerLogin side:
@@ -304,6 +322,54 @@ func TestLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), ":9339") {
 		t.Errorf("err = %q, must not contain a \":<port>\"-shaped address (that's the loopback-dial footgun this guard exists to prevent)", err.Error())
+	}
+	if !strings.Contains(err.Error(), "serverInfo redirect") {
+		t.Errorf("err = %q, want it to mention the serverInfo redirect context", err.Error())
+	}
+}
+
+// TestLoginRedirectRejectsMissingRedirectPort is the round-19 counterpart to
+// TestLoginRedirectRejectsEmptyRedirectIP, covering the port half of buildBaseZoneLoginAddr's
+// guard instead of the host half: a serverInfo redirect payload that omits `port` entirely (the
+// same shape gsl.go's getIntFlexible silently resolves to 0 for, whether the field is absent or
+// present-but-unparseable) must make Login() return a clear error, not silently build and dial a
+// "host:0"-shaped address. Mirrors TestLoginRedirectRejectsEmptyRedirectIP's fake-GSL/fake-game-
+// server setup, just omitting the `port` field on the serverInfo payload instead of malforming
+// `ip`.
+func TestLoginRedirectRejectsMissingRedirectPort(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		si := NewSFSObject()
+		si.PutUtfString("ip", "203.0.113.9")
+		// No "port" field at all -- getIntFlexible(si, "port") resolves this to 0, same as an
+		// unparseable port value would.
+		si.PutUtfString("zone", "APS2")
+		resp := NewSFSObject()
+		resp.PutSFSObject("serverInfo", si)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	oldHost, oldPort := splitHostPortInt(t, oldAddr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: oldHost, Port: oldPort, Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	result, err := Login(LoginOptions{})
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("expected an error for a redirect payload with a missing port, got nil")
+	}
+	if strings.Contains(err.Error(), "203.0.113.9:0") {
+		t.Errorf("err = %q, must not contain a \"host:0\"-shaped address (that's the footgun this guard exists to prevent)", err.Error())
 	}
 	if !strings.Contains(err.Error(), "serverInfo redirect") {
 		t.Errorf("err = %q, want it to mention the serverInfo redirect context", err.Error())
@@ -393,5 +459,62 @@ func TestWaitForInitPushConnectionFailure(t *testing.T) {
 	}
 	if elapsed > window {
 		t.Errorf("waitForInitPush took %v, want it to return promptly on connection failure rather than waiting out the full %v window", elapsed, window)
+	}
+}
+
+// writeFailConn wraps a net.Conn and makes every Write fail with a fixed error while leaving
+// Read (and everything else -- SetReadDeadline, SetWriteDeadline, Close, ...) delegated to the
+// embedded conn unchanged. Used by TestWaitForInitPushSendExtensionFailure below to simulate a
+// half-open connection: a local write that fails immediately, paired with a read that would
+// otherwise genuinely block until the caller's deadline (there's no peer-close/EOF involved, so
+// it's distinguishable from TestWaitForInitPushConnectionFailure's scenario above).
+type writeFailConn struct {
+	net.Conn
+	err error
+}
+
+func (w *writeFailConn) Write([]byte) (int, error) { return 0, w.err }
+
+// TestWaitForInitPushSendExtensionFailure is the round-19 regression test for waitForInitPush's
+// handling of a failed login.init active-pull send: previously, a SendExtension error here was
+// only logged, and execution fell through unconditionally into the next blocking ReadEnvelope --
+// so a local write failure (a plausible half-open-connection symptom, since a write error can
+// surface fast while a peer that never actually closes the connection leaves the read blocking
+// until the deadline) got silently downgraded into an ordinary silence-until-deadline timeout
+// instead of the definite initErr!=nil connection-failure result Login() is built to fail-fast
+// on. Forces this deterministically with writeFailConn rather than relying on a race: the read
+// side is left as a genuinely-blocking, non-EOF net.Pipe (no peer close at all), so the *only*
+// way this test's error can surface is via the send failure itself, and only a fix that returns
+// immediately on that failure -- not one that just logs and keeps waiting -- can make this test
+// pass promptly instead of timing out the full window.
+func TestWaitForInitPushSendExtensionFailure(t *testing.T) {
+	client, _ := newPipeGameConnPair(t) // server intentionally left idle: no reply, no close
+	writeErr := errors.New("simulated write failure (e.g. half-open connection)")
+	client.conn = &writeFailConn{Conn: client.conn, err: writeErr}
+
+	const window = 200 * time.Millisecond
+	start := time.Now()
+	buildings, visitors, gotInit, err := waitForInitPush(client, window)
+	elapsed := time.Since(start)
+
+	if gotInit {
+		t.Fatalf("expected gotInit=false, got true (buildings=%v visitors=%v)", buildings, visitors)
+	}
+	if err == nil {
+		t.Fatal("expected a non-nil error when the login.init active-pull send fails, got nil (indistinguishable from a plain timeout)")
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("err = %v, want it to wrap/equal the SendExtension failure %v", err, writeErr)
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Errorf("err = %v, want a genuine send-failure error, not a timeout error", err)
+	}
+	// The active pull only fires at the halfway point (window/2), so the earliest this can
+	// possibly return is ~window/2, not immediately from start -- but it must return well before
+	// the full window elapses, proving it didn't fall through into the blocking read-and-wait
+	// path after logging the send failure.
+	if elapsed > window*3/4 {
+		t.Errorf("waitForInitPush took %v, want it to return promptly after the failed send rather than waiting out the full %v window", elapsed, window)
 	}
 }

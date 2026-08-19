@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"time"
 )
@@ -171,11 +172,18 @@ func (e *Envelope) AsExtension() (*ExtensionMessage, bool) {
 // production cooldown, an already-claimed daily reward, a visitor that hasn't arrived yet.
 // Logged at Warn (still worth seeing) but not treated as a failure for aggregation/exit-code
 // purposes, so a routine daily re-run doesn't make -collect's exit code permanently noisy.
-var benignErrorCodes = map[string]bool{
-	"602026":             true, // buildings.go: "In production, please be patient."
-	"120289":             true, // vip.go: "no score"/"no reward" -- already claimed today
-	"visitor_err_coming": true, // visitors.go: visitor not yet arrived/greetable
-	"120471":             true, // alliance.go: al.science.donate cooldown -- "Donate science CD time is not finish"
+//
+// Each errorCode is scoped to the specific cmd(s) it's actually documented for (see the inline
+// comments below) -- classifyResponse only treats an errorCode as benign when msg.Cmd is one of
+// its listed cmds. Without this scoping, a genuine failure on an unrelated command that happens
+// to reuse one of these numeric errorCode values would be silently reclassified from
+// outcomeFailure to outcomeBenign, undermining the aggregated-error/exit-code signal every
+// orchestration loop (CollectAll/ClaimAllMail/GreetVisitors/ClaimAllianceGifts) relies on.
+var benignErrorCodes = map[string][]string{
+	"602026":             {"building.production.collect"},                     // buildings.go: "In production, please be patient."
+	"120289":             {"vip.add.login.score", "vip.get.every.day.reward"}, // vip.go: "no score"/"no reward" -- already claimed today
+	"visitor_err_coming": {"visitor.operate"},                                 // visitors.go: visitor not yet arrived/greetable
+	"120471":             {"al.science.donate"},                               // alliance.go: al.science.donate cooldown -- "Donate science CD time is not finish"
 }
 
 // commandOutcome classifies a collect/claim response into one of three buckets: a real success,
@@ -195,8 +203,12 @@ const (
 
 // classifyResponse determines a response's outcome and, for a benign or real failure, the
 // errorCode (empty string for the building.production.collect status=0-with-no-errorCode benign
-// case). This is the single place both logCommandResult and sendAndWait derive their behavior
-// from, so the two can never drift out of sync with each other.
+// case). An errorCode present in benignErrorCodes is only outcomeBenign when msg.Cmd matches one
+// of that code's documented cmds (see benignErrorCodes' doc comment) -- mirroring how the
+// status=0 heuristic above is itself scoped to building.production.collect -- so a genuine
+// failure on an unrelated cmd that happens to share one of these numeric errorCode values still
+// falls through to outcomeFailure. This is the single place both logCommandResult and sendAndWait
+// derive their behavior from, so the two can never drift out of sync with each other.
 func classifyResponse(msg *ExtensionMessage) (commandOutcome, string) {
 	ec, has := msg.Params.Get("errorCode")
 	if !has {
@@ -206,7 +218,7 @@ func classifyResponse(msg *ExtensionMessage) (commandOutcome, string) {
 		return outcomeSuccess, ""
 	}
 	code := fmt.Sprintf("%v", ec.Val)
-	if benignErrorCodes[code] {
+	if cmds, ok := benignErrorCodes[code]; ok && slices.Contains(cmds, msg.Cmd) {
 		return outcomeBenign, code
 	}
 	return outcomeFailure, code

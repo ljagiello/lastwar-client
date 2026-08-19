@@ -39,6 +39,34 @@ type SFSValue struct {
 	Val  interface{}
 }
 
+// String makes SFSValue satisfy fmt.Stringer safely, mirroring *SFSObject/*SFSArray's own
+// String()/StringRedacted() treatment (rounds 14-15). Every current .Get() call site type-asserts
+// straight through .Val, or hands the whole SFSObject/SFSArray recursively to StringRedacted() --
+// none formats a bare SFSValue itself -- so this is currently latent, not actively exploited. But
+// it's the same shape of gap those rounds closed: without this, an idiomatic future call site like
+// `fmt.Sprintf("...: %v", someVal)` on an SFSValue extracted via o.Get("loginKey") would fall
+// through to Go's default reflection-based struct formatter and print v.Val -- a live
+// secret -- in full cleartext, since Go's struct-field printer has no notion of "this field is
+// sensitive."
+//
+// Unlike *SFSObject/*SFSArray, a bare SFSValue carries no key/field-name context at all to check
+// against sensitiveSFSKeys (that check only ever happens one level up, in the parent SFSObject
+// that held this value under a specific key) -- so, mirroring the bare *SFSArray.StringRedacted()
+// method's own reasoning for the identical "no key context to lean on" situation, this
+// blanket-masks unconditionally rather than risk ever printing a value that turns out to be
+// sensitive.
+func (v SFSValue) String() string {
+	return "[REDACTED SFSValue]"
+}
+
+// GoString makes SFSValue satisfy fmt.GoStringer, mirroring String() above the same way
+// *SFSObject.GoString()/*SFSArray.GoString() mirror their own String() methods: without this,
+// %#v on a bare SFSValue falls through to Go's default reflection-based formatter, dumping its
+// Val field (and Type) raw.
+func (v SFSValue) GoString() string {
+	return v.String()
+}
+
 // SFSObject is an ordered string-keyed map, matching the client's own
 // "insert order doesn't matter for lookup, but we preserve it for wire
 // determinism" behavior.
@@ -293,13 +321,57 @@ func (o *SFSObject) StringRedacted() string {
 			b.WriteString(", ")
 		}
 		v := o.values[k]
+		// The key name itself is server-controlled (readUtfString decodes it straight off the
+		// wire, same as any string value), so it goes through sanitizeForTerminal too -- not just
+		// the value -- before being embedded in the output. See sanitizeForTerminal's doc comment.
+		safeKey := sanitizeForTerminal(k)
 		if isSensitiveSFSKey(k) {
-			fmt.Fprintf(&b, "%s=%s", k, redactSFSValue(v))
+			fmt.Fprintf(&b, "%s=%s", safeKey, redactSFSValue(v))
 		} else {
-			fmt.Fprintf(&b, "%s=%s", k, formatSFSValueRedacted(v))
+			fmt.Fprintf(&b, "%s=%s", safeKey, formatSFSValueRedacted(v))
 		}
 	}
 	b.WriteString("}")
+	return b.String()
+}
+
+// sanitizeForTerminal makes s safe to write to a terminal by escaping every C0 control byte
+// (0x00-0x1F) other than a plain newline/tab, plus DEL (0x7F), as a visible "\xHH" sequence
+// instead of passing it through raw.
+//
+// This protocol has no separate "trusted" vs "untrusted" string channel -- every decoded field
+// value (and, per readUtfString/readValuePayload's sfsObjectType case, every decoded field KEY
+// too) is either produced by DecodeObject from bytes a live server or a captured/replayed capture
+// file supplied, both of which are adversarial from this client's point of view. Two real call
+// sites write StringRedacted()'s output straight to a terminal with zero escaping of their own
+// (decode.go's -decode-stream tool, directly reachable from a crafted capture file, and
+// buildings.go's PrintBuildings, hit during ordinary -collect/-list-buildings runs against a live
+// server) -- without this, a malicious server/capture file could embed a raw ESC (0x1b) followed
+// by a CSI/OSC sequence in any decoded string and spoof terminal output on the operator's screen
+// (fake error text, title-bar spoofing, cursor manipulation) the moment that value flows into
+// StringRedacted()'s output. Every slog.* call site is already safe (main.go's JSON handler
+// escapes control bytes through encoding/json), so this is scoped to this file's own
+// formatting/redaction output construction rather than duplicated at each terminal-writing call
+// site, closing the gap for every current AND future consumer of StringRedacted() at once.
+//
+// Deliberately byte-oriented rather than rune-oriented: a raw ESC byte is always 0x1b regardless
+// of what UTF-8 sequence surrounds it (and readUtfString's `string(b)` conversion doesn't
+// guarantee b is even valid UTF-8 to begin with, since it comes straight off the wire), so
+// scanning byte-by-byte catches it without needing to decode runes first -- and every ordinary
+// multi-byte UTF-8 sequence's bytes are all >= 0x80, so they pass through this scan untouched.
+// Newline and tab are deliberately left alone so ordinary multi-line/tab-formatted string values
+// stay human-readable; every other C0 control code (including BEL 0x07 and ESC 0x1b) and DEL are
+// escaped.
+func sanitizeForTerminal(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 0x20 && c != '\n' && c != '\t') || c == 0x7f {
+			fmt.Fprintf(&b, "\\x%02x", c)
+			continue
+		}
+		b.WriteByte(c)
+	}
 	return b.String()
 }
 
@@ -347,7 +419,13 @@ func formatSFSValueRedacted(v SFSValue) string {
 		b.WriteString("]")
 		return b.String()
 	default:
-		return fmt.Sprintf("%v", val)
+		// val may be a bare string/sfsText value, or one of the 8 primitive-array types
+		// (readValuePayload's array-tag cases) whose elements can themselves be
+		// server-controlled strings ([]string) -- sanitizeForTerminal is applied to the whole
+		// formatted result rather than type-switching on val itself so it catches both shapes
+		// (and any future scalar type added here) uniformly. See sanitizeForTerminal's doc
+		// comment.
+		return sanitizeForTerminal(fmt.Sprintf("%v", val))
 	}
 }
 
@@ -390,7 +468,12 @@ func formatSFSValueRedacted(v SFSValue) string {
 // above.
 func redactSFSValue(v SFSValue) string {
 	if s, ok := v.Val.(string); ok {
-		return redact(s)
+		// redact() (login.go) only shortens s to a first4...last4 shape -- it doesn't strip
+		// control bytes, so a secret whose first/last 4 bytes happen to contain a raw ESC/BEL
+		// (e.g. an attacker padding a crafted "loginKey" value specifically to smuggle one into
+		// the visible slice) would still reach the terminal unescaped without this. See
+		// sanitizeForTerminal's doc comment.
+		return sanitizeForTerminal(redact(s))
 	}
 	if n, ok := primitiveArrayLen(v.Val); ok {
 		return fmt.Sprintf("[REDACTED %d items]", n)
@@ -492,7 +575,15 @@ func (a *SFSArray) StringRedacted() string {
 // Returns an error (rather than panicking) if any key/string/collection
 // along the way is too large to represent on the wire -- see int16Count and
 // writeUtfString.
+//
+// A nil o returns a clean error instead of panicking on the o.keys dereference below --
+// mirroring this file's existing nil-guard hardening on writeValuePayload's nested
+// sfsObjectType/sfsArrayType cases and on StringRedacted/formatSFSValueRedacted/redactSFSValue,
+// all of which handle a nil *SFSObject/*SFSArray gracefully rather than crashing the process.
 func EncodeObject(o *SFSObject) ([]byte, error) {
+	if o == nil {
+		return nil, fmt.Errorf("sfsobject: cannot encode a nil *SFSObject")
+	}
 	var buf bytes.Buffer
 	buf.WriteByte(sfsObjectType)
 	n, err := int16Count(len(o.keys), "keys")

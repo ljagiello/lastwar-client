@@ -454,3 +454,100 @@ func TestLoadOrCreateDeviceIdentityRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestSaveStateFileRoundTrip confirms saveStateFile's normal write-then-read round trip still
+// works correctly after switching it from a plain os.WriteFile to the write-temp-then-rename
+// atomicWriteStateFile helper (the same one atomicWriteDeviceIDStateFile's self-heal path already
+// used): the target file must end up existing at the given path, at 0600, with exactly the
+// written content -- not the temp file, not something left behind under a ".tmp-*" name.
+func TestSaveStateFileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state-roundtrip")
+
+	const want = "some-persisted-value"
+	if err := saveStateFile(path, want); err != nil {
+		t.Fatalf("saveStateFile: %v", err)
+	}
+
+	got, err := readTrimmed(path)
+	if err != nil {
+		t.Fatalf("readTrimmed: %v", err)
+	}
+	if got != want {
+		t.Errorf("got %q after round trip, want %q", got, want)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Errorf("got mode %v for %s, want 0600", fi.Mode().Perm(), path)
+	}
+
+	// No stray temp file (atomicWriteStateFile's "<base>.tmp-*" pattern) should be left behind in
+	// the directory alongside the real target -- confirms the rename actually happened rather
+	// than leaving both a temp file and (somehow) the target.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("got directory entries %v, want exactly [%s] (no leftover temp file)", names, filepath.Base(path))
+	}
+}
+
+// TestSaveStateFileLeavesTargetUntouchedOnFailedWrite proves saveStateFile's switch to
+// write-temp-then-rename actually protects an existing target from a torn write, not just that
+// the happy path still works: if the final rename step fails, the target must be left completely
+// untouched rather than ending up empty, truncated, or partially overwritten -- the exact class of
+// bug a plain os.WriteFile (truncate-open + write, no rename) is exposed to on a crash mid-write.
+//
+// Forcing rename(2) to fail this way -- destination path is an existing directory -- is a
+// type-mismatch failure the kernel reports the same way regardless of privilege, so (like
+// identity_test.go's TestLoadOrCreateDeviceIdentityDoesNotClobberOnReadFailure and config_test.go's
+// TestLoadEffectiveConfigExitsOnDefaultPathReadFailure) it also works when tests run as root,
+// unlike a permission-bits-based failure trick would.
+func TestSaveStateFileLeavesTargetUntouchedOnFailedWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state-target")
+
+	// Put a directory where the state file is expected, so the temp file gets written and
+	// fsync'd successfully (proving the write itself completed) but the final os.Rename fails
+	// with a directory/type-mismatch error instead of silently replacing/merging into it.
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := saveStateFile(path, "new-content"); err == nil {
+		t.Fatal("saveStateFile: got nil error for a rename onto an existing directory, want an error")
+	}
+
+	// The target must still be exactly what it was before the failed save -- a directory, not a
+	// regular file (torn, empty, or otherwise) written over/into it.
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if !fi.IsDir() {
+		t.Errorf("target path is no longer a directory after a failed saveStateFile -- something wrote over it, want it left completely untouched")
+	}
+
+	// The temp file (written and fsync'd before the failed rename) must be cleaned up rather than
+	// leaked into the directory permanently.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("got directory entries %v, want exactly [%s] (temp file cleaned up, target untouched)", names, filepath.Base(path))
+	}
+}

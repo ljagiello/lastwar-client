@@ -29,6 +29,8 @@ Two independent axes describe every command: which gameplay system it belongs to
 | Admin/Debug | 7 | **Skip** | GM-only, debug-gated client-side |
 | Misc | 108 | **Triage** | Leaderboards, player career/talent, photo album, titles |
 
+These rows sum to 3,057, not the 3,047 mechanically-extracted main-table figure quoted above (and not the 3,178 grand total, which also includes the 131 chat-table commands this per-domain breakdown doesn't cover) -- a handful of commands land ambiguously between two domains and were counted in each, so this table is a categorization aid, not an exact partition.
+
 ## Search the full catalog
 
 3,178 commands total: 3,047 from the main dispatch table (`Net.Msgs.*`, over the primary SFS socket) plus 131 from the dedicated chat subsystem's own table (`Chat.WebMessage.*` / `Chat.NetMessage.*`, split across the chat WebSocket and the primary socket — see the **WS** / **SFS** tags).

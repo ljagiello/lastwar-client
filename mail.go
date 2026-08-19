@@ -77,6 +77,17 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 	const mailListPageSize = 100
 
 	var all []Mail
+	// seenUIDs dedupes mail uids across pages, mirroring FetchBuildings' seenBuildingUUIDs/
+	// appendBuilding pattern (buildings.go): this function's own doc comment above already flags
+	// real uncertainty about the pagination cursor's true semantics (the cold-start clientseq/time
+	// values were never independently confirmed against the real client), so if the server's
+	// cursor ever repeats a uid across two pages -- e.g. an off-by-one boundary re-send -- that
+	// duplicate must not flow into the returned slice twice. Left unguarded, ClaimAllMail's
+	// groupUnclaimedByType would bucket the same uid twice under its type and put it twice into a
+	// single mail.reward.batch request's comma-joined uids field for that mail if it has an
+	// unclaimed reward -- unverified server-side behavior for a duplicate uid in one batch
+	// request, and not worth risking when a defensive guard is this cheap.
+	seenUIDs := make(map[string]bool)
 	clientseq := ""
 	reqTime := int64(0)
 	first := true
@@ -115,7 +126,13 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 					if !requirePresentField(mo, "uid", "mail") {
 						continue
 					}
-					all = append(all, Mail{Raw: mo})
+					m := Mail{Raw: mo}
+					uid := m.Uid()
+					if seenUIDs[uid] {
+						continue
+					}
+					seenUIDs[uid] = true
+					all = append(all, m)
 				}
 			}
 		}

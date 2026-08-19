@@ -42,9 +42,10 @@ func TestParseLogLevel(t *testing.T) {
 // options struct here -- the flag-parsing logic lives inline in main() itself -- so instead of
 // calling a helper, this reuses the same re-exec-the-test-binary-as-a-subprocess idiom but has the
 // child overwrite os.Args to the exact argv main() would see for a real invocation before calling
-// main() itself. Every case below exits inside fs.Parse's own error branch, before any
-// network/login/config-loading code runs, so this is safe to run with no fake servers or HOME
-// override.
+// main() itself. Every case below exits either inside fs.Parse's own error branch, or (the stray
+// positional argument case, round 19's Fix 1) in the fs.NArg() check immediately after it succeeds
+// -- either way, before any network/login/config-loading code runs, so this is safe to run with no
+// fake servers or HOME override.
 func TestMainFlagParseExitCodes(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		argv := []string{"lastwar-client"}
@@ -61,14 +62,28 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 	}
 
 	cases := []struct {
-		name     string
-		args     []string
-		wantCode int
+		name             string
+		args             []string
+		wantCode         int
+		wantStderrSubstr string // empty = no stderr content assertion, just the exit code
 	}{
-		{"long help flag exits 0", []string{"-help"}, 0},
-		{"short help flag exits 0", []string{"-h"}, 0},
-		{"unrecognized flag exits 1", []string{"-this-flag-does-not-exist"}, 1},
-		{"malformed flag value exits 1", []string{"-cs-port=not-a-number"}, 1},
+		{"long help flag exits 0", []string{"-help"}, 0, ""},
+		{"short help flag exits 0", []string{"-h"}, 0, ""},
+		{"unrecognized flag exits 1", []string{"-this-flag-does-not-exist"}, 1, ""},
+		{"malformed flag value exits 1", []string{"-cs-port=not-a-number"}, 1, ""},
+		{
+			// This is the regression case for this round's Fix 1: Go's flag package stops parsing
+			// at the first non-'-'-prefixed token and silently stashes everything after it as
+			// fs.Args(), with fs.Parse itself returning a nil error -- so before the fs.NArg()
+			// check added in main() (right after fs.Parse succeeds), this exact invocation used to
+			// exit 0 and proceed straight into a real guest-login run instead of catching what's
+			// almost certainly a mistyped flag missing its leading dash (e.g. "collect" instead of
+			// "-collect"). It's safe to drive through the real main() here, with no fake servers or
+			// HOME override, because the new check exits before any network/login/config-loading
+			// code runs -- same as every other case in this table.
+			"stray positional argument exits 1 with a clear error instead of silently launching a real run",
+			[]string{"collect"}, 1, "unexpected argument(s): collect",
+		},
 	}
 
 	for _, c := range cases {
@@ -92,6 +107,9 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 			}
 			if gotCode != c.wantCode {
 				t.Errorf("subprocess exit code = %d, want %d; stderr=%s", gotCode, c.wantCode, stderr.String())
+			}
+			if c.wantStderrSubstr != "" && !strings.Contains(stderr.String(), c.wantStderrSubstr) {
+				t.Errorf("subprocess stderr = %s\nwant it to contain %q", stderr.String(), c.wantStderrSubstr)
 			}
 		})
 	}

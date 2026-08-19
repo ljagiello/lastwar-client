@@ -300,6 +300,97 @@ func TestListMailWarnsOnMaxPagesTruncation(t *testing.T) {
 	}
 }
 
+// TestListMailDedupesUIDAcrossPages is the regression test for ListMail's seenUIDs guard (mail.go):
+// ListMail's own doc comment already flags real uncertainty about the pagination cursor's true
+// semantics, so if the server's cursor ever repeats the same mail uid across two pages, ListMail
+// must only return it once rather than letting a duplicate flow unfiltered into ClaimAllMail (where
+// groupUnclaimedByType would bucket it twice and put it twice into a single mail.reward.batch
+// request's comma-joined uids field for a reward-bearing mail). The fake server here answers page 1
+// with two mail entries, then page 2 with one brand-new uid PLUS a resend of page 1's second uid --
+// simulating a cursor that unexpectedly repeats a boundary entry -- and more=false to stop there.
+// ListMail must return exactly the three distinct uids, in first-sighting order, with the repeated
+// uid appearing only once.
+func TestListMailDedupesUIDAcrossPages(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read page 1 request: %v", err)
+			return
+		}
+		if msg, ok := env.AsExtension(); !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("page 1 request malformed")
+			return
+		}
+		resp1 := NewSFSObject()
+		arr1 := NewSFSArray()
+		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0))
+		arr1.AddSFSObject(newTestMailObj("uid-2", 4, 1))
+		resp1.PutSFSArray("msg", arr1)
+		resp1.PutBool("more", true)
+		resp1.PutUtfString("lastUid", "uid-2")
+		resp1.PutLong("lastMailTime", 555)
+		if err := server.SendExtension("push.chat.get.system.mails", resp1); err != nil {
+			return
+		}
+
+		env, err = server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read page 2 request: %v", err)
+			return
+		}
+		if msg, ok := env.AsExtension(); !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("page 2 request malformed")
+			return
+		}
+		resp2 := NewSFSObject()
+		arr2 := NewSFSArray()
+		// uid-2 is a repeat of page 1's second entry -- the same cursor-repeats-a-uid scenario
+		// this test exercises -- followed by a genuinely new uid-3.
+		arr2.AddSFSObject(newTestMailObj("uid-2", 4, 1))
+		arr2.AddSFSObject(newTestMailObj("uid-3", 9, 0))
+		resp2.PutSFSArray("msg", arr2)
+		resp2.PutBool("more", false)
+		if err := server.SendExtension("push.chat.get.system.mails", resp2); err != nil {
+			return
+		}
+	}()
+
+	got, err := ListMail(client)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never finished both pages")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	wantUids := []string{"uid-1", "uid-2", "uid-3"}
+	if len(got) != len(wantUids) {
+		t.Fatalf("got %d mail entries %v, want %d (uid-2 repeated across pages must be deduped to a single entry)", len(got), uidsOf(got), len(wantUids))
+	}
+	for i, m := range got {
+		if m.Uid() != wantUids[i] {
+			t.Errorf("mail[%d].Uid() = %q, want %q", i, m.Uid(), wantUids[i])
+		}
+	}
+}
+
+// uidsOf is a small test helper for failure messages: returns the uids of a []Mail slice in order.
+func uidsOf(mail []Mail) []string {
+	uids := make([]string, len(mail))
+	for i, m := range mail {
+		uids[i] = m.Uid()
+	}
+	return uids
+}
+
 // mailBatchServer is the shared fake-server shape for the ClaimAllMail batching tests below: it
 // answers exactly one ListMail request with all of mails in a single page, then answers
 // wantReadBatches read-status batches and wantRewardBatches reward-claim batches, recording each
@@ -1144,5 +1235,75 @@ func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing
 	gotTypes := map[int32]bool{seenTypes[0]: true, seenTypes[1]: true}
 	if !gotTypes[3] || !gotTypes[9] {
 		t.Errorf("mail.reward.batch types seen = %v, want exactly {3, 9}", seenTypes)
+	}
+}
+
+// TestClaimAllMailNetErrorOnFirstTypeAbortsSecondType is the round-19 regression test for the
+// rewardLoop label itself (mail.go): the net.Error break inside the reward-claim loop's inner batch
+// loop is `break rewardLoop`, explicitly labeled so it exits BOTH the inner per-batch loop and the
+// outer per-mail-type loop over byType in one step -- not a plain unlabeled `break`, which would only
+// stop the CURRENT type's remaining batches and let the outer `for mailType, uids := range byType`
+// loop carry on into the next, still-unprocessed type. Every existing test that drives a net.Error
+// through this loop (TestClaimAllMailAbortsRemainingBatchesOnNetError) uses fixture data with only
+// one distinct mail type, so weakening the label to a plain break would go completely undetected
+// there: with only one type in byType, "abort every other type" and "abort just this type's
+// remaining batches" are indistinguishable outcomes. Likewise, the two tests that already use
+// multiple distinct types (TestClaimAllMailClaimsRewardsForEachDistinctType and
+// TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError) only ever inject an ordinary
+// decoded business errorCode, never a net.Error, so neither exercises the break at all. This test
+// closes that gap: two distinct unclaimed-reward mail types (3 and 9, one mail entry each so each
+// type's reward-claim loop is exactly one batch), with the underlying connection going net.Error-dead
+// starting exactly at the first reward-claim batch response -- i.e. whichever of the two types Go's
+// (randomized) map iteration visits first.
+//
+// Uses recordingConn/scriptedNetErrConn the same way TestClaimAllMailAbortsRemainingBatchesOnNetError
+// does, but with two chained canned responses instead of one: a real, valid list-mail response (both
+// mail entries, more=false) followed by a real, valid read-status-batch success response, so both the
+// ListMail round trip and the single read-status batch genuinely succeed before the reward-claim
+// loop is ever reached. Every Read after those two responses are exhausted -- i.e. the response to
+// the very first reward-claim batch request, regardless of which type it belongs to -- fails
+// immediately with a net.Error.
+//
+// If the labeled break fires correctly, exactly 3 writes happen: the list-mail request, the
+// read-status batch request, and the first type's reward-claim batch request -- which fails and
+// aborts the whole rewardLoop before the second type's batch is ever attempted. A weakened plain
+// `break` would instead let the outer loop continue into the second type after the first type's
+// single-batch inner loop exits, issuing that second type's reward-claim batch request too (which
+// also fails against the same already-dead connection, but only after being attempted) -- showing up
+// as writeCount()==4, not 3.
+func TestClaimAllMailNetErrorOnFirstTypeAbortsSecondType(t *testing.T) {
+	rec := &recordingConn{}
+	recorder := &GameConn{conn: rec}
+
+	listResp := NewSFSObject()
+	arr := NewSFSArray()
+	arr.AddSFSObject(newTestMailObj("t3-a", 3, 0)) // rewardStatus=0: unclaimed
+	arr.AddSFSObject(newTestMailObj("t9-a", 9, 0)) // rewardStatus=0: unclaimed
+	listResp.PutSFSArray("msg", arr)
+	listResp.PutBool("more", false)
+	if err := recorder.SendExtension("push.chat.get.system.mails", listResp); err != nil {
+		t.Fatalf("build canned list-mail response: %v", err)
+	}
+
+	readResp := NewSFSObject()
+	readResp.PutBool("success", true)
+	if err := recorder.SendExtension("mail.read.status.betch", readResp); err != nil {
+		t.Fatalf("build canned read-status response: %v", err)
+	}
+
+	fake := &scriptedNetErrConn{remain: rec.buf.Bytes()}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := ClaimAllMail(client)
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (the first type's reward-claim batch fails with a net.Error)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Errorf("ClaimAllMail() error = %v, want it to wrap a net.Error (the failure that triggered the rewardLoop abort)", err)
+	}
+	if got := fake.writeCount(); got != 3 {
+		t.Errorf("fake connection saw %d writes, want exactly 3 (list-mail + read-status batch + first type's reward-claim batch only -- a net.Error on the first mail type's reward batch must abort the SECOND, not-yet-started type too, not just the first type's remaining batches)", got)
 	}
 }
