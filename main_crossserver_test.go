@@ -620,6 +620,75 @@ func TestRunCrossServerTestExitsWhenPortNotGiven(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestExitsWhenGameUidEmpty is the regression test for this round's fix: the
+// gameUid == "" pre-flight check added to runCrossServerTest (main.go), the sibling right below
+// the existing firstHost(ip) == "" and port <= 0 checks TestRunCrossServerTestExitsWhenIPEmpty and
+// TestRunCrossServerTestExitsWhenPortNotGiven above already cover.
+//
+// Without that check, an empty gameUid reached DoCrossServerLogin unguarded (DoCrossServerLogin
+// validates AccessTok itself but has no equivalent check for GameUid) and burned a full dial+login
+// network round-trip only to fail downstream. Worse than a merely wasted round-trip: unlike
+// base-zone login (login.go), which sends an empty "un" field as the normal case, cross-server
+// login (crossserver.go) sends the gameUid value directly as the "un" field on the wire, so the
+// resulting failure is wrapped in ErrAuthRejected -- the same ec=28/E011 signature README.md
+// documents as meaning an expired/stale session, actively misdirecting an operator debugging a
+// simple missing-gameUid configuration gap toward the wrong root cause.
+//
+// Mirrors TestRunCrossServerTestExitsWhenIPEmpty's exact scenario, substituting gameUid for ip: a
+// -cs-rt refresh whose response carries a fresh access token (non-empty lsr.At) but an EMPTY
+// server list -- refreshHasUsableData only requires EITHER to be usable, not both, so this passes
+// that check and falls through with gameUid left exactly as empty as it started (no -cs-gameuid
+// flag, no session config, and no server-list entry from the refresh to supply one). ip and port
+// are both given valid values so this test isolates the gameUid check specifically, rather than
+// tripping the sibling ip/port checks first.
+//
+// Uses the same re-exec-the-test-binary-as-a-subprocess idiom as
+// TestRunCrossServerTestExitsWhenIPEmpty above, for the same reason: runCrossServerTest calls
+// os.Exit(1) directly on this path, so it can't be driven to completion in-process without also
+// killing this test binary.
+func TestRunCrossServerTestExitsWhenGameUidEmpty(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{
+			Code:       "0",
+			ServerList: nil, // deliberately empty -- the exact case this test targets
+			At:         &LoginToken{Token: "fresh-token-but-no-server-list"},
+		})
+		useFakeGSLServer(t, gsl)
+
+		// gameUid is deliberately left unset, as if -cs-gameuid were never passed and no session
+		// config supplied one either; ip/port are valid so this isolates the gameUid check.
+		runCrossServerTest(crossServerTestOpts{
+			ip:   "1.2.3.4",
+			port: 18888,
+			rt:   "some-refresh-token",
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will
+		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
+		// this silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestExitsWhenGameUidEmpty$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	const wantMsg = "no gameUid given"
+	if !strings.Contains(stderr.String(), wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the pre-fix behavior instead proceeds into DoCrossServerLogin and burns a network round-trip before failing downstream)", stderr.String(), wantMsg)
+	}
+}
+
 // TestRunCrossServerTestExitsWhenGSLRefreshCallFails is the regression test for this round's Fix
 // 4: the -cs-rt GSL opt=refresh call itself failing (GetServerList returning a transport/HTTP
 // error, as distinct from a successful-but-unusable response -- already covered by

@@ -75,6 +75,20 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 	const pushCmd = "push.chat.get.system.mails"
 	const maxPages = 20
 	const mailListPageSize = 100
+	// mailListRawItemCap bounds how many RAW entries in a single page's `msg` response array the
+	// loop below will examine, independent of mailListPageSize (100, the requested page-size hint)
+	// and maxPages (20) -- both of those bound round-trip COUNT only, not the size of any single
+	// page's response array, which is otherwise bounded only by sfsobject.go's much larger
+	// maxDecodedNodes=300,000 decode budget. Without this, a malformed entry (not an *SFSObject, or
+	// missing the required "uid" field via requirePresentField) hits a `continue` that doesn't
+	// advance any output-count-based cap, since it never reaches the append -- the same gap
+	// visitors.go's ParseInitVisitors closed in round 26 for visitor.list, applied here to mail.list
+	// pages. requirePresentField itself logs a Warn per malformed entry, so a hostile/misbehaving
+	// peer responding to a single mail.list page with a huge malformed array would otherwise force
+	// full scan-and-log cost regardless of the requested page size. Set comfortably above
+	// mailListPageSize=100 -- a legitimate server response may reasonably vary somewhat from the
+	// exact requested page size -- but still finite and well below the decode-level ceiling.
+	const mailListRawItemCap = 1000
 
 	var all []Mail
 	// seenUIDs dedupes mail uids across pages, mirroring FetchBuildings' seenBuildingUUIDs/
@@ -118,7 +132,13 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		v, ok := msg.Params.Get("msg")
 		if ok {
 			if arr, ok := v.Val.(*SFSArray); ok {
-				for _, item := range arr.items {
+				if len(arr.items) > mailListRawItemCap {
+					slog.Warn("list mail: page response array longer than raw-item scan cap; truncating scan", "page", page, "arrayLen", len(arr.items), "cap", mailListRawItemCap)
+				}
+				for i, item := range arr.items {
+					if i >= mailListRawItemCap {
+						break
+					}
 					mo, ok := item.Val.(*SFSObject)
 					if !ok {
 						continue

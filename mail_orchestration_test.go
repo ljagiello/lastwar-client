@@ -592,6 +592,86 @@ func uidsOf(mail []Mail) []string {
 	return uids
 }
 
+// TestListMailCapsRawItemsExaminedPerPage is the round-27 regression test for ListMail's raw-item
+// scan cap (mail.go's mailListRawItemCap): mailListPageSize (100, the requested page-size hint) and
+// maxPages (20) only bound round-trip COUNT, not the size of any single page's response array,
+// which is otherwise bounded only by sfsobject.go's much larger maxDecodedNodes=300,000 decode
+// budget. Before this fix, a malformed entry (missing the required "uid" field) hit a `continue`
+// that didn't advance any output-count-based cap, since it never reached the append -- the same
+// gap-class visitors.go's ParseInitVisitors closed in round 26 for visitor.list (see
+// TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput).
+//
+// The fake server here answers a single page with far more entries than mailListRawItemCap, every
+// one of them missing "uid" so none inflate the valid-output count. Since every entry is malformed,
+// len(got) stays 0 throughout the scan either way -- so counting the "skipping mail entry with no
+// uid field" warnings actually logged, rather than just asserting len(got), is what makes this test
+// capable of catching an unbounded-scan regression at all: len(got) would be 0 either way, fixed or
+// broken.
+//
+// Mutation check: reverting the loop's `for i, item := range arr.items { if i >= mailListRawItemCap
+// { break }; ... }` in mail.go back to a plain `for _, item := range arr.items { ... }` makes this
+// test fail with a logged-warning count of wantMalformed instead of mailListRawItemCap.
+func TestListMailCapsRawItemsExaminedPerPage(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const mailListRawItemCap = 1000         // must match ListMail's own unexported mailListRawItemCap constant
+	wantMalformed := mailListRawItemCap * 5 // far more malformed entries than the cap
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read list-mail request: %v", err)
+			return
+		}
+		if msg, ok := env.AsExtension(); !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("list-mail request malformed")
+			return
+		}
+		resp := NewSFSObject()
+		arr := NewSFSArray()
+		for i := 0; i < wantMalformed; i++ {
+			mo := NewSFSObject()
+			mo.PutInt("type", 3) // deliberately no "uid" field
+			arr.AddSFSObject(mo)
+		}
+		resp.PutSFSArray("msg", arr)
+		resp.PutBool("more", false)
+		if err := server.SendExtension("push.chat.get.system.mails", resp); err != nil {
+			t.Errorf("send list-mail response: %v", err)
+		}
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got, err := ListMail(client)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake server never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListMail() returned %d mail entries, want 0 (every entry in this test is malformed -- missing uid)", len(got))
+	}
+
+	logged := buf.String()
+	gotWarnings := strings.Count(logged, "skipping mail entry with no uid field")
+	if gotWarnings != mailListRawItemCap {
+		t.Errorf("ListMail logged %d \"missing uid\" warnings, want exactly %d (the cap on RAW items examined per page, not just valid ones appended) -- input had %d malformed entries; the loop must stop scanning after the first %d regardless of how many turned out valid", gotWarnings, mailListRawItemCap, wantMalformed, mailListRawItemCap)
+	}
+	if !strings.Contains(logged, "page response array longer than raw-item scan cap") {
+		t.Errorf("expected a warning about the page response array exceeding the raw-item scan cap, got log:\n%s", logged)
+	}
+}
+
 // mailBatchServer is the shared fake-server shape for the ClaimAllMail batching tests below: it
 // answers exactly one ListMail request with all of mails in a single page, then answers
 // wantReadBatches read-status batches and wantRewardBatches reward-claim batches, recording each

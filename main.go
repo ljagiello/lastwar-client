@@ -884,6 +884,24 @@ func runCrossServerTest(o crossServerTestOpts) {
 		os.Exit(1)
 	}
 
+	// Symmetric to the ip/port checks just above, and to DoCrossServerLogin's own p.AccessTok == ""
+	// check (crossserver.go): that AccessTok check already carries a live-tested citation that an
+	// empty value there reliably fails with ec=28/E011, and the identical mechanism applies here.
+	// Unlike base-zone login (login.go), which sends an empty "un" field as the normal, expected
+	// case, cross-server login (crossserver.go) sends the gameUid value directly as the "un" field
+	// on the wire -- so an empty gameUid here isn't just a missing-value formality, it changes actual
+	// on-wire behavior. DoCrossServerLogin has no check for it, so today an empty gameUid burns a
+	// full dial+login network round-trip only to fail downstream, wrapped in the same ErrAuthRejected
+	// path as a real expired/stale session -- actively misdirecting an operator debugging a simple
+	// missing-gameUid configuration gap toward the wrong root cause (README.md documents this exact
+	// ec=28/E011 signature as meaning an expired/stale session). Checked here, after the -cs-rt
+	// refresh block above (which can replace gameUid with a fresh server list entry), so a config/
+	// flag omission that IS resolved by -cs-rt doesn't false-positive.
+	if gameUid == "" {
+		slog.Error("cross-server login: no gameUid given (pass -cs-gameuid or a session config with gameUid) -- an empty gameUid is sent directly as the un field on the wire and reliably fails with ec=28/E011, misleadingly resembling an expired/stale session rather than a missing-gameUid configuration gap")
+		os.Exit(1)
+	}
+
 	result, err := DoCrossServerLogin(CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
 		DeviceID: deviceID, AirKey: airKey,

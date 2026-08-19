@@ -36,7 +36,7 @@ import (
 func RunInteractive(conn *GameConn, controlPipe string) {
 	slog.Info("interactive mode: reading commands", "controlPipe", controlPipe)
 	slog.Info(`format: cmd.name {"key":"value"} (params optional)`)
-	slog.Info("example usage", "example", `echo 'building.camp.collect {"uuid":123}' > `+controlPipe)
+	slog.Info("example usage", "example", `echo 'building.production.collect {"uuid":123}' > `+controlPipe)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)

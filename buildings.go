@@ -179,10 +179,45 @@ func requirePresentField(o *SFSObject, field, context string) bool {
 	return true
 }
 
+// maxRawBuildingItemsPerPush is the defensive, non-protocol-guessing ceiling on how many raw items
+// ParseInitBuildings (below) and FetchBuildings' two sibling inline loops -- the "push.init.build"
+// case's defaultBuilds array and the "push.add.building" case's buildings array -- will examine from
+// one server-supplied array in one push, regardless of how many of those items turn out to be valid,
+// distinct buildings. Unlike visitors.go's ParseInitVisitors, there is no server-supplied "expected
+// building count" hint field anywhere in this codebase's protocol notes to clamp against
+// (maxCollectibleBuildingsPerRun's own doc comment below already makes this exact argument for why
+// buildings needs a purely defensive cap rather than trusting a server-sent hint) -- so this is a
+// single hardcoded ceiling applied identically to all three loops, not a clamp on a server-sent value.
+//
+// Before this cap existed, all three loops scanned their raw arrays with NO bound of any kind -- not
+// even an output-count bound, let alone round 26's raw-item-scan bound (visitors.go's
+// ParseInitVisitors) -- so the only ceiling on record-processing cost was sfsobject.go's
+// maxDecodedNodes=300,000 decode-level budget. ParseInitBuildings in particular feeds the PRIMARY
+// init-push path (login.go's waitForInitPush, called from Login() on every login, not just
+// FetchBuildings' fallback), so a hostile/misbehaving -cs-ip peer could pad building_new with up to
+// ~300,000 minimal malformed entries (each triggering a Warn log via requirePresentField below) and
+// force a full scan-and-log cost on every single login.
+//
+// Set well above maxCollectibleBuildingsPerRun=300 (below): that constant bounds the POST-parse,
+// POST-filter collect loop over already-parsed, already-deduped, already-recognized-type buildings,
+// while this one bounds the PARSE-time scan of raw items -- most of which (malformed entries,
+// unrecognized building types, duplicate uuids across the three sources) never make it into
+// collectibleBuildings' output at all. So this can reasonably be several times larger without
+// weakening maxCollectibleBuildingsPerRun's own protection, while still finite enough to keep each
+// loop's worst-case scan-and-log cost bounded rather than open-ended.
+const maxRawBuildingItemsPerPush = 2000
+
 // ParseInitBuildings extracts the owned-building list from the bare `init`
 // bootstrap push's `building_new` field (BuildManager:InitData(t) in the
 // decompiled Lua) -- the real source of building data, as opposed to the
 // separate, rarely-fired push.init.build/defaultBuilds.
+//
+// The scan of `building_new` is capped at maxRawBuildingItemsPerPush RAW items examined, not merely
+// valid ones appended to the returned slice -- mirroring ParseInitVisitors' round-26 fix (visitors.go):
+// a malformed entry's `continue` below must count against the cap just as much as a valid entry's
+// append does, since otherwise a server-supplied array padded entirely with malformed entries would
+// defeat the cap entirely (len(out) would never advance, so an output-count-only cap would never
+// trigger). See maxRawBuildingItemsPerPush's own doc comment for the full threat model.
 func ParseInitBuildings(initParams *SFSObject) []Building {
 	var out []Building
 	v, ok := initParams.Get("building_new")
@@ -193,7 +228,14 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 	if !ok {
 		return out
 	}
-	for _, item := range arr.items {
+	if len(arr.items) > maxRawBuildingItemsPerPush {
+		slog.Warn("building_new longer than raw-item scan cap; truncating",
+			"itemCount", len(arr.items), "cap", maxRawBuildingItemsPerPush)
+	}
+	for i, item := range arr.items {
+		if i >= maxRawBuildingItemsPerPush {
+			break
+		}
 		bi, ok := item.Val.(*SFSObject)
 		if !ok {
 			continue
@@ -204,6 +246,18 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 		out = append(out, Building{Raw: bi})
 	}
 	return out
+}
+
+// capDeadline returns the earlier of a per-push extension candidate and the caller's original
+// outer deadline -- so a burst of qualifying bootstrap pushes (see the "init"/"push.init.build"
+// cases below) can still extend FetchBuildings' wait somewhat, for a slow-but-legitimate
+// multi-push bootstrap burst, but can never push the total wait past the timeout the caller
+// originally asked for.
+func capDeadline(candidate, original time.Time) time.Time {
+	if candidate.After(original) {
+		return original
+	}
+	return candidate
 }
 
 // FetchBuildings waits for the bare init push's building_new field (the
@@ -218,18 +272,6 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 // is the fastest way to confirm which of Farmland/Iron Mine/Gold Mine/
 // Training Base collect via a queue-item uuid vs a direct building-uuid
 // action.
-// capDeadline returns the earlier of a per-push extension candidate and the caller's original
-// outer deadline -- so a burst of qualifying bootstrap pushes (see the "init"/"push.init.build"
-// cases below) can still extend FetchBuildings' wait somewhat, for a slow-but-legitimate
-// multi-push bootstrap burst, but can never push the total wait past the timeout the caller
-// originally asked for.
-func capDeadline(candidate, original time.Time) time.Time {
-	if candidate.After(original) {
-		return original
-	}
-	return candidate
-}
-
 func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visitor, error) {
 	var buildings []Building
 	var visitors []Visitor
@@ -332,7 +374,18 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			gotInitBuild = true
 			if v, ok := msg.Params.Get("defaultBuilds"); ok {
 				if arr, ok := v.Val.(*SFSArray); ok {
-					for _, item := range arr.items {
+					// Raw-item-scan cap: see maxRawBuildingItemsPerPush's doc comment above
+					// ParseInitBuildings for why this loop needs the identical defensive ceiling
+					// ParseInitBuildings itself applies to building_new -- this is one of the two
+					// sibling inline loops that constant's doc comment refers to.
+					if len(arr.items) > maxRawBuildingItemsPerPush {
+						slog.Warn("push.init.build defaultBuilds longer than raw-item scan cap; truncating",
+							"itemCount", len(arr.items), "cap", maxRawBuildingItemsPerPush)
+					}
+					for i, item := range arr.items {
+						if i >= maxRawBuildingItemsPerPush {
+							break
+						}
 						wrapper, ok := item.Val.(*SFSObject)
 						if !ok {
 							continue
@@ -364,7 +417,17 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 		case "push.add.building":
 			if v, ok := msg.Params.Get("buildings"); ok {
 				if arr, ok := v.Val.(*SFSArray); ok {
-					for _, item := range arr.items {
+					// Raw-item-scan cap: see maxRawBuildingItemsPerPush's doc comment above
+					// ParseInitBuildings -- this is the other of the two sibling inline loops that
+					// constant's doc comment refers to.
+					if len(arr.items) > maxRawBuildingItemsPerPush {
+						slog.Warn("push.add.building buildings longer than raw-item scan cap; truncating",
+							"itemCount", len(arr.items), "cap", maxRawBuildingItemsPerPush)
+					}
+					for i, item := range arr.items {
+						if i >= maxRawBuildingItemsPerPush {
+							break
+						}
 						bi, ok := item.Val.(*SFSObject)
 						if !ok {
 							continue

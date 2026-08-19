@@ -328,6 +328,60 @@ func TestFindRecommendedTech(t *testing.T) {
 	})
 }
 
+// TestFindRecommendedTechCapsRawItemsExamined is the round-27 regression test for
+// findRecommendedTech's raw-item scan cap (alliance.go's allianceScienceRawItemCap):
+// findRecommendedTech returns immediately on the first state==1 match, so there's no unbounded
+// OUTPUT growth to worry about -- but before this fix, a state==1 entry missing the required
+// "scienceId" field hit a `continue` that didn't advance any output-count-based cap, since
+// requirePresentField's failure never reaches the `return`. A hostile peer responding to
+// science.data.refresh with an array where many/all entries have state==1 but a missing scienceId
+// would cause requirePresentField's Warn to fire on every single one, with no bound, since the raw
+// allianceScience array is bounded only by sfsobject.go's much larger maxDecodedNodes=300,000
+// decode budget -- the same gap-class visitors.go's ParseInitVisitors closed in round 26 for
+// visitor.list (see TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput).
+//
+// The array here holds far more state==1-but-missing-scienceId entries than
+// allianceScienceRawItemCap, and none of them are otherwise valid, so findRecommendedTech must
+// return the same "not found" result it would today when genuinely nothing recommended exists --
+// this test doesn't change that behavior, only bounds the scan. Since every entry is malformed,
+// found stays false throughout the scan either way -- so counting the "skipping allianceScience
+// entry with no scienceId field" warnings actually logged, rather than just asserting found, is
+// what makes this test capable of catching an unbounded-scan regression at all.
+//
+// Mutation check: reverting the loop's `for i, item := range arr.items { if i >=
+// allianceScienceRawItemCap { break }; ... }` in alliance.go back to a plain `for _, item := range
+// arr.items { ... }` makes this test fail with a logged-warning count of wantMalformed instead of
+// allianceScienceRawItemCap.
+func TestFindRecommendedTechCapsRawItemsExamined(t *testing.T) {
+	wantMalformed := allianceScienceRawItemCap * 5 // far more malformed entries than the cap
+
+	arr := NewSFSArray()
+	for i := 0; i < wantMalformed; i++ {
+		bad := NewSFSObject()
+		bad.PutInt("state", 1) // recommended, but deliberately no scienceId field
+		arr.AddSFSObject(bad)
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	id, found := findRecommendedTech(arr)
+	slog.SetDefault(orig)
+
+	if found {
+		t.Fatalf("findRecommendedTech() = (%d, true), want found=false (every entry in this test is malformed -- missing scienceId)", id)
+	}
+
+	logged := buf.String()
+	gotWarnings := strings.Count(logged, "skipping allianceScience entry with no scienceId field")
+	if gotWarnings != allianceScienceRawItemCap {
+		t.Errorf("findRecommendedTech logged %d \"missing scienceId\" warnings, want exactly %d (the cap on RAW items examined, not just valid ones considered) -- input had %d malformed entries; the loop must stop scanning after the first %d regardless of how many turned out valid", gotWarnings, allianceScienceRawItemCap, wantMalformed, allianceScienceRawItemCap)
+	}
+	if !strings.Contains(logged, "allianceScience array longer than raw-item scan cap") {
+		t.Errorf("expected a warning about the allianceScience array exceeding the raw-item scan cap, got log:\n%s", logged)
+	}
+}
+
 // TestDonateRecommendedAllianceTechNoAllianceScienceField checks the first documented no-op
 // branch: a science.data.refresh response with no allianceScience field at all must return nil,
 // not an error, and must not go on to send a donate request. No second fake-server reader is set

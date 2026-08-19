@@ -195,11 +195,37 @@ func DonateRecommendedAllianceTech(conn *GameConn) error {
 	return err
 }
 
+// allianceScienceRawItemCap bounds how many RAW entries in an allianceScience array
+// findRecommendedTech will examine. Live testing found ~45 entries in a real account's full
+// alliance tech tree (see DonateRecommendedAllianceTech's doc comment); this function returns
+// immediately on the first state==1 match, so there's no unbounded OUTPUT growth to worry about,
+// only unbounded scan/log cost -- a hostile peer responding to science.data.refresh with an array
+// where many/all entries have state==1 but a missing scienceId would otherwise cause
+// requirePresentField's Warn to fire on every single one, with no bound, since the raw
+// allianceScience array is bounded only by sfsobject.go's much larger maxDecodedNodes=300,000
+// decode budget. Same gap-class as visitors.go's ParseInitVisitors (round 26) and ListMail's
+// mailListRawItemCap (mail.go), applied here. Set generously above the live-confirmed ~45 real
+// entries -- a legitimately larger tech tree from a future game update shouldn't be needlessly
+// clamped -- but still finite and well below the decode-level ceiling.
+const allianceScienceRawItemCap = 1000
+
 // findRecommendedTech scans an allianceScience array for the state==1 entry -- pulled out of
 // DonateRecommendedAllianceTech as a standalone, network-free function so it can be unit tested
 // without a live connection.
+//
+// The scan is capped at allianceScienceRawItemCap RAW items examined (round 27), not just at
+// however many turn out valid -- see that constant's doc comment. A malformed or non-recommended
+// entry hits a `continue` that doesn't advance any output-based counter, so without this cap a
+// hostile/misbehaving peer could force an unbounded scan/log cost regardless of how quickly a real
+// recommended entry would otherwise be found.
 func findRecommendedTech(arr *SFSArray) (scienceId int32, found bool) {
-	for _, item := range arr.items {
+	if len(arr.items) > allianceScienceRawItemCap {
+		slog.Warn("alliance tech tree: allianceScience array longer than raw-item scan cap; truncating scan", "arrayLen", len(arr.items), "cap", allianceScienceRawItemCap)
+	}
+	for i, item := range arr.items {
+		if i >= allianceScienceRawItemCap {
+			break
+		}
 		tech, ok := item.Val.(*SFSObject)
 		if !ok {
 			continue
