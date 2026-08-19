@@ -48,15 +48,25 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(*logLevel)})))
 
 	csIOSSetExplicitly := false
+	var ignoredInDecodeMode []string
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "cs-ios" {
 			csIOSSetExplicitly = true
 		}
+		// -decode-label is honored in -decode-stream mode (it labels that mode's own output), and
+		// -log-level is honored in every mode (it configures slog before any of this runs) -- every
+		// other flag that was explicitly set is dead weight in -decode-stream mode, since that mode
+		// never logs in, connects, or touches a session config at all. flag.Visit only visits flags
+		// actually set on the command line, so this naturally covers any flag added in the future
+		// without needing its name added here too.
+		if f.Name != "decode-stream" && f.Name != "decode-label" && f.Name != "log-level" {
+			ignoredInDecodeMode = append(ignoredInDecodeMode, f.Name)
+		}
 	})
 
 	if *decodeStream != "" {
-		if *collect || *listBuildings || *interactive != "" || *email != "" || *csIP != "" || *csRt != "" {
-			slog.Warn("ignoring all other flags because -decode-stream is set (no login or network connection happens in this mode)")
+		if len(ignoredInDecodeMode) > 0 {
+			slog.Warn("ignoring other flags because -decode-stream is set (no login or network connection happens in this mode)", "ignoredFlags", ignoredInDecodeMode)
 		}
 		runDecode(*decodeLabel, *decodeStream)
 		return
@@ -124,10 +134,11 @@ func main() {
 	buildings := result.Buildings
 	visitors := result.Visitors
 	if len(buildings) == 0 {
-		// Login's own retry loop already tried (and logged) 3 attempts at
-		// the `init` push; this is just a last-chance listen (e.g. the
-		// loginKey fast-path, where Login returns immediately without
-		// running that loop) before giving up.
+		// Login() itself already made its one attempt at the `init` push (or,
+		// on the loginKey fast-path, never waited for it at all) -- see the
+		// comment above maxLoginAttempts in login.go for why that's kept at a
+		// single attempt rather than a retry loop. This is just one last
+		// chance to catch a late `init` before giving up entirely.
 		slog.Info("fetching building list (push.init.build)")
 		buildings, visitors, err = FetchBuildings(conn, 12*time.Second)
 		if err != nil {
@@ -156,8 +167,11 @@ func main() {
 	slog.Info("client exiting")
 }
 
-// parseLogLevel maps a -log-level flag value to an slog.Level, defaulting to Info for anything
-// unrecognized (including the empty string).
+// parseLogLevel maps a -log-level flag value to an slog.Level, defaulting to Info for the empty
+// string (the flag's own default) and for anything unrecognized -- but an unrecognized value (e.g.
+// a typo) is reported to stderr first, since slog isn't configured yet at the point this runs: its
+// return value is what configures slog's own level a moment later in main(), so there's no logger
+// to slog.Warn through yet.
 func parseLogLevel(s string) slog.Level {
 	switch strings.ToLower(s) {
 	case "debug":
@@ -166,7 +180,10 @@ func parseLogLevel(s string) slog.Level {
 		return slog.LevelWarn
 	case "error":
 		return slog.LevelError
+	case "", "info":
+		return slog.LevelInfo
 	default:
+		fmt.Fprintf(os.Stderr, "unrecognized -log-level %q, defaulting to info (valid values: debug, warn, error, info)\n", s)
 		return slog.LevelInfo
 	}
 }

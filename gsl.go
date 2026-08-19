@@ -151,7 +151,6 @@ type LoginServerListRespon struct {
 	ServerList       []LoginServerInfo  `json:"serverList"`
 	LoginServer      *AccountServerInfo `json:"loginServer"`
 	LastLoggedServer flexString         `json:"lastLoggedServer"`
-	Bin              string             `json:"bin"`
 	At               *LoginToken        `json:"at"`
 	Rt               *LoginToken        `json:"rt"`
 }
@@ -253,7 +252,10 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 		form.Set("rt", opt.Rt)
 	}
 
-	plainForm := encodeFormSorted(form)
+	plainForm, err := encodeFormSorted(form)
+	if err != nil {
+		return nil, fmt.Errorf("encode GSL request form: %w", err)
+	}
 
 	uuidField, dataField, err := gc.EncryptRequest(plainForm)
 	if err != nil {
@@ -321,7 +323,21 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 // (insertion-independent) order. Field order does not affect the crypto
 // (ECB has no cross-block dependency) but matching the reference client's
 // order is good hygiene -- see dossier §03.
-func encodeFormSorted(form url.Values) string {
+//
+// Unlike url.Values.Encode(), values are written verbatim, not
+// percent-encoded: the reference client's plaintext form body is built the
+// same way, and percent-encoding it would just be extra bytes the server
+// doesn't expect. A raw '=' inside a value is harmless -- every field here
+// is parsed key=value splitting on the FIRST '=' only, and '=' is routinely
+// present anyway as base64 padding in airKey (confirmed live: a test build
+// with a real base64-derived airKey failed until this exact check was
+// narrowed from "&=" to "&" alone). A raw '&' inside a value is the one
+// real corruption risk -- it would be misread as a field separator, so it's
+// still rejected below. Of the callers, only opt.LoginKey round-trips
+// through a local file with no format validation, so it's the one value
+// here that isn't inherently safe by construction, but the check applies to
+// every field at the one point they all funnel through.
+func encodeFormSorted(form url.Values) (string, error) {
 	order := []string{"uuid", "airKey", "loginFlag", "country", "is3D", "lang", "simOp", "platform",
 		"isSimulator", "zone", "gameuid", "newServer", "openCountry", "opt", "loginKey", "rt"}
 	var b strings.Builder
@@ -331,6 +347,9 @@ func encodeFormSorted(form url.Values) string {
 		if !ok || len(v) == 0 {
 			continue
 		}
+		if strings.Contains(v[0], "&") {
+			return "", fmt.Errorf("encodeFormSorted: field %q value contains '&', would corrupt the form", k)
+		}
 		if !first {
 			b.WriteByte('&')
 		}
@@ -339,7 +358,7 @@ func encodeFormSorted(form url.Values) string {
 		b.WriteByte('=')
 		b.WriteString(v[0])
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 func defaultHTTPClient() *http.Client {

@@ -164,6 +164,18 @@ func (b Building) Level() int32       { return b.Raw.GetInt("lv") }
 func (b Building) PointId() int32     { return b.Raw.GetInt("pId") }
 func (b Building) LastCollect() int64 { return b.Raw.GetLong("lCT") }
 
+// requirePresentField reports whether o has field, logging a Warn with the raw entry (for
+// diagnosability) and returning false if it's missing -- shared by every list-parsing code path
+// (buildings, mail, visitors) that must tolerate a malformed/unexpected entry from the server
+// without crashing or silently fabricating a zero-value id.
+func requirePresentField(o *SFSObject, field, context string) bool {
+	if !o.Has(field) {
+		slog.Warn("skipping "+context+" entry with no "+field+" field", "raw", o.String())
+		return false
+	}
+	return true
+}
+
 // ParseInitBuildings extracts the owned-building list from the bare `init`
 // bootstrap push's `building_new` field (BuildManager:InitData(t) in the
 // decompiled Lua) -- the real source of building data, as opposed to the
@@ -183,8 +195,7 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 		if !ok {
 			continue
 		}
-		if !bi.Has("uuid") {
-			slog.Warn("skipping building_new entry with no uuid field", "raw", bi.String())
+		if !requirePresentField(bi, "uuid", "building_new") {
 			continue
 		}
 		out = append(out, Building{Raw: bi})
@@ -249,8 +260,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 						}
 						if biv, ok := wrapper.Get("buildInfo"); ok {
 							if bi, ok := biv.Val.(*SFSObject); ok {
-								if !bi.Has("uuid") {
-									slog.Warn("skipping push.init.build entry with no uuid field", "raw", bi.String())
+								if !requirePresentField(bi, "uuid", "push.init.build") {
 									continue
 								}
 								buildings = append(buildings, Building{Raw: bi})
@@ -271,8 +281,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 						if !ok {
 							continue
 						}
-						if !bi.Has("uuid") {
-							slog.Warn("skipping push.add.building entry with no uuid field", "raw", bi.String())
+						if !requirePresentField(bi, "uuid", "push.add.building") {
 							continue
 						}
 						buildings = append(buildings, Building{Raw: bi})

@@ -75,8 +75,7 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 		if !ok {
 			continue
 		}
-		if !vi.Has("uid") {
-			slog.Warn("skipping visitor.list entry with no uid field", "raw", vi.String())
+		if !requirePresentField(vi, "uid", "visitor.list") {
 			continue
 		}
 		out = append(out, Visitor{Raw: vi})

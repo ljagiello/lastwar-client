@@ -106,17 +106,24 @@ func ClaimAllianceGifts(conn *GameConn) error {
 // count/times/multiplier field on the wire -- holding the button is
 // client-side auto-repeat, firing the same single-donation request
 // multiple times while held, not a batched server call. The free/coin
-// donate path this function uses is rate-limited server-side (confirmed
-// live via `al.science.refreshNum`: `maxNum=30` per day, gated by a
-// `refreshTimeBlock=1200000` -- 20 minutes -- cooldown between individual
-// donations), so only one attempt makes sense per `-collect` run. It will
-// legitimately fail with a cooldown error if run again too soon; this is
-// expected, but -- unlike the analogous building/VIP/visitor cooldowns
-// (see conn.go's benignErrorCodes) -- this specific errorCode has not yet
-// been captured and added to that allowlist, so today it DOES surface as
-// a real Error-level failure and contributes to -collect's exit code,
-// rather than being treated as benign. Capture the real errorCode from a
-// live cooldown response and add it to benignErrorCodes to close this gap.
+// donate path this function uses is rate-limited server-side to
+// `maxNum=30` per day (confirmed live via `al.science.refreshNum`), so
+// only one attempt makes sense per `-collect` run.
+//
+// CORRECTED, third audit cycle: earlier revisions of this comment assumed
+// `refreshTimeBlock=1200000` (20 minutes) on the donate response was an
+// enforced per-donation cooldown, and expected a run within that window to
+// fail with a not-yet-captured errorCode. Live-tested this round: two
+// `-collect` runs roughly 3 minutes apart both donated successfully
+// (`state=1`, `donateCDTime=0` both times), with only the response's
+// `maxdonate.count` field decrementing (6 -> 5) -- no cooldown-shaped
+// failure at all. So `refreshTimeBlock` is NOT a per-donation cooldown
+// timer; the real daily gate is that consumable count against `maxNum=30`.
+// What errorCode (if any) the server returns once that daily count hits 0
+// is still unconfirmed -- deliberately not simulated by exhausting the
+// real account's daily donations just to capture it. If/when that's
+// observed live, add its errorCode to conn.go's benignErrorCodes the same
+// way the analogous building/VIP/visitor cooldowns already are.
 // The gem-cost path has no such
 // cooldown (`useGoldNum`/`maxGoldNum` both came back as 999999999, i.e.
 // unlimited) but spends real premium currency per use, so it's

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -109,5 +112,83 @@ func TestSaveLoginKeyTightensExistingFilePermissions(t *testing.T) {
 	}
 	if fi.Mode().Perm() != 0600 {
 		t.Errorf("got mode %v, want 0600 -- SaveLoginKey should tighten an existing file's permissions, not just set them on creation", fi.Mode().Perm())
+	}
+}
+
+// TestLoadOrCreateDeviceIdentityWarnsOnLoosePermissions mirrors config_test.go's
+// TestLoadSessionConfigWarnsOnLoosePermissions -- the persisted loginKey is at least as sensitive
+// as the session config (see warnIfLoosePermissions' doc comment), so loading the device identity
+// must surface the same loose-permission warning.
+func TestLoadOrCreateDeviceIdentityWarnsOnLoosePermissions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	if err := os.WriteFile(loginKeyStatePath(), []byte("stale-key"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	if _, err := loadOrCreateDeviceIdentity(); err != nil {
+		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
+	}
+	if !strings.Contains(buf.String(), "more permissive than 0600") {
+		t.Errorf("expected a permission warning in the log output, got: %s", buf.String())
+	}
+}
+
+// TestLoadOrCreateDeviceIdentityRoundTrip confirms the full persisted-state lifecycle: a fresh
+// HOME creates a new device identity, SaveGameUid/SaveUsername persist their values to disk at
+// 0600, and a second load picks up exactly what was saved -- the same guarantee config_test.go's
+// tests already confirm for SessionConfig.
+func TestLoadOrCreateDeviceIdentityRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	first, err := loadOrCreateDeviceIdentity()
+	if err != nil {
+		t.Fatalf("loadOrCreateDeviceIdentity (create): %v", err)
+	}
+	if first.DeviceID == "" {
+		t.Fatal("got empty DeviceID on fresh identity")
+	}
+	if first.GameUid != "" || first.Username != "" {
+		t.Errorf("got GameUid=%q Username=%q on fresh identity, want both empty", first.GameUid, first.Username)
+	}
+
+	const wantGameUid = "test-gameuid-123"
+	const wantUsername = "test-username"
+	if err := first.SaveGameUid(wantGameUid); err != nil {
+		t.Fatalf("SaveGameUid: %v", err)
+	}
+	if err := first.SaveUsername(wantUsername); err != nil {
+		t.Fatalf("SaveUsername: %v", err)
+	}
+
+	second, err := loadOrCreateDeviceIdentity()
+	if err != nil {
+		t.Fatalf("loadOrCreateDeviceIdentity (reload): %v", err)
+	}
+	if second.DeviceID != first.DeviceID {
+		t.Errorf("got DeviceID %q on reload, want %q (should reuse the persisted id, not regenerate)", second.DeviceID, first.DeviceID)
+	}
+	if second.GameUid != wantGameUid {
+		t.Errorf("got GameUid %q on reload, want %q", second.GameUid, wantGameUid)
+	}
+	if second.Username != wantUsername {
+		t.Errorf("got Username %q on reload, want %q", second.Username, wantUsername)
+	}
+
+	for _, path := range []string{deviceIDStatePath(), gameUidStatePath(), usernameStatePath()} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if fi.Mode().Perm() != 0600 {
+			t.Errorf("got mode %v for %s, want 0600", fi.Mode().Perm(), path)
+		}
 	}
 }

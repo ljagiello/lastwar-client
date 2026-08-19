@@ -383,11 +383,11 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 	// known to differ from every real login this server has ever seen.
 	p.PutUtfString("dataConfigMd5", "")
 	effectivePackageName := packageName
-	platform := "1"       // Android
+	platformCode := "1"   // Android
 	pf := "market_global" // Android storefront
 	if in.IOSMode {
 		effectivePackageName = iosPackageName
-		platform = "0"
+		platformCode = "0"
 		pf = "AppStore"
 		// iOS-only identifiers a real client always sends; captured live
 		// with real (non-secret, ad-tracking-scoped) values, sent empty
@@ -398,7 +398,7 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 	}
 	p.PutUtfString("packageName", effectivePackageName)
 	p.PutUtfString("packageSign", packageSignHex(effectivePackageName))
-	p.PutUtfString("platform", platform)
+	p.PutUtfString("platform", platformCode)
 	p.PutInt("lat", 1) // real client sent 1 (location-authorized); we hardcoded 0 before
 	// device_string: not present in any real capture (guest or reconnect)
 	// -- dropped rather than guessed at.

@@ -173,6 +173,9 @@ Two things worth checking after setup, not just once but as ongoing habits:
   the generic exit `1` used for other failures -- a cron wrapper can check `$?` directly and
   know to recapture a fresh session (see "Session config" above) without needing to grep the log
   at all.
+- **`-log-level` controls the JSON log verbosity** (`debug`, `warn`, or `error`; default `info`) --
+  handy for trimming a noisy cron log down to warnings/errors only, or turning on `debug` output
+  while chasing down a problem run.
 
 ## Files
 
@@ -196,6 +199,20 @@ Two things worth checking after setup, not just once but as ongoing habits:
 | `decode.go` | `-decode-stream`: decode a reassembled capture file with the live codec, no network |
 | `main.go` | CLI entrypoint |
 | `selftest_test.go` | Unit tests for the crypto/codec/framing layers (no network required) |
+| `crypto_gsl_test.go` | GSL crypto envelope round trip: `NewGSLCrypto` + `EncryptRequest` + `DecryptResponse` composed together, not just the AES-ECB/PKCS7 primitives `selftest_test.go` covers |
+| `gsl_http_test.go` | `CheckVersion` and `GetServerList` exercised against a fake HTTP server |
+| `packet_bigsized_test.go` | Packet framing round trip for payloads over 65535 bytes (4-byte length prefix, `hdrBigSized`) |
+| `packet_zstd_test.go` | `ReadPacket`'s Zstandard-decompression branch (`hdrCompressed\|hdrUseLZ4`) round trip |
+| `sfsobject_array_test.go` | Array-tag decode round trips, including `ByteArray`'s 4-byte element count vs. every other array tag's 2-byte count |
+| `conn_test.go` | `Envelope.AsExtension`, `classifyResponse`'s success/benign/failure outcome classification, and a `GameConn` send/receive round trip |
+| `conn_wait_test.go` | `sendAndWait`/`waitFor`/`waitForCmd`/`waitForInitPush`: outcome classification, deadline timeouts, unmatched-push skipping, and the init-push halfway active-pull fallback |
+| `identity_test.go` | `BuildLoginParams`' Android/iOS and empty-vs-set-`GameUid` conditional field logic; `SaveLoginKey`/loose-permission warning and load/save round trip for the persisted device identity |
+| `main_test.go` | `parseLogLevel`'s recognized values and its unrecognized-value fallback-to-info behavior |
+| `config_test.go` | Session config load/save: explicit-path loading, loose-file-permission warnings, permission tightening on save |
+| `login_test.go` | `redact`'s secret-masking for log output |
+| `buildings_visitors_test.go` | `BuildingNameOf`, `collectCmdFor`, and init-push building/visitor parsing (`ParseInitBuildings`/`ParseInitVisitors`, including malformed-entry skipping) |
+| `pure_helpers_test.go` | Pure helpers spanning buildings/mail/alliance: `collectibleBuildings`, `groupUnclaimedByType`, `findRecommendedTech` |
+| `redirect_helpers_test.go` | GSL/cross-server helpers: `findServerInfo`, `getIntFlexible`, `serverIDFromZone` |
 | `tools/reassemble_stream.py` | Reassembles one TCP stream from a pcap into `-decode-stream`-ready files — see [Capturing and decoding traffic](docs/capturing-and-decoding-traffic.mdx) |
 
 ## License

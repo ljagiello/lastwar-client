@@ -83,8 +83,7 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 					if !ok {
 						continue
 					}
-					if !mo.Has("uid") {
-						slog.Warn("skipping mail entry with no uid field", "raw", mo.String())
+					if !requirePresentField(mo, "uid", "mail") {
 						continue
 					}
 					all = append(all, Mail{Raw: mo})

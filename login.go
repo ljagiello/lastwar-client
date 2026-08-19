@@ -31,6 +31,23 @@ type LoginOptions struct {
 	Handshake bool   // experimental: send the vanilla SFS2X pre-Login Handshake (see conn.go:DoHandshake)
 }
 
+// gslOptFor picks the GSL getserverlist opt for a device identity, per
+// dossier §02.2's opt table, refined empirically:
+//
+//	loginKey known             -> opt=login (fastest, resolves the real account directly)
+//	gameUid known, no loginKey -> opt=fix
+//	neither known              -> opt=new (brand new device)
+func gslOptFor(ident *deviceIdentity) GSLOpt {
+	switch {
+	case ident.LoginKey != "":
+		return GSLOpt{Opt: "login", LoginKey: ident.LoginKey}
+	case ident.GameUid != "":
+		return GSLOpt{Opt: "fix"}
+	default:
+		return GSLOpt{Opt: "new"}
+	}
+}
+
 // Login runs the full bootstrap: HTTP check-version, GSL getserverlist,
 // SFS2X TCP connect, base zone login, and -- unless a persisted loginKey
 // lets GSL resolve the account directly -- the email verification-code
@@ -60,17 +77,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	slog.Info("air key", "airKey", ident.AirKey())
 	slog.Info("persisted state", "username", ident.Username, "gameUid", ident.GameUid, "loginKey", redact(ident.LoginKey))
 
-	// dossier §02.2's opt table, refined empirically:
-	//   loginKey known  -> opt=login (fastest, resolves the real account directly)
-	//   gameUid known, no loginKey -> opt=fix
-	//   neither known -> opt=new (brand new device)
-	opt := GSLOpt{Opt: "new"}
-	switch {
-	case ident.LoginKey != "":
-		opt = GSLOpt{Opt: "login", LoginKey: ident.LoginKey}
-	case ident.GameUid != "":
-		opt = GSLOpt{Opt: "fix"}
-	}
+	opt := gslOptFor(ident)
 	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt)
 	lsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, opt, "", ident.GameUid)
 	if err != nil {
@@ -98,7 +105,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		}
 	}
 	addr := fmt.Sprintf("%s:%d", firstHost(stateSrv.IP), stateSrv.Port)
-	serverID := strings.TrimPrefix(zone, "APS")
+	serverID := serverIDFromZone(zone)
 
 	// Steps 3-5 (dial, login, wait-for-init) were originally a retry loop
 	// mirroring the real client's own recovery from a missing `init` push
@@ -228,20 +235,15 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			addr = newAddr
 			if newZone != "" {
 				zone = newZone
-				serverID = strings.TrimPrefix(zone, "APS")
+				serverID = serverIDFromZone(zone)
 			}
-			// Same suspected single-use-per-connection risk as the init-push-timeout retry path
-			// below: this closes the connection and redials a brand-new TCP session, so refresh
-			// the access token before reconnecting rather than carrying the old one forward
-			// unverified.
+			// Same suspected single-use-per-connection risk as crossserver.go's
+			// DoCrossServerLogin redirect path (which does the equivalent token
+			// refresh): this closes the connection and redials a brand-new TCP
+			// session, so refresh the access token before reconnecting rather than
+			// carrying the old one forward unverified.
 			slog.Info("fetching fresh access token before following serverInfo redirect (suspected single-use-per-connection)")
-			freshOpt := GSLOpt{Opt: "new"}
-			switch {
-			case ident.LoginKey != "":
-				freshOpt = GSLOpt{Opt: "login", LoginKey: ident.LoginKey}
-			case ident.GameUid != "":
-				freshOpt = GSLOpt{Opt: "fix"}
-			}
+			freshOpt := gslOptFor(ident)
 			freshLsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, freshOpt, "", ident.GameUid)
 			if err != nil {
 				slog.Error("GSL refresh failed; following redirect with stale token anyway", "error", err)

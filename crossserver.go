@@ -90,6 +90,10 @@ type CrossServerLoginParams struct {
 // address, resends Login with the new zone) up to a small bounded number
 // of hops rather than treating the first response as final.
 func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, error) {
+	if p.AccessTok == "" {
+		return nil, fmt.Errorf("cross-server login: no access token given (pass -cs-at, -cs-rt, or a session config with accessToken) -- an empty token reliably fails with ec=28/E011")
+	}
+
 	const maxRedirects = 3
 	addr := fmt.Sprintf("%s:%d", firstHost(p.IP), p.Port)
 	zone := p.Zone

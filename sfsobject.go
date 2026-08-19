@@ -219,6 +219,65 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) {
 		binary.Write(buf, binary.BigEndian, math.Float64bits(v.Val.(float64)))
 	case sfsUtfString:
 		writeUtfString(buf, v.Val.(string))
+	case sfsText:
+		// Same underlying representation as sfsUtfString (a Go string), but tagged sfsText on the
+		// wire and length-prefixed with a 4-byte count instead of 2 (mirrors readValuePayload's
+		// sfsText case).
+		b := []byte(v.Val.(string))
+		writeInt32(buf, int32(len(b)))
+		buf.Write(b)
+	case sfsBoolArray:
+		arr := v.Val.([]bool)
+		writeInt16(buf, int16Count(len(arr), "bool array items"))
+		for _, e := range arr {
+			if e {
+				buf.WriteByte(1)
+			} else {
+				buf.WriteByte(0)
+			}
+		}
+	case sfsByteArray:
+		// Unlike every other array type (which use a 2-byte count), ByteArray uses a bare 4-byte
+		// int count (mirrors readValuePayload's sfsByteArray case -- see the comment there).
+		b := v.Val.([]byte)
+		writeInt32(buf, int32(len(b)))
+		buf.Write(b)
+	case sfsShortArray:
+		arr := v.Val.([]int16)
+		writeInt16(buf, int16Count(len(arr), "short array items"))
+		for _, e := range arr {
+			writeInt16(buf, e)
+		}
+	case sfsIntArray:
+		arr := v.Val.([]int32)
+		writeInt16(buf, int16Count(len(arr), "int array items"))
+		for _, e := range arr {
+			writeInt32(buf, e)
+		}
+	case sfsLongArray:
+		arr := v.Val.([]int64)
+		writeInt16(buf, int16Count(len(arr), "long array items"))
+		for _, e := range arr {
+			writeInt64(buf, e)
+		}
+	case sfsFloatArray:
+		arr := v.Val.([]float32)
+		writeInt16(buf, int16Count(len(arr), "float array items"))
+		for _, e := range arr {
+			binary.Write(buf, binary.BigEndian, math.Float32bits(e))
+		}
+	case sfsDoubleArray:
+		arr := v.Val.([]float64)
+		writeInt16(buf, int16Count(len(arr), "double array items"))
+		for _, e := range arr {
+			binary.Write(buf, binary.BigEndian, math.Float64bits(e))
+		}
+	case sfsUtfStringArray:
+		arr := v.Val.([]string)
+		writeInt16(buf, int16Count(len(arr), "utf string array items"))
+		for _, s := range arr {
+			writeUtfString(buf, s)
+		}
 	case sfsObjectType:
 		inner := v.Val.(*SFSObject)
 		writeInt16(buf, int16Count(len(inner.keys), "keys"))
@@ -233,6 +292,9 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) {
 			writeTaggedValue(buf, iv)
 		}
 	default:
+		// Every SFSDataType tag decode supports has an encode case above, except sfsClass (19),
+		// which is unused/unimplemented by the game itself (see the const block) and so has never
+		// had a decode case to mirror either.
 		panic(fmt.Sprintf("sfsobject: unsupported encode type %d", v.Type))
 	}
 }

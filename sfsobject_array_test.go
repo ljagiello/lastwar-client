@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 )
@@ -144,6 +145,103 @@ func TestArrayDecodeRoundTrips(t *testing.T) {
 		want := []byte{1, 2, 3}
 		if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+}
+
+// TestArrayEncodeDecodeRoundTrips proves writeValuePayload's array/text cases -- added to close
+// the audit finding that the encode path had no cases for any primitive-array wire type or
+// sfsText, though decode fully supported them -- produce bytes that readValuePayload decodes back
+// to the original value. Unlike TestArrayDecodeRoundTrips above (which only proves decode parses
+// hand-built bytes), this drives both directions through the real encode and decode code paths.
+func TestArrayEncodeDecodeRoundTrips(t *testing.T) {
+	t.Run("BoolArray", func(t *testing.T) {
+		want := []bool{true, false, true}
+		var buf bytes.Buffer
+		writeValuePayload(&buf, SFSValue{sfsBoolArray, want})
+		r := &sfsReader{data: buf.Bytes()}
+		v, err := r.readValuePayload(sfsBoolArray)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got, ok := v.Val.([]bool)
+		if !ok || len(got) != len(want) {
+			t.Fatalf("got %v, want %v", v.Val, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("index %d: got %v, want %v", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("IntArray", func(t *testing.T) {
+		want := []int32{-100, 0, 200}
+		var buf bytes.Buffer
+		writeValuePayload(&buf, SFSValue{sfsIntArray, want})
+		r := &sfsReader{data: buf.Bytes()}
+		v, err := r.readValuePayload(sfsIntArray)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got, ok := v.Val.([]int32)
+		if !ok || len(got) != len(want) {
+			t.Fatalf("got %v, want %v", v.Val, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("index %d: got %v, want %v", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("ByteArray (4-byte count)", func(t *testing.T) {
+		want := []byte{1, 2, 3, 4}
+		var buf bytes.Buffer
+		writeValuePayload(&buf, SFSValue{sfsByteArray, want})
+		r := &sfsReader{data: buf.Bytes()}
+		v, err := r.readValuePayload(sfsByteArray)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got, ok := v.Val.([]byte)
+		if !ok || !bytes.Equal(got, want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("UtfStringArray", func(t *testing.T) {
+		want := []string{"hello", "world"}
+		var buf bytes.Buffer
+		writeValuePayload(&buf, SFSValue{sfsUtfStringArray, want})
+		r := &sfsReader{data: buf.Bytes()}
+		v, err := r.readValuePayload(sfsUtfStringArray)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got, ok := v.Val.([]string)
+		if !ok || len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("index %d: got %v, want %v", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("Text", func(t *testing.T) {
+		want := "a long-form text field"
+		var buf bytes.Buffer
+		writeValuePayload(&buf, SFSValue{sfsText, want})
+		r := &sfsReader{data: buf.Bytes()}
+		v, err := r.readValuePayload(sfsText)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got, ok := v.Val.(string)
+		if !ok || got != want {
+			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
 }
