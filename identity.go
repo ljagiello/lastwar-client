@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
@@ -210,6 +211,49 @@ type LoginParamsInput struct {
 
 const iosPackageName = "com.lastwar.ios"
 
+// iosAnalyticsBlob mirrors the JSON shape of the `ta` analytics blob a real
+// captured iOS login sends, so the diagnostic copy built in BuildLoginParams
+// can be constructed field-by-field instead of as a giant hand-maintained
+// JSON string literal.
+type iosAnalyticsBlob struct {
+	OS              string `json:"#os"`
+	Disk            string `json:"#disk"`
+	DeviceID        string `json:"#device_id"`
+	OSVersion       string `json:"#os_version"`
+	SystemLanguage  string `json:"#system_language"`
+	BundleID        string `json:"#bundle_id"`
+	Carrier         string `json:"#carrier"`
+	AppVersion      string `json:"#app_version"`
+	FPS             int    `json:"#fps"`
+	RAM             string `json:"#ram"`
+	Simulator       bool   `json:"#simulator"`
+	ZoneOffset      int    `json:"#zone_offset"`
+	Manufacturer    string `json:"#manufacturer"`
+	ScreenHeight    int    `json:"#screen_height"`
+	NetworkType     string `json:"#network_type"`
+	DeviceModel     string `json:"#device_model"`
+	ScreenWidth     int    `json:"#screen_width"`
+	InstallTime     string `json:"#install_time"`
+	LwNet           string `json:"lw_net"`
+	LwResVersion    string `json:"lw_res_version"`
+	LwBuildcode     string `json:"lw_buildcode"`
+	LwLine          string `json:"lw_line"`
+	PdDl            int    `json:"pd_dl"`
+	LwAb            string `json:"lw_ab"`
+	LwPlatform      string `json:"lw_platform"`
+	LwGameSessionID string `json:"lw_game_session_id"`
+	LwFirstLaunch   bool   `json:"lw_first_launch"`
+	LwAllianceID    string `json:"lw_alliance_id"`
+	LwDeviceID      string `json:"lw_device_id"`
+	LwDeviceLevel   int    `json:"lw_device_level"`
+	LwMainLevel     int    `json:"lw_main_level"`
+	LwShumeiID      string `json:"lw_shumei_id"`
+	LwAirKey        string `json:"lw_airKey"`
+	LwVersion       string `json:"lw_version"`
+	LwPower         int    `json:"lw_power"`
+	LwZone          string `json:"lw_zone"`
+}
+
 func BuildLoginParams(in LoginParamsInput) *SFSObject {
 	now := time.Now().Unix()
 	cmdBaseTime := strconv.FormatInt(now, 10)
@@ -220,13 +264,31 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 	p.PutInt("netType", 2) // 2 = wifi, matches the common case
 	ta := "{}"
 	if in.IOSMode {
-		// DIAGNOSTIC ONLY: reproduces the exact field structure/format of the
-		// `ta` analytics blob from a real captured login (values below are
-		// synthetic placeholders, not the real captured ones), to isolate
-		// whether the server validates fields inside it (lw_zone/lw_device_id/
-		// lw_shumei_id echoing the top-level request) as part of the same
-		// token-binding check already confirmed for packageName/appVersion/versionCode.
-		ta = `{"#os": "iOS", "#disk": "84.6/926.4", "#device_id": "00000000-0000-0000-0000-000000000000", "#os_version": "26.5", "#system_language": "en", "#bundle_id": "com.lastwar.ios", "#carrier": "", "#app_version": "1.0.344", "#fps": 3, "#ram": "4.3/64.0", "#simulator": false, "#zone_offset": -7, "#manufacturer": "Apple", "#screen_height": 1194, "#network_type": "WIFI", "#device_model": "iPad8,6", "#screen_width": 834, "#install_time": "2025-06-16 09:27:29.892", "lw_net": "wifi", "lw_res_version": "2131.1477_788F_37951.23413", "lw_buildcode": "786", "lw_line": "lastwar-game-cf.lastwarapp.net", "pd_dl": 3, "lw_ab": "1", "lw_platform": "AppStore", "lw_game_session_id": "00000000-0000-0000-0000-000000000000", "lw_first_launch": false, "lw_alliance_id": "00000000000000000000000000000000", "lw_device_id": "your-real-device-id_n3d", "lw_device_level": 2, "lw_main_level": 33, "lw_shumei_id": "your-real-shumei-fingerprint-token", "lw_airKey": "your-real-air-key-token", "lw_version": "1.0.344", "lw_power": 0, "lw_zone": "APS1234"}`
+		// DIAGNOSTIC ONLY: reproduces the field structure/format of the ta analytics blob a
+		// real captured iOS login sends, to isolate whether the server validates fields inside
+		// it (lw_zone/lw_device_id/lw_shumei_id echoing the top-level request) as part of the
+		// same token-binding check already confirmed for packageName/appVersion/versionCode.
+		// Built from the same in.* fields used for the top-level request elsewhere in this
+		// function, so the embedded copy can never silently disagree with the request it's
+		// nested in; the remaining fields (device/OS telemetry this client has no way to
+		// observe about itself) are fixed, deliberately round, clearly-synthetic placeholders.
+		blob := iosAnalyticsBlob{
+			OS: "iOS", Disk: "50.0/100.0", DeviceID: "00000000-0000-0000-0000-000000000000",
+			OSVersion: "0.0", SystemLanguage: "en", BundleID: iosPackageName, Carrier: "",
+			AppVersion: "0.0.0", FPS: 0, RAM: "0.0/0.0", Simulator: false, ZoneOffset: 0,
+			Manufacturer: "Apple", ScreenHeight: 0, NetworkType: "WIFI", DeviceModel: "unknown",
+			ScreenWidth: 0, InstallTime: "2000-01-01 00:00:00.000",
+			LwNet: "wifi", LwResVersion: "0.0", LwBuildcode: "0", LwLine: "",
+			PdDl: 0, LwAb: "0", LwPlatform: "AppStore",
+			LwGameSessionID: "00000000-0000-0000-0000-000000000000", LwFirstLaunch: false,
+			LwAllianceID: "00000000000000000000000000000000",
+			LwDeviceID:   in.DeviceID, LwDeviceLevel: 0, LwMainLevel: 0,
+			LwShumeiID: in.ShumeiBoxId, LwAirKey: in.AirKey,
+			LwVersion: "0.0.0", LwPower: 0, LwZone: "APS" + in.ServerID,
+		}
+		if b, err := json.Marshal(blob); err == nil {
+			ta = string(b)
+		}
 	}
 	p.PutUtfString("ta", ta)
 	p.PutUtfString("distinct_id", "")

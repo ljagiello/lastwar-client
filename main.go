@@ -6,16 +6,15 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-
 	email := flag.String("email", "", "account email to log in with (only needed if no loginKey is on file yet)")
 	codePipe := flag.String("code-pipe", "", "path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin")
-	collect := flag.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, and donating to the recommended alliance tech, after login")
-	listBuildings := flag.Bool("list-buildings", false, "print every owned building (id, type, level, queue state) and exit")
+	collect := flag.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both once-a-day VIP claims, after login")
+	listBuildings := flag.Bool("list-buildings", false, "print every owned building (id, type, level, queue state); the process still exits after -collect/-list-buildings finish unless -interactive is also set")
 	interactive := flag.String("interactive", "", "stay connected and read ad-hoc test commands from this control FIFO instead of exiting")
 
 	csIP := flag.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
@@ -32,11 +31,25 @@ func main() {
 	noConfig := flag.Bool("no-config", false, "skip loading any session config, even the default file -- for a plain guest/email-flow run when a session config is also present")
 	decodeStream := flag.String("decode-stream", "", "decode a reassembled raw TCP byte stream file (see docs/capturing-and-decoding-traffic.mdx) and print every SFS2X packet, then exit -- no login, no network connection at all")
 	decodeLabel := flag.String("decode-label", "", "prefix label for -decode-stream output lines, e.g. \"c2s\" or \"s2c\" (default: \"stream\")")
+	logLevel := flag.String("log-level", "info", "log verbosity: debug, info, warn, or error")
 	flag.Parse()
+
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(*logLevel)})))
+
+	csIOSSetExplicitly := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "cs-ios" {
+			csIOSSetExplicitly = true
+		}
+	})
 
 	if *decodeStream != "" {
 		runDecode(*decodeLabel, *decodeStream)
 		return
+	}
+
+	if *noConfig && *configPath != "" {
+		slog.Warn("ignoring -config because -no-config is also set")
 	}
 
 	var cfg *SessionConfig
@@ -55,12 +68,15 @@ func main() {
 		*csDeviceID = applyOverride(cfg.DeviceID, *csDeviceID)
 		*csShumei = applyOverride(cfg.ShumeiBoxId, *csShumei)
 		*csAt = applyOverride(cfg.AccessToken, *csAt)
-		if cfg.IOSMode {
-			*csIOS = true
+		if !csIOSSetExplicitly {
+			*csIOS = cfg.IOSMode
 		}
 	}
 
 	if *csIP != "" || *csRt != "" {
+		if *email != "" {
+			slog.Warn("ignoring -email because -cs-ip/-cs-rt is set (cross-server reconnect doesn't use the email flow)")
+		}
 		runCrossServerTest(crossServerTestOpts{
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
@@ -73,7 +89,12 @@ func main() {
 	result, err := Login(LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake})
 	if err != nil {
 		slog.Error("login failed", "error", err)
-		os.Exit(1)
+		// Exit code 2 (rather than the generic 1) specifically marks
+		// authentication/session failures -- the class of failure the
+		// README documents as needing a fresh capture, not a transient
+		// retry -- so a cron wrapper can distinguish it without parsing
+		// the JSON log body.
+		os.Exit(2)
 	}
 	conn := result.Conn
 	defer conn.Close()
@@ -111,6 +132,21 @@ func main() {
 	}
 
 	slog.Info("client exiting")
+}
+
+// parseLogLevel maps a -log-level flag value to an slog.Level, defaulting to Info for anything
+// unrecognized (including the empty string).
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 type crossServerTestOpts struct {
@@ -181,7 +217,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 	})
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
-		os.Exit(1)
+		// Exit code 2 marks authentication/session failures specifically -- see the matching comment in main() above.
+		os.Exit(2)
 	}
 	conn := result.Conn
 	defer conn.Close()

@@ -74,7 +74,7 @@ This section walks through going from a clean checkout to a working `-collect` r
     {
       "ip": "203.0.113.10",
       "port": 17783,
-      "zone": "your-real-zone",
+      "zone": "your-real-zone-e.g.-APS1234",
       "gameUid": "your-real-composite-gameUid",
       "deviceId": "your-real-device-id_n3d",
       "shumeiBoxId": "your-real-shumei-fingerprint-token",
@@ -129,40 +129,13 @@ Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, 
 
 ### Flags reference
 
-| Flag | Default | Description |
-|---|---|---|
-| `-email` | `""` | Account email to log in with (only needed if no loginKey is on file yet). |
-| `-code-pipe` | `""` | Path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin. |
-| `-collect` | `false` | Collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both daily VIP claims, after login (see [Live validation against production](/live-validation)). |
-| `-list-buildings` | `false` | Print every owned building (id, type, level, queue state) and exit. |
-| `-interactive` | `""` | Stay connected and read ad-hoc test commands from this control FIFO instead of exiting. |
-| `-cs-ip` | `""` | Skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from `accountArr`/`push.account.login.new`). |
-| `-cs-port` | `0` | Port for `-cs-ip`. |
-| `-cs-zone` | `""` | Zone for `-cs-ip`, e.g. `APS999`. |
-| `-cs-gameuid` | `""` | Composite `gameUid` for `-cs-ip`. |
-| `-cs-deviceid` | `""` | Override `deviceId` (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one. |
-| `-cs-shumei` | `""` | Real `shumeiBoxId` anti-fraud fingerprint token, if known. |
-| `-cs-rt` | `""` | If set, first does a GSL `opt=refresh` call with this refresh token to obtain a fresh access token before reconnecting. |
-| `-cs-at` | `""` | Raw access token to send directly as `p.at`, skipping any GSL call entirely (e.g. one captured live from a real client). |
-| `-cs-ios` | `false` | Send an iOS-flavored Login (`packageName=com.lastwar.ios`, matching `packageSign`/`platform`/`pf`) instead of Android — an `at` token is bound to the platform/package it was issued for. |
-| `-handshake` | `false` | Experimental: send the vanilla SFS2X pre-Login Handshake (action `0`) before Login — see `conn.go:DoHandshake`. |
-| `-config` | `""` | Path to a session config JSON (see `config.example.json`); if unset, auto-loads `~/.lastwar_goclient_session.json` when present. Explicit `-cs-*` flags override individual config fields. |
-| `-no-config` | `false` | Skip loading any session config, even the default file — for a plain guest/email-flow run when a session config is also present. |
+The definitive, always-current flag list lives in the code itself — run `./lastwar-client -h`,
+or read the flag definitions directly in `main.go`. A duplicated table here has already drifted
+out of sync with the real flags more than once; the root `README.md`'s Usage section covers the
+common cases with a live-tested example for each.
 
 ### Files
 
-| File | Purpose |
-|---|---|
-| `crypto.go` | GSL RSA-PKCS1v15 + AES-256-ECB-PKCS7 request/response envelope |
-| `sfsobject.go` | SFSObject/SFSArray binary codec (encode + decode), recursive pretty-printing |
-| `packet.go` | SFS2X packet framing: header flags, length-derived XOR, zlib compression, Zstandard decompression |
-| `gsl.go` | HTTP bootstrap: check-version, GSL `getserverlist.php` (`opt=new\|login\|fix\|refresh`) |
-| `conn.go` | TCP connection, envelope send/receive, heartbeat |
-| `identity.go` | Persisted device identity + the ~50-field SFS `Login` params object (Android and iOS variants) |
-| `config.go` | Session config file loading (`~/.lastwar_goclient_session.json` / `-config`) |
-| `login.go` | Full login orchestration: guest login, email verification, account binding |
-| `crossserver.go` | Direct role reconnect (`CrossServerLogin` reimplementation) |
-| `buildings.go` | Building list parsing, type-ID table, resource-collection commands |
-| `interactive.go` | Control-FIFO REPL for testing commands against a live session without re-login |
-| `main.go` | CLI entrypoint |
-| `selftest_test.go` | Unit tests for the crypto/codec/framing layers (no network required) |
+See the `README.md`'s Files table at the repository root for the full, current file-by-file
+breakdown — keeping a second copy here is exactly what caused it to drift out of sync (it was
+missing six real files before this rewrite).

@@ -90,11 +90,16 @@ func loadEffectiveConfig(explicitPath string) (*SessionConfig, string) {
 	cfg, err := LoadSessionConfig(path)
 	if err != nil {
 		if explicitPath != "" {
-			// only explicitly-requested configs are fatal if unreadable;
-			// a missing/broken default file just falls through silently
+			// An explicitly-requested config is fatal if unreadable.
 			fmt.Fprintf(os.Stderr, "load session config %s: %v\n", path, err)
 			os.Exit(1)
 		}
+		// The default path is silent when the file is simply absent (an
+		// expected, common case), but this branch is only reached when
+		// os.Stat above already confirmed the file DOES exist -- so a
+		// parse failure here means "present but corrupt," a materially
+		// different and actionable condition worth a warning, not silence.
+		slog.Warn("default session config exists but failed to load; continuing without it", "path", path, "error", err)
 		return nil, ""
 	}
 	return cfg, path

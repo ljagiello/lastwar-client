@@ -192,3 +192,7 @@ Two things worth checking after setup, not just once but as ongoing habits:
 | `main.go` | CLI entrypoint |
 | `selftest_test.go` | Unit tests for the crypto/codec/framing layers (no network required) |
 | `tools/reassemble_stream.py` | Reassembles one TCP stream from a pcap into `-decode-stream`-ready files — see [Capturing and decoding traffic](docs/capturing-and-decoding-traffic.mdx) |
+
+## License
+
+Apache License 2.0 -- see [LICENSE](LICENSE).

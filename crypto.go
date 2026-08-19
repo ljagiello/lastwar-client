@@ -19,9 +19,18 @@ const saltAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345
 func randomSalt(n int) (string, error) {
 	buf := make([]byte, 1)
 	out := make([]byte, n)
+	// Reject bytes past the largest multiple of len(saltAlphabet) that fits in a byte, so every
+	// alphabet character has exactly equal probability -- a plain %-mod on a uniform byte would
+	// otherwise be a few percent biased toward the first (256 mod len(saltAlphabet)) characters.
+	limit := 256 - (256 % len(saltAlphabet))
 	for i := 0; i < n; i++ {
-		if _, err := rand.Read(buf); err != nil {
-			return "", err
+		for {
+			if _, err := rand.Read(buf); err != nil {
+				return "", err
+			}
+			if int(buf[0]) < limit {
+				break
+			}
 		}
 		out[i] = saltAlphabet[int(buf[0])%len(saltAlphabet)]
 	}

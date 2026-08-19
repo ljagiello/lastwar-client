@@ -504,7 +504,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		return SFSValue{tag, out}, nil
 	case sfsArrayType:
-		n, err := r.readInt16()
+		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}
@@ -518,7 +518,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		return SFSValue{tag, arr}, nil
 	case sfsObjectType:
-		n, err := r.readInt16()
+		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}

@@ -79,9 +79,15 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		if ok {
 			if arr, ok := v.Val.(*SFSArray); ok {
 				for _, item := range arr.items {
-					if mo, ok := item.Val.(*SFSObject); ok {
-						all = append(all, Mail{Raw: mo})
+					mo, ok := item.Val.(*SFSObject)
+					if !ok {
+						continue
 					}
+					if !mo.Has("uid") {
+						slog.Warn("skipping mail entry with no uid field", "raw", mo.String())
+						continue
+					}
+					all = append(all, Mail{Raw: mo})
 				}
 			}
 		}

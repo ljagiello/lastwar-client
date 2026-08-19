@@ -71,9 +71,15 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 		return out
 	}
 	for _, item := range arr.items {
-		if vi, ok := item.Val.(*SFSObject); ok {
-			out = append(out, Visitor{Raw: vi})
+		vi, ok := item.Val.(*SFSObject)
+		if !ok {
+			continue
 		}
+		if !vi.Has("uid") {
+			slog.Warn("skipping visitor.list entry with no uid field", "raw", vi.String())
+			continue
+		}
+		out = append(out, Visitor{Raw: vi})
 	}
 	return out
 }

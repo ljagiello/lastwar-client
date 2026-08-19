@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -26,6 +28,15 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 	slog.Info(`format: cmd.name {"key":"value"} (params optional)`)
 	slog.Info("example usage", "example", `echo 'building.camp.collect {"uuid":123}' > `+controlPipe)
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		slog.Info("shutting down", "signal", sig.String())
+		conn.Close()
+		os.Exit(0)
+	}()
+
 	for {
 		f, err := os.Open(controlPipe)
 		if err != nil {
@@ -39,6 +50,9 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 				continue
 			}
 			handleInteractiveLine(conn, line)
+		}
+		if err := scanner.Err(); err != nil {
+			slog.Error("control pipe scan error", "controlPipe", controlPipe, "error", err)
 		}
 		f.Close()
 		// A FIFO reader sees EOF once every writer closes; reopen and

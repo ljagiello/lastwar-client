@@ -178,9 +178,15 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 		return out
 	}
 	for _, item := range arr.items {
-		if bi, ok := item.Val.(*SFSObject); ok {
-			out = append(out, Building{Raw: bi})
+		bi, ok := item.Val.(*SFSObject)
+		if !ok {
+			continue
 		}
+		if !bi.Has("uuid") {
+			slog.Warn("skipping building_new entry with no uuid field", "raw", bi.String())
+			continue
+		}
+		out = append(out, Building{Raw: bi})
 	}
 	return out
 }

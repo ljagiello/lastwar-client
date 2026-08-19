@@ -147,3 +147,18 @@ func TestArrayDecodeRoundTrips(t *testing.T) {
 		}
 	})
 }
+
+func TestNestedCountRejectsNegative(t *testing.T) {
+	t.Run("SFSArray", func(t *testing.T) {
+		r := &sfsReader{data: []byte{0xFF, 0xFF}} // count = -1
+		if _, err := r.readValuePayload(sfsArrayType); err == nil {
+			t.Fatal("expected error for negative nested array count, got nil")
+		}
+	})
+	t.Run("SFSObject", func(t *testing.T) {
+		r := &sfsReader{data: []byte{0xFF, 0xFF}} // count = -1
+		if _, err := r.readValuePayload(sfsObjectType); err == nil {
+			t.Fatal("expected error for negative nested object count, got nil")
+		}
+	})
+}

@@ -128,7 +128,11 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			outer.PutByte("c", controllerSystem)
 			outer.PutShort("a", actionLogin)
 			outer.PutSFSObject("p", loginContent)
-			os.WriteFile(f, EncodeObject(outer), 0644)
+			// 0600, not 0644 -- this dump includes p.at (the live access token), same
+			// sensitivity as the session config file (see config.go's SaveSessionConfig).
+			if err := os.WriteFile(f, EncodeObject(outer), 0600); err != nil {
+				slog.Error("failed to write login body debug dump", "path", f, "error", err)
+			}
 		}
 		if err := conn.SendEnvelope(controllerSystem, actionLogin, loginContent); err != nil {
 			conn.Close()
