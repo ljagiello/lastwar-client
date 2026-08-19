@@ -36,7 +36,7 @@ func main() {
 	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip")
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
-	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- the refresh response's server list also REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid")
+	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- the refresh response's server list also REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and the fresh access token REPLACES any explicitly-passed -cs-at")
 	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at, skipping any GSL call entirely (e.g. one captured live from a real client)")
 	csIOS := fs.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
 	handshake := fs.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
@@ -156,11 +156,10 @@ func main() {
 	buildings := result.Buildings
 	visitors := result.Visitors
 	if len(buildings) == 0 {
-		// Login() itself already made its one attempt at the `init` push (or,
-		// on the loginKey fast-path, never waited for it at all) -- see the
-		// comment above maxLoginAttempts in login.go for why that's kept at a
-		// single attempt rather than a retry loop. This is just one last
-		// chance to catch a late `init` before giving up entirely.
+		// Login() itself already made its one attempt at the `init` push --
+		// see the comment above maxLoginAttempts in login.go for why that's
+		// kept at a single attempt rather than a retry loop. This is just one
+		// last chance to catch a late `init` before giving up entirely.
 		slog.Info("fetching building list (push.init.build)")
 		buildings, visitors, err = FetchBuildings(conn, 12*time.Second)
 		if err != nil {
@@ -263,30 +262,47 @@ func runCrossServerTest(o crossServerTestOpts) {
 
 	accessTok := o.at
 	ip, port, zone, gameUid := o.ip, o.port, o.zone, o.gameUid
-	// Captured only when -cs-rt runs its own GSL round trip below, then threaded into
-	// CrossServerLoginParams so a mid-login serverInfo redirect can refresh AccessTok instead of
-	// reusing a stale one (see CrossServerLoginParams' doc comment). Left nil for a bare -cs-ip
-	// run: DoCrossServerLogin is deliberately GSL-free in that mode ("dialing directly, no GSL
-	// call" -- see its own doc comment), so we don't add a surprise network round trip just to
-	// get redirect-refresh capability; it degrades to the existing logged-warning fallback.
+
+	// GSL plumbing (HTTP client + gate host + RSA pubkey), threaded into CrossServerLoginParams so a
+	// mid-login serverInfo redirect can refresh AccessTok instead of reusing a stale one (see
+	// CrossServerLoginParams' doc comment). CheckVersion is a single cheap HTTP call, so it's made
+	// unconditionally here rather than only under -cs-rt: a plain SessionConfig reconnect with no
+	// -cs-rt at all (the primary case crossserver.go's own redirect-following doc comment is about --
+	// surviving a real server-merge zone migration) could otherwise never reach this safety net.
+	//
+	// -cs-rt additionally NEEDS this to make its own opt=refresh call below, so a failure here stays
+	// fatal (os.Exit) in that case, matching this function's existing error-handling posture for
+	// -cs-rt. For every other path, this is purely a best-effort enhancement on top of a reconnect
+	// that doesn't otherwise need any GSL/HTTP capability -- a failure here just logs a warning and
+	// leaves gslHTTPClient/gslRSAPub/gslGateHost nil, falling back to today's documented degraded
+	// behavior (DoCrossServerLogin reusing the current access token unrefreshed, with its own logged
+	// warning, if a redirect is actually hit) instead of failing the whole run over it.
 	var gslHTTPClient *http.Client
 	var gslRSAPub *rsa.PublicKey
 	var gslGateHost string
-	if o.rt != "" {
+	{
 		httpClient := defaultHTTPClient()
 		cv, gateHost, err := CheckVersion(httpClient)
 		if err != nil {
-			slog.Error("check-version failed", "error", err)
-			os.Exit(1)
+			if o.rt != "" {
+				slog.Error("check-version failed", "error", err)
+				os.Exit(1)
+			}
+			slog.Warn("check-version failed; proceeding without redirect-refresh capability (a mid-login serverInfo redirect will fall back to reusing the current access token)", "error", err)
+		} else if pub, err := parseRSAPubKeyFromDER(cv.ResMsg); err != nil {
+			if o.rt != "" {
+				slog.Error("parse RSA pubkey failed", "error", err)
+				os.Exit(1)
+			}
+			slog.Warn("parse RSA pubkey failed; proceeding without redirect-refresh capability (a mid-login serverInfo redirect will fall back to reusing the current access token)", "error", err)
+		} else {
+			gslHTTPClient, gslRSAPub, gslGateHost = httpClient, pub, gateHost
 		}
-		pub, err := parseRSAPubKeyFromDER(cv.ResMsg)
-		if err != nil {
-			slog.Error("parse RSA pubkey failed", "error", err)
-			os.Exit(1)
-		}
-		gslHTTPClient, gslRSAPub, gslGateHost = httpClient, pub, gateHost
+	}
+
+	if o.rt != "" {
 		slog.Info("GSL getserverlist (opt=refresh)")
-		lsr, err := GetServerList(httpClient, gateHost, pub, deviceID, GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
+		lsr, err := GetServerList(gslHTTPClient, gslGateHost, gslRSAPub, deviceID, GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
 		if err != nil {
 			slog.Error("GSL refresh failed", "error", err)
 			// Exit code 2 marks authentication/session failures specifically -- see the matching comment in main() above.
@@ -294,6 +310,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 		slog.Info("GSL refresh response", "code", lsr.Code, "serverListLen", len(lsr.ServerList))
 		if lsr.At != nil {
+			if o.at != "" {
+				slog.Warn("ignoring -cs-at because -cs-rt is set (the GSL refresh response's access token replaces it)")
+			}
 			accessTok = lsr.At.Token
 			slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
 		}

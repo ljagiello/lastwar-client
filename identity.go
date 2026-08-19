@@ -148,10 +148,17 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 			return nil, err
 		}
 		id = hex.EncodeToString(raw) + "_n3d"
-		if err := os.WriteFile(deviceIDStatePath(), []byte(id), 0o600); err != nil {
+		if err := saveStateFile(deviceIDStatePath(), id); err != nil {
 			return nil, fmt.Errorf("persist device id: %w", err)
 		}
 	}
+	// deviceId+gameUid alone (no loginKey) are sufficient to attempt an
+	// account-resolving GSL call via login.go's gslOptFor (opt=fix case), so
+	// every persisted state file gets the same loose-permissions check, not
+	// just loginKey.
+	warnIfLoosePermissions(deviceIDStatePath())
+	warnIfLoosePermissions(usernameStatePath())
+	warnIfLoosePermissions(gameUidStatePath())
 	warnIfLoosePermissions(loginKeyStatePath())
 	readTrimmed := func(path string) string {
 		if b, err := os.ReadFile(path); err == nil {
@@ -169,8 +176,10 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 
 // warnIfLoosePermissions logs a warning if path exists and is readable/writable by group or
 // other -- mirrors the equivalent check config.go's LoadSessionConfig already does for the
-// session config file, applied here to the persisted loginKey, which is just as sensitive (a
-// loginKey alone is sufficient to log back into the real account via opt=login).
+// session config file, applied here to all four persisted device-identity files. loginKey is
+// the most sensitive (alone sufficient to log back into the real account via opt=login), but
+// deviceId+gameUid together are enough to attempt an account-resolving GSL call (opt=fix, see
+// login.go's gslOptFor), so they get the same treatment.
 func warnIfLoosePermissions(path string) {
 	fi, err := os.Stat(path)
 	if err != nil {

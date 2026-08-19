@@ -53,8 +53,13 @@ type CheckVersionResponse struct {
 type flexString string
 
 func (f *flexString) UnmarshalJSON(b []byte) error {
-	s := strings.Trim(string(b), `"`)
-	*f = flexString(s)
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*f = flexString(s)
+		return nil
+	}
+	// Not a JSON string (e.g. a bare number like 301) -- use the raw bytes as-is.
+	*f = flexString(b)
 	return nil
 }
 func (f flexString) String() string { return string(f) }

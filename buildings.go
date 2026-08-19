@@ -167,9 +167,13 @@ func (b Building) LastCollect() int64 { return b.Raw.GetLong("lCT") }
 // requirePresentField reports whether o has field, logging a Warn with the raw entry (for
 // diagnosability) and returning false if it's missing -- shared by every list-parsing code path
 // (buildings, mail, visitors) that must tolerate a malformed/unexpected entry from the server
-// without crashing or silently fabricating a zero-value id.
+// without crashing or silently fabricating a zero-value id. An explicit sfsNull for field is
+// treated the same as a missing field: Has() only reflects key presence, so a null-typed entry
+// would otherwise slip past the guard and GetInt/GetLong/GetString would fall through to a
+// zero value indistinguishable from a genuine one.
 func requirePresentField(o *SFSObject, field, context string) bool {
-	if !o.Has(field) {
+	v, ok := o.Get(field)
+	if !ok || v.Val == nil {
 		slog.Warn("skipping "+context+" entry with no "+field+" field", "raw", o.String())
 		return false
 	}

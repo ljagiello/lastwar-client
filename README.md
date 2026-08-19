@@ -186,10 +186,11 @@ Two things worth checking after setup, not just once but as ongoing habits:
 | `packet.go` | SFS2X packet framing: header flags, length-derived XOR, zlib compression, Zstandard decompression |
 | `gsl.go` | HTTP bootstrap: check-version, GSL `getserverlist.php` (`opt=new\|login\|fix\|refresh`) |
 | `conn.go` | TCP connection, envelope send/receive, heartbeat |
+| `errors.go` | `ErrAuthRejected` sentinel distinguishing exit code 2 (confirmed auth rejection) from exit code 1 (generic failure) |
 | `identity.go` | Persisted device identity + the ~50-field SFS `Login` params object (Android and iOS variants) |
 | `config.go` | Session config file loading (`~/.lastwar_goclient_session.json` / `-config`) |
 | `login.go` | Full login orchestration: guest login, email verification, account binding |
-| `crossserver.go` | Direct role reconnect (`CrossServerLogin` reimplementation) |
+| `crossserver.go` | Direct role reconnect (`CrossServerLogin` reimplementation); `LWDEBUG_DUMP_LOGIN`/`LWDEBUG_DUMP_LOGIN_BODY` env vars dump the outgoing login request for debugging (the latter writes it, live access token included, to a caller-chosen file at 0600 -- same sensitivity as the session config) |
 | `buildings.go` | Building list parsing, type-ID table, resource-collection commands |
 | `visitors.go` | City-visitor parsing (from the `init` push) and greeting (`visitor.operate`) |
 | `mail.go` | Mailbox listing/pagination and batch reward claiming, scoped per category |
@@ -203,9 +204,12 @@ Two things worth checking after setup, not just once but as ongoing habits:
 | `gsl_http_test.go` | `CheckVersion` and `GetServerList` exercised against a fake HTTP server |
 | `packet_bigsized_test.go` | Packet framing round trip for payloads over 65535 bytes (4-byte length prefix, `hdrBigSized`) |
 | `packet_zstd_test.go` | `ReadPacket`'s Zstandard-decompression branch (`hdrCompressed\|hdrUseLZ4`) round trip |
+| `packet_oom_test.go` | `ReadPacket`'s declared-length size guards reject an oversized/hostile frame using only the header fields, before ever reading (let alone allocating) the body |
 | `sfsobject_array_test.go` | Array-tag decode round trips, including `ByteArray`'s 4-byte element count vs. every other array tag's 2-byte count |
+| `sfsobject_encode_error_test.go` | `EncodeObject` returns an error instead of panicking when a string value exceeds the wire format's 65535-byte length-prefix limit, including through nested-`SFSObject` recursion |
 | `conn_test.go` | `Envelope.AsExtension`, `classifyResponse`'s success/benign/failure outcome classification, and a `GameConn` send/receive round trip |
 | `conn_wait_test.go` | `sendAndWait`/`waitFor`/`waitForCmd`/`waitForInitPush`: outcome classification, deadline timeouts, unmatched-push skipping, and the init-push halfway active-pull fallback |
+| `conn_handshake_test.go` | `DoHandshake`'s success path and its `ec`-bearing failure path wrapping `ErrAuthRejected`; `StartHeartbeat`'s periodic pings, stop-on-`Close`, and close-on-send-failure behavior |
 | `identity_test.go` | `BuildLoginParams`' Android/iOS and empty-vs-set-`GameUid` conditional field logic; `SaveLoginKey`/loose-permission warning and load/save round trip for the persisted device identity |
 | `main_test.go` | `parseLogLevel`'s recognized values and its unrecognized-value fallback-to-info behavior |
 | `config_test.go` | Session config load/save: explicit-path loading, loose-file-permission warnings, permission tightening on save |
@@ -213,6 +217,7 @@ Two things worth checking after setup, not just once but as ongoing habits:
 | `buildings_visitors_test.go` | `BuildingNameOf`, `collectCmdFor`, and init-push building/visitor parsing (`ParseInitBuildings`/`ParseInitVisitors`, including malformed-entry skipping) |
 | `pure_helpers_test.go` | Pure helpers spanning buildings/mail/alliance: `collectibleBuildings`, `groupUnclaimedByType`, `findRecommendedTech` |
 | `redirect_helpers_test.go` | GSL/cross-server helpers: `findServerInfo`, `getIntFlexible`, `serverIDFromZone` |
+| `interactive_test.go` | `putJSONValue`'s JSON-to-`SFSObject` type mapping, including `json.Number`'s int64-vs-float64 fallback for uuid-sized values |
 | `tools/reassemble_stream.py` | Reassembles one TCP stream from a pcap into `-decode-stream`-ready files — see [Capturing and decoding traffic](docs/capturing-and-decoding-traffic.mdx) |
 
 ## License

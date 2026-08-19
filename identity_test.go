@@ -140,6 +140,31 @@ func TestLoadOrCreateDeviceIdentityWarnsOnLoosePermissions(t *testing.T) {
 	}
 }
 
+// TestLoadOrCreateDeviceIdentityWarnsOnLooseGameUidPermissions confirms the loose-permissions
+// warning isn't limited to the loginKey file -- gameUid is just as capable of driving an
+// account-resolving GSL call (opt=fix, see login.go's gslOptFor) once a deviceId is known, so it
+// must get the same check on every load.
+func TestLoadOrCreateDeviceIdentityWarnsOnLooseGameUidPermissions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	if err := os.WriteFile(gameUidStatePath(), []byte("stale-gameuid"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	if _, err := loadOrCreateDeviceIdentity(); err != nil {
+		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
+	}
+	if !strings.Contains(buf.String(), "more permissive than 0600") {
+		t.Errorf("expected a permission warning in the log output, got: %s", buf.String())
+	}
+}
+
 // TestLoadOrCreateDeviceIdentityRoundTrip confirms the full persisted-state lifecycle: a fresh
 // HOME creates a new device identity, SaveGameUid/SaveUsername persist their values to disk at
 // 0600, and a second load picks up exactly what was saved -- the same guarantee config_test.go's

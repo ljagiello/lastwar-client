@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +41,28 @@ func TestCheckVersionAgainstFakeServer(t *testing.T) {
 	}
 }
 
+// TestCheckVersionRejectsOversizedResponse exercises maxGSLResponseSize's rejection branch: a
+// fake server that writes a body over the limit must produce the size-limit error, not silently
+// read the whole thing (or worse, an unbounded amount) into memory.
+func TestCheckVersionRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(bytes.Repeat([]byte("a"), maxGSLResponseSize+1))
+	}))
+	defer server.Close()
+
+	origHosts := checkVersionHosts
+	checkVersionHosts = []string{server.URL}
+	defer func() { checkVersionHosts = origHosts }()
+
+	_, _, err := CheckVersion(defaultHTTPClient())
+	if err == nil {
+		t.Fatal("CheckVersion: expected an error for an oversized response, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds") || !strings.Contains(err.Error(), "byte limit") {
+		t.Errorf("CheckVersion error = %q, want it to mention the size limit", err)
+	}
+}
+
 func TestGetServerListAgainstFakeServer(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -65,6 +89,55 @@ func TestGetServerListAgainstFakeServer(t *testing.T) {
 	}
 	if len(lsr.ServerList) != 1 || lsr.ServerList[0].IP != "1.2.3.4" {
 		t.Fatalf("got %+v, want a single server with IP 1.2.3.4", lsr.ServerList)
+	}
+}
+
+// TestGetServerListRejectsOversizedResponse exercises maxGSLResponseSize's rejection branch on
+// the GetServerList side (its own io.ReadAll/LimitReader call site, separate from CheckVersion's).
+func TestGetServerListRejectsOversizedResponse(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(bytes.Repeat([]byte("a"), maxGSLResponseSize+1))
+	}))
+	defer server.Close()
+
+	_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	if err == nil {
+		t.Fatal("GetServerList: expected an error for an oversized response, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds") || !strings.Contains(err.Error(), "byte limit") {
+		t.Errorf("GetServerList error = %q, want it to mention the size limit", err)
+	}
+}
+
+// TestFlexStringUnmarshalJSON covers the three shapes observed live for flexString fields: a
+// plain JSON string, a JSON string containing an escaped quote (the case naive
+// strings.Trim(`"`) got wrong -- it only strips the leading/trailing quote byte, leaving the
+// escape sequence in the middle untouched), and a bare JSON number.
+func TestFlexStringUnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want string
+	}{
+		{"plain string", `"0"`, "0"},
+		{"escaped quote", `"a\"b"`, `a"b`},
+		{"bare number", `301`, "301"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var f flexString
+			if err := json.Unmarshal([]byte(tt.json), &f); err != nil {
+				t.Fatalf("Unmarshal(%s): %v", tt.json, err)
+			}
+			if f.String() != tt.want {
+				t.Errorf("Unmarshal(%s) = %q, want %q", tt.json, f.String(), tt.want)
+			}
+		})
 	}
 }
 
