@@ -49,18 +49,26 @@ func gslOptFor(ident *deviceIdentity) GSLOpt {
 }
 
 // buildBaseZoneLoginAddr builds the "host:port" dial address for the base zone SFS2X connection
-// from a GSL server list entry, guarding against an empty ip: Go's "host:port" dial syntax treats
-// an empty host as the loopback interface, so an unguarded fmt.Sprintf("%s:%d", "", port) wouldn't
-// fail cleanly at all -- it would silently attempt a real TCP connection to 127.0.0.1/::1 and
-// return a misleading "connection refused" instead of any indication that no host was ever given.
-// Mirrors main.go's equivalent `if firstHost(ip) == "" { ...; os.Exit(1) }` guard on the
-// cross-server login path, adapted to return an error rather than exit since this is a
-// library-style function.
+// from a GSL server list entry (or a serverInfo redirect payload -- same "ip"/"port" shape),
+// guarding against an empty ip: Go's "host:port" dial syntax treats an empty host as the loopback
+// interface, so an unguarded fmt.Sprintf("%s:%d", "", port) wouldn't fail cleanly at all -- it
+// would silently attempt a real TCP connection to 127.0.0.1/::1 and return a misleading
+// "connection refused" instead of any indication that no host was ever given. Mirrors main.go's
+// equivalent `if firstHost(ip) == "" { ...; os.Exit(1) }` guard on the cross-server login path,
+// adapted to return an error rather than exit since this is a library-style function.
 //
-// Not observed live: reachable only if gsl.go's applyLoginServerFallback synthesizes an empty-IP
-// ServerList[0] entry, which itself requires LoginServer.IP to also be empty -- a low-probability,
-// nested-unconfirmed-conditions scenario. Guarded anyway since the failure mode (silently dialing
-// loopback) is confusing enough to be worth a clear error over a cryptic one.
+// Used at two call sites in this file: the initial dial address built from GSL's server list, and
+// the mid-login serverInfo redirect branch below (which had this exact gap until round 18 -- the
+// redirect's ip is a fresh value the server hands back mid-login, not something a caller or an
+// earlier check can pre-validate, so the guard has to live here, not just at the first call site).
+// crossserver.go's DoCrossServerLogin reuses this same helper for its own, byte-for-byte identical
+// redirect branch rather than duplicating the guard.
+//
+// The GSL-entry call site itself is not observed live: reachable only if gsl.go's
+// applyLoginServerFallback synthesizes an empty-IP ServerList[0] entry, which itself requires
+// LoginServer.IP to also be empty -- a low-probability, nested-unconfirmed-conditions scenario.
+// Guarded anyway since the failure mode (silently dialing loopback) is confusing enough to be
+// worth a clear error over a cryptic one.
 func buildBaseZoneLoginAddr(ip string, port int) (string, error) {
 	host := firstHost(ip)
 	if host == "" {
@@ -253,7 +261,11 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 				conn.Close()
 				return nil, fmt.Errorf("login: too many serverInfo redirects (>%d), last addr=%s zone=%s", maxRedirectHops, addr, zone)
 			}
-			newAddr := fmt.Sprintf("%s:%d", firstHost(siObj.GetString("ip")), getIntFlexible(siObj, "port"))
+			newAddr, err := buildBaseZoneLoginAddr(siObj.GetString("ip"), int(getIntFlexible(siObj, "port")))
+			if err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("login: serverInfo redirect: %w", err)
+			}
 			newZone := siObj.GetString("zone")
 			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddr, "newZone", newZone, "oldAddr", addr, "oldZone", zone)
 			conn.Close()

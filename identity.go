@@ -177,6 +177,47 @@ func createDeviceIDStateFile(path, id string) error {
 	return err
 }
 
+// deviceIDEmptyRetryAttempts/deviceIDEmptyRetryDelay bound how long loadOrCreateDeviceIdentity
+// waits, after an O_CREATE|O_EXCL failure on the device-id state file, to tell a genuine
+// concurrent writer (which will finish within milliseconds on the same machine) apart from a
+// stale empty leftover from a prior crashed/OOM-killed/disk-full process (which never will). Kept
+// small and bounded on purpose -- this must never become an unbounded or silent retry loop.
+const (
+	deviceIDEmptyRetryAttempts = 3
+	deviceIDEmptyRetryDelay    = 25 * time.Millisecond
+)
+
+// atomicWriteDeviceIDStateFile self-heals a stale empty device-id file by writing a fresh
+// identity via write-temp-then-rename instead of a plain O_WRONLY reopen. A plain reopen could
+// race and clobber a slow-but-genuine concurrent writer's partial content; rename within the same
+// directory is atomic on POSIX filesystems, so any concurrent reader sees either the old (empty)
+// content or the complete new content, never a torn write. fsync-ing the temp file before the
+// rename ensures the content is durable before the rename makes it visible.
+func atomicWriteDeviceIDStateFile(path, id string) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op once the rename below succeeds -- the path no longer exists
+	if _, err := tmp.WriteString(id); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
 func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 	id, err := readTrimmed(deviceIDStatePath())
 	if err != nil {
@@ -200,16 +241,42 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 		if err := createDeviceIDStateFile(deviceIDStatePath(), id); err != nil {
 			if os.IsExist(err) {
 				// Another invocation created the file between our read-not-exists check above
-				// and this write -- re-read instead of unconditionally overwriting whatever it
-				// persisted; see createDeviceIDStateFile's doc comment.
-				reread, rereadErr := readTrimmed(deviceIDStatePath())
-				if rereadErr != nil {
-					return nil, fmt.Errorf("device id file appeared concurrently and could not be re-read: %w", rereadErr)
+				// and this write (see createDeviceIDStateFile's doc comment) -- OR the file is a
+				// stale 0-byte leftover from a prior process that crashed/was OOM-killed/hit a
+				// full disk between its own O_CREATE|O_EXCL and WriteString, with zero
+				// concurrency actually involved this time. Both look identical right now
+				// (os.IsExist(err) == true, file empty); the only way to tell them apart is to
+				// give a genuine concurrent writer a brief window to finish, since on the same
+				// machine that takes milliseconds. Re-read a few times with a short delay
+				// between attempts: a real concurrent writer's content shows up well within that
+				// window, while a stale empty leftover stays empty across every attempt.
+				var reread string
+				for attempt := 0; attempt < deviceIDEmptyRetryAttempts; attempt++ {
+					if attempt > 0 {
+						time.Sleep(deviceIDEmptyRetryDelay)
+					}
+					var rereadErr error
+					reread, rereadErr = readTrimmed(deviceIDStatePath())
+					if rereadErr != nil {
+						return nil, fmt.Errorf("device id file appeared concurrently and could not be re-read: %w", rereadErr)
+					}
+					if reread != "" {
+						break
+					}
 				}
 				if reread == "" {
-					return nil, fmt.Errorf("device id file appeared concurrently but is empty: %s", deviceIDStatePath())
+					// Still empty after giving a genuine concurrent writer several chances to
+					// finish -- this is a stale leftover, not an in-progress write. Self-heal by
+					// writing a fresh identity atomically instead of returning a permanent error
+					// that every subsequent run would repeat forever until a human intervened by
+					// hand.
+					slog.Warn("device id state file exists but is empty after retries; self-healing with a fresh identity", "path", deviceIDStatePath(), "attempts", deviceIDEmptyRetryAttempts)
+					if err := atomicWriteDeviceIDStateFile(deviceIDStatePath(), id); err != nil {
+						return nil, fmt.Errorf("self-heal empty device id file: %w", err)
+					}
+				} else {
+					id = reread
 				}
-				id = reread
 			} else {
 				return nil, fmt.Errorf("persist device id: %w", err)
 			}

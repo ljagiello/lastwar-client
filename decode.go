@@ -38,11 +38,14 @@ func DecodeStreamFile(label, path string) error {
 		n++
 		obj, err := DecodeObject(body)
 		if err != nil {
-			head := body
-			if len(head) > 32 {
-				head = head[:32]
-			}
-			fmt.Printf("[%s] #%d @offset %d: DecodeObject error: %v (body %d bytes, hex head: %x)\n", label, n, start, err, len(body), head)
+			// Deliberately no hex/content dump of body here: a decode failure can still have an
+			// intact sensitive field (e.g. "tk"/"loginKey") sitting near the front of an otherwise-
+			// undecoded frame (a truncated capture, for instance), and body is the raw pre-decode
+			// bytes -- there's no SFSObject to run through sensitiveSFSKeys/StringRedacted yet, so
+			// any raw slice of it bypasses that redaction entirely. Print only the error itself and
+			// the body's byte length (diagnostic, reveals nothing about content) -- never body's
+			// bytes. See decode_test.go's TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure.
+			fmt.Printf("[%s] #%d @offset %d: DecodeObject error: %v (body %d bytes)\n", label, n, start, err, len(body))
 			continue
 		}
 		fmt.Printf("[%s] #%d @offset %d: %s\n", label, n, start, obj.StringRedacted())

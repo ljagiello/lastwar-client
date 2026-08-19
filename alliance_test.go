@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"errors"
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -63,6 +67,96 @@ func TestClaimAllianceGiftsSendsBothTypes(t *testing.T) {
 	}
 	if len(gotTypes) != 2 || gotTypes[0] != allianceGiftPremium || gotTypes[1] != allianceGiftRegular {
 		t.Errorf("got types %v, want [%d %d] (Premium then Regular, in order)", gotTypes, allianceGiftPremium, allianceGiftRegular)
+	}
+}
+
+// TestClaimAllianceGiftsAbortsRemainingTypesOnNetError is the round-18 regression test for
+// ClaimAllianceGifts' net.Error early-abort: the loop over the 2 gift types (alliance.go) now
+// mirrors CollectAll's identical errors.As-against-net.Error early-abort (buildings.go) and
+// ClaimAllMail's (mail.go) -- append the triggering error to errs, then break, rather than
+// unconditionally attempting the Regular (type=2) request after the Premium (type=1) request
+// already failed with a net.Error. The underlying connection is known-dead at that point, so the
+// second request is already doomed to independently burn a full defaultCmdTimeout before failing
+// the exact same way.
+//
+// The fake connection's Read always fails with fakeNetError (borrowed from
+// buildings_orchestration_test.go's fakeNetErrConn/fakeNetError/fakeNetAddr -- same package, so
+// directly visible here without redefinition), so ClaimAllianceGifts' very first request -- the
+// Premium (type=1) claim -- fails immediately with a wrapped net.Error. Only that one request
+// should ever be sent.
+//
+// Mutation check: reverting ClaimAllianceGifts' loop back to the old flat
+// `errs = append(errs, err)`-with-no-break shape makes this test fail with writeCount() == 2
+// instead of 1.
+func TestClaimAllianceGiftsAbortsRemainingTypesOnNetError(t *testing.T) {
+	fake := &fakeNetErrConn{}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := ClaimAllianceGifts(client)
+
+	if err == nil {
+		t.Fatal("ClaimAllianceGifts() = nil, want a non-nil error (the fake connection's every Read fails)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Errorf("ClaimAllianceGifts() error = %v, want it to wrap a net.Error (the failure that triggered the break)", err)
+	}
+	if got := fake.writeCount(); got != 1 {
+		t.Errorf("fake connection saw %d writes, want exactly 1 (only the Premium/type=1 request -- ClaimAllianceGifts should have aborted before the Regular/type=2 request)", got)
+	}
+}
+
+// TestClaimAllianceGiftsContinuesAfterBusinessErrorOnFirstType proves the round-18 net.Error
+// early-abort fix above did not regress the pre-existing no-short-circuit-on-business-errors
+// behavior: an ordinary decoded errorCode failure on the Premium (type=1) claim must not stop the
+// Regular (type=2) claim from still being attempted -- only a genuine net.Error should do that
+// (see TestClaimAllianceGiftsAbortsRemainingTypesOnNetError above).
+func TestClaimAllianceGiftsContinuesAfterBusinessErrorOnFirstType(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	var gotTypes []int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				return
+			}
+			if msg.Cmd != "alliance.reward.allreceive" {
+				t.Errorf("Cmd = %q, want alliance.reward.allreceive", msg.Cmd)
+			}
+			gotTypes = append(gotTypes, msg.Params.GetInt("type"))
+			resp := NewSFSObject()
+			if i == 0 {
+				resp.PutUtfString("errorCode", "999999") // genuine failure, not benign
+			} else {
+				resp.PutInt("receiveResult", 1)
+			}
+			_ = server.SendExtension(msg.Cmd, resp)
+		}
+	}()
+
+	err := ClaimAllianceGifts(client)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never finished reading both requests")
+	}
+
+	if err == nil {
+		t.Fatal("ClaimAllianceGifts() = nil, want a non-nil error (the Premium/type=1 request got a genuine failure)")
+	}
+	if !strings.Contains(err.Error(), "999999") {
+		t.Errorf("ClaimAllianceGifts() error = %v, want it to mention the type=1 failure's errorCode 999999", err)
+	}
+	if len(gotTypes) != 2 || gotTypes[0] != allianceGiftPremium || gotTypes[1] != allianceGiftRegular {
+		t.Errorf("got types %v, want [%d %d] (Premium then Regular, in order) -- an ordinary business error must not abort the loop", gotTypes, allianceGiftPremium, allianceGiftRegular)
 	}
 }
 

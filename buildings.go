@@ -206,9 +206,12 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 	return out
 }
 
-// FetchBuildings waits for push.init.build (the full base snapshot sent
-// once after entering the city scene) and returns every owned building.
-// It also opportunistically captures a short window of any push.queue.add/
+// FetchBuildings waits for the bare init push's building_new field (the
+// real post-login bootstrap source -- see the case "init" branch below and
+// ParseInitBuildings' doc comment; push.init.build is a rarely-fired
+// secondary push, not the primary source its old name here might suggest)
+// and returns every owned building. It also opportunistically captures a
+// short window of any push.queue.add/
 // push.build.queue.info traffic that arrives in the same window and logs
 // it -- production-queue items are separate entities from buildings
 // (dossier §City/Building "two queue systems"), and seeing real examples
@@ -351,8 +354,8 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 	return buildings, visitors, nil
 }
 
-// PrintBuildings prints every building to stdout, calling out full raw field
-// dumps for our 8 requested target types (recognized ones by name,
+// PrintBuildings prints every building to stdout, unconditionally including
+// a full raw field dump per instance (recognized types by name,
 // unrecognized ones so we can eyeball the data and pin down Smelter/Material
 // Workshop/etc.). This is the actual -list-buildings result data, so it goes
 // to stdout (not slog/stderr) to keep it capturable via shell redirection,

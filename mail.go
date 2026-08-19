@@ -208,6 +208,18 @@ func ClaimAllMail(conn *GameConn) error {
 	mail, err := ListMail(conn)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list mail: %w", err))
+		// A net.Error here means the underlying connection is already known-dead -- ListMail's
+		// own pagination loop hit it mid-fetch (see ListMail's doc comment: it returns whatever
+		// mail it already collected before the failure, not nil). Whatever partial `mail` it
+		// handed back is deliberately NOT processed in that case: proceeding into the read-status
+		// batch loop below would just burn one more defaultCmdTimeout issuing a batch against a
+		// connection already known to be dead, mirroring the readAbortedByNetErr skip further
+		// down. An ordinary decoded errorCode failure (not a net.Error) must still fall through to
+		// process any partial mail normally -- see TestClaimAllMailProcessesPartialMailOnListPageFailure.
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			return errors.Join(errs...)
+		}
 	}
 	if len(mail) == 0 {
 		if err == nil {

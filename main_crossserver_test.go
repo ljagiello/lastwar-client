@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -242,4 +243,205 @@ func TestRunCrossServerTestExitsWhenIPEmpty(t *testing.T) {
 	if !strings.Contains(stderr.String(), wantMsg) {
 		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the pre-fix behavior instead falls through to a misleading \"connection refused\" dial failure)", stderr.String(), wantMsg)
 	}
+}
+
+// TestRunCrossServerTestExitsCode2WhenRefreshHasNoUsableData is the regression test for this
+// round's Fix 1 (exit-code contract gap): a GSL opt=refresh response with neither a fresh access
+// token nor a non-empty server list (refreshHasUsableData(lsr) == false) used to exit 1, the
+// generic "look at the log" code -- but README.md makes an explicit, unqualified operator-facing
+// promise ("Exit code 2 means the session itself is stale ... Login/auth failures (both the
+// plain-login and cross-server-reconnect paths) exit 2 specifically ... a cron wrapper can check $?
+// directly ... without needing to grep the log"). A GSL refresh rejection IS semantically a
+// stale/rejected session, so this path now exits 2 instead.
+//
+// Uses the same re-exec-the-test-binary-as-a-subprocess idiom as
+// TestRunCrossServerTestExitsWhenIPEmpty above, for the same reason: runCrossServerTest calls
+// os.Exit directly on this path, so it can't be driven to completion in-process without also
+// killing this test binary.
+func TestRunCrossServerTestExitsCode2WhenRefreshHasNoUsableData(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{
+			Code:       "0",
+			ServerList: nil, // deliberately empty...
+			At:         nil, // ...and no fresh access token: refreshHasUsableData(lsr) == false
+		})
+		useFakeGSLServer(t, gsl)
+
+		runCrossServerTest(crossServerTestOpts{
+			ip:   "1.2.3.4", // present so this fails on the refresh-data check, not the ip check
+			port: 18888,
+			rt:   "some-refresh-token",
+		})
+		// Only reached if runCrossServerTest fails to exit -- the outer assertions below will
+		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
+		// this silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestExitsCode2WhenRefreshHasNoUsableData$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 2 {
+		t.Errorf("subprocess exit code = %d, want 2 (README's documented stale-session exit-code contract, not the generic 1); stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	const wantMsg = "no usable data"
+	if !strings.Contains(stderr.String(), wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q", stderr.String(), wantMsg)
+	}
+}
+
+// TestRunCrossServerTestServerListOverrideLogging is the end-to-end regression test for this
+// round's Fix 2 (silent flag override, log-level asymmetry): a GSL opt=refresh response with a
+// non-empty ServerList silently reassigns ip/port/zone/gameUid, even when the operator explicitly
+// passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid -- but that used to only ever log at INFO
+// ("server selected"), unlike the symmetric -cs-rt-overriding-cs-at case right above it in
+// runCrossServerTest, which already logs an explicit WARN. Given README's own guidance that
+// -log-level trims a cron log down to warnings/errors only, an operator running with a trimmed
+// log level would see the -cs-at override warning but silently miss this one. This drives
+// runCrossServerTest through both shapes -- explicit flags actually being overridden, and no
+// explicit flags at all (e.g. a fresh cron run with only a session config, or nothing set yet) --
+// and asserts the log level/wording differs accordingly.
+func TestRunCrossServerTestServerListOverrideLogging(t *testing.T) {
+	const freshZone, freshGameUid = "APS-REAL", "uid-real"
+
+	run := func(t *testing.T, explicit bool) string {
+		t.Setenv("HOME", t.TempDir())
+
+		gameAddr := startFakeGameServer(t, fakeInitPushServer(nil))
+		gameHost, gamePort := splitHostPortInt(t, gameAddr)
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{
+			Code: "0",
+			ServerList: []LoginServerInfo{
+				{IP: gameHost, Port: gamePort, Zone: freshZone, GameUid: freshGameUid},
+			},
+			At: &LoginToken{Token: "fresh-token"},
+		})
+		useFakeGSLServer(t, gsl)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		defer slog.SetDefault(orig)
+
+		// Stale placeholders, deliberately different from the fake GSL server's refresh response
+		// in every field, mirroring an old session config or explicit -cs-* flags being overridden.
+		runCrossServerTest(crossServerTestOpts{
+			ip: "stale-placeholder-host", port: 1, zone: "APS-STALE", gameUid: "uid-stale",
+			rt:         "some-refresh-token",
+			ipExplicit: explicit, portExplicit: explicit, zoneExplicit: explicit, gameUidExplicit: explicit,
+		})
+		return buf.String()
+	}
+
+	t.Run("explicit flags overridden -> WARN naming them", func(t *testing.T) {
+		log := run(t, true)
+		if !strings.Contains(log, "level=WARN") {
+			t.Errorf("log = %s\nwant a WARN-level record", log)
+		}
+		if !strings.Contains(log, "overriding explicitly-passed flag") {
+			t.Errorf("log = %s\nwant it to mention the override explicitly", log)
+		}
+		for _, name := range []string{"cs-ip", "cs-port", "cs-zone", "cs-gameuid"} {
+			if !strings.Contains(log, name) {
+				t.Errorf("log = %s\nwant it to name %q among the overridden flags", log, name)
+			}
+		}
+	})
+
+	t.Run("no explicit flags -> plain INFO, no override WARN", func(t *testing.T) {
+		log := run(t, false)
+		if strings.Contains(log, "overriding explicitly-passed flag") {
+			t.Errorf("log = %s\nwant no override WARN when nothing was explicitly set (e.g. a fresh cron run)", log)
+		}
+		if !strings.Contains(log, "server selected") {
+			t.Errorf("log = %s\nwant the original plain INFO \"server selected\" log to still fire unescalated", log)
+		}
+	})
+}
+
+// TestRunCrossServerTestAtWarningAttribution is the end-to-end regression test for this round's
+// Fix 3 (misattribution to the flag when the value came from config): the "ignoring -cs-at because
+// -cs-rt is set" and "continuing with the original -cs-at unrefreshed" warnings used to fire on the
+// bare condition o.at != "", with no distinction between "-cs-at was actually typed on the command
+// line" and "-cs-at ended up non-empty purely because a loaded session config's accessToken field
+// was merged in" (see the config-merge step in main(), "*csAt = applyOverride(cfg.AccessToken,
+// *csAt)") -- so a config-sourced value got blamed on a flag the operator never typed. This drives
+// runCrossServerTest through all four combinations of {refresh returns a fresh token, refresh
+// returns no token} x {-cs-at explicitly typed, -cs-at from config only} and checks the resulting
+// log wording names -cs-at only in the explicit cases.
+func TestRunCrossServerTestAtWarningAttribution(t *testing.T) {
+	const freshZone, freshGameUid = "APS-REAL", "uid-real"
+
+	run := func(t *testing.T, atExplicit, withFreshToken bool) string {
+		t.Setenv("HOME", t.TempDir())
+
+		gameAddr := startFakeGameServer(t, fakeInitPushServer(nil))
+		gameHost, gamePort := splitHostPortInt(t, gameAddr)
+
+		lsr := LoginServerListRespon{
+			Code: "0",
+			// A non-empty server list keeps refreshHasUsableData true even in the
+			// withFreshToken=false cases below, where At is left nil.
+			ServerList: []LoginServerInfo{
+				{IP: gameHost, Port: gamePort, Zone: freshZone, GameUid: freshGameUid},
+			},
+		}
+		if withFreshToken {
+			lsr.At = &LoginToken{Token: "fresh-token"}
+		}
+		gsl := newFakeGSLServer(t, lsr)
+		useFakeGSLServer(t, gsl)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		defer slog.SetDefault(orig)
+
+		runCrossServerTest(crossServerTestOpts{
+			at: "some-access-token", rt: "some-refresh-token",
+			atExplicit: atExplicit,
+		})
+		return buf.String()
+	}
+
+	t.Run("refresh returns fresh token, -cs-at explicitly typed -> warns and names -cs-at", func(t *testing.T) {
+		log := run(t, true, true)
+		if !strings.Contains(log, "ignoring -cs-at because -cs-rt is set") {
+			t.Errorf("log = %s\nwant the \"ignoring -cs-at\" warning, naming the flag the operator actually typed", log)
+		}
+	})
+
+	t.Run("refresh returns fresh token, -cs-at value came from config only -> no misattributed warning", func(t *testing.T) {
+		log := run(t, false, true)
+		if strings.Contains(log, "-cs-at") {
+			t.Errorf("log = %s\nwant no warning misattributing the config-sourced value to a flag the operator never typed", log)
+		}
+	})
+
+	t.Run("refresh returns no token, -cs-at explicitly typed -> warns and names -cs-at", func(t *testing.T) {
+		log := run(t, true, false)
+		if !strings.Contains(log, "continuing with the original -cs-at unrefreshed") {
+			t.Errorf("log = %s\nwant the \"-cs-at unrefreshed\" warning, naming the flag the operator actually typed", log)
+		}
+	})
+
+	t.Run("refresh returns no token, -cs-at value came from config only -> warns without naming -cs-at", func(t *testing.T) {
+		log := run(t, false, false)
+		if !strings.Contains(log, "continuing with the session config's access token, unrefreshed") {
+			t.Errorf("log = %s\nwant the config-attributed \"unrefreshed\" warning -- the operational risk (a stale, unrefreshed token) is worth flagging either way, just not misattributed to -cs-at", log)
+		}
+		if strings.Contains(log, "-cs-at") {
+			t.Errorf("log = %s\nwant it to not misattribute the config-sourced value to -cs-at", log)
+		}
+	})
 }

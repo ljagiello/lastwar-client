@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 )
 
@@ -75,11 +76,22 @@ const (
 func ClaimAllianceGifts(conn *GameConn) error {
 	const cmd = "alliance.reward.allreceive"
 	var errs []error
+	// The 2 gift types are independent (neither scoped to the other's outcome), so an ordinary
+	// decoded business-logic errorCode failure on one must not stop the other from being
+	// attempted -- every error, regardless of kind, still gets appended to errs. A net.Error is a
+	// different kind of failure though: it means the underlying TCP connection itself is
+	// known-dead, so the remaining type is already doomed to independently burn a full
+	// defaultCmdTimeout before failing the exact same way. Mirrors CollectAll's identical
+	// errors.As-against-net.Error early-abort (buildings.go) and ClaimAllMail's (mail.go).
 	for _, giftType := range []int32{allianceGiftPremium, allianceGiftRegular} {
 		params := NewSFSObject()
 		params.PutInt("type", giftType)
 		_, err := sendAndWait(conn, fmt.Sprintf("alliance gift claim response (type %d)", giftType), cmd, params)
 		errs = append(errs, err)
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			break
+		}
 	}
 	return errors.Join(errs...)
 }

@@ -130,6 +130,41 @@ func TestRefreshHasUsableData(t *testing.T) {
 	}
 }
 
+// TestServerListOverrideFlags is the fast, deterministic unit test of the pure comparison
+// extracted from runCrossServerTest's GSL-refresh server-list-override warning (see
+// serverListOverrideFlags' doc comment in main.go, and this round's Fix 2). It directly pins down
+// the flag-vs-config distinction: nothing explicit yields nil (the existing plain INFO "server
+// selected" log stays as-is), while any explicitly-set flag among cs-ip/cs-port/cs-zone/cs-gameuid
+// is named, in declaration order, regardless of which subset was set.
+func TestServerListOverrideFlags(t *testing.T) {
+	cases := []struct {
+		name                                                    string
+		ipExplicit, portExplicit, zoneExplicit, gameUidExplicit bool
+		want                                                    []string
+	}{
+		{"nothing explicit", false, false, false, false, nil},
+		{"only cs-ip explicit", true, false, false, false, []string{"cs-ip"}},
+		{"only cs-port explicit", false, true, false, false, []string{"cs-port"}},
+		{"only cs-zone explicit", false, false, true, false, []string{"cs-zone"}},
+		{"only cs-gameuid explicit", false, false, false, true, []string{"cs-gameuid"}},
+		{
+			"all four explicit, declaration order preserved regardless of a different natural check order",
+			true, true, true, true,
+			[]string{"cs-ip", "cs-port", "cs-zone", "cs-gameuid"},
+		},
+		{"ip and zone only", true, false, true, false, []string{"cs-ip", "cs-zone"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := serverListOverrideFlags(c.ipExplicit, c.portExplicit, c.zoneExplicit, c.gameUidExplicit)
+			if !slices.Equal(got, c.want) {
+				t.Errorf("serverListOverrideFlags(ip=%v, port=%v, zone=%v, gameUid=%v) = %v, want %v",
+					c.ipExplicit, c.portExplicit, c.zoneExplicit, c.gameUidExplicit, got, c.want)
+			}
+		})
+	}
+}
+
 // TestCrossServerFlagNamesRecognizesExactlySevenFlags pins down that crossServerFlagNames
 // recognizes precisely the 7 -cs-* flags that are consumed once the cross-server path is taken
 // (i.e. every -cs-* flag except -cs-ip/-cs-rt, which instead gate whether that path is taken at

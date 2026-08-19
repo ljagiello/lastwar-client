@@ -267,3 +267,98 @@ func TestDecodeStreamFileRedactsCredentialFields(t *testing.T) {
 		t.Errorf("stdout missing the redacted loginKey field entirely -- packet may not have been decoded/printed at all, got:\n%s", stdout)
 	}
 }
+
+// decodeStreamFileHexHeadWindow mirrors the pre-fix DecodeObject-failure branch's hex-dump window
+// size (decode.go used to do `if len(head) > 32 { head = head[:32] }` before hex-encoding it). Used
+// only by this test's fixture self-check below, to prove the fixture actually places the sensitive
+// value where the old buggy code would have dumped it -- not to reproduce the buggy behavior itself.
+const decodeStreamFileHexHeadWindow = 32
+
+// mustEncodeTruncatedPacketWithLeadingSensitiveField builds a packet whose framing is entirely
+// valid (correct length prefix, round-trips through ReadPacket cleanly, same as
+// mustEncodeCorruptPacket) but whose SFSObject body is cut short mid-way through its *second*
+// field's value -- not its first. The first field (sensitiveKey/sensitiveValue) is written first
+// and is left completely intact in the truncated bytes; only the trailing field is chopped, which
+// is what forces DecodeObject to fail (unexpected EOF reading the trailing field's value) while
+// leaving the sensitive field's bytes sitting undisturbed near the front of the body -- exactly
+// the "truncated deep into an otherwise well-formed object" shape from the finding this guards
+// against, as opposed to mustEncodeCorruptPacket's instant-fail-on-the-first-byte shape.
+//
+// Fails the test outright (rather than silently building a fixture that doesn't prove anything) if
+// sensitiveValue doesn't land entirely inside the first decodeStreamFileHexHeadWindow bytes of the
+// encoded object -- that placement is exactly what made the pre-fix hex dump leak it, so a fixture
+// that doesn't satisfy it wouldn't actually reproduce the bug this test guards against.
+func mustEncodeTruncatedPacketWithLeadingSensitiveField(t *testing.T, sensitiveKey, sensitiveValue string) []byte {
+	t.Helper()
+	o := NewSFSObject()
+	o.PutUtfString(sensitiveKey, sensitiveValue)
+	o.PutUtfString("laterField", "padding padding padding padding padding padding padding")
+
+	full, err := EncodeObject(o)
+	if err != nil {
+		t.Fatalf("EncodeObject: %v", err)
+	}
+
+	valueOffset := bytes.Index(full, []byte(sensitiveValue))
+	if valueOffset < 0 {
+		t.Fatalf("test fixture bug: encoded object does not contain sensitiveValue %q verbatim", sensitiveValue)
+	}
+	if valueOffset+len(sensitiveValue) > decodeStreamFileHexHeadWindow {
+		t.Fatalf("test fixture does not place the full sensitive value within the first %d bytes of the "+
+			"encoded object (value starts at offset %d, is %d bytes long) -- shorten sensitiveValue or its "+
+			"preceding fields so this fixture still reproduces the pre-fix bug this test guards against",
+			decodeStreamFileHexHeadWindow, valueOffset, len(sensitiveValue))
+	}
+
+	truncated := full[:len(full)-5] // chop only into laterField's value, sensitiveKey stays intact
+	packet, err := EncodePacket(truncated)
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+	return packet
+}
+
+// TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure is a regression test for the
+// finding that DecodeStreamFile's DecodeObject-failure branch printed a raw hex dump of up to the
+// first 32 bytes of the (undecoded) frame body -- completely bypassing sensitiveSFSKeys/
+// StringRedacted, which can only ever run on a *successfully* decoded SFSObject, never on the raw
+// pre-decode bytes. A real capture truncated deep into an otherwise well-formed object can still
+// have an intact sensitive field (here "tk", a session token per sfsobject.go's sensitiveSFSKeys)
+// sorted near the front of that same 32-byte window, so the old code printed the field name and the
+// live secret in cleartext hex even though decoding had failed. This builds exactly that shape via
+// mustEncodeTruncatedPacketWithLeadingSensitiveField (which itself self-checks that the secret
+// really does land inside the old hex-dump window, so this test cannot silently stop proving
+// anything if the fixture's byte layout ever shifts) and proves the secret appears nowhere in
+// stdout, neither as UTF-8 nor as its hex encoding. Reverting decode.go's fix back to hex-dumping
+// the body makes this test fail (confirmed by running it against the pre-fix code).
+func TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure(t *testing.T) {
+	const secretTk = "SUPERSECRETTOKEN12345" // short enough to land fully inside the 32-byte window
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.bin")
+	packet := mustEncodeTruncatedPacketWithLeadingSensitiveField(t, "tk", secretTk)
+	if err := os.WriteFile(path, packet, 0o600); err != nil {
+		t.Fatalf("write test stream: %v", err)
+	}
+
+	var decodeErr error
+	stdout := captureStdout(t, func() {
+		decodeErr = DecodeStreamFile("test", path)
+	})
+	if decodeErr != nil {
+		t.Fatalf("expected nil error (a bad packet is logged and skipped, not fatal), got: %v", decodeErr)
+	}
+	// Sanity: prove the packet actually reached and exercised the DecodeObject-failure path (not,
+	// say, silently skipped), so the absence of the secret below reflects the fix rather than the
+	// packet never being decoded/printed at all.
+	if !strings.Contains(stdout, "DecodeObject error") {
+		t.Fatalf("stdout missing DecodeObject error line -- packet may not have reached the failure path at all, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, secretTk) {
+		t.Errorf("DecodeStreamFile leaked the raw tk value in cleartext on the decode-failure path:\n%s", stdout)
+	}
+	secretHex := fmt.Sprintf("%x", []byte(secretTk))
+	if strings.Contains(strings.ToLower(stdout), secretHex) {
+		t.Errorf("DecodeStreamFile leaked the tk value hex-encoded on the decode-failure path:\n%s", stdout)
+	}
+}

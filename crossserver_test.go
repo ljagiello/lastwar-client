@@ -513,6 +513,54 @@ func TestDoCrossServerLoginTooManyRedirects(t *testing.T) {
 	}
 }
 
+// TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP is the round-18 regression test for
+// DoCrossServerLogin's serverInfo redirect branch: it built the redialed address via a raw
+// fmt.Sprintf("%s:%d", firstHost(siObj.GetString("ip")), ...) guarded only by
+// siObj.GetString("ip") != "" -- the RAW string, not firstHost's resolved result. A pipe-malformed
+// ip like "|1.2.3.4" is non-empty raw but firstHost resolves it down to "", so the old code built a
+// ":<port>"-shaped address, which Go's "host:port" dial syntax silently treats as the loopback
+// interface instead of failing clearly. Mirrors login.go's own TestLoginRedirectRejectsEmptyRedirectIP
+// for the same bug on Login()'s side (conn_wait_test.go); this fix routes DoCrossServerLogin's
+// redirect branch through login.go's buildBaseZoneLoginAddr instead of duplicating the guard.
+func TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		si := NewSFSObject()
+		si.PutUtfString("ip", "|1.2.3.4") // firstHost("|1.2.3.4") == "" -- the malformed case
+		si.PutInt("port", 9339)
+		si.PutUtfString("zone", "APS2")
+		resp := NewSFSObject()
+		resp.PutSFSObject("serverInfo", si)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, oldAddr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+	result, err := DoCrossServerLogin(p)
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("expected an error for a pipe-malformed redirect ip, got nil")
+	}
+	if strings.Contains(err.Error(), ":9339") {
+		t.Errorf("err = %q, must not contain a \":<port>\"-shaped address (that's the loopback-dial footgun this guard exists to prevent)", err.Error())
+	}
+	if !strings.Contains(err.Error(), "serverInfo redirect") {
+		t.Errorf("err = %q, want it to mention the serverInfo redirect context", err.Error())
+	}
+}
+
 // TestDoCrossServerLoginRedirectRefreshesGameUid exercises the major fix in crossserver.go's
 // serverInfo redirect block: the mid-redirect GSL refresh (opt=fix) returns a fresh serverList
 // entry alongside the fresh access token, and its gameUid must be propagated into p.GameUid --

@@ -80,10 +80,34 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(*logLevel)})))
 
 	csIOSSetExplicitly := false
+	// csIPSetExplicitly/csPortSetExplicitly/csZoneSetExplicitly/csGameUidSetExplicitly/
+	// csAtSetExplicitly mirror csIOSSetExplicitly's own pattern, for the same reason: they record
+	// whether the corresponding -cs-* flag was actually typed on the command line, as distinct from
+	// ending up non-empty purely because a loaded session config's field is merged into it further
+	// below (the "*csAt = applyOverride(cfg.AccessToken, *csAt)" style merge). Threaded into
+	// crossServerTestOpts so runCrossServerTest's GSL-refresh flag-vs-config log-wording distinction
+	// can reuse this same visitedFlags mechanism instead of inventing a new one -- see
+	// crossServerTestOpts' doc comment.
+	csIPSetExplicitly := false
+	csPortSetExplicitly := false
+	csZoneSetExplicitly := false
+	csGameUidSetExplicitly := false
+	csAtSetExplicitly := false
 	var visitedFlags []string
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "cs-ios" {
+		switch f.Name {
+		case "cs-ios":
 			csIOSSetExplicitly = true
+		case "cs-ip":
+			csIPSetExplicitly = true
+		case "cs-port":
+			csPortSetExplicitly = true
+		case "cs-zone":
+			csZoneSetExplicitly = true
+		case "cs-gameuid":
+			csGameUidSetExplicitly = true
+		case "cs-at":
+			csAtSetExplicitly = true
 		}
 		visitedFlags = append(visitedFlags, f.Name)
 	})
@@ -153,6 +177,9 @@ func main() {
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
 			iosMode: *csIOS, interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
+			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
+			zoneExplicit: csZoneSetExplicitly, gameUidExplicit: csGameUidSetExplicitly,
+			atExplicit: csAtSetExplicitly,
 		})
 		return
 	}
@@ -281,6 +308,33 @@ func refreshHasUsableData(lsr *LoginServerListRespon) bool {
 	return lsr.At != nil || len(lsr.ServerList) > 0
 }
 
+// serverListOverrideFlags reports which of "cs-ip", "cs-port", "cs-zone", "cs-gameuid" (in that
+// order) were actually typed on the command line -- per ipExplicit/portExplicit/zoneExplicit/
+// gameUidExplicit, see crossServerTestOpts' doc comment -- and are therefore about to be silently
+// overridden by a GSL opt=refresh response's non-empty ServerList. A nil result means none of the
+// four were explicitly set (e.g. a fresh cron run with no prior overrides, where ip/port/zone/
+// gameUid started from either their zero value or a loaded session config), which the call site
+// uses to keep its existing plain INFO-level "server selected" log instead of escalating to WARN --
+// only a real override of an operator-supplied value escalates. Taking the four bools as plain
+// arguments (rather than the whole crossServerTestOpts struct, or being inlined at the call site) is
+// what makes this testable without building a real crossServerTestOpts/GSL round-trip.
+func serverListOverrideFlags(ipExplicit, portExplicit, zoneExplicit, gameUidExplicit bool) []string {
+	var out []string
+	if ipExplicit {
+		out = append(out, "cs-ip")
+	}
+	if portExplicit {
+		out = append(out, "cs-port")
+	}
+	if zoneExplicit {
+		out = append(out, "cs-zone")
+	}
+	if gameUidExplicit {
+		out = append(out, "cs-gameuid")
+	}
+	return out
+}
+
 // crossServerSaveBackNeeded reports whether runCrossServerTest has anything new to persist back
 // to the session config: the FINAL address/zone/access-token/gameUid a cross-server connection
 // actually used (newHost/newPort/newZone/newAccessTok/newGameUid, taken from
@@ -355,6 +409,18 @@ type crossServerTestOpts struct {
 	port                                                          int
 	handshake, iosMode, collect, listBuildings                    bool
 	configSavePath                                                string // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
+
+	// ipExplicit/portExplicit/zoneExplicit/gameUidExplicit/atExplicit record whether the
+	// corresponding -cs-ip/-cs-port/-cs-zone/-cs-gameuid/-cs-at flag was actually typed on the
+	// command line (populated via fs.Visit in main(), the same visitedFlags mechanism
+	// ignoredCrossServerFlags already uses), as opposed to ip/port/zone/gameUid/at ending up
+	// non-empty purely because a loaded session config's field was merged into it (see the
+	// "*csAt = applyOverride(cfg.AccessToken, *csAt)" style merge in main()). runCrossServerTest
+	// uses these to distinguish a GSL opt=refresh response overriding the operator's own explicit
+	// choice (worth a WARN, and worth naming the flag in the message) from it merely overriding/
+	// leaving-in-place a config-loaded default (expected, unremarkable, or worded without
+	// misattributing it to a flag the operator never typed).
+	ipExplicit, portExplicit, zoneExplicit, gameUidExplicit, atExplicit bool
 }
 
 // runCrossServerTest exercises DoCrossServerLogin directly, using an
@@ -449,10 +515,24 @@ func runCrossServerTest(o crossServerTestOpts) {
 			// producing a confusing downstream DoCrossServerLogin failure instead of failing clearly
 			// here, at the point where the actual problem is known.
 			slog.Error("GSL refresh returned no usable data -- likely rejected server-side, recapture the refresh token", "code", lsr.Code)
-			os.Exit(1)
+			// Exit code 2, not the generic 1: a GSL refresh call that comes back with neither a
+			// fresh access token nor a usable server list is semantically a rejected/stale
+			// session, not a transient local failure -- exactly the class of failure README.md's
+			// "Exit code 2 means the session itself is stale ... Login/auth failures (both the
+			// plain-login and cross-server-reconnect paths) exit 2 specifically" cron-wrapper
+			// contract promises, unqualified, for this path too. Matches the sibling
+			// ErrAuthRejected-gated exit-2 sites elsewhere in this function/file.
+			os.Exit(2)
 		}
 		if lsr.At != nil {
-			if o.at != "" {
+			if o.at != "" && o.atExplicit {
+				// Only warn when -cs-at was actually typed on the command line: an operator who
+				// explicitly passed -cs-at presumably wanted THAT token used, so silently
+				// replacing it is worth flagging. When o.at is non-empty purely because a loaded
+				// session config's accessToken field was merged into it (o.atExplicit false),
+				// replacing a stale config-stored token with a freshly refreshed one is exactly
+				// what -cs-rt is FOR -- not a surprising override of operator intent -- so no
+				// warning fires for that case.
 				slog.Warn("ignoring -cs-at because -cs-rt is set (the GSL refresh response's access token replaces it)")
 			}
 			accessTok = lsr.At.Token
@@ -462,15 +542,33 @@ func runCrossServerTest(o crossServerTestOpts) {
 			// (refreshHasUsableData already confirmed it returned SOMETHING actionable, just not
 			// an access token specifically -- e.g. a server-list-only response), but with no `at`
 			// field to replace it, accessTok stays whatever o.at already was. That's silent
-			// today: nothing currently points out that this run is proceeding with the
-			// operator's original, possibly-stale -cs-at and got no token refresh at all, which
-			// is exactly the kind of thing worth knowing before an ec=28/E011 failure downstream.
-			slog.Warn("GSL refresh response carried no access token -- continuing with the original -cs-at unrefreshed", "accessTokLen", len(o.at))
+			// today: nothing currently points out that this run is proceeding with a possibly-
+			// stale access token and got no refresh at all, which is exactly the kind of thing
+			// worth knowing before an ec=28/E011 failure downstream -- unlike the warning just
+			// above, this one fires regardless of whether the token came from -cs-at or a
+			// session config, since the operational risk (an unrefreshed, possibly-stale token)
+			// is identical either way; only the wording changes, so it doesn't misattribute a
+			// config-sourced value to a flag the operator never actually typed.
+			if o.atExplicit {
+				slog.Warn("GSL refresh response carried no access token -- continuing with the original -cs-at unrefreshed", "accessTokLen", len(o.at))
+			} else {
+				slog.Warn("GSL refresh response carried no access token -- continuing with the session config's access token, unrefreshed", "accessTokLen", len(o.at))
+			}
 		}
 		if len(lsr.ServerList) > 0 {
 			srv := lsr.ServerList[0]
+			if overridden := serverListOverrideFlags(o.ipExplicit, o.portExplicit, o.zoneExplicit, o.gameUidExplicit); len(overridden) > 0 {
+				// Symmetric to the "ignoring -cs-at" WARN above, for the same reason: an
+				// operator-supplied value is about to be silently replaced. Only escalated to
+				// WARN when it's actually overriding something the operator explicitly typed --
+				// a fresh cron run with no prior -cs-ip/-cs-port/-cs-zone/-cs-gameuid overrides at
+				// all (e.g. everything came from a session config, or nothing was set yet) keeps
+				// the plain INFO-level "server selected" log below instead.
+				slog.Warn("GSL refresh response's server list is overriding explicitly-passed flag(s)", "overriddenFlags", overridden, "ip", srv.IP, "port", srv.Port, "zone", srv.Zone, "gameUid", srv.GameUid)
+			} else {
+				slog.Info("server selected", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone, "gameUid", srv.GameUid)
+			}
 			ip, port, zone, gameUid = srv.IP, srv.Port, srv.Zone, srv.GameUid
-			slog.Info("server selected", "ip", ip, "port", port, "zone", zone, "gameUid", gameUid)
 		}
 	}
 

@@ -258,6 +258,58 @@ func TestBuildBaseZoneLoginAddrFirstOfFallbackList(t *testing.T) {
 	}
 }
 
+// TestLoginRedirectRejectsEmptyRedirectIP is the round-18 regression test for the same
+// firstHost-without-emptiness-check gap crossserver_test.go's
+// TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP covers on the DoCrossServerLogin side:
+// Login()'s own serverInfo redirect branch only checked siObj.GetString("ip") != "", not
+// firstHost's resolved result -- so a pipe-malformed ip like "|1.2.3.4" (raw non-empty, but
+// firstHost resolves it down to "") built a ":<port>"-shaped dial address via a raw fmt.Sprintf,
+// which Go's "host:port" dial syntax silently treats as the loopback interface, instead of
+// failing clearly. Reuses login_integration_test.go's fake-GSL/fake-game-server infrastructure
+// (newFakeGSLServer/useFakeGSLServer) and crossserver_test.go's fake game listener helpers
+// (startFakeGameServer/splitHostPortInt) -- all in this same package -- to drive a real Login()
+// call through a successful initial dial and into the redirect branch. Proves Login() now returns
+// a clear error (routed through buildBaseZoneLoginAddr, same as the initial dial) instead of
+// attempting the loopback dial.
+func TestLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		si := NewSFSObject()
+		si.PutUtfString("ip", "|1.2.3.4") // firstHost("|1.2.3.4") == "" -- the malformed case
+		si.PutInt("port", 9339)
+		si.PutUtfString("zone", "APS2")
+		resp := NewSFSObject()
+		resp.PutSFSObject("serverInfo", si)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	oldHost, oldPort := splitHostPortInt(t, oldAddr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: oldHost, Port: oldPort, Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	result, err := Login(LoginOptions{})
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("expected an error for a pipe-malformed redirect ip, got nil")
+	}
+	if strings.Contains(err.Error(), ":9339") {
+		t.Errorf("err = %q, must not contain a \":<port>\"-shaped address (that's the loopback-dial footgun this guard exists to prevent)", err.Error())
+	}
+	if !strings.Contains(err.Error(), "serverInfo redirect") {
+		t.Errorf("err = %q, want it to mention the serverInfo redirect context", err.Error())
+	}
+}
+
 // TestWaitForInitPushHalfwayActivePull checks waitForInitPush's two-phase deadline scheme: when
 // the server stays completely silent (no `init` push ever arrives), the login.init active-pull
 // fallback still gets sent roughly at the halfway point of the window, not at the very start and

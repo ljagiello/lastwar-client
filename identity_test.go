@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Confirms BuildLoginParams' Android/iOS and empty-vs-set-GameUid conditional field logic --
@@ -270,6 +271,120 @@ func TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropGameUidOnReadFailure(t *te
 	}
 	if !strings.Contains(buf.String(), "failed to read gameUid state file") {
 		t.Errorf("expected a warning naming the failed gameUid read, got: %s", buf.String())
+	}
+}
+
+// TestLoadOrCreateDeviceIdentitySelfHealsStaleEmptyDeviceIDFile confirms the fix for the bug
+// where loadOrCreateDeviceIdentity permanently failed whenever the persisted device-id file
+// exists on disk but is empty -- e.g. a prior process crashed/was OOM-killed/hit a full disk
+// between createDeviceIDStateFile's O_CREATE|O_EXCL and its following WriteString, leaving a
+// 0-byte file behind, with zero concurrency actually involved. Before the fix, readTrimmed
+// correctly returned ("", nil) for this existing-but-empty file, the id=="" branch's
+// O_CREATE|O_EXCL then failed with os.IsExist(err)==true purely because the empty file was
+// already there, and the code unconditionally treated that as "a concurrent invocation raced us
+// and finished first" -- re-reading, finding the same empty content, and returning a hard
+// permanent error with no self-healing path, so every subsequent run repeated the identical
+// failure forever. This test pre-creates an empty device-id file with no concurrency involved at
+// all (just an empty file sitting there from the start) and asserts loadOrCreateDeviceIdentity
+// now self-heals by writing a fresh identity into that same path instead of returning the old
+// "device id file appeared concurrently but is empty" error.
+func TestLoadOrCreateDeviceIdentitySelfHealsStaleEmptyDeviceIDFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	path := deviceIDStatePath()
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	got, err := loadOrCreateDeviceIdentity()
+	if err != nil {
+		t.Fatalf("loadOrCreateDeviceIdentity: got error %v, want a self-healed identity instead of the old permanent failure", err)
+	}
+	if got.DeviceID == "" {
+		t.Fatal("got empty DeviceID after self-heal, want a freshly generated one")
+	}
+	if !strings.HasSuffix(got.DeviceID, "_n3d") {
+		t.Errorf("got DeviceID %q, want the release-build suffix _n3d", got.DeviceID)
+	}
+	if !strings.Contains(buf.String(), "self-healing with a fresh identity") {
+		t.Errorf("expected a self-heal warning in the log output, got: %s", buf.String())
+	}
+
+	// The self-healed id must actually be persisted to disk (not just held in memory) and at the
+	// same 0600 permissions the rest of the state-file lifecycle uses, so a subsequent run picks
+	// up the same identity instead of repeating the self-heal (or worse, re-fabricating) forever.
+	onDisk, err := readTrimmed(path)
+	if err != nil {
+		t.Fatalf("readTrimmed after self-heal: %v", err)
+	}
+	if onDisk != got.DeviceID {
+		t.Errorf("on-disk device id %q does not match returned DeviceID %q", onDisk, got.DeviceID)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Errorf("got mode %v for %s, want 0600", fi.Mode().Perm(), path)
+	}
+
+	// A second load must reuse the self-healed id rather than self-healing (or fabricating)
+	// again.
+	second, err := loadOrCreateDeviceIdentity()
+	if err != nil {
+		t.Fatalf("loadOrCreateDeviceIdentity (reload): %v", err)
+	}
+	if second.DeviceID != got.DeviceID {
+		t.Errorf("got DeviceID %q on reload, want %q (should reuse the self-healed id)", second.DeviceID, got.DeviceID)
+	}
+}
+
+// TestLoadOrCreateDeviceIdentityUsesGenuineConcurrentWriterContent confirms the os.IsExist
+// re-read/retry path still does the right thing for the case it was originally built for:
+// another invocation wins the O_CREATE|O_EXCL race and finishes writing real (non-empty) content
+// shortly afterwards -- well within the retry window -- rather than the file staying empty
+// forever. The device-id file is pre-created empty (so the initial readTrimmed sees "" and takes
+// the id=="" branch, and createDeviceIDStateFile's O_CREATE|O_EXCL deterministically fails with
+// os.IsExist since the file already exists), and a background goroutine populates it with real
+// content 10ms later, comfortably inside the ~50ms total retry window. Unlike
+// TestLoadOrCreateDeviceIdentitySelfHealsStaleEmptyDeviceIDFile's file (which stays empty and
+// must self-heal), content that shows up mid-retry must win outright -- the self-heal path added
+// by that fix must never fire here, let alone overwrite it.
+func TestLoadOrCreateDeviceIdentityUsesGenuineConcurrentWriterContent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	path := deviceIDStatePath()
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const wantID = "concurrent-writer-device-id_n3d"
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_ = os.WriteFile(path, []byte(wantID), 0o600)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	got, err := loadOrCreateDeviceIdentity()
+	if err != nil {
+		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
+	}
+	if got.DeviceID != wantID {
+		t.Errorf("got DeviceID %q, want %q (the genuine concurrent writer's content, not a self-healed replacement)", got.DeviceID, wantID)
+	}
+	if strings.Contains(buf.String(), "self-healing with a fresh identity") {
+		t.Errorf("self-heal path fired for a genuine concurrent writer, want it to only adopt the existing content: %s", buf.String())
 	}
 }
 

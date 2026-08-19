@@ -851,6 +851,69 @@ func TestClaimAllMailAbortsRemainingBatchesOnNetError(t *testing.T) {
 	}
 }
 
+// TestClaimAllMailSkipsReadStatusOnListMailNetError is the round-18 regression test for
+// ClaimAllMail's ListMail-net.Error check (mail.go): immediately after the ListMail call,
+// ClaimAllMail now checks whether ListMail's own returned error is itself a net.Error and, if so,
+// skips straight to returning errors.Join(errs...) -- rather than falling through to the
+// len(mail) == 0 check and, since ListMail deliberately returns whatever partial mail it already
+// collected before a mid-pagination net.Error (see ListMail's own doc comment), proceeding into the
+// read-status batch loop and issuing at least one more sendAndWait against the already-known-dead
+// connection before that loop's own separate net.Error check (proven by
+// TestClaimAllMailAbortsRemainingBatchesOnNetError above) would have caught it one batch too late.
+//
+// An ordinary decoded errorCode failure (not a net.Error) on ListMail must still fall through to
+// process any partial mail normally -- that's TestClaimAllMailProcessesPartialMailOnListPageFailure's
+// existing coverage above, deliberately left unchanged by this fix.
+//
+// Uses recordingConn/scriptedNetErrConn the same way TestClaimAllMailAbortsRemainingBatchesOnNetError
+// does, but scripted the other way around: page 1 of chat.get.system.mails gets a real, valid canned
+// response carrying one unclaimed-reward mail entry with more=true (so ListMail queues a second
+// page), and every Read after that -- i.e., page 2's round trip -- fails immediately with a
+// net.Error. ListMail therefore returns that one already-collected mail entry alongside the
+// net.Error it hit fetching page 2, exactly the "partial mail + a net.Error" shape this fix must
+// react to.
+//
+// If the fix fires correctly, exactly 2 writes happen: the page-1 and page-2
+// chat.get.system.mails requests (both inside ListMail itself). No mail.read.status.betch request
+// is ever sent, despite ClaimAllMail having one real, already-known mail uid in hand that the old
+// (pre-fix) code would have tried to mark read anyway.
+//
+// Mutation check: reverting the fix (removing the net.Error check right after the ListMail call,
+// or removing its early return) makes ClaimAllMail fall through to the read-status batch loop,
+// which then issues one more write (the read-status batch request) before its own separate
+// net.Error check aborts it -- showing up as writeCount() == 3, not 2.
+func TestClaimAllMailSkipsReadStatusOnListMailNetError(t *testing.T) {
+	rec := &recordingConn{}
+	recorder := &GameConn{conn: rec}
+
+	page1Resp := NewSFSObject()
+	arr := NewSFSArray()
+	arr.AddSFSObject(newTestMailObj("uid-1", 3, 0)) // rewardStatus=0: unclaimed reward
+	page1Resp.PutSFSArray("msg", arr)
+	page1Resp.PutBool("more", true)
+	page1Resp.PutUtfString("lastUid", "uid-1")
+	page1Resp.PutLong("lastMailTime", 555)
+	if err := recorder.SendExtension("push.chat.get.system.mails", page1Resp); err != nil {
+		t.Fatalf("build canned page-1 list-mail response: %v", err)
+	}
+
+	fake := &scriptedNetErrConn{remain: rec.buf.Bytes()}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := ClaimAllMail(client)
+
+	if err == nil {
+		t.Fatal("ClaimAllMail() = nil, want a non-nil error (page 2's list-mail round trip fails with a net.Error)")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Errorf("ClaimAllMail() error = %v, want it to wrap a net.Error (the ListMail failure that triggered the skip)", err)
+	}
+	if got := fake.writeCount(); got != 2 {
+		t.Errorf("fake connection saw %d writes, want exactly 2 (page-1 and page-2 chat.get.system.mails requests only -- ClaimAllMail should have skipped straight to returning after ListMail's own net.Error, without issuing any read-status batch call)", got)
+	}
+}
+
 // TestClaimAllMailClaimsRewardsForEachDistinctType is the round-17 regression test for Fix 2: every
 // existing ClaimAllMail test's fixture data happens to produce at most one distinct type in byType,
 // so the intended cross-type behavior of the per-mail-type reward-claim loop (mail.go, iterating

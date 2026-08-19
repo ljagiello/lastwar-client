@@ -129,6 +129,76 @@ func TestLoginGuestHappyPath(t *testing.T) {
 	}
 }
 
+// TestLoginConnectionFailureWhileWaitingForInit is the integration-level regression test for
+// round 17's fix in Login() itself (the "if initErr != nil { ...; conn.Close(); return nil,
+// fmt.Errorf(...) }" block in step 5, right after the waitForInitPush call): a genuine connection
+// failure while waiting for the `init` bootstrap push must make Login() itself fail fast with a
+// wrapping error and a nil *LoginResult, not silently fall through to "giving up... continuing
+// anyway" the way a plain silence-until-deadline timeout does.
+//
+// TestWaitForInitPushConnectionFailure (conn_wait_test.go) already proves this at the
+// waitForInitPush helper level directly, over a raw net.Pipe -- but every existing Login() test in
+// this file drives its fake server through fakeInitPushServer or an equivalent send-the-init-push
+// path, so nothing exercises the initErr!=nil branch through Login()'s own entry point: if that
+// block were ever deleted or inverted, no test in the repo would catch it. This test closes that
+// gap by having the fake game server accept the base zone Login normally (plain success, no
+// serverInfo redirect) and then close the TCP connection outright instead of ever sending `init` --
+// the same "peer closes, giving ReadEnvelope a real EOF/reset" failure
+// TestWaitForInitPushConnectionFailure forces directly on the helper, but here reached the only way
+// Login()'s real callers ever would: through Login() itself.
+func TestLoginConnectionFailureWhileWaitingForInit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		// Deliberately never send `init` -- close the connection outright instead, so the client's
+		// step-5 wait (waitForInitPush) sees a real read error (EOF/reset), not a silence-until-
+		// deadline timeout. A plain timeout would take waitForInitPush's full 45s (Login()'s
+		// unexported initPushTimeout, not overridable from a test) and land Login() on the benign
+		// "giving up... continuing anyway" path instead of the fail-fast path this test is for.
+		server.Close()
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	start := time.Now()
+	result, err := Login(LoginOptions{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("Login: expected a non-nil error when the connection fails while waiting for the init push, got nil")
+	}
+	if result != nil {
+		t.Errorf("Login: result = %+v, want nil *LoginResult alongside the error", result)
+	}
+	if !strings.Contains(err.Error(), "connection failed while waiting for init push") {
+		t.Errorf("Login err = %q, want it to mention \"connection failed while waiting for init push\"", err.Error())
+	}
+	// Same rationale as TestWaitForInitPushConnectionFailure's own elapsed-time check: a connection
+	// failure should surface promptly, not after waiting out the full 45s initPushTimeout window --
+	// proving Login() actually took the initErr!=nil fail-fast branch rather than, say, coincidentally
+	// timing out and then erroring for some unrelated reason.
+	if elapsed > 45*time.Second {
+		t.Errorf("Login took %v, want it to fail promptly on connection failure rather than waiting out the full init-push timeout window", elapsed)
+	}
+}
+
 // TestLoginRedirectRefreshesGameUid is Login()'s counterpart to crossserver_test.go's
 // TestDoCrossServerLoginRedirectRefreshesGameUid, exercising the mirrored fix this round added to
 // Login()'s own serverInfo-redirect handling (see login.go, "gameUid changed on GSL refresh"): the

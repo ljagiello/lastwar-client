@@ -212,7 +212,18 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		slog.Info("login OK")
 
 		if siObj := findServerInfo(env.Content); siObj != nil && siObj.GetString("ip") != "" {
-			newAddr := fmt.Sprintf("%s:%d", firstHost(siObj.GetString("ip")), getIntFlexible(siObj, "port"))
+			// buildBaseZoneLoginAddr (login.go) guards against an empty resolved host --
+			// same "serverInfo" redirect shape and same gap login.go's Login() had until
+			// round 18: only siObj.GetString("ip") != "" was checked above, which doesn't
+			// catch inputs like "" or "|1.2.3.4" or a bare "|" that firstHost resolves down
+			// to an empty host. An unguarded fmt.Sprintf("%s:%d", "", port) wouldn't fail --
+			// Go's "host:port" dial syntax treats an empty host as the loopback interface,
+			// so this would silently redial 127.0.0.1/::1 instead of erroring clearly.
+			newAddr, err := buildBaseZoneLoginAddr(siObj.GetString("ip"), int(getIntFlexible(siObj, "port")))
+			if err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("cross-server login: serverInfo redirect: %w", err)
+			}
 			newZone := siObj.GetString("zone")
 			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddr, "newZone", newZone, "oldAddr", addr, "oldZone", zone)
 
