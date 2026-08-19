@@ -274,6 +274,64 @@ func TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropGameUidOnReadFailure(t *te
 	}
 }
 
+// TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropUsernameOnReadFailure mirrors
+// TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropGameUidOnReadFailure above, but for the
+// username state file -- confirming readTrimmed's fix applies there too, not just to gameUid.
+// Before the fix this returned (identity, nil) with Username == ""; now it must surface the
+// error instead of silently discarding a real, already-persisted username.
+func TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropUsernameOnReadFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// A directory in place of the username state file reproduces a reliable non-ENOENT read
+	// failure on an otherwise-legitimate device id (created fresh on this same call).
+	if err := os.Mkdir(usernameStatePath(), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	_, err := loadOrCreateDeviceIdentity()
+	if err == nil {
+		t.Fatal("loadOrCreateDeviceIdentity: got nil error for a non-ENOENT username read failure, want an error rather than a silently-empty Username")
+	}
+	if !strings.Contains(buf.String(), "failed to read username state file") {
+		t.Errorf("expected a warning naming the failed username read, got: %s", buf.String())
+	}
+}
+
+// TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropLoginKeyOnReadFailure mirrors
+// TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropGameUidOnReadFailure above, but for the
+// loginKey state file -- confirming readTrimmed's fix applies there too, not just to gameUid.
+// Before the fix this returned (identity, nil) with LoginKey == ""; now it must surface the
+// error instead of silently discarding a real, already-persisted loginKey.
+func TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropLoginKeyOnReadFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// A directory in place of the loginKey state file reproduces a reliable non-ENOENT read
+	// failure on an otherwise-legitimate device id (created fresh on this same call).
+	if err := os.Mkdir(loginKeyStatePath(), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	_, err := loadOrCreateDeviceIdentity()
+	if err == nil {
+		t.Fatal("loadOrCreateDeviceIdentity: got nil error for a non-ENOENT loginKey read failure, want an error rather than a silently-empty LoginKey")
+	}
+	if !strings.Contains(buf.String(), "failed to read loginKey state file") {
+		t.Errorf("expected a warning naming the failed loginKey read, got: %s", buf.String())
+	}
+}
+
 // TestLoadOrCreateDeviceIdentitySelfHealsStaleEmptyDeviceIDFile confirms the fix for the bug
 // where loadOrCreateDeviceIdentity permanently failed whenever the persisted device-id file
 // exists on disk but is empty -- e.g. a prior process crashed/was OOM-killed/hit a full disk

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -71,60 +70,6 @@ func TestClaimAllianceGiftsSendsBothTypes(t *testing.T) {
 	}
 }
 
-// allianceFakeNetError implements net.Error directly (error + Timeout() + the
-// deprecated-but-still-required Temporary()), with a configurable Timeout() so tests can
-// distinguish an ordinary per-request timeout (Timeout()==true -- sendAndWait's normal "no
-// matching response within defaultCmdTimeout" outcome on a perfectly healthy connection, which
-// must NOT abort the remaining independent gift-type request) from a genuine connection-level
-// failure (Timeout()==false -- connection reset, broken pipe, DNS failure, TLS error, etc., which
-// must still abort the remaining request). Defined locally rather than reusing
-// buildings_orchestration_test.go's package-level fakeNetError (which hardcodes Timeout()==true
-// and, per the round-21 audit, misdescribes that as a dead-connection stand-in) so this file's
-// fix doesn't depend on a shared type it doesn't own.
-type allianceFakeNetError struct {
-	timeout bool
-}
-
-func (e allianceFakeNetError) Error() string {
-	if e.timeout {
-		return "fake net.Error: simulated per-request timeout"
-	}
-	return "fake net.Error: simulated dead connection"
-}
-func (e allianceFakeNetError) Timeout() bool   { return e.timeout }
-func (e allianceFakeNetError) Temporary() bool { return false }
-
-// allianceFakeNetErrConn is a minimal net.Conn whose every Read fails with the given
-// allianceFakeNetError. Writes always succeed and are counted, so a test can prove exactly how
-// many requests ClaimAllianceGifts sent before (or despite) its net.Error handling.
-type allianceFakeNetErrConn struct {
-	mu     sync.Mutex
-	writes int
-	err    allianceFakeNetError
-}
-
-func (c *allianceFakeNetErrConn) Read([]byte) (int, error) { return 0, c.err }
-
-func (c *allianceFakeNetErrConn) Write(b []byte) (int, error) {
-	c.mu.Lock()
-	c.writes++
-	c.mu.Unlock()
-	return len(b), nil
-}
-
-func (c *allianceFakeNetErrConn) writeCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.writes
-}
-
-func (c *allianceFakeNetErrConn) Close() error                     { return nil }
-func (c *allianceFakeNetErrConn) LocalAddr() net.Addr              { return fakeNetAddr{} }
-func (c *allianceFakeNetErrConn) RemoteAddr() net.Addr             { return fakeNetAddr{} }
-func (c *allianceFakeNetErrConn) SetDeadline(time.Time) error      { return nil }
-func (c *allianceFakeNetErrConn) SetReadDeadline(time.Time) error  { return nil }
-func (c *allianceFakeNetErrConn) SetWriteDeadline(time.Time) error { return nil }
-
 // TestClaimAllianceGiftsAbortsRemainingTypesOnNetError is the round-18 regression test for
 // ClaimAllianceGifts' net.Error early-abort, updated in round 21 to use a genuine (non-timeout)
 // net.Error: the loop over the 2 gift types (alliance.go) mirrors CollectAll's identical
@@ -135,16 +80,18 @@ func (c *allianceFakeNetErrConn) SetWriteDeadline(time.Time) error { return nil 
 // the second request is already doomed to independently burn a full defaultCmdTimeout before
 // failing the exact same way.
 //
-// The fake connection's Read always fails with an allianceFakeNetError whose Timeout() is false
-// (a stand-in for connection reset/broken pipe/DNS failure/TLS error, not an ordinary per-request
-// timeout), so ClaimAllianceGifts' very first request -- the Premium (type=1) claim -- fails
-// immediately with a wrapped, non-timeout net.Error. Only that one request should ever be sent.
+// It reuses fakeNetErrConn/fakeNetError (buildings_orchestration_test.go, same package) with the
+// default timeout: false, so the fake connection's every Read fails with a fakeNetError whose
+// Timeout() is false (a stand-in for connection reset/broken pipe/DNS failure/TLS error, not an
+// ordinary per-request timeout), so ClaimAllianceGifts' very first request -- the Premium (type=1)
+// claim -- fails immediately with a wrapped, non-timeout net.Error. Only that one request should
+// ever be sent.
 //
 // Mutation check: reverting ClaimAllianceGifts' loop back to the old flat
 // `errs = append(errs, err)`-with-no-break shape makes this test fail with writeCount() == 2
 // instead of 1.
 func TestClaimAllianceGiftsAbortsRemainingTypesOnNetError(t *testing.T) {
-	fake := &allianceFakeNetErrConn{err: allianceFakeNetError{timeout: false}}
+	fake := &fakeNetErrConn{}
 	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
 
 	err := ClaimAllianceGifts(client)
@@ -173,14 +120,15 @@ func TestClaimAllianceGiftsAbortsRemainingTypesOnNetError(t *testing.T) {
 // (type=2) request from still being attempted, and the timeout error itself must still show up in
 // the aggregated result.
 //
-// The fake connection's Read always fails with an allianceFakeNetError whose Timeout() is true,
-// so both requests fail the same way; both should still be sent.
+// It reuses fakeNetErrConn/fakeNetError (buildings_orchestration_test.go, same package) with
+// timeout: true, so the fake connection's every Read fails with a fakeNetError whose Timeout() is
+// true, so both requests fail the same way; both should still be sent.
 //
 // Mutation check: reverting the alliance.go fix back to the bare
 // `if errors.As(err, &netErr) { break }` (no !netErr.Timeout()) makes this test fail with
 // writeCount() == 1 instead of 2.
 func TestClaimAllianceGiftsContinuesAfterNetErrorTimeoutOnFirstType(t *testing.T) {
-	fake := &allianceFakeNetErrConn{err: allianceFakeNetError{timeout: true}}
+	fake := &fakeNetErrConn{timeout: true}
 	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
 
 	err := ClaimAllianceGifts(client)

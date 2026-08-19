@@ -732,3 +732,158 @@ func TestCollectAllContinuesRemainingActionsOnNetErrorTimeout(t *testing.T) {
 		t.Errorf("fake connection saw %d writes, want more than 1 (every one of CollectAll's fixed sub-actions should have been attempted, not just the first)", got)
 	}
 }
+
+// TestContainsNonTimeoutNetError directly exercises containsNonTimeoutNetError (buildings.go) --
+// the round-22 helper CollectAll's outer loop now uses in place of a plain `errors.As(err, &netErr)
+// && !netErr.Timeout()` check. Covers the crux of the fix: errors.As itself only returns the FIRST
+// net.Error match its own depth-first walk finds through a joined-error tree, so a bare
+// errors.Join(timeout, non-timeout) and its reverse errors.Join(non-timeout, timeout) must BOTH
+// report a non-timeout net.Error present -- order must not matter, unlike errors.As.
+func TestContainsNonTimeoutNetError(t *testing.T) {
+	timeoutErr := fakeNetError{timeout: true}
+	nonTimeoutErr := fakeNetError{timeout: false}
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"bare Timeout()==true net.Error", timeoutErr, false},
+		{"bare Timeout()==false net.Error", nonTimeoutErr, true},
+		{"errors.Join(timeout, timeout)", errors.Join(timeoutErr, timeoutErr), false},
+		{"errors.Join(timeout, non-timeout)", errors.Join(timeoutErr, nonTimeoutErr), true},
+		// Order must not matter -- this is the crux of the round-22 fix: a plain errors.As would
+		// find whichever net.Error its depth-first walk hits first, which for
+		// errors.Join(non-timeout, timeout) IS the genuine non-timeout net.Error (so a naive
+		// errors.As-based check happens to get this particular ordering right by accident), but
+		// errors.Join(timeout, non-timeout) above is the ordering where a plain errors.As gets it
+		// wrong -- both must report true regardless of which position the non-timeout error is in.
+		{"errors.Join(non-timeout, timeout)", errors.Join(nonTimeoutErr, timeoutErr), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsNonTimeoutNetError(tt.err); got != tt.want {
+				t.Errorf("containsNonTimeoutNetError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// sequencedNetErrConn is a minimal net.Conn whose Read calls fail with a scripted sequence of
+// net.Errors, one per call -- unlike fakeNetErrConn above, whose every Read fails identically
+// (always timeout or always non-timeout, never a mix within one connection's lifetime). Calls past
+// the end of the script repeat the script's last entry, so a test doesn't need to predict exactly
+// how many extra reads a not-yet-fixed bug might cause before failing its own assertions.
+//
+// This is what TestCollectAllAbortsOnMaskedNonTimeoutNetErrorInJoinedSubActionError needs to
+// reproduce the round-22 audit's own repro technique: a single sub-action (ClaimAllianceGifts, per
+// the audit's suggestion) must see its FIRST item fail with a Timeout()==true net.Error (benign,
+// its own round-21-fixed inner loop keeps going) and its SECOND item fail with a Timeout()==false
+// net.Error (genuine dead connection, its own inner loop correctly breaks) -- producing exactly the
+// errors.Join(timeout, non-timeout) tree that a plain errors.As-based check in CollectAll's outer
+// loop could miss (see CollectAll's round-22 doc comment in buildings.go). Every other sub-action
+// scheduled before it in CollectAll's fixed sequence also needs a scripted Timeout()==true failure
+// of its own, purely so CollectAll's outer loop doesn't already have a legitimate reason to keep
+// going or stop before ever reaching the sub-action under test -- their own returned errors are not
+// otherwise interesting to this test.
+//
+// Writes always succeed and are counted, mirroring fakeNetErrConn, so a test can prove exactly how
+// many requests were sent -- and, critically, that no MORE were sent after CollectAll's outer loop
+// should have aborted.
+type sequencedNetErrConn struct {
+	mu       sync.Mutex
+	writes   int
+	reads    int
+	timeouts []bool // Timeout() for the Nth Read call (0-indexed); the last entry repeats past the end
+}
+
+func (c *sequencedNetErrConn) Read([]byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	idx := c.reads
+	if idx >= len(c.timeouts) {
+		idx = len(c.timeouts) - 1
+	}
+	c.reads++
+	return 0, fakeNetError{timeout: c.timeouts[idx]}
+}
+
+func (c *sequencedNetErrConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	c.writes++
+	c.mu.Unlock()
+	return len(b), nil
+}
+
+func (c *sequencedNetErrConn) writeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
+}
+
+func (c *sequencedNetErrConn) Close() error                     { return nil }
+func (c *sequencedNetErrConn) LocalAddr() net.Addr              { return fakeNetAddr{} }
+func (c *sequencedNetErrConn) RemoteAddr() net.Addr             { return fakeNetAddr{} }
+func (c *sequencedNetErrConn) SetDeadline(time.Time) error      { return nil }
+func (c *sequencedNetErrConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *sequencedNetErrConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestCollectAllAbortsOnMaskedNonTimeoutNetErrorInJoinedSubActionError is the round-22 regression
+// test for CollectAll's outer net.Error check (buildings.go): reproduces the audit's own repro
+// technique against ClaimAllianceGifts (alliance.go), one of the three sub-actions whose own inner
+// loop, per round 21, appends every per-item error -- including any earlier benign
+// Timeout()==true -- to a local slice and returns one errors.Join(errs...) tree rather than a
+// single error.
+//
+// The scripted read sequence below makes every sub-action scheduled before ClaimAllianceGifts in
+// CollectAll's fixed order fail with a benign Timeout()==true net.Error (so CollectAll's outer loop
+// has no reason to stop before reaching it), then makes ClaimAllianceGifts' own two gift-type
+// requests fail Premium (type=1, first) with Timeout()==true and Regular (type=2, second) with
+// Timeout()==false -- exactly the "starts flaking with timeouts, then actually dies" tree
+// CollectAll's round-22 fix (containsNonTimeoutNetError) exists to still catch. ClaimAllianceGifts
+// itself behaves correctly per round 21 (its own inner loop appends both errors and breaks after
+// the second), returning errors.Join(timeoutErr, nonTimeoutErr) as ONE error to CollectAll.
+//
+// CollectAll's own fixed sequence (buildings.go's `actions` slice) is: CollectIdleReward,
+// GreetVisitors, ClaimAllMail, HelpAllianceMembers, ClaimAllianceGifts,
+// DonateRecommendedAllianceTech, ClaimVIPDailyLoginScore, ClaimVIPDailyFreebie, then one closure per
+// collectible building. visitors and buildings are both passed nil/empty so GreetVisitors is a
+// no-op (0 requests) and there are no building-collect closures, keeping the scripted read sequence
+// short: CollectIdleReward's peek (1), ClaimAllMail's ListMail first page (1, short-circuits since
+// zero mail was "found"), HelpAllianceMembers (1), then ClaimAllianceGifts' Premium and Regular
+// requests (2) -- 5 reads/writes total before the mixed error is returned. If CollectAll correctly
+// aborts right there, DonateRecommendedAllianceTech, both VIP claims, and (if the fix broke count
+// still didn't skip them) any building collects must NEVER be attempted -- exactly what this test
+// checks by asserting the write count stops at 5, not 8.
+//
+// Mutation check: reverting CollectAll's containsNonTimeoutNetError(err) check back to the old
+// `errors.As(err, &netErr) && !netErr.Timeout()` makes this test fail with writeCount() == 8
+// instead of 5, since errors.As would find ClaimAllianceGifts' first (benign, Timeout()==true)
+// joined error before ever reaching its second (genuine) one, and CollectAll would incorrectly keep
+// going through DonateRecommendedAllianceTech and both VIP claims.
+func TestCollectAllAbortsOnMaskedNonTimeoutNetErrorInJoinedSubActionError(t *testing.T) {
+	fake := &sequencedNetErrConn{
+		timeouts: []bool{
+			true,  // 1: CollectIdleReward's peek
+			true,  // 2: ClaimAllMail's ListMail (first page)
+			true,  // 3: HelpAllianceMembers
+			true,  // 4: ClaimAllianceGifts' Premium (type=1) -- benign, its own loop keeps going
+			false, // 5: ClaimAllianceGifts' Regular (type=2) -- genuine dead connection
+		},
+	}
+	client := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	err := CollectAll(client, nil, nil)
+
+	if err == nil {
+		t.Fatal("CollectAll() = nil, want a non-nil error (every scripted read fails)")
+	}
+	if !containsNonTimeoutNetError(err) {
+		t.Errorf("CollectAll() error = %v, want containsNonTimeoutNetError to still find the genuine non-timeout net.Error buried in ClaimAllianceGifts' joined result", err)
+	}
+	const wantWrites = 5 // idle-peek(1) + mail-list(1) + help(1) + gifts(2); see doc comment above
+	if got := fake.writeCount(); got != wantWrites {
+		t.Errorf("fake connection saw %d writes, want exactly %d (CollectAll should have aborted immediately after ClaimAllianceGifts' mixed timeout/non-timeout result, never attempting DonateRecommendedAllianceTech or either VIP claim)", got, wantWrites)
+	}
+}

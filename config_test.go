@@ -137,6 +137,63 @@ func TestLoadEffectiveConfigExitsOnDefaultPathReadFailure(t *testing.T) {
 	}
 }
 
+// TestSaveSessionConfigRoundTrip confirms SaveSessionConfig's normal write-then-read round trip
+// still works correctly after switching it from a plain os.WriteFile+os.Chmod sequence to the
+// write-temp-then-rename atomicWriteStateFile helper (the same one identity.go's saveStateFile --
+// see identity_test.go's TestSaveStateFileRoundTrip -- already uses for loginKey/gameUid/
+// username): the target file must end up existing at the given path, at 0600, with exactly the
+// written content round-tripping intact through LoadSessionConfig -- not the temp file, not
+// something left behind under a ".tmp-*" name.
+func TestSaveSessionConfigRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.json")
+
+	want := &SessionConfig{
+		IP:          "1.2.3.4",
+		Port:        9527,
+		Zone:        "APS1",
+		GameUid:     "some-game-uid",
+		DeviceID:    "some-device-id",
+		ShumeiBoxId: "some-shumei-box-id",
+		AccessToken: "some-access-token",
+		IOSMode:     true,
+	}
+	if err := SaveSessionConfig(want, path); err != nil {
+		t.Fatalf("SaveSessionConfig: %v", err)
+	}
+
+	got, err := LoadSessionConfig(path)
+	if err != nil {
+		t.Fatalf("LoadSessionConfig: %v", err)
+	}
+	if *got != *want {
+		t.Errorf("got %+v after round trip, want %+v", got, want)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Errorf("got mode %v for %s, want 0600", fi.Mode().Perm(), path)
+	}
+
+	// No stray temp file (atomicWriteStateFile's "<base>.tmp-*" pattern) should be left behind in
+	// the directory alongside the real target -- confirms the rename actually happened rather
+	// than leaving both a temp file and (somehow) the target.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("got directory entries %v, want exactly [%s] (no leftover temp file)", names, filepath.Base(path))
+	}
+}
+
 func TestSaveSessionConfigTightensExistingFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.json")

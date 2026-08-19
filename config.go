@@ -50,27 +50,43 @@ func LoadSessionConfig(path string) (*SessionConfig, error) {
 	return &cfg, nil
 }
 
-// SaveSessionConfig writes cfg to path as indented JSON, preserving the
-// 0600 permissions a session config (it holds a real access token) should
-// always have -- matters because os.WriteFile only applies its mode bit
-// when actually creating the file; on an existing file the previous mode
-// wins, so a config file created some other way with looser permissions
-// wouldn't get tightened by this call alone. Used to persist a
-// serverInfo redirect's resolved address/zone (see
-// CrossServerLoginResult) so future runs connect directly instead of
-// re-following the same redirect every time.
+// SaveSessionConfig writes cfg to path as indented JSON via identity.go's
+// atomicWriteStateFile (write to a fresh 0600 temp file in the same
+// directory, fsync, then os.Rename into place) instead of a plain
+// os.WriteFile+os.Chmod sequence. Used to persist a serverInfo redirect's
+// resolved address/zone (see CrossServerLoginResult) so future runs connect
+// directly instead of re-following the same redirect every time -- and, via
+// main.go's runCrossServerTest, to persist a -cs-rt access-token refresh.
+// Both call sites tend to land near the end of a cron-driven run, exactly
+// the kind of moment a SIGKILL/timeout/power-loss is plausible.
+//
+// A plain os.WriteFile does an open(O_TRUNC)+write+close as separate
+// syscalls with no fsync: a crash/OOM-kill/power-loss mid-write could leave
+// a zero-length or torn/truncated session config file behind. That's
+// especially bad here because loadEffectiveConfig only treats
+// os.IsNotExist as the benign "no config yet" case -- a torn file's
+// json.Unmarshal failure does NOT satisfy os.IsNotExist, so it takes the
+// fatal os.Exit(1) branch instead, repeating on every subsequent run until
+// a human intervenes. Routing through atomicWriteStateFile closes that gap
+// the same way it already closed it for identity.go's loginKey/gameUid/
+// username state files: the rename either publishes the complete new
+// content or leaves the previous complete content in place, never
+// something in between.
+//
+// As a side effect of always writing through a fresh 0600 temp file and
+// renaming it into place, this also settles the "existing file left
+// world/group-readable" gotcha os.WriteFile's mode argument has (it only
+// applies on file creation, not when overwriting an existing file): rename
+// replaces the target's inode outright, so the destination always ends up
+// with the temp file's 0600 bits regardless of what permissions the file
+// being replaced had -- preserving the 0600 permissions a session config
+// (it holds a real access token) should always have.
 func SaveSessionConfig(cfg *SessionConfig, path string) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return err
-	}
-	// os.WriteFile's mode argument only applies when the file is newly created; on an existing
-	// file its previous mode wins. Chmod explicitly so the 0600 invariant this file needs (it
-	// holds a real access token) actually holds on every save, not just at creation.
-	return os.Chmod(path, 0600)
+	return atomicWriteStateFile(path, string(data))
 }
 
 // applyOverride returns override if it's non-zero, else base.

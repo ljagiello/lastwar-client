@@ -497,6 +497,26 @@ func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) error 
 	// pointlessly waiting out every remaining action's timeout in turn. The error that triggered
 	// the break is still appended to errs first, so the caller's aggregated error still reports
 	// what actually happened.
+	//
+	// Bug fixed here (round 22): the check below used to be a plain `errors.As(err, &netErr) &&
+	// !netErr.Timeout()`. Three of these sub-actions -- GreetVisitors (visitors.go), ClaimAllMail
+	// (mail.go), ClaimAllianceGifts (alliance.go) -- each loop over multiple items internally and,
+	// per round 21's fix, already correctly distinguish a per-item Timeout()==true net.Error
+	// (benign, keep going) from Timeout()==false (fatal, break that sub-action's own inner loop) --
+	// but each still appends EVERY per-item error, including any earlier benign timeout, to a local
+	// errs slice and returns one errors.Join(errs...) tree, not a single error. errors.As's own doc
+	// comment says it "finds the first error in err's tree that matches target" via a depth-first
+	// walk -- not the most severe one, and not "any" match -- so if one of those three sub-actions
+	// hit an ordinary per-item timeout on item 1, then a genuine non-timeout net.Error (connection
+	// actually dead) on item 2 in its own loop, the joined error it returns has the benign timeout
+	// positioned first in the tree by that walk. The plain errors.As check above found THAT one,
+	// saw Timeout()==true, and did not break -- even though the connection was genuinely dead and
+	// every remaining action here was about to independently burn a full defaultCmdTimeout before
+	// failing the same way. That silently reopened exactly the wasted-timeout problem round 21
+	// fixed, for a realistic degrading-connection scenario (starts flaking with timeouts, then
+	// actually dies) rather than just the original "any net.Error" over-broad case. Fixed by
+	// containsNonTimeoutNetError below, which walks every branch of a possibly-joined error tree
+	// instead of stopping at errors.As's first match -- see TestCollectAllAbortsOnMaskedNonTimeoutNetErrorInJoinedSubActionError.
 	actions := []func() error{
 		func() error { return CollectIdleReward(conn) },
 		func() error { return GreetVisitors(conn, visitors) },
@@ -526,12 +546,50 @@ func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) error 
 	for _, action := range actions {
 		err := action()
 		errs = append(errs, err)
-		var netErr net.Error
-		if errors.As(err, &netErr) && !netErr.Timeout() {
+		if containsNonTimeoutNetError(err) {
 			break
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// containsNonTimeoutNetError reports whether err's error tree contains a net.Error anywhere with
+// Timeout() == false -- a genuine connection-level failure (connection reset, broken pipe, DNS
+// failure, TLS error, etc.) -- as opposed to a net.Error with Timeout() == true (sendAndWait's
+// ordinary "no matching response within defaultCmdTimeout" per-item outcome). See CollectAll's
+// round-22 doc comment above for why this exists: a plain `errors.As(err, &netErr) &&
+// !netErr.Timeout()` check is not enough once err can be a multi-error errors.Join tree (which
+// GreetVisitors/ClaimAllMail/ClaimAllianceGifts each return) -- errors.As stops at the FIRST
+// net.Error its own depth-first walk finds, which can be a benign timeout even when a genuine
+// non-timeout net.Error is sitting elsewhere in the same tree.
+//
+// This walks the same tree shape errors.As itself documents walking -- err itself, then repeatedly
+// its Unwrap() error or Unwrap() []error method -- but does not stop at the first net.Error match:
+// every node is checked directly (so a node that is itself both a net.Error and a wrapper, e.g. the
+// standard library's *net.OpError, is correctly read via its own Timeout() rather than skipped over
+// in favor of whatever it wraps), a benign (Timeout()==true) match does not end the search, and a
+// multi-error join recurses into every branch, returning true the moment ANY one of them is a
+// genuine non-timeout net.Error -- order-independent, unlike errors.As.
+func containsNonTimeoutNetError(err error) bool {
+	for err != nil {
+		if netErr, ok := err.(net.Error); ok && !netErr.Timeout() {
+			return true
+		}
+		switch x := err.(type) {
+		case interface{ Unwrap() []error }:
+			for _, sub := range x.Unwrap() {
+				if containsNonTimeoutNetError(sub) {
+					return true
+				}
+			}
+			return false
+		case interface{ Unwrap() error }:
+			err = x.Unwrap()
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // collectibleBuildings filters buildings down to the ones collectCmdFor recognizes -- pulled out

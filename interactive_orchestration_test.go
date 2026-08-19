@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"log/slog"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -317,5 +320,110 @@ func TestHandleInteractiveLineSendsBareCommandWithNoSpace(t *testing.T) {
 	}
 	if n := len(g.params.keys); n != 0 {
 		t.Errorf("params has %d entries, want 0 for a bare command with no JSON", n)
+	}
+}
+
+// TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit is this round's regression test for
+// handleInteractiveLine's waitForCmd error handling: the exact same net.Error/Timeout()
+// distinction round 21 applied at 6+ other call sites (buildings.go, mail.go, visitors.go,
+// alliance.go) -- and that's already honored two lines up by SendExtension's own
+// unconditional-fatal treatment on send failure -- was simply absent from this waitForCmd site.
+// A Timeout()==true net.Error is waitForCmd's ordinary "no matching response within 8s" outcome
+// (conn_wait_test.go's TestWaitForTimeout confirms sendAndWait/waitForCmd's plain timeout is
+// itself a net.Error with Timeout()==true) -- routine and expected, not evidence the connection
+// died -- so handleInteractiveLine must keep its original log-and-return behavior here, NOT
+// os.Exit.
+//
+// It reuses fakeNetErrConn/fakeNetError (buildings_orchestration_test.go, same package) with
+// timeout: true instead of interactive.go's real 8-second wait or a live net.Pipe peer: every
+// Read on the fake connection fails immediately with a Timeout()==true net.Error, so this test
+// drives the exact same error shape waitForCmd's real deadline-expiry produces, but fast and
+// deterministically. Writes still succeed (fakeNetErrConn's default behavior), so
+// conn.SendExtension above this in handleInteractiveLine still succeeds and this test actually
+// reaches the waitForCmd failure path rather than short-circuiting on the send.
+//
+// Mutation check: a fix that treats every waitForCmd error identically as fatal (dropping the
+// Timeout() check entirely) would make this test hang until its own 2s watchdog fires, since
+// handleInteractiveLine would call os.Exit(1) and kill the whole test binary before `done` could
+// ever close.
+func TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit(t *testing.T) {
+	fake := &fakeNetErrConn{timeout: true}
+	conn := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleInteractiveLine(conn, `some.command`)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleInteractiveLine did not return promptly on a routine (Timeout()==true) waitForCmd failure -- did it call os.Exit instead of returning?")
+	}
+
+	if got := fake.writeCount(); got != 1 {
+		t.Errorf("fake connection saw %d writes, want exactly 1 (the SendExtension call, which must still have succeeded before the waitForCmd timeout)", got)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "no matching response within 8s") {
+		t.Errorf("expected the routine \"no matching response within 8s\" log line for a Timeout()==true waitForCmd error, got:\n%s", logged)
+	}
+	if strings.Contains(logged, "connection appears dead") {
+		t.Errorf("a Timeout()==true waitForCmd error must not be logged as a dead connection:\n%s", logged)
+	}
+}
+
+// TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits is the fatal-path counterpart to
+// TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit above: a net.Error from waitForCmd whose
+// Timeout() is false means the underlying game connection is actually gone (connection reset,
+// broken pipe, etc.), not an ordinary per-call timeout -- so handleInteractiveLine must treat it
+// exactly like the adjacent SendExtension failure two lines up and os.Exit(1), since
+// -interactive's whole reason for existing is interacting with a live connection.
+//
+// handleInteractiveLine calls os.Exit(1) directly on this path, so (like
+// TestRunCrossServerTestExitsWhenIPEmpty in main_crossserver_test.go and
+// TestLoadEffectiveConfigExitsOnDefaultPathReadFailure in config_test.go) it can't be driven to
+// completion in-process without also killing this test binary. This uses the same
+// re-exec-the-test-binary-as-a-subprocess idiom: LASTWAR_TEST_HELPER_PROCESS=1 gates a branch
+// that actually calls handleInteractiveLine and lets it exit, while the outer test spawns that as
+// a child process and asserts on its exit code AND stderr message.
+//
+// It reuses fakeNetErrConn/fakeNetError with the default timeout: false (a stand-in for
+// connection reset/broken pipe/DNS failure/TLS error, not an ordinary per-call timeout), so
+// waitForCmd's read fails immediately with a genuine, non-timeout net.Error.
+func TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		fake := &fakeNetErrConn{}
+		conn := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+		handleInteractiveLine(conn, `some.command`)
+		// Only reached if handleInteractiveLine fails to exit -- the outer assertions below will
+		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
+		// this silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	const wantMsg = "connection appears dead"
+	if !strings.Contains(stderr.String(), wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the same phrasing used by the adjacent SendExtension-failure fatal exit)", stderr.String(), wantMsg)
 	}
 }

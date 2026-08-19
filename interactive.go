@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -153,8 +155,26 @@ func handleInteractiveLine(conn *GameConn, line string) {
 
 	msg, err := waitForCmd(conn, 8*time.Second, cmd, "push."+cmd)
 	if err != nil {
-		slog.Error("no matching response within 8s", "error", err)
-		return
+		// Same net.Error/Timeout() distinction round 21 applied at 6+ other call sites
+		// (buildings.go, mail.go, visitors.go, alliance.go) -- and that's already honored two
+		// lines up by SendExtension's own unconditional-fatal treatment on send failure.
+		// waitForCmd's ordinary "no matching response within 8s" outcome is ITSELF a net.Error
+		// with Timeout()==true (conn_wait_test.go's TestWaitForTimeout): the operator's command
+		// simply had no reply within the window, which is routine and expected -- not evidence
+		// the connection died -- so that case keeps the original log-and-return behavior and
+		// RunInteractive's outer loop goes back to blocking on the FIFO for the next command. A
+		// net.Error with Timeout()==false (connection reset, broken pipe, etc.) -- or any other
+		// non-net.Error failure, which doesn't match this benign timeout shape either -- means
+		// the underlying game connection is actually gone, so it gets the same fatal treatment
+		// as the adjacent SendExtension failure above: there's no point continuing to read from
+		// the control FIFO once the connection -interactive exists to interact with is dead.
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			slog.Error("no matching response within 8s", "error", err)
+			return
+		}
+		slog.Error("response wait failed -- connection appears dead, exiting interactive mode", "error", err)
+		os.Exit(1)
 	}
 	// Not msg.Params.String() -- same reasoning as the "sending command" log above.
 	slog.Info("received response", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())

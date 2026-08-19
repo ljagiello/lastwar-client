@@ -571,6 +571,18 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 		p.PutUtfString("AndroidID", "")
 		p.PutUtfString("IMEI", "")
 	}
+	// Deliberately NOT gated on in.IOSMode, unlike every other platform-specific field in this
+	// function. pshField always hashes cmdBaseTime against apkCertHex -- the Android APK
+	// (com.fun.lastwar.gp)'s own signing certificate DER bytes -- so under IOSMode this sends an
+	// Android-derived psh alongside an otherwise fully iOS-flavored identity. That's a real,
+	// known internal inconsistency, not an overlooked branch: unlike packageName/platform/pf/
+	// appVersion/versionCode/idfa/idfv/phone_native_screen above (all confirmed live from a real
+	// captured iOS session, see docs/live-validation.mdx), there is no live iOS capture of this
+	// field to isolate what a genuine iOS client actually sends for it, and per this project's
+	// standing convention (docs/AGENTS.md) an unconfirmed formula must not be guessed at just to
+	// look more platform-consistent. Left Android-derived on purpose until a fresh iOS capture
+	// settles it -- this is an open question, not a proven-working alternative, the same way
+	// `ta`'s exact minimal iOS content is flagged as open in docs/live-validation.mdx.
 	p.PutUtfString("psh", pshField(cmdBaseTime))
 	p.PutUtfString("mt", "")
 	p.PutUtfString("deviceId", in.DeviceID)

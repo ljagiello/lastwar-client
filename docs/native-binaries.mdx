@@ -54,7 +54,9 @@ Only 1.8 MB — small for a Unity IL2CPP binary, and for good reason: it contain
       <td>
         <strong>None</strong> — actually <code>SHA1(packageName)</code>, a constant public string; trivially
         reproducible without touching the APK's real signature. The field that genuinely depends on the signing
-        cert is <code>psh</code> (see [Identity, login & session](/auth)), and the Go client already reproduces it correctly.
+        cert is <code>psh</code> (see [Identity, login & session](/auth)), and the Go client reproduces it correctly
+        for the Android identity — under iOS mode it still sends the Android-derived value, since no live iOS
+        capture of this field exists to confirm what a real iOS client would send instead.
       </td>
     </tr>
     <tr>
