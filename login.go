@@ -204,7 +204,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		}
 		if ec, ok := env.Content.Get("ec"); ok {
 			conn.Close()
-			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s", ec.Val, env.Content.String())
+			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.String(), ErrAuthRejected)
 		}
 		slog.Info("login OK", "un", env.Content.GetString("un"))
 		if un := env.Content.GetString("un"); un != "" && un != ident.Username {
@@ -307,7 +307,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	if ec, ok := msg.Params.Get("errorCode"); ok {
 		conn.Close()
-		return nil, fmt.Errorf("SEND-CODE FAILED: errorCode=%v full=%s", ec.Val, msg.Params.String())
+		return nil, fmt.Errorf("SEND-CODE FAILED: errorCode=%v full=%s: %w", ec.Val, msg.Params.String(), ErrAuthRejected)
 	}
 	slog.Info("server accepted", "response", msg.Params.String())
 	slog.Info("verification code should now be arriving", "email", opts.Email)
@@ -343,7 +343,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	if ec, ok := ackMsg.Params.Get("errorCode"); ok {
 		conn.Close()
-		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED: errorCode=%v full=%s", ec.Val, ackMsg.Params.String())
+		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED: errorCode=%v full=%s: %w", ec.Val, ackMsg.Params.String(), ErrAuthRejected)
 	}
 	slog.Info("ack", "response", ackMsg.Params.String())
 
@@ -357,7 +357,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	if ec, ok := msg2.Params.Get("errorCode"); ok {
 		conn.Close()
-		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED (push): errorCode=%v full=%s", ec.Val, msg2.Params.String())
+		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED (push): errorCode=%v full=%s: %w", ec.Val, msg2.Params.String(), ErrAuthRejected)
 	}
 	// Not msg2.Params.String() -- the full response carries loginKey (and
 	// accountArr) in cleartext, and String() does no field-level redaction.
@@ -502,6 +502,15 @@ func readCodeFromStdin() string {
 // here idle (heartbeat still running in the background) until the code is
 // written to the pipe from a separate shell command.
 func readCodeFromPipe(path string) string {
+	fi, statErr := os.Stat(path)
+	if statErr != nil {
+		slog.Error("stat code pipe failed", "codePipe", path, "error", statErr)
+		os.Exit(1)
+	}
+	if fi.Mode()&os.ModeNamedPipe == 0 {
+		slog.Error("codePipe exists but is not a FIFO -- did you forget mkfifo?", "codePipe", path)
+		os.Exit(1)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		slog.Error("open code pipe", "path", path, "error", err)

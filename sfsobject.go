@@ -267,6 +267,7 @@ type sfsReader struct {
 	data  []byte
 	pos   int
 	depth int
+	nodes int
 }
 
 // maxNestDepth bounds how many levels of nested SFSArray/SFSObject readValuePayload will
@@ -274,6 +275,14 @@ type sfsReader struct {
 // from this game have never needed anywhere close to this, and unbounded recursion here is a
 // crash-the-process vector on a payload well under the existing frame-size cap.
 const maxNestDepth = 64
+
+// maxDecodedNodes bounds the total number of values a single decode may produce, independent of
+// nesting depth or per-level fan-out -- an ordinary few-level-deep, wide-fan-out nested
+// array/object can decode into an enormous number of total leaf nodes even while staying well
+// within maxNestDepth and the wire-level maxFrameSize cap (a measured ~60MB wire payload
+// decoding into multiple GB of heap via ordinary 3-level nesting). Chosen comfortably above
+// anything the real ~313KB init payload has ever needed.
+const maxDecodedNodes = 300_000
 
 func (r *sfsReader) remaining() int { return len(r.data) - r.pos }
 
@@ -362,6 +371,12 @@ func (r *sfsReader) readTaggedValue() (SFSValue, error) {
 }
 
 func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
+	// Count every decoded value, not just containers -- leaf-node count is what actually
+	// drives heap amplification for a wide-fan-out nested array/object (see maxDecodedNodes).
+	r.nodes++
+	if r.nodes > maxDecodedNodes {
+		return SFSValue{}, fmt.Errorf("sfsobject: decoded node count exceeds %d", maxDecodedNodes)
+	}
 	switch tag {
 	case sfsNull:
 		return SFSValue{tag, nil}, nil

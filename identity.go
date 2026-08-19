@@ -181,21 +181,32 @@ func warnIfLoosePermissions(path string) {
 	}
 }
 
+// saveStateFile writes data to path with 0600 permissions, then explicitly chmods it to 0600
+// as well -- os.WriteFile's mode argument only applies on file creation, so an existing file
+// left world/group-readable would otherwise stay that way forever. Mirrors config.go's
+// SaveSessionConfig fix for the same gotcha.
+func saveStateFile(path, data string) error {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
 func (d *deviceIdentity) SaveLoginKey(key string) error {
 	d.LoginKey = key
-	return os.WriteFile(loginKeyStatePath(), []byte(key), 0o600)
+	return saveStateFile(loginKeyStatePath(), key)
 }
 
 func (d *deviceIdentity) SaveGameUid(uid string) error {
 	d.GameUid = uid
-	return os.WriteFile(gameUidStatePath(), []byte(uid), 0o600)
+	return saveStateFile(gameUidStatePath(), uid)
 }
 
 // SaveUsername persists the SFS login response's `un` field so the next run
 // can present it instead of an empty username.
 func (d *deviceIdentity) SaveUsername(un string) error {
 	d.Username = un
-	return os.WriteFile(usernameStatePath(), []byte(un), 0o600)
+	return saveStateFile(usernameStatePath(), un)
 }
 
 func (d *deviceIdentity) AirKey() string {

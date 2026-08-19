@@ -175,9 +175,12 @@ var benignErrorCodes = map[string]bool{
 }
 
 // commandOutcome classifies a collect/claim response into one of three buckets: a real success,
-// a benign no-op (an expected cooldown/already-claimed/not-yet-arrived errorCode, or a status=0
-// response with no errorCode at all -- buildings.go's own doc comments treat status=1, not just
-// errorCode-absence, as the real proof a collection succeeded), or a genuine failure.
+// a benign no-op (an expected cooldown/already-claimed/not-yet-arrived errorCode, or -- for
+// building.production.collect specifically -- a status=0 response with no errorCode; buildings.go's
+// own doc comments treat status=1, not just errorCode-absence, as the real proof a collection
+// succeeded, and docs/live-validation.mdx only ever observed status=1 or errorCode=602026 from that
+// command). Other command families have no documented evidence of ever emitting a status field, so
+// the status=0 heuristic does not apply to them and they fall through to outcomeSuccess instead.
 type commandOutcome int
 
 const (
@@ -187,13 +190,13 @@ const (
 )
 
 // classifyResponse determines a response's outcome and, for a benign or real failure, the
-// errorCode (empty string for the status=0-with-no-errorCode benign case). This is the single
-// place both logCommandResult and sendAndWait derive their behavior from, so the two can never
-// drift out of sync with each other.
+// errorCode (empty string for the building.production.collect status=0-with-no-errorCode benign
+// case). This is the single place both logCommandResult and sendAndWait derive their behavior
+// from, so the two can never drift out of sync with each other.
 func classifyResponse(msg *ExtensionMessage) (commandOutcome, string) {
 	ec, has := msg.Params.Get("errorCode")
 	if !has {
-		if msg.Params.Has("status") && msg.Params.GetInt("status") == 0 {
+		if msg.Cmd == "building.production.collect" && msg.Params.Has("status") && msg.Params.GetInt("status") == 0 {
 			return outcomeBenign, ""
 		}
 		return outcomeSuccess, ""

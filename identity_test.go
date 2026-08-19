@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // Confirms BuildLoginParams' Android/iOS and empty-vs-set-GameUid conditional field logic --
 // exactly the static-vs-dynamic field set whose mismatch caused the documented "reconnect wall"
@@ -78,5 +81,33 @@ func TestBuildLoginParamsConditionalFields(t *testing.T) {
 				t.Errorf("versionCode = %q, want %q", got, wantVersionCode)
 			}
 		})
+	}
+}
+
+// TestSaveLoginKeyTightensExistingFilePermissions mirrors config_test.go's
+// TestSaveSessionConfigTightensExistingFilePermissions -- the loginKey file is even more
+// sensitive than the session config (see warnIfLoosePermissions' doc comment: a loginKey alone
+// is sufficient to log back into the real account), so SaveLoginKey must also tighten an
+// existing file's permissions on every save, not just at creation.
+func TestSaveLoginKeyTightensExistingFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	path := loginKeyStatePath()
+	if err := os.WriteFile(path, []byte("stale"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &deviceIdentity{}
+	if err := d.SaveLoginKey("fresh-key"); err != nil {
+		t.Fatalf("SaveLoginKey: %v", err)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Errorf("got mode %v, want 0600 -- SaveLoginKey should tighten an existing file's permissions, not just set them on creation", fi.Mode().Perm())
 	}
 }

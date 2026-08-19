@@ -24,6 +24,13 @@ const (
 	unityVer    = "440"
 )
 
+// maxGSLResponseSize bounds the HTTP responses read via io.ReadAll below
+// (CheckVersion, GetServerList). Reading an untrusted HTTP body without a
+// cap is the same trivial multi-GB OOM vector packet.go's maxFrameSize
+// guards against on the TCP side, just tighter: these are small JSON/text
+// config responses, never expected to exceed a few KB.
+const maxGSLResponseSize = 1 << 20 // 1 MiB
+
 // onlineCheckVersionHostList, dossier §02.
 var checkVersionHosts = []string{
 	"https://lastwar-serverlist-cf.lastwarapp.net",
@@ -83,10 +90,14 @@ func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error
 			lastErr = err
 			continue
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxGSLResponseSize+1))
 		resp.Body.Close()
 		if err != nil {
 			lastErr = err
+			continue
+		}
+		if len(body) > maxGSLResponseSize {
+			lastErr = fmt.Errorf("%s: response body exceeds %d byte limit", host, maxGSLResponseSize)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -265,9 +276,12 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGSLResponseSize+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > maxGSLResponseSize {
+		return nil, fmt.Errorf("getserverlist.php: response body exceeds %d byte limit", maxGSLResponseSize)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("getserverlist.php: HTTP %d: %s", resp.StatusCode, string(body))

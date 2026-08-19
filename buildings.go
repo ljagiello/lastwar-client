@@ -294,19 +294,23 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 	return buildings, visitors, nil
 }
 
-// PrintBuildings logs every building, calling out full raw field dumps for
-// our 8 requested target types (recognized ones by name, unrecognized ones
-// so we can eyeball the data and pin down Smelter/Material Workshop/etc.).
+// PrintBuildings prints every building to stdout, calling out full raw field
+// dumps for our 8 requested target types (recognized ones by name,
+// unrecognized ones so we can eyeball the data and pin down Smelter/Material
+// Workshop/etc.). This is the actual -list-buildings result data, so it goes
+// to stdout (not slog/stderr) to keep it capturable via shell redirection,
+// per the stdout=data/stderr=logs convention -version and -decode-stream
+// also follow.
 func PrintBuildings(buildings []Building) {
 	byType := map[int32][]Building{}
 	for _, b := range buildings {
 		byType[b.BId()] = append(byType[b.BId()], b)
 	}
-	slog.Info("building summary", "distinctTypes", len(byType), "totalInstances", len(buildings))
+	fmt.Printf("building summary: distinctTypes=%d totalInstances=%d\n", len(byType), len(buildings))
 	for bId, list := range byType {
-		slog.Info("building type", "bId", bId, "name", BuildingNameOf(bId), "instances", len(list))
+		fmt.Printf("building type: bId=%d name=%s instances=%d\n", bId, BuildingNameOf(bId), len(list))
 		for _, b := range list {
-			slog.Info("building instance", "uuid", b.Uuid(), "buildingLevel", b.Level(), "pointId", b.PointId(), "raw", b.Raw.String())
+			fmt.Printf("building instance: uuid=%d buildingLevel=%d pointId=%d raw=%s\n", b.Uuid(), b.Level(), b.PointId(), b.Raw.String())
 		}
 	}
 }

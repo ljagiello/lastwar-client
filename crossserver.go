@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/rsa"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 )
@@ -38,6 +40,18 @@ type CrossServerLoginParams struct {
 	ShumeiBoxId string // real anti-fraud device fingerprint, if known
 	Handshake   bool   // experimental: send the vanilla SFS2X pre-Login Handshake (see conn.go:DoHandshake)
 	IOSMode     bool   // send an iOS-flavored identity instead of Android; see LoginParamsInput.IOSMode
+
+	// HTTPClient/RSAPub/GateHost are OPTIONAL GSL plumbing, needed only to
+	// refresh AccessTok via GetServerList(opt=fix) if a serverInfo redirect
+	// is hit mid-login (see the doc comment on DoCrossServerLogin). Callers
+	// that already have these in scope from their own CheckVersion() call
+	// (e.g. main.go's runCrossServerTest) should pass them through; callers
+	// that don't leave them nil/zero and DoCrossServerLogin degrades to
+	// reusing AccessTok unrefreshed across the redial, with a logged
+	// warning at the point that happens.
+	HTTPClient *http.Client
+	RSAPub     *rsa.PublicKey
+	GateHost   string
 }
 
 // DoCrossServerLogin reimplements the client's CrossServerLogin FSM state
@@ -154,23 +168,38 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		}
 		if ec, ok := env.Content.Get("ec"); ok {
 			conn.Close()
-			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s", ec.Val, env.Content.String())
+			// Wrapped in ErrAuthRejected (defined in errors.go) so callers can
+			// distinguish "server actively rejected this login" (ec present) from
+			// a bare dial/timeout/I/O failure above, which stay unwrapped.
+			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.String(), ErrAuthRejected)
 		}
 		slog.Info("login OK")
 
-		// Note: unlike login.go's equivalent redirect path (which fetches a fresh access token
-		// before redialing, on the documented suspicion that a token is single-use-per-connection),
-		// this path reuses p.AccessTok unchanged across the closed-and-redialed connection.
-		// DoCrossServerLogin is deliberately GSL-free (see the doc comment above) -- it has no
-		// httpClient/RSA pubkey/gateHost in scope to refresh a token with, so fixing this
-		// properly means threading those through CrossServerLoginParams and every caller. Not
-		// done here; this is a known, live-unverified gap -- if a serverInfo redirect on this
-		// path starts failing with ec=28/E011 after the redial, this reused token is the first
-		// thing to suspect.
 		if siObj := findServerInfo(env.Content); siObj != nil && siObj.GetString("ip") != "" {
 			newAddr := fmt.Sprintf("%s:%d", firstHost(siObj.GetString("ip")), getIntFlexible(siObj, "port"))
 			newZone := siObj.GetString("zone")
 			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddr, "newZone", newZone, "oldAddr", addr, "oldZone", zone)
+
+			// Before closing this connection and redialing, refresh AccessTok via GSL --
+			// mirroring login.go's equivalent redirect path, on the same documented
+			// suspicion that a token is single-use-per-connection. Only possible when the
+			// caller supplied HTTPClient/RSAPub/GateHost (DoCrossServerLogin is otherwise
+			// deliberately GSL-free, see the doc comment above); callers that don't fall
+			// back to reusing p.AccessTok unrefreshed, logged loudly below so an ec=28/E011
+			// failure right after this redial is immediately diagnosable.
+			if p.HTTPClient != nil && p.RSAPub != nil && p.GateHost != "" {
+				slog.Info("fetching fresh access token before following serverInfo redirect (suspected single-use-per-connection)")
+				freshLsr, err := GetServerList(p.HTTPClient, p.GateHost, p.RSAPub, p.DeviceID, GSLOpt{Opt: "fix"}, "", p.GameUid)
+				if err != nil {
+					slog.Error("GSL refresh failed; following redirect with stale access token anyway", "error", err)
+				} else if freshLsr.At != nil {
+					p.AccessTok = freshLsr.At.Token
+					slog.Info("fresh access token acquired", "tokenLen", len(p.AccessTok))
+				}
+			} else {
+				slog.Warn("following serverInfo redirect with UNREFRESHED access token -- no HTTPClient/RSAPub/GateHost given to DoCrossServerLogin, so it cannot fetch a fresh one before redialing; if this redial fails with ec=28/E011, this reused token is the first thing to suspect")
+			}
+
 			conn.Close()
 			addr = newAddr
 			if newZone != "" {

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/rsa"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"runtime/debug"
 	"strconv"
@@ -27,7 +30,7 @@ func main() {
 	csShumei := flag.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
 	csRt := flag.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- the refresh response's server list also REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid")
 	csAt := flag.String("cs-at", "", "raw access token to send directly as p.at, skipping any GSL call entirely (e.g. one captured live from a real client)")
-	csIOS := flag.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an `at` token is bound to the platform/package it was issued for")
+	csIOS := flag.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
 	handshake := flag.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
 	configPath := flag.String("config", "", "path to a session config JSON (see config.example.json); if unset, auto-loads "+defaultSessionConfigPath()+" when present. Explicit -cs-* flags override individual config fields.")
 	noConfig := flag.Bool("no-config", false, "skip loading any session config, even the default file -- for a plain guest/email-flow run when a session config is also present")
@@ -103,12 +106,17 @@ func main() {
 	result, err := Login(LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake})
 	if err != nil {
 		slog.Error("login failed", "error", err)
-		// Exit code 2 (rather than the generic 1) specifically marks
-		// authentication/session failures -- the class of failure the
-		// README documents as needing a fresh capture, not a transient
-		// retry -- so a cron wrapper can distinguish it without parsing
-		// the JSON log body.
-		os.Exit(2)
+		// Exit code 2 (rather than the generic 1) specifically marks a
+		// confirmed server-side auth rejection (ErrAuthRejected) -- the
+		// class of failure the README documents as needing a fresh
+		// capture, not a transient retry -- so a cron wrapper can
+		// distinguish it without parsing the JSON log body. A network/
+		// dial/local-I/O failure that never reached that point is just a
+		// generic failure (1): it may well clear up on its own.
+		if errors.Is(err, ErrAuthRejected) {
+			os.Exit(2)
+		}
+		os.Exit(1)
 	}
 	conn := result.Conn
 	defer conn.Close()
@@ -216,6 +224,15 @@ func runCrossServerTest(o crossServerTestOpts) {
 
 	accessTok := o.at
 	ip, port, zone, gameUid := o.ip, o.port, o.zone, o.gameUid
+	// Captured only when -cs-rt runs its own GSL round trip below, then threaded into
+	// CrossServerLoginParams so a mid-login serverInfo redirect can refresh AccessTok instead of
+	// reusing a stale one (see CrossServerLoginParams' doc comment). Left nil for a bare -cs-ip
+	// run: DoCrossServerLogin is deliberately GSL-free in that mode ("dialing directly, no GSL
+	// call" -- see its own doc comment), so we don't add a surprise network round trip just to
+	// get redirect-refresh capability; it degrades to the existing logged-warning fallback.
+	var gslHTTPClient *http.Client
+	var gslRSAPub *rsa.PublicKey
+	var gslGateHost string
 	if o.rt != "" {
 		httpClient := defaultHTTPClient()
 		cv, gateHost, err := CheckVersion(httpClient)
@@ -228,6 +245,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			slog.Error("parse RSA pubkey failed", "error", err)
 			os.Exit(1)
 		}
+		gslHTTPClient, gslRSAPub, gslGateHost = httpClient, pub, gateHost
 		slog.Info("GSL getserverlist (opt=refresh)")
 		lsr, err := GetServerList(httpClient, gateHost, pub, deviceID, GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
 		if err != nil {
@@ -252,11 +270,17 @@ func runCrossServerTest(o crossServerTestOpts) {
 		DeviceID: deviceID, AirKey: airKey,
 		AccessTok: accessTok, ShumeiBoxId: o.shumeiBoxId,
 		Handshake: o.handshake, IOSMode: o.iosMode,
+		HTTPClient: gslHTTPClient, RSAPub: gslRSAPub, GateHost: gslGateHost,
 	})
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
-		// Exit code 2 marks authentication/session failures specifically -- see the matching comment in main() above.
-		os.Exit(2)
+		// Exit code 2 marks a confirmed server-side auth rejection specifically -- see the
+		// matching comment in main() above. A bare TCP dial failure never reaches that point,
+		// so it falls through to the generic exit code 1.
+		if errors.Is(err, ErrAuthRejected) {
+			os.Exit(2)
+		}
+		os.Exit(1)
 	}
 	conn := result.Conn
 	defer conn.Close()

@@ -218,3 +218,29 @@ func TestGetIntGetLongCoercion(t *testing.T) {
 		t.Errorf("GetLong(int field) = %d, want 9", got)
 	}
 }
+
+// TestDecodedNodeCountRejected proves the maxDecodedNodes ceiling catches breadth-driven
+// amplification that maxNestDepth alone does not: this payload is only 2 levels deep (far under
+// maxNestDepth=64) but its outer*inner fan-out crosses maxDecodedNodes in total leaf count -- the
+// same shape as the audit's ~60MB/59M-node reproduction, scaled down so this test builds and runs
+// in well under a second instead of allocating gigabytes.
+func TestDecodedNodeCountRejected(t *testing.T) {
+	const outerCount = 10
+	const innerCount = 30001 // outerCount * innerCount > maxDecodedNodes (300_000), each count well under the int16-per-level cap
+
+	var buf []byte
+	buf = binary.BigEndian.AppendUint16(buf, outerCount)
+	for i := 0; i < outerCount; i++ {
+		buf = append(buf, sfsArrayType)
+		buf = binary.BigEndian.AppendUint16(buf, innerCount)
+		for j := 0; j < innerCount; j++ {
+			buf = append(buf, sfsNull)
+		}
+	}
+
+	r := &sfsReader{data: buf}
+	_, err := r.readValuePayload(sfsArrayType)
+	if err == nil {
+		t.Fatal("expected an error once decoded node count exceeds maxDecodedNodes, got nil (this would allow unbounded heap amplification via wide, shallow nesting)")
+	}
+}

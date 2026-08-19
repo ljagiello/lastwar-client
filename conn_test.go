@@ -62,12 +62,95 @@ func newTestExtMsg(cmd string, errorCode any) *ExtensionMessage {
 	return &ExtensionMessage{Cmd: cmd, Params: params}
 }
 
+// newTestExtMsgWithStatus is newTestExtMsg plus an optional "status" int field, for exercising
+// classifyResponse's status=0 benign heuristic (which, unlike errorCode, only fires for a
+// specific cmd -- see TestClassifyResponse). hasStatus distinguishes "no status field at all"
+// from "status=0" -- both need to be tested separately, and a bare int can't represent "absent".
+func newTestExtMsgWithStatus(cmd string, errorCode any, status int32, hasStatus bool) *ExtensionMessage {
+	msg := newTestExtMsg(cmd, errorCode)
+	if hasStatus {
+		msg.Params.PutInt("status", status)
+	}
+	return msg
+}
+
 func TestLogCommandResultClassification(t *testing.T) {
 	// logCommandResult only logs; this smoke-tests all three classification branches
 	// (success, benign errorCode, real-failure errorCode) run without panicking.
 	logCommandResult("test success", newTestExtMsg("test.cmd", nil))
 	logCommandResult("test benign", newTestExtMsg("test.cmd", "602026"))
 	logCommandResult("test real failure", newTestExtMsg("test.cmd", "999999"))
+}
+
+// TestClassifyResponse asserts classifyResponse's actual (outcome, code) return value directly,
+// including that the status=0-with-no-errorCode benign heuristic is scoped to
+// building.production.collect only -- for every other command a status=0 response with no
+// errorCode is a real success, not a no-op (see classifyResponse's doc comment in conn.go).
+func TestClassifyResponse(t *testing.T) {
+	tests := []struct {
+		name        string
+		cmd         string
+		errorCode   any
+		status      int32
+		hasStatus   bool
+		wantOutcome commandOutcome
+		wantCode    string
+	}{
+		{
+			name:        "no errorCode, no status field, any cmd -> success",
+			cmd:         "some.other.cmd",
+			hasStatus:   false,
+			wantOutcome: outcomeSuccess,
+			wantCode:    "",
+		},
+		{
+			name:        "no errorCode, status=1, any cmd -> success",
+			cmd:         "some.other.cmd",
+			status:      1,
+			hasStatus:   true,
+			wantOutcome: outcomeSuccess,
+			wantCode:    "",
+		},
+		{
+			name:        "no errorCode, status=0, cmd=building.production.collect -> benign",
+			cmd:         "building.production.collect",
+			status:      0,
+			hasStatus:   true,
+			wantOutcome: outcomeBenign,
+			wantCode:    "",
+		},
+		{
+			name:        "no errorCode, status=0, other cmd -> success (heuristic must not apply globally)",
+			cmd:         "mail.reward.batch",
+			status:      0,
+			hasStatus:   true,
+			wantOutcome: outcomeSuccess,
+			wantCode:    "",
+		},
+		{
+			name:        "errorCode is a known benignErrorCodes entry -> benign",
+			cmd:         "vip.reward.get",
+			errorCode:   "602026",
+			wantOutcome: outcomeBenign,
+			wantCode:    "602026",
+		},
+		{
+			name:        "errorCode is not in benignErrorCodes -> failure",
+			cmd:         "vip.reward.get",
+			errorCode:   "999999",
+			wantOutcome: outcomeFailure,
+			wantCode:    "999999",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := newTestExtMsgWithStatus(tt.cmd, tt.errorCode, tt.status, tt.hasStatus)
+			gotOutcome, gotCode := classifyResponse(msg)
+			if gotOutcome != tt.wantOutcome || gotCode != tt.wantCode {
+				t.Errorf("classifyResponse() = (%v, %q), want (%v, %q)", gotOutcome, gotCode, tt.wantOutcome, tt.wantCode)
+			}
+		})
+	}
 }
 
 func TestGameConnSendReceiveRoundTrip(t *testing.T) {
