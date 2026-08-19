@@ -206,7 +206,7 @@ Two things worth checking after setup, not just once but as ongoing habits:
 | `packet_bigsized_test.go` | Packet framing round trip for payloads over 65535 bytes (4-byte length prefix, `hdrBigSized`) |
 | `packet_zstd_test.go` | `ReadPacket`'s Zstandard-decompression branch (`hdrCompressed\|hdrUseLZ4`) round trip |
 | `packet_oom_test.go` | `ReadPacket`'s declared-length size guards reject an oversized/hostile frame using only the header fields, before ever reading (let alone allocating) the body |
-| `sfsobject_array_test.go` | Array-tag decode round trips, including `ByteArray`'s 4-byte element count vs. every other array tag's 2-byte count |
+| `sfsobject_array_test.go` | Array-tag decode round trips (including `ByteArray`'s 4-byte element count vs. every other array tag's 2-byte count) and encode round trips; a hostile-input battery against the decoder -- negative array/text counts, the `maxNestDepth` recursion bomb, the `maxDecodedNodes` wide-fan-out amplification bomb, and `DecodeObject` rejecting trailing bytes left over after a well-formed top-level object |
 | `sfsobject_encode_error_test.go` | `EncodeObject` returns an error instead of panicking when a string value exceeds the wire format's 65535-byte length-prefix limit, including through nested-`SFSObject` recursion |
 | `conn_test.go` | `Envelope.AsExtension`, `classifyResponse`'s success/benign/failure outcome classification, and a `GameConn` send/receive round trip |
 | `conn_wait_test.go` | `sendAndWait`/`waitFor`/`waitForCmd`/`waitForInitPush`: outcome classification, deadline timeouts, unmatched-push skipping, and the init-push halfway active-pull fallback |

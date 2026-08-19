@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -463,5 +464,89 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 		t.Fatalf("read persisted username: %v", err)
 	} else if strings.TrimSpace(string(got)) != wantUsername {
 		t.Errorf("persisted username = %q, want %q", strings.TrimSpace(string(got)), wantUsername)
+	}
+}
+
+// TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey proves the push.account.login.new
+// errorCode-present branch doesn't leak the response's cleartext loginKey into the returned
+// error (and therefore into main.go's slog.Error("login failed", ...) call site) -- a real,
+// live credential-leak bug found and fixed this round: the errorCode branch dumped the raw
+// response via msg2.Params.String() two lines above the exact comment warning against doing
+// that for this specific message type.
+func TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const testEmail = "player@example.com"
+	const testCode = "654321"
+	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-1234567890"
+
+	pipePath := mkfifoT(t, t.TempDir(), "code.pipe")
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+			return
+		}
+
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		ack := NewSFSObject()
+		ack.PutBool("success", true)
+		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
+			return
+		}
+
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		finishAck := NewSFSObject()
+		finishAck.PutBool("success", true)
+		if err := server.SendExtension("account.login.new", finishAck); err != nil {
+			return
+		}
+
+		// The push carries both a rejection (errorCode) AND the same cleartext loginKey field a
+		// successful push would -- proving the errorCode branch must redact it too, not just the
+		// success branch.
+		push := NewSFSObject()
+		push.PutUtfString("errorCode", "999999")
+		push.PutUtfString("loginKey", secretLoginKey)
+		_ = server.SendExtension("push.account.login.new", push)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       0,
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	go func() {
+		f, err := os.OpenFile(pipePath, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(testCode + "\n")
+	}()
+
+	_, err := Login(LoginOptions{Email: testEmail, CodePipe: pipePath})
+	if err == nil {
+		t.Fatal("Login: expected an error from the rejected push.account.login.new, got nil")
+	}
+	if !errors.Is(err, ErrAuthRejected) {
+		t.Errorf("Login error does not satisfy errors.Is(err, ErrAuthRejected): %v", err)
+	}
+	if strings.Contains(err.Error(), secretLoginKey) {
+		t.Errorf("Login error leaks the raw loginKey in cleartext: %v", err)
 	}
 }

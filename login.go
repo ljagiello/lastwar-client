@@ -390,7 +390,13 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	if ec, ok := msg2.Params.Get("errorCode"); ok {
 		conn.Close()
-		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED (push): errorCode=%v full=%s: %w", ec.Val, msg2.Params.String(), ErrAuthRejected)
+		// Not msg2.Params.String() -- same as the success path just below: this push's full
+		// response shape carries loginKey (and accountArr) in cleartext regardless of whether
+		// it's reporting success or, as here, an error, and String() does no field-level
+		// redaction. Build the error from explicitly-selected, individually-redacted fields
+		// instead of dumping the raw response.
+		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED (push): errorCode=%v gameUid=%s loginKey=%s: %w",
+			ec.Val, msg2.Params.GetString("gameUid"), redact(msg2.Params.GetString("loginKey")), ErrAuthRejected)
 	}
 	// Not msg2.Params.String() -- the full response carries loginKey (and
 	// accountArr) in cleartext, and String() does no field-level redaction.
