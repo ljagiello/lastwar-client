@@ -561,6 +561,70 @@ func TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 	}
 }
 
+// TestDoCrossServerLoginRedirectWrongTypedIPIsWarned is the round-29 regression test for the
+// gate login.go's redirectIP helper closes: the redirect-detection check used to be an entirely
+// UNGUARDED siObj.GetString("ip") != "" -- which silently returns "" for ANY wrong-typed ip
+// field, indistinguishable from a genuinely absent one, making a real redirect completely
+// invisible instead of erroring or warning. This is not theoretical: gsl.go's getIntFlexible
+// helper exists specifically because this SAME serverInfo object's neighboring port field is
+// documented as "confirmed live... sometimes a UTF string instead" of a number -- only port was
+// ever hardened against that, not ip. Here the fake server sends serverInfo.ip as an int
+// (PutInt) instead of the expected UTF string, simulating exactly that failure mode. Proves two
+// things: (1) DoCrossServerLogin does NOT silently vanish the signal -- it logs a Warn
+// mentioning the wrong-typed ip field -- and (2) since the ip genuinely can't be resolved, it
+// still falls back to treating the response as a normal (non-redirect) success, matching the
+// pre-fix behavior's control flow exactly, only now with a diagnostic instead of total silence.
+func TestDoCrossServerLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		si := NewSFSObject()
+		si.PutInt("ip", 12345) // wrong-typed: a real ip is always a UTF string, never a number
+		si.PutInt("port", 9339)
+		si.PutUtfString("zone", "APS2")
+		resp := NewSFSObject()
+		resp.PutSFSObject("serverInfo", si)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := DoCrossServerLogin(p)
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v (a wrong-typed ip must not be treated as a fatal error -- it degrades to \"no redirect\", same as a genuinely absent ip)", err)
+	}
+	defer result.Conn.Close()
+
+	if result.Addr != addr {
+		t.Errorf("Addr = %q, want %q (the wrong-typed ip must not resolve to a followed redirect)", result.Addr, addr)
+	}
+	if result.Zone != "APS1" {
+		t.Errorf("Zone = %q, want %q (unchanged -- the redirect must not have been followed)", result.Zone, "APS1")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "wrong-typed") || !strings.Contains(logged, "ip") {
+		t.Errorf("expected a Warn log mentioning the wrong-typed ip field, got:\n%s", logged)
+	}
+}
+
 // TestDoCrossServerLoginRejectsEmptyInitialIP is the round-24 regression test for
 // DoCrossServerLogin's INITIAL dial address: it used to build addr via a raw
 // fmt.Sprintf("%s:%d", firstHost(p.IP), p.Port) with no validation at all -- unlike this same

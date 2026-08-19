@@ -332,6 +332,16 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 		if !requireFieldType(bi, "uuid", "building_new", sfsFieldKindLong) {
 			continue
 		}
+		// bId is guarded purely for consistency/diagnosability with the uuid guard immediately
+		// above (round 29 audit): BId() (this file) reads it via the same GetInt zero-value-
+		// coercing accessor, but unlike uuid, nothing here previously logged a Warn on a
+		// wrong-typed bId -- it would just silently coerce to bId=0, which collectCmdFor's switch
+		// (below) simply never matches, so the building is safely dropped from CollectAll's
+		// collect loop either way. Not a correctness fix, just a diagnostic one: see
+		// TestParseInitBuildingsWrongTypedBIdIsRejected.
+		if !requireFieldType(bi, "bId", "building_new", sfsFieldKindInt) {
+			continue
+		}
 		out = append(out, Building{Raw: bi})
 	}
 	return out
@@ -484,6 +494,11 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 								if !requireFieldType(bi, "uuid", "push.init.build", sfsFieldKindLong) {
 									continue
 								}
+								// bId guard: see the identical guard's doc comment in
+								// ParseInitBuildings above -- consistency/diagnosability only.
+								if !requireFieldType(bi, "bId", "push.init.build", sfsFieldKindInt) {
+									continue
+								}
 								appendBuilding(Building{Raw: bi})
 							}
 						}
@@ -522,6 +537,11 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 							continue
 						}
 						if !requireFieldType(bi, "uuid", "push.add.building", sfsFieldKindLong) {
+							continue
+						}
+						// bId guard: see the identical guard's doc comment in ParseInitBuildings
+						// above -- consistency/diagnosability only.
+						if !requireFieldType(bi, "bId", "push.add.building", sfsFieldKindInt) {
 							continue
 						}
 						appendBuilding(Building{Raw: bi})

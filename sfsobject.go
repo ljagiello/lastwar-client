@@ -111,6 +111,44 @@ func (o *SFSObject) GetString(key string) string {
 	}
 	return ""
 }
+
+// GetInt reads a field as int32, accepting the same narrower integer types GetLong does (int16,
+// byte) plus int64 -- SFS2X's Long tag often carries a value this repo reads through the narrower
+// Int-shaped accessor anyway (buildings.go's Building.BId()/Level()/PointId(), mail.go's
+// Mail.Type()/RewardStatus(), visitors.go's Visitor.EventId()/VisitorId(), alliance.go's
+// findRecommendedTech via tech.GetInt("state")/GetInt("scienceId")) -- but an int64 value that does
+// NOT actually fit in int32's range is treated the same way this function already treats a wrong-
+// Go-typed or absent field: as a zero value, never as a silently wrapped one.
+//
+// Round 29 fix: the int64 case used to do a bare, unchecked int32(n) conversion, which Go
+// truncates/wraps (modulo 2^32) rather than errors on -- an out-of-int32-range Long used to come out
+// as a small, unrelated, possibly-negative int32 instead of being rejected. That defeated
+// requireFieldType's (buildings.go) own documented guarantee that "requireFieldType's check and the
+// accessor's own behavior can never disagree": requireFieldType/sfsFieldKindAccepts only checks that
+// the field's concrete Go TYPE is one GetInt accepts (int64/int32/int16/byte), not that an int64
+// VALUE actually fits in int32's range -- so a present, correctly-int64-typed, but out-of-range field
+// used to sail straight past requireFieldType's guard and then come out of GetInt corrupted, for
+// every one of the real call sites listed above (e.g. a wrapped bId colliding with an unrelated
+// building in buildings.go's map-keyed lookups, or findRecommendedTech donating to the wrong tech).
+//
+// Returning 0 here -- the same zero-value fallback this function already uses for a wrong-Go-typed
+// field -- is the fix, consistent with this codebase's existing "treat as absent/zero-value rather
+// than corrupt" philosophy (see requireFieldType's own doc comment). Whether sfsFieldKindAccepts
+// (buildings.go) should ALSO learn to reject an out-of-range int64 value -- making requireFieldType
+// itself catch this case the same way it already catches a wrong Go type -- was considered and
+// deliberately left alone: sfsFieldKindAccepts documents itself as a pure TYPE-family check
+// ("identifies which family of concrete decoded Go types"), and every field this repo actually reads
+// via GetInt is, in every real captured payload, a small in-range identifier/counter -- an
+// out-of-range Long under one of these keys is itself a sign of a decode desync or a hostile/corrupt
+// payload, not a legitimate large ID this client needs to preserve. GetInt's own fix already
+// degrades that case the same safe way a wrong-typed field degrades (a dedup-map/lookup collision
+// risk, not memory corruption or a crash), so duplicating a value-range check into
+// sfsFieldKindAccepts too would add real complexity (a kind-specific range check inside what is
+// today a pure, kind-only type switch, and one only GetInt/sfsFieldKindInt would ever need --
+// sfsFieldKindLong's own accessor, GetLong, never narrows and so has no equivalent gap) for no
+// behavioral gain beyond what GetInt's own fix already provides. See
+// TestGetIntRejectsOutOfInt32RangeLong (sfsobject_array_test.go) for the regression coverage proving
+// the wrap no longer happens.
 func (o *SFSObject) GetInt(key string) int32 {
 	if v, ok := o.values[key]; ok {
 		switch n := v.Val.(type) {
@@ -121,6 +159,9 @@ func (o *SFSObject) GetInt(key string) int32 {
 		case byte:
 			return int32(n)
 		case int64:
+			if n < math.MinInt32 || n > math.MaxInt32 {
+				return 0
+			}
 			return int32(n)
 		}
 	}
@@ -338,6 +379,14 @@ func isSensitiveSFSKey(k string) bool {
 // including for an object built programmatically via Put*/Add* (which has no decode-time bound
 // applied to it at all, since maxDecodedNodes/chargeNodes only run inside DecodeObject's read
 // path).
+//
+// Round 29 addition: the two gaps above only motivated bounding the total number of KEYS/ITEMS
+// walked -- they didn't account for a single key/item's own VALUE being unboundedly large, if that
+// value is a bare string/sfsText field or one of the 8 primitive-array types (as opposed to a nested
+// SFSObject/SFSArray, whose own internal keys/items were already correctly charged one unit each).
+// formatSFSValueRedacted's default case now charges additional budget proportional to such a
+// value's own real size (chargeUpTo/primitiveArrayPrefix, sfsobject.go), so a single huge string or
+// primitive-array field can't exempt itself from this same budget.
 const maxFormattedNodes = 50_000
 
 // formatTruncatedMarker is appended to StringRedacted()'s output, in place of the remaining
@@ -355,6 +404,19 @@ const formatTruncatedMarker = "...[truncated: exceeded maxFormattedNodes format 
 // cost of the call as a whole.
 type formatBudget struct {
 	remaining int
+	// truncated becomes true the first time ANY nesting level (stringRedactedBudgeted's key loop,
+	// formatSFSValueRedacted's *SFSArray item loop, or formatSFSValueRedacted's default case for an
+	// oversized primitive array/string -- see chargeUpTo/noteTruncation below) notices the shared
+	// budget is exhausted and appends formatTruncatedMarker to its own output.
+	//
+	// Round 29 fix: without this flag, EVERY still-in-progress enclosing nesting level independently
+	// re-checks charge() (still false, per its own doc comment) once the budget is exhausted and
+	// appends its OWN formatTruncatedMarker as the call stack unwinds -- so a single StringRedacted()
+	// output could contain multiple redundant truncation markers, one per enclosing level that was
+	// still mid-loop at the moment exhaustion was first noticed, instead of just one. noteTruncation()
+	// below is the single choke point that lets only the FIRST caller to notice actually append the
+	// marker; every later caller, at any nesting level, sees truncated already true and stays silent.
+	truncated bool
 }
 
 func newFormatBudget() *formatBudget {
@@ -370,6 +432,47 @@ func (fb *formatBudget) charge() bool {
 		return false
 	}
 	fb.remaining--
+	return true
+}
+
+// chargeUpTo consumes up to n units of budget for a SINGLE value whose real formatting cost is
+// proportional to n (a primitive array's element count, or a string's byte length) -- unlike
+// charge(), which always spends exactly one unit per key/item, this lets formatSFSValueRedacted's
+// default case (see its doc comment) charge proportional to a bare string/primitive-array value's
+// actual size, rather than the flat single unit its caller already paid just for the field/item
+// existing at all.
+//
+// Returns allowed (how many of the n units actually fit, 0 <= allowed <= n) and ranOut (whether the
+// budget ran out before allowed reached n) -- a caller uses allowed to format only a size-bounded
+// prefix of the value when ranOut is true, instead of either formatting the whole (potentially huge)
+// value regardless of budget, or refusing to format any of it.
+func (fb *formatBudget) chargeUpTo(n int) (allowed int, ranOut bool) {
+	if n <= 0 {
+		return 0, false
+	}
+	if fb.remaining <= 0 {
+		return 0, true
+	}
+	if n <= fb.remaining {
+		fb.remaining -= n
+		return n, false
+	}
+	allowed = fb.remaining
+	fb.remaining = 0
+	return allowed, true
+}
+
+// noteTruncation reports whether THIS call is the first, across the whole shared budget's recursive
+// descent, to notice the budget is exhausted -- see the truncated field's doc comment above for why
+// this exists. A caller that just observed exhaustion (charge() returned false, or chargeUpTo
+// reported ranOut) should append formatTruncatedMarker to its own output only when this returns
+// true; every subsequent call (from this or any other nesting level) returns false and must NOT
+// append a second marker.
+func (fb *formatBudget) noteTruncation() bool {
+	if fb.truncated {
+		return false
+	}
+	fb.truncated = true
 	return true
 }
 
@@ -413,10 +516,14 @@ func (o *SFSObject) stringRedactedBudgeted(fb *formatBudget) string {
 	wrote := false
 	for _, k := range o.keys {
 		if !fb.charge() {
-			if wrote {
-				b.WriteString(", ")
+			// noteTruncation: only the FIRST nesting level to notice exhaustion appends the marker --
+			// see formatBudget.truncated's doc comment (round 29 fix).
+			if fb.noteTruncation() {
+				if wrote {
+					b.WriteString(", ")
+				}
+				b.WriteString(formatTruncatedMarker)
 			}
-			b.WriteString(formatTruncatedMarker)
 			break
 		}
 		if wrote {
@@ -521,10 +628,14 @@ func formatSFSValueRedacted(v SFSValue, fb *formatBudget) string {
 		wrote := false
 		for _, item := range val.items {
 			if !fb.charge() {
-				if wrote {
-					b.WriteString(", ")
+				// noteTruncation: only the FIRST nesting level to notice exhaustion appends the
+				// marker -- see formatBudget.truncated's doc comment (round 29 fix).
+				if fb.noteTruncation() {
+					if wrote {
+						b.WriteString(", ")
+					}
+					b.WriteString(formatTruncatedMarker)
 				}
-				b.WriteString(formatTruncatedMarker)
 				break
 			}
 			if wrote {
@@ -536,12 +647,42 @@ func formatSFSValueRedacted(v SFSValue, fb *formatBudget) string {
 		b.WriteString("]")
 		return b.String()
 	default:
-		// val may be a bare string/sfsText value, or one of the 8 primitive-array types
-		// (readValuePayload's array-tag cases) whose elements can themselves be
-		// server-controlled strings ([]string) -- sanitizeForTerminal is applied to the whole
-		// formatted result rather than type-switching on val itself so it catches both shapes
-		// (and any future scalar type added here) uniformly. See sanitizeForTerminal's doc
-		// comment.
+		// val may be a bare string/sfsText value, one of the 8 primitive-array types
+		// (readValuePayload's array-tag cases) whose elements can themselves be server-controlled
+		// strings ([]string), or any other plain scalar (int32/int64/int16/byte/float32/float64/
+		// bool/nil).
+		//
+		// Round 29 fix: the first two shapes can be arbitrarily large -- a decoded string's byte
+		// length or a primitive array's element count is bounded only by maxDecodedNodes (the
+		// DECODE-time budget for the whole payload), not by this format-time budget -- yet this case
+		// used to charge a flat ONE formatBudget unit for the entire value regardless of its real
+		// size (e.g. a 40,000-element string array cost the same single unit as an empty one), so
+		// maxFormattedNodes didn't actually bound a single StringRedacted() call's real formatting
+		// cost for either shape, only for nested SFSObject/SFSArray structures (whose own per-key/
+		// per-item charge() calls in stringRedactedBudgeted/the *SFSArray case above already scale
+		// correctly). The caller (stringRedactedBudgeted's key loop, or the *SFSArray item loop
+		// above) already charged exactly one unit for "this field/item exists at all" before ever
+		// reaching this function -- chargeUpTo below charges ADDITIONAL budget proportional to the
+		// value's actual size on top of that, and truncates the formatted output (via
+		// primitiveArrayPrefix, or a direct byte-slice for a string) to whatever fits when it
+		// doesn't. Every other scalar type here is intrinsically O(1) to format, so it keeps the
+		// flat, already-paid 1-unit cost with no extra charge.
+		if n, ok := primitiveArrayLen(val); ok {
+			allowed, ranOut := fb.chargeUpTo(n)
+			out := sanitizeForTerminal(primitiveArrayPrefix(val, allowed))
+			if ranOut && fb.noteTruncation() {
+				out += " " + formatTruncatedMarker
+			}
+			return out
+		}
+		if s, ok := val.(string); ok {
+			allowed, ranOut := fb.chargeUpTo(len(s))
+			out := sanitizeForTerminal(s[:allowed])
+			if ranOut && fb.noteTruncation() {
+				out += " " + formatTruncatedMarker
+			}
+			return out
+		}
 		return sanitizeForTerminal(fmt.Sprintf("%v", val))
 	}
 }
@@ -638,6 +779,35 @@ func primitiveArrayLen(val interface{}) (int, bool) {
 		return len(a), true
 	}
 	return 0, false
+}
+
+// primitiveArrayPrefix formats val's first n elements the same way Go's default fmt.Sprintf("%v",
+// val) would format the WHOLE slice (e.g. "[1 2 3]"), for a primitive array value (one of the 8
+// types primitiveArrayLen recognizes). Used by formatSFSValueRedacted's default case (round 29 fix)
+// to format only as many elements as fit within the remaining formatBudget when the array's real
+// size doesn't fit in full -- n is always <= the value's real length (formatSFSValueRedacted only
+// ever passes chargeUpTo's own `allowed` return, which is capped at the value's real length), so the
+// slice expression below can never panic.
+func primitiveArrayPrefix(val interface{}, n int) string {
+	switch a := val.(type) {
+	case []bool:
+		return fmt.Sprintf("%v", a[:n])
+	case []byte:
+		return fmt.Sprintf("%v", a[:n])
+	case []int16:
+		return fmt.Sprintf("%v", a[:n])
+	case []int32:
+		return fmt.Sprintf("%v", a[:n])
+	case []int64:
+		return fmt.Sprintf("%v", a[:n])
+	case []float32:
+		return fmt.Sprintf("%v", a[:n])
+	case []float64:
+		return fmt.Sprintf("%v", a[:n])
+	case []string:
+		return fmt.Sprintf("%v", a[:n])
+	}
+	return ""
 }
 
 // SFSArray is a sequential list of tagged values.

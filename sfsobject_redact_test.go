@@ -1116,3 +1116,200 @@ func TestStringRedactedFormatBudgetBoundsManyTopLevelKeys(t *testing.T) {
 		t.Errorf("StringRedacted() output is missing the first key, want it present before truncation kicks in: %.200s", got)
 	}
 }
+
+// TestStringRedactedFormatBudgetBoundsLargePrimitiveArrayField is the round-29 regression test for
+// the MINOR finding: formatSFSValueRedacted's default case (handling a bare string/sfsText value and
+// all 8 primitive-array types) used to charge only ONE formatBudget unit for the ENTIRE value
+// regardless of its actual size (e.g. a 40,000-element string array was charged as 1 unit) -- so a
+// single huge primitive-array-valued field was effectively EXEMPT from maxFormattedNodes, unlike a
+// semantically-equivalent large *SFSArray (already proven bounded by
+// TestStringRedactedFormatBudgetBoundsLargeArray above). This builds a single ordinary, non-sensitive
+// field whose value is a primitive []int32 array (readValuePayload's sfsIntArray shape -- a plain
+// unwrapped Go slice, NOT the *SFSArray wrapper type those other two tests exercise) far larger than
+// maxFormattedNodes, and proves a single StringRedacted() call on it is now bounded the same way.
+func TestStringRedactedFormatBudgetBoundsLargePrimitiveArrayField(t *testing.T) {
+	const itemCount = 200_000 // comfortably more than maxFormattedNodes (50_000)
+
+	arr := make([]int32, itemCount)
+	for i := range arr {
+		arr[i] = int32(i)
+	}
+
+	o := NewSFSObject()
+	// "nickname" is written FIRST so it's guaranteed to be charged/formatted before the huge
+	// primitive-array field below can exhaust the shared budget.
+	o.PutUtfString("nickname", "player-one")
+	o.put("scoreHistory", SFSValue{sfsIntArray, arr}) // an ordinary, non-sensitive field name
+
+	got := o.StringRedacted()
+
+	if !strings.Contains(got, formatTruncatedMarker) {
+		t.Fatalf("StringRedacted() on a %d-element primitive-array field did not truncate -- expected the visible %q marker in the output (%d bytes); a large primitive array must not be exempt from maxFormattedNodes", itemCount, formatTruncatedMarker, len(got))
+	}
+	const maxReasonableOutputBytes = 10 * maxFormattedNodes
+	if len(got) > maxReasonableOutputBytes {
+		t.Errorf("StringRedacted() output is %d bytes, want at most %d -- a single call must not scale with the real element count (%d)", len(got), maxReasonableOutputBytes, itemCount)
+	}
+	lateItem := fmt.Sprintf("%d", itemCount-1)
+	if strings.Contains(got, lateItem) {
+		t.Errorf("StringRedacted() output contains element %q from near the end of a %d-element primitive array -- the format walk did not actually stop at the budget", lateItem, itemCount)
+	}
+	if !strings.Contains(got, "player-one") {
+		t.Errorf("StringRedacted() output is missing the sibling \"nickname\" field, which was written before the huge array and should still be present: %.200s", got)
+	}
+	if !strings.Contains(got, "scoreHistory=[0") {
+		t.Errorf("StringRedacted() output is missing the first array element, want it present before truncation kicks in: %.200s", got)
+	}
+}
+
+// TestStringRedactedTruncationMarkerAppearsOnlyOnce is the round-29 regression test for the NIT
+// finding: once the shared formatBudget is exhausted mid-recursion, EVERY still-in-progress
+// enclosing nesting level used to independently re-check fb.charge() (still false) and append its
+// own formatTruncatedMarker, so a single StringRedacted() output could contain multiple redundant
+// truncation markers instead of just one. This builds a 3-level-deep fixture specifically so THREE
+// separate loops each notice the exhausted budget in the same call:
+//  1. an innermost *SFSArray with far more items than maxFormattedNodes (its own item loop notices
+//     exhaustion first, and is the one that should actually append the marker);
+//  2. an outer *SFSArray holding that huge array as its first item, plus a second item after it
+//     (this outer array's own item loop notices exhaustion too, once it tries to charge for that
+//     second item); and
+//  3. the top-level SFSObject holding the outer array under one key, plus a second key after it
+//     (the top-level key loop notices exhaustion too, once it tries to charge for that second key).
+//
+// Before the fix, all three would append formatTruncatedMarker independently. After the fix, only
+// the first (innermost) one should.
+func TestStringRedactedTruncationMarkerAppearsOnlyOnce(t *testing.T) {
+	const innerCount = maxFormattedNodes + 10 // ample to exhaust the shared budget deep inside a nested array
+
+	innerArr := NewSFSArray()
+	for i := 0; i < innerCount; i++ {
+		innerArr.AddInt(int32(i))
+	}
+
+	outerArr := NewSFSArray()
+	outerArr.add(SFSValue{sfsArrayType, innerArr}) // item[0]: the huge nested array that exhausts the budget
+	outerArr.AddInt(1)                             // item[1]: outerArr's own loop must notice exhaustion here
+
+	o := NewSFSObject()
+	o.PutSFSArray("a", outerArr) // key "a": consumes 1 unit, then recurses into outerArr's own loop
+	o.PutInt("b", 2)             // key "b": the top-level key loop must notice exhaustion here too
+
+	got := o.StringRedacted()
+
+	markerCount := strings.Count(got, formatTruncatedMarker)
+	if markerCount != 1 {
+		t.Fatalf("StringRedacted() output contains %d occurrences of formatTruncatedMarker, want exactly 1 -- "+
+			"every still-in-progress enclosing nesting level (the inner array's own item loop, outerArr's own "+
+			"item loop, and the top-level key loop) independently notices the exhausted shared budget, but only "+
+			"the FIRST one to notice should append the marker; got (truncated to 500 bytes): %.500s",
+			markerCount, got)
+	}
+}
+
+// TestStringRedactedFormatBudgetSharedAcrossNestingLevels is the round-29 regression test for the
+// MINOR testing-rigor finding: the existing maxFormattedNodes tests
+// (TestStringRedactedFormatBudgetBoundsLargeArray, TestStringRedactedFormatBudgetBoundsManyTopLevelKeys)
+// only prove a single FLAT level truncates -- neither proves the budget is actually SHARED (not
+// reset) across nested recursion, despite formatBudget's own doc comment explicitly stating it must
+// not reset per nesting level (sfsobject.go). This builds a top-level object with a NESTED object
+// holding maxFormattedNodes keys of its own, plus a SIBLING key placed after the nested object in
+// insertion order, and proves:
+//
+//  1. the nested object's own key loop truncates PARTWAY THROUGH (with the marker), even though its
+//     own key count alone is exactly maxFormattedNodes -- it only runs out because the outer
+//     object's "nested" key itself already spent one unit of the SAME shared budget before
+//     recursing in; and
+//  2. the sibling key placed AFTER the nested object never appears in the output at all, because the
+//     shared budget is already fully spent by the time the outer loop reaches it.
+//
+// If the budget were (incorrectly) reset to a fresh maxFormattedNodes at the start of the nested
+// object's own stringRedactedBudgeted call -- the exact bug this test guards against -- neither of
+// these would be true: the nested object would format all of its own keys with no truncation, and
+// the sibling key after it would print normally too.
+func TestStringRedactedFormatBudgetSharedAcrossNestingLevels(t *testing.T) {
+	nested := NewSFSObject()
+	for i := 0; i < maxFormattedNodes; i++ {
+		nested.PutInt(fmt.Sprintf("n%06d", i), int32(i))
+	}
+
+	o := NewSFSObject()
+	o.PutSFSObject("nested", nested) // consumes 1 unit of the shared budget before recursing in
+	o.PutUtfString("afterNested", "should-not-appear-if-budget-is-shared-correctly")
+
+	got := o.StringRedacted()
+
+	if !strings.Contains(got, formatTruncatedMarker) {
+		t.Fatalf("StringRedacted() with a %d-key nested object (consuming 1 shared-budget unit via its own "+
+			"outer key first) did not truncate at all -- expected the shared budget to run out partway "+
+			"through the nested object's own keys: %.300s", maxFormattedNodes, got)
+	}
+	// The nested object's very last key must NOT appear -- proving its own internal loop was cut
+	// short by the shared (not freshly-reset) budget.
+	lastNestedKey := fmt.Sprintf("n%06d", maxFormattedNodes-1)
+	if strings.Contains(got, lastNestedKey) {
+		t.Errorf("StringRedacted() output contains the nested object's last key %q -- the nested object's "+
+			"own key loop was not actually bounded by the shared budget (it behaved as if it had its own "+
+			"fresh %d-unit budget instead)", lastNestedKey, maxFormattedNodes)
+	}
+	// The sibling key placed AFTER the nested object in the OUTER object's own key list must not
+	// appear either -- the shared budget is already exhausted formatting the nested object, so the
+	// outer loop must never even reach this key.
+	if strings.Contains(got, "afterNested") {
+		t.Errorf("StringRedacted() output contains the sibling key \"afterNested\", which sits after the "+
+			"nested object in insertion order -- the shared format budget must already be exhausted by the "+
+			"time the outer loop reaches it if it is truly shared (not reset) across nesting levels, got: %.300s", got)
+	}
+	// The nested object's first key must still be present, confirming this isn't simply an
+	// empty/broken output.
+	if !strings.Contains(got, "n000000=0") {
+		t.Errorf("StringRedacted() output is missing the nested object's first key, want it present before truncation kicks in: %.300s", got)
+	}
+}
+
+// TestStringRedactedFormatBudgetBoundary is the round-29 boundary-condition regression test for
+// maxFormattedNodes: every prior maxFormattedNodes test
+// (TestStringRedactedFormatBudgetBoundsLargeArray, TestStringRedactedFormatBudgetBoundsManyTopLevelKeys)
+// overshoots the cap by a wide margin (~4x), so neither would catch an off-by-one regression in
+// formatBudget.charge()'s own boundary condition (`remaining <= 0`) -- the exact anti-pattern round
+// 28 itself fixed for every OTHER raw-item cap in this codebase (see
+// TestParseInitBuildingsRawItemCapBoundary, buildings_visitors_test.go, for the pattern this test
+// mirrors). This drives both sides of the exactly-maxFormattedNodes boundary directly with
+// well-formed top-level keys, so the PRESENCE/ABSENCE of specific keys in the output -- not just a
+// truncation-marker count -- proves whether the cap fired at exactly the right point.
+func TestStringRedactedFormatBudgetBoundary(t *testing.T) {
+	buildObject := func(n int) *SFSObject {
+		o := NewSFSObject()
+		for i := 0; i < n; i++ {
+			o.PutInt(fmt.Sprintf("k%06d", i), int32(i))
+		}
+		return o
+	}
+
+	t.Run("exactly cap keys: all formatted, no truncation marker", func(t *testing.T) {
+		got := buildObject(maxFormattedNodes).StringRedacted()
+
+		if strings.Contains(got, formatTruncatedMarker) {
+			t.Errorf("unexpected truncation marker at exactly-cap boundary (%d keys): %.300s", maxFormattedNodes, got)
+		}
+		lastKey := fmt.Sprintf("k%06d=%d", maxFormattedNodes-1, maxFormattedNodes-1)
+		if !strings.Contains(got, lastKey) {
+			t.Errorf("StringRedacted() output is missing the last key %q at exactly-cap boundary (%d keys), want every key present: %.300s", lastKey, maxFormattedNodes, got)
+		}
+	})
+
+	t.Run("cap+1 keys: truncation marker fires, only cap keys formatted", func(t *testing.T) {
+		got := buildObject(maxFormattedNodes + 1).StringRedacted()
+
+		if !strings.Contains(got, formatTruncatedMarker) {
+			t.Fatalf("expected a truncation marker at cap+1 boundary (%d keys), got: %.300s", maxFormattedNodes+1, got)
+		}
+		lastFittingKey := fmt.Sprintf("k%06d=%d", maxFormattedNodes-1, maxFormattedNodes-1)
+		if !strings.Contains(got, lastFittingKey) {
+			t.Errorf("StringRedacted() output is missing key %q, which should still fit exactly at the boundary (cap+1 input must still format the first %d keys in full): %.300s", lastFittingKey, maxFormattedNodes, got)
+		}
+		droppedKey := fmt.Sprintf("k%06d", maxFormattedNodes)
+		if strings.Contains(got, droppedKey) {
+			t.Errorf("StringRedacted() output contains key %q, the one key past the cap -- it must be the first (and only) key dropped by truncation at the cap+1 boundary: %.300s", droppedKey, got)
+		}
+	})
+}

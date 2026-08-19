@@ -167,6 +167,20 @@ func TestSendAndWaitWriteStageFailureIsNonTimeoutNetError(t *testing.T) {
 	}
 }
 
+// TestSendStageErrorMessage is the round-29 regression test for the MINOR finding that
+// sendStageError's Error() method was never directly asserted anywhere -- only incidentally
+// exercised via slog output in sendAndWait's send-failure branch and TestSendAndWait
+// WriteStageFailureIsNonTimeoutNetError above, neither of which checks its exact returned string.
+// Asserts the "send: " prefix (conn.go's sendStageError.Error()) against a known underlying error
+// directly.
+func TestSendStageErrorMessage(t *testing.T) {
+	underlying := errors.New("boom")
+	err := sendStageError{err: underlying}
+	if got, want := err.Error(), "send: boom"; got != want {
+		t.Errorf("sendStageError{}.Error() = %q, want %q", got, want)
+	}
+}
+
 func TestSendAndWaitTimeoutNoResponse(t *testing.T) {
 	// sendAndWait takes no timeout parameter -- it always waits via waitForCmd(conn,
 	// defaultCmdTimeout, ...), and defaultCmdTimeout (conn.go) is a plain 8*time.Second const, not

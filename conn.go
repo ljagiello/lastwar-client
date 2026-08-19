@@ -221,10 +221,21 @@ const (
 // failure on an unrelated cmd that happens to share one of these numeric errorCode values still
 // falls through to outcomeFailure. This is the single place both logCommandResult and sendAndWait
 // derive their behavior from, so the two can never drift out of sync with each other.
+//
+// Round 29: the status check below uses requireFieldType (buildings.go), not a bare
+// Has("status")+GetInt("status")==0 pair, for the same reason requireFieldType exists at all --
+// GetInt silently coerces ANY non-int-shaped value to int32(0), so a present-but-wrong-typed
+// status field used to satisfy Has()+GetInt()==0 exactly like a genuine status=0 would, folding a
+// malformed/wrong-typed response into this same benign bucket. requireFieldType treats a
+// wrong-typed status exactly like a missing one -- false here, falling through to outcomeSuccess
+// -- so only a status field that actually decoded as an int, and is genuinely 0, takes this
+// branch. See TestClassifyResponseWrongTypedStatusIsNotBenign (conn_test.go).
 func classifyResponse(msg *ExtensionMessage) (commandOutcome, string) {
 	ec, has := msg.Params.Get("errorCode")
 	if !has {
-		if msg.Cmd == "building.production.collect" && msg.Params.Has("status") && msg.Params.GetInt("status") == 0 {
+		if msg.Cmd == "building.production.collect" &&
+			requireFieldType(msg.Params, "status", "building.production.collect", sfsFieldKindInt) &&
+			msg.Params.GetInt("status") == 0 {
 			return outcomeBenign, ""
 		}
 		return outcomeSuccess, ""
@@ -279,6 +290,13 @@ const defaultCmdTimeout = 8 * time.Second
 // wraps -- never replaces -- the original error via Unwrap, so errors.Is/errors.As against the
 // underlying cause (e.g. a specific *net.OpError) keep working through this wrapper. Only applied
 // to the write-error branch below; waitForCmd's read/wait-side timeout behavior is untouched.
+//
+// Round 29: also used by DoHandshake's own send-stage branch (its c.SendEnvelope call, below) --
+// an independent send path that shares SendEnvelope/writeTimeout with sendAndWait but was missed
+// when this type was introduced, leaving DoHandshake's send failures unwrapped while its
+// read-side branches (the wall-clock deadline check, and ReadEnvelope failures via packet.go's
+// wrapIfClosed/deadConnError) were already hardened. See
+// TestDoHandshakeSendFailureIsNonTimeoutNetError (conn_handshake_test.go).
 type sendStageError struct {
 	err error
 }
@@ -332,7 +350,13 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 	req.PutUtfString("api", "1.7.8")
 	req.PutUtfString("cl", "Unity")
 	if err := c.SendEnvelope(controllerSystem, actionHandshake, req); err != nil {
-		return nil, fmt.Errorf("send handshake: %w", err)
+		// sendStageError (above): forces Timeout()==false even if the underlying write failure
+		// itself reports Timeout()==true (e.g. SendEnvelope's own writeTimeout deadline), so this
+		// branch can never be confused with the wall-clock-deadline-elapsed branch below, which
+		// legitimately IS a Timeout()==true net.Error (deadlineExceededError). Round 29: this
+		// send-stage branch was the one DoHandshake error path still missing this treatment --
+		// see TestDoHandshakeSendFailureIsNonTimeoutNetError (conn_handshake_test.go).
+		return nil, sendStageError{err: fmt.Errorf("send handshake: %w", err)}
 	}
 	deadline := time.Now().Add(timeout)
 	for {

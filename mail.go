@@ -35,18 +35,33 @@ func (m Mail) RewardStatus() int32 { return m.Raw.GetInt("rewardStatus") }
 
 // HasUnclaimedReward reports whether this mail has a reward still waiting to be claimed.
 // `rewardStatus == 0` is the confirmed "unclaimed" value (docs/live-validation.mdx's Mail
-// section), but GetInt can't distinguish a real 0 from a genuinely-absent field -- both come back
-// as the int32 zero value. That conflation matters here specifically: notification-only mail
-// (alliance markers, battle reports, and similar -- see ClaimAllMail's doc comment) never carries
-// a reward at all, and plausibly omits the rewardStatus key entirely rather than sending an
-// explicit 0. Treating a missing key as "unclaimed" would misclassify that mail as having a
-// reward it doesn't have. So this checks presence via Get first (same explicit-null-vs-missing
-// guard used by requirePresentField/findRecommendedTech's scienceId handling in alliance.go) and
-// only then compares the value -- a genuinely-absent rewardStatus field reads as "no reward"
-// (false), not "unclaimed".
+// section), but GetInt can't distinguish a real 0 from a genuinely-absent OR wrong-typed field --
+// all three silently coerce to the int32 zero value. That conflation matters here specifically:
+// notification-only mail (alliance markers, battle reports, and similar -- see ClaimAllMail's doc
+// comment) never carries a reward at all, and plausibly omits the rewardStatus key entirely rather
+// than sending an explicit 0. Treating a missing (or wrong-typed) key as "unclaimed" would
+// misclassify that mail as having a reward it doesn't have.
+//
+// Fixed (round 29): this used to check presence only (`v, ok := m.Raw.Get("rewardStatus"); !ok ||
+// v.Val == nil`) before comparing m.RewardStatus() == 0 -- guarding the missing/explicit-null case
+// but not the present-but-wrong-typed one. GetInt silently coerces ANY non-nil value whose concrete
+// Go type isn't in its accepted set (int32/int16/byte/int64) to int32(0), not just a missing field,
+// so a present-but-wrong-typed rewardStatus (e.g. sent as a string or float) passed the old guard,
+// coerced to 0 via GetInt, and the "== 0" comparison DETERMINISTICALLY (every time, not merely a
+// collision risk) misclassified it as unclaimed -- feeding groupUnclaimedByType, which would then
+// bucket that mail's uid into a real mail.reward.batch request for a reward that may not exist. Now
+// uses the shared requireFieldType guard (same one ListMail's uid check and groupUnclaimedByType's
+// type check already use) so a present-but-wrong-typed rewardStatus is treated the same as a
+// missing one: "no verifiable reward status" (false), not "unclaimed". See
+// TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified for the regression coverage.
+//
+// Note: buildings.go's requirePresentField doc comment currently cites this function as an example
+// of a presence-only guard that "only ever compares the raw presence, never keys a lookup off the
+// value" -- that citation is now stale, since this function's "== 0" comparison is keyed off the
+// value via requireFieldType, not requirePresentField's presence-only check. Not fixed here since
+// this file doesn't own buildings.go.
 func (m Mail) HasUnclaimedReward() bool {
-	v, ok := m.Raw.Get("rewardStatus")
-	if !ok || v.Val == nil {
+	if !requireFieldType(m.Raw, "rewardStatus", "mail reward status", sfsFieldKindInt) {
 		return false
 	}
 	return m.RewardStatus() == 0
@@ -187,18 +202,29 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		}
 		clientseq = lastUid
 		// lastMailTime is lastUid's sibling cursor field, read the same way and forwarded the
-		// same way into the next page's request -- but GetLong can't tell a missing/null
-		// lastMailTime apart from a legitimate explicit 0 (both silently return int64(0)),
-		// unlike GetString's "" which is never a legitimate mail uid. Left unguarded, a
-		// response with a valid lastUid but a missing lastMailTime would silently reset
-		// reqTime to the same value as the cold-start request while clientseq keeps advancing
-		// normally -- the exact failure shape the lastUid check above exists to prevent, just
-		// on its sibling field. Impact is bounded (seenUIDs dedupes any re-fetched mail,
-		// maxPages caps the loop), so this doesn't abort pagination like the lastUid check
-		// does, but it's still worth surfacing so an operator can tell a run hit this instead
-		// of quietly assuming it's a legitimate mail timestamped at the epoch.
-		if v, ok := msg.Params.Get("lastMailTime"); !ok || v.Val == nil {
-			slog.Warn("list mail: response reported more=true but lastMailTime is missing/null, reqTime will reset to 0 for the next page instead of the real cursor value", "page", page, "collectedSoFar", len(all))
+		// same way into the next page's request -- but GetLong can't tell a missing/null/
+		// wrong-typed lastMailTime apart from a legitimate explicit 0 (all three silently
+		// coerce to int64(0)), unlike GetString's "" which is never a legitimate mail uid. Left
+		// unguarded, a response with a valid lastUid but a missing, null, or wrong-typed
+		// lastMailTime would silently reset reqTime to the same value as the cold-start request
+		// while clientseq keeps advancing normally -- the exact failure shape the lastUid check
+		// above exists to prevent, just on its sibling field. Impact is bounded (seenUIDs
+		// dedupes any re-fetched mail, maxPages caps the loop), so this doesn't abort
+		// pagination like the lastUid check does, but it's still worth surfacing so an operator
+		// can tell a run hit this instead of quietly assuming it's a legitimate mail timestamped
+		// at the epoch.
+		//
+		// Fixed (round 29): this used to check missing/null only (`!ok || v.Val == nil`), the
+		// same presence-only shape requirePresentField uses -- so a PRESENT-BUT-WRONG-TYPED
+		// lastMailTime (e.g. sent as a string) silently passed this guard and then coerced to 0
+		// via GetLong with zero diagnostic signal, the same conflation HasUnclaimedReward's own
+		// round-29 fix addresses for rewardStatus (see its doc comment above). Now routed
+		// through the shared requireFieldType guard (mail.go/buildings.go/alliance.go/
+		// visitors.go's uid/uuid/type/scienceId checks already use it) so a wrong-typed
+		// lastMailTime warns too, not just a missing/null one -- see
+		// TestListMailWarnsOnWrongTypedLastMailTime.
+		if !requireFieldType(msg.Params, "lastMailTime", "list mail page", sfsFieldKindLong) {
+			slog.Warn("list mail: response reported more=true but lastMailTime is missing/null/wrong-typed, reqTime will reset to 0 for the next page instead of the real cursor value", "page", page, "collectedSoFar", len(all))
 		}
 		reqTime = msg.Params.GetLong("lastMailTime")
 		first = false

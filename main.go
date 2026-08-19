@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -16,6 +17,19 @@ import (
 )
 
 func main() {
+	// Install a JSON slog handler as the very first thing main() does -- before declaring ANY
+	// flag, and in particular before -config's below, whose help text calls
+	// defaultSessionConfigPath() -> stateFilePath() -> os.UserHomeDir(), which itself slog.Warns if
+	// $HOME is unset/undeterminable. Flag declaration always runs, on every single invocation
+	// (including -h/-help/-version/-no-config), so without this, that warning would fire through
+	// Go's plain-text default slog handler -- installed implicitly until something calls
+	// slog.SetDefault -- producing one stray non-JSON line in an otherwise all-JSON log stream on
+	// every run. This uses slog's default level (Info, since HandlerOptions is nil) as a
+	// placeholder purely to get JSON formatting in place immediately; it's replaced a few lines
+	// below, once -log-level has actually been parsed, with the correctly-leveled handler -- so
+	// nothing here needs to duplicate parseLogLevel or otherwise reorder when flags are parsed.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+
 	// A plain flag.String/Bool/Int + flag.Parse() would use the package-level
 	// flag.CommandLine, which is constructed with ExitOnError -- on a bad flag
 	// (unknown flag, bad value) that calls os.Exit(2) directly, colliding with
@@ -23,7 +37,13 @@ func main() {
 	// server-side auth rejection" (see the ErrAuthRejected handling below).
 	// ContinueOnError instead hands the parse error back to us so we can pick
 	// a non-colliding exit code.
-	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	//
+	// filepath.Base(os.Args[0]), not the raw os.Args[0]: the raw invocation path varies with
+	// however the binary happened to be invoked (e.g. "/tmp/lwc", "./lastwar-client",
+	// "/usr/local/bin/lastwar-client"), and FlagSet's name is what -h/-help and every parse-error
+	// usage message prints as "Usage of X:" -- a stable program name there reads as intentional
+	// documentation, not an accident of $0.
+	fs := flag.NewFlagSet(filepath.Base(os.Args[0]), flag.ContinueOnError)
 	email := fs.String("email", "", "account email to bind the guest identity to via email verification; if omitted and no loginKey is on file yet, the run silently stays on a fresh guest identity (no account binding, no error)")
 	codePipe := fs.String("code-pipe", "", "path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin")
 	collect := fs.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck/Overlord idle rewards, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both once-a-day VIP claims, after login")
@@ -44,7 +64,7 @@ func main() {
 	noConfig := fs.Bool("no-config", false, "skip loading any session config, even the default file -- for a plain guest/email-flow run when a session config is also present")
 	decodeStream := fs.String("decode-stream", "", "decode a reassembled raw TCP byte stream file (see docs/capturing-and-decoding-traffic.mdx) and print every SFS2X packet, then exit -- no login, no network connection at all")
 	decodeLabel := fs.String("decode-label", "", "prefix label for -decode-stream output lines, e.g. \"c2s\" or \"s2c\" (default: \"stream\")")
-	logLevel := fs.String("log-level", "info", "log verbosity: debug, info, warn, or error")
+	logLevel := fs.String("log-level", "info", "log verbosity: debug, info, warn (or its alias warning), or error")
 	version := fs.Bool("version", false, "print build info and exit")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag.ContinueOnError still runs the same failf/usage path flag.ExitOnError does (it
@@ -68,9 +88,11 @@ func main() {
 	// if "collect" were never there at all. Left unchecked, that's a real trap: the single most
 	// likely real-world cause is an operator typo'ing a flag without its leading dash (e.g. `collect`
 	// instead of `-collect`), and today that silently proceeds into a full guest-login run instead of
-	// catching what's almost certainly a mistake. slog isn't configured yet at this point (that
-	// happens further below, after the -version short-circuit), so this reports via stderr directly,
-	// matching parseLogLevel's own fmt.Fprintf-to-stderr convention for the same reason.
+	// catching what's almost certainly a mistake. The level-configured slog handler isn't installed
+	// yet at this point (that happens further below, after the -version short-circuit, once
+	// -log-level has actually been parsed -- only the placeholder JSON handler from the very top of
+	// main() is live so far), so this reports via stderr directly, matching parseLogLevel's own
+	// fmt.Fprintf-to-stderr convention for the same reason.
 	if fs.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "unexpected argument(s): %s (missing a leading '-' on a flag? see -help)\n", strings.Join(fs.Args(), " "))
 		os.Exit(1)
@@ -83,9 +105,11 @@ func main() {
 	// other flags with no warning, unlike every other no-op-flag-combination case this file otherwise
 	// warns about. This is deliberate, not an oversight: stacking -version with live-run flags is an
 	// unlikely real operator mistake (low real-world impact), and keeping -version's exit simple,
-	// fast, and unconditional (no slog setup, no fs.Visit call) is judged worth more than closing this
-	// specific gap. Don't "fix" this by reordering fs.Visit() above this check without re-deriving
-	// that tradeoff first.
+	// fast, and unconditional (no LEVEL-CONFIGURED slog setup -- the placeholder JSON handler
+	// installed at the very top of main() is already in place regardless, but the second
+	// slog.SetDefault below, which depends on parsing -log-level, is skipped here -- and no
+	// fs.Visit call) is judged worth more than closing this specific gap. Don't "fix" this by
+	// reordering fs.Visit() above this check without re-deriving that tradeoff first.
 	if *version {
 		printVersion()
 		return
@@ -626,7 +650,7 @@ func parseLogLevel(s string) slog.Level {
 	case "", "info":
 		return slog.LevelInfo
 	default:
-		fmt.Fprintf(os.Stderr, "unrecognized -log-level %q, defaulting to info (valid values: debug, warn, error, info)\n", s)
+		fmt.Fprintf(os.Stderr, "unrecognized -log-level %q, defaulting to info (valid values: debug, info, warn (or its alias warning), error)\n", s)
 		return slog.LevelInfo
 	}
 }

@@ -253,6 +253,52 @@ func TestDoHandshakeReadEnvelopeFailure(t *testing.T) {
 	}
 }
 
+// TestDoHandshakeSendFailureIsNonTimeoutNetError is the round-29 regression test for the MAJOR
+// finding that DoHandshake's own send-stage branch (its c.SendEnvelope call) used a bare
+// fmt.Errorf("send handshake: %w", err) instead of sendStageError -- the exact write-vs-read-
+// timeout conflation sendStageError (conn.go) was built to prevent in sendAndWait's identical
+// send-stage branch, reproduced here in an independent send path. Mirrors
+// TestSendAndWaitWriteStageFailureIsNonTimeoutNetError's technique (conn_wait_test.go) exactly:
+// injects a write failure that itself reports Timeout()==true (fakeTimeoutNetError), and asserts
+// the error DoHandshake actually returns reports Timeout()==false once run through
+// errors.As(&netErr) -- proving it's forced through sendStageError rather than passed through
+// unwrapped, which would otherwise make a connection too broken to even send a request
+// indistinguishable from DoHandshake's own benign wall-clock-deadline-elapsed timeout (see
+// TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope above).
+func TestDoHandshakeSendFailureIsNonTimeoutNetError(t *testing.T) {
+	client, _ := newPipeGameConnPair(t) // server intentionally left idle: the write must fail before any read is attempted
+	writeErr := fakeTimeoutNetError{msg: "simulated write-deadline-exceeded failure"}
+	client.conn = &writeFailConn{Conn: client.conn, err: writeErr}
+
+	// Sanity check on the test's own setup: the injected failure really does report
+	// Timeout()==true, mirroring what a genuine deadline-exceeded net.Conn.Write returns -- if
+	// this ever went false the test below would trivially pass for the wrong reason.
+	if !writeErr.Timeout() {
+		t.Fatal("test setup bug: writeErr must itself report Timeout()==true")
+	}
+
+	_, err := client.DoHandshake(500 * time.Millisecond)
+	if err == nil {
+		t.Fatal("expected an error when the handshake send itself fails")
+	}
+	if !strings.Contains(err.Error(), "send handshake") {
+		t.Errorf("err = %v, want it to include DoHandshake's \"send handshake\" wrapping prefix", err)
+	}
+	if !errors.Is(err, writeErr) {
+		t.Errorf("err = %v, want it to wrap the underlying write failure %v", err, writeErr)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- a send-stage failure must be distinguishable from DoHandshake's own benign deadline-elapsed timeout, even though the underlying write error itself reports Timeout()==true (mirroring a real deadline-exceeded net.Conn.Write)")
+	}
+	if netErr.Temporary() {
+		t.Errorf("netErr.Temporary() = true, want false")
+	}
+}
+
 // TestStartHeartbeatSendsPeriodicPingsAndStopsOnClose covers StartHeartbeat's normal loop: pings
 // (controllerSystem/actionPingPong) go out roughly every `interval`, and closing the GameConn
 // stops the goroutine -- no further pings arrive afterward.

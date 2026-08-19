@@ -241,6 +241,15 @@ func findRecommendedTech(arr *SFSArray) (scienceId int32, found bool) {
 		if !ok {
 			continue
 		}
+		// state is guarded via requireFieldType purely for consistency/diagnosability with the
+		// scienceId guard immediately below (round 29 audit): a wrong-typed state used to coerce
+		// silently to state=0 via GetInt's own zero-value fallback, which simply fails the `!= 1`
+		// comparison below and is treated the same as a genuine non-recommended entry -- fail-safe
+		// (never a false match), but with zero diagnostic signal that the entry was malformed
+		// rather than legitimately not recommended. See TestFindRecommendedTechWrongTypedStateIsRejected.
+		if !requireFieldType(tech, "state", "allianceScience", sfsFieldKindInt) {
+			continue
+		}
 		if tech.GetInt("state") != 1 {
 			continue
 		}

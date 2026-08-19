@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -469,5 +470,89 @@ func TestHandleInteractiveLineWaitForCmdRealGracefulCloseExits(t *testing.T) {
 	const wantMsg = "connection appears dead"
 	if !strings.Contains(stderr.String(), wantMsg) {
 		t.Errorf("subprocess stderr = %s\nwant it to contain %q (the same phrasing used by the adjacent SendExtension-failure fatal exit)", stderr.String(), wantMsg)
+	}
+}
+
+// TestStatControlPipeWithRetryRecoversFromTransientMissingFile is this round's regression test for
+// the MAJOR finding that RunInteractive's per-iteration os.Stat call on the control FIFO used to
+// treat ANY failure as immediately fatal (os.Exit(1)), even though the failure at the instant of
+// one particular stat call can be purely transient and self-correcting (e.g. the pipe being
+// momentarily replaced/recreated by another process) rather than evidence the FIFO is permanently
+// gone. Like TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit above, this drives the retry
+// helper directly (rather than the os.Exit(1)-terminated RunInteractive loop itself) so a failed
+// fix reports as a clean test failure instead of killing the test binary.
+//
+// The FIFO at path deliberately does not exist yet when statControlPipeWithRetry is first called --
+// a background goroutine creates it only after controlPipeRetryDelay, well inside the function's
+// controlPipeRetries budget -- so the very first stat attempt is guaranteed to see ENOENT. A bare
+// os.Stat call (RunInteractive's pre-fix behavior) would have given up right there; this asserts
+// the retry helper instead keeps trying and succeeds once the FIFO actually appears.
+func TestStatControlPipeWithRetryRecoversFromTransientMissingFile(t *testing.T) {
+	path := t.TempDir() + "/control.pipe"
+
+	go func() {
+		time.Sleep(controlPipeRetryDelay)
+		_ = syscall.Mkfifo(path, 0o600)
+	}()
+
+	fi, err := statControlPipeWithRetry(path)
+	if err != nil {
+		t.Fatalf("statControlPipeWithRetry() error = %v, want nil once the FIFO appears within the retry budget", err)
+	}
+	if fi.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("statControlPipeWithRetry() returned FileInfo for %q that isn't a FIFO, want the real FIFO's info", path)
+	}
+}
+
+// TestOpenControlPipeWithRetryRecoversFromTransientMissingFile is openControlPipeWithRetry's
+// sibling of TestStatControlPipeWithRetryRecoversFromTransientMissingFile above, for the identical
+// reason (see that test's doc comment) applied to RunInteractive's os.Open call instead of its
+// os.Stat call.
+//
+// This creates a plain regular file rather than a real FIFO: openControlPipeWithRetry itself only
+// wraps os.Open and retries on failure -- it has no FIFO-specific behavior of its own (the
+// FIFO-mode-bit check happens separately, in RunInteractive, via statControlPipeWithRetry, before
+// openControlPipeWithRetry is ever called) -- and a plain file sidesteps a real FIFO's read-open-
+// blocks-until-a-writer-connects semantics, which would otherwise need a second synchronized
+// goroutine and risk flakiness unrelated to what this test is actually checking: that a failed
+// open attempt is retried instead of immediately giving up.
+func TestOpenControlPipeWithRetryRecoversFromTransientMissingFile(t *testing.T) {
+	path := t.TempDir() + "/control-file"
+
+	go func() {
+		time.Sleep(controlPipeRetryDelay)
+		f, err := os.Create(path)
+		if err == nil {
+			f.Close()
+		}
+	}()
+
+	f, err := openControlPipeWithRetry(path)
+	if err != nil {
+		t.Fatalf("openControlPipeWithRetry() error = %v, want nil once the file appears within the retry budget", err)
+	}
+	f.Close()
+}
+
+// TestStatControlPipeWithRetryGivesUpOnPersistentFailure is the boundedness counterpart to
+// TestStatControlPipeWithRetryRecoversFromTransientMissingFile above: a path that never appears at
+// all must still eventually report failure (not retry forever) so RunInteractive's existing fatal
+// os.Exit(1) behavior for a genuinely-broken control pipe is preserved -- this fix is about not
+// giving up on the very FIRST failure, not about softening the case where the control pipe really
+// is gone for good. The elapsed-time bound (generous relative to controlPipeRetries *
+// controlPipeRetryDelay) is what would catch a mutation that dropped the retry loop's upper bound
+// entirely and made it retry forever instead of just being slow.
+func TestStatControlPipeWithRetryGivesUpOnPersistentFailure(t *testing.T) {
+	path := t.TempDir() + "/never-created"
+
+	start := time.Now()
+	_, err := statControlPipeWithRetry(path)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("statControlPipeWithRetry() error = nil, want a non-nil error for a control pipe path that never appears")
+	}
+	if want := 3 * time.Second; elapsed > want {
+		t.Errorf("statControlPipeWithRetry() took %v to give up, want well under %v (bounded, not retrying forever)", elapsed, want)
 	}
 }

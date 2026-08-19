@@ -207,6 +207,54 @@ func TestClassifyResponse(t *testing.T) {
 	}
 }
 
+// TestClassifyResponseWrongTypedStatusIsNotBenign is the round-29 regression test for the MAJOR
+// finding that classifyResponse's building.production.collect status check used
+// Has("status")+GetInt("status")==0 -- presence-only plus the silently-zero-coercing GetInt --
+// instead of the requireFieldType/sfsFieldKindAccepts machinery (buildings.go) round 28 built
+// specifically to catch this bug class elsewhere. GetInt coerces ANY non-int-shaped value to
+// int32(0), so a present-but-wrong-typed status field (e.g. the server sending it as a string or a
+// double) used to satisfy the old check exactly like a genuine status=0 would, folding a malformed
+// response into the same "benign no-op" bucket a real cooldown response gets -- indistinguishable
+// from classifyResponse's point of view. Since classifyResponse is the single dedup point both
+// logCommandResult and sendAndWait's returned error derive from, this matters beyond just log
+// severity. Covers both a wrong-typed non-zero-looking raw value (double 0.0, which GetInt would
+// also coerce to 0) and a wrong-typed string "0", proving the fix rejects the field's presence
+// entirely rather than just checking its coerced value.
+func TestClassifyResponseWrongTypedStatusIsNotBenign(t *testing.T) {
+	tests := []struct {
+		name string
+		put  func(p *SFSObject)
+	}{
+		{
+			name: "status is a double, not an int",
+			put:  func(p *SFSObject) { p.PutDouble("status", 0) },
+		},
+		{
+			name: "status is a string, not an int",
+			put:  func(p *SFSObject) { p.PutUtfString("status", "0") },
+		},
+		{
+			name: "status is a bool, not an int",
+			put:  func(p *SFSObject) { p.PutBool("status", false) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := NewSFSObject()
+			tt.put(params)
+			msg := &ExtensionMessage{Cmd: "building.production.collect", Params: params}
+
+			gotOutcome, gotCode := classifyResponse(msg)
+			if gotOutcome == outcomeBenign {
+				t.Errorf("classifyResponse() = (%v, %q), want NOT outcomeBenign -- a wrong-typed status field must not be misclassified as the benign status==0 case (GetInt's zero-value coercion must not be trusted without a type check first)", gotOutcome, gotCode)
+			}
+			if gotOutcome != outcomeSuccess {
+				t.Errorf("classifyResponse() = (%v, %q), want outcomeSuccess (no errorCode present, and a wrong-typed status must be treated as if status were absent)", gotOutcome, gotCode)
+			}
+		})
+	}
+}
+
 func TestGameConnSendReceiveRoundTrip(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -330,5 +378,61 @@ func TestCloseIsIdempotentConcurrent(t *testing.T) {
 		if err != errs[0] {
 			t.Errorf("concurrent Close() call %d = %v, want it to equal call 0's result (%v)", i, err, errs[0])
 		}
+	}
+}
+
+// erroringCloseConn is countingCloseConn's sibling for the round-29 MINOR finding that the
+// existing TestCloseIsIdempotent* tests never exercise a genuinely non-nil FIRST-call error:
+// countingCloseConn's first call always returns nil by construction, so a regression that
+// discarded Close()'s captured error entirely (e.g. GameConn.Close() calling c.conn.Close()
+// without storing/returning the result) would still pass every existing test in this file. Every
+// call here returns the same fixed, caller-supplied error -- standing in for a real net.Conn whose
+// underlying Close() genuinely fails (e.g. a TCP RST already pending, or an already-broken fd).
+type erroringCloseConn struct {
+	net.Conn
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (c *erroringCloseConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return c.err
+}
+
+func (c *erroringCloseConn) callCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+// TestCloseCapturesNonNilFirstCallError is the round-29 regression test proving GameConn.Close()
+// actually stores and returns a genuine non-nil error from the underlying net.Conn.Close(), not
+// just that it dedups repeated calls (TestCloseIsIdempotent{Sequential,Concurrent} above already
+// cover dedup, but only ever against a nil first-call result). Asserts the same error is returned
+// from every call -- not only the first -- exactly like the existing idempotency tests do, but this
+// time with a first-call result that would expose a regression discarding closeErr entirely.
+func TestCloseCapturesNonNilFirstCallError(t *testing.T) {
+	wantErr := errors.New("simulated genuine close failure")
+	conn := &erroringCloseConn{err: wantErr}
+	c := &GameConn{conn: conn, reader: bufio.NewReaderSize(conn, 4096)}
+
+	err1 := c.Close()
+	err2 := c.Close()
+	err3 := c.Close()
+
+	if got := conn.callCount(); got != 1 {
+		t.Errorf("underlying net.Conn.Close() called %d times across 3 GameConn.Close() calls, want exactly 1", got)
+	}
+	if err1 != wantErr {
+		t.Errorf("first Close() = %v, want it to be the underlying net.Conn.Close()'s genuine error (%v) -- a regression that discards the captured error (e.g. calling c.conn.Close() without storing its result) would return nil here instead", err1, wantErr)
+	}
+	if err2 != err1 {
+		t.Errorf("second Close() = %v, want it to equal the first Close()'s captured error (%v)", err2, err1)
+	}
+	if err3 != err1 {
+		t.Errorf("third Close() = %v, want it to equal the first Close()'s captured error (%v)", err3, err1)
 	}
 }

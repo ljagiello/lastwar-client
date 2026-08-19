@@ -196,7 +196,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		}
 		if err := conn.SendEnvelope(controllerSystem, actionLogin, loginContent); err != nil {
 			conn.Close()
-			return nil, err
+			return nil, sendStageError{err: err}
 		}
 		slog.Info("login request sent, waiting for response",
 			"gameUid", p.GameUid, "zone", zone, "accessTok", redact(p.AccessTok), "shumeiBoxId", redact(p.ShumeiBoxId))
@@ -221,7 +221,15 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		}
 		slog.Info("login OK")
 
-		if siObj := findServerInfo(env.Content); siObj != nil && siObj.GetString("ip") != "" {
+		siObj := findServerInfo(env.Content)
+		redirectIPVal := ""
+		if siObj != nil {
+			redirectIPVal = redirectIP(siObj, "crossserver.go cross-server Login")
+		}
+		if siObj != nil && redirectIPVal != "" {
+			// redirectIP (login.go) distinguishes a present-but-wrong-typed ip from a genuinely
+			// absent one, logging a Warn for the former -- see its doc comment for why that gap
+			// (only port was hardened via getIntFlexible, not ip) was a real, non-theoretical risk.
 			// buildBaseZoneLoginAddr (login.go) guards against an empty resolved host --
 			// same "serverInfo" redirect shape and same gap login.go's Login() had until
 			// round 18: only siObj.GetString("ip") != "" was checked above, which doesn't
@@ -229,7 +237,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// to an empty host. An unguarded fmt.Sprintf("%s:%d", "", port) wouldn't fail --
 			// Go's "host:port" dial syntax treats an empty host as the loopback interface,
 			// so this would silently redial 127.0.0.1/::1 instead of erroring clearly.
-			newAddr, err := buildBaseZoneLoginAddr(siObj.GetString("ip"), int(getIntFlexible(siObj, "port")))
+			newAddr, err := buildBaseZoneLoginAddr(redirectIPVal, int(getIntFlexible(siObj, "port")))
 			if err != nil {
 				conn.Close()
 				return nil, fmt.Errorf("cross-server login: serverInfo redirect: %w", err)

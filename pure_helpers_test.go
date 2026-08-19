@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"log/slog"
+	"strings"
+	"testing"
+)
 
 func TestCollectibleBuildings(t *testing.T) {
 	newBuilding := func(uuid int64, bId int32) Building {
@@ -83,6 +88,57 @@ func TestHasUnclaimedRewardMissingFieldIsNotUnclaimed(t *testing.T) {
 	}
 	if len(got[3]) != 1 || got[3][0] != "reward-1" {
 		t.Errorf("type 3: got %v, want [reward-1] -- notif-1 (no rewardStatus) must not appear", got[3])
+	}
+}
+
+// TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified is the regression test for
+// HasUnclaimedReward's round-29 fix: before it, the guard checked rewardStatus's presence only
+// (ok && v.Val != nil), so a PRESENT-BUT-WRONG-TYPED rewardStatus (e.g. sent as a string instead of
+// an int) slipped past the guard and then coerced to int32(0) via GetInt's silent zero-value
+// coercion -- and the "== 0" comparison deterministically (not just a chance collision)
+// misclassified it as unclaimed on every call. Reverting the requireFieldType guard in
+// HasUnclaimedReward (back to the old `v, ok := m.Raw.Get("rewardStatus"); !ok || v.Val == nil`
+// check) would make this test fail: the wrong-typed mail would then read as unclaimed and get
+// bucketed into groupUnclaimedByType's output, ready to be sent in a real mail.reward.batch
+// request.
+func TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified(t *testing.T) {
+	wrongTyped := NewSFSObject()
+	wrongTyped.PutUtfString("uid", "wrong-type-1")
+	wrongTyped.PutInt("type", 3)
+	wrongTyped.PutUtfString("rewardStatus", "not-an-int") // wrong SFS type: rewardStatus must be an Int
+
+	genuineUnclaimed := NewSFSObject()
+	genuineUnclaimed.PutUtfString("uid", "genuine-unclaimed-1")
+	genuineUnclaimed.PutInt("type", 3)
+	genuineUnclaimed.PutInt("rewardStatus", 0)
+
+	mail := []Mail{{Raw: wrongTyped}, {Raw: genuineUnclaimed}}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	gotWrongTyped := mail[0].HasUnclaimedReward()
+	gotGenuine := mail[1].HasUnclaimedReward()
+	slog.SetDefault(orig)
+
+	if gotWrongTyped {
+		t.Errorf("HasUnclaimedReward() = true for mail with wrong-typed rewardStatus, want false (must not be misclassified as unclaimed)")
+	}
+	if !gotGenuine {
+		t.Errorf("HasUnclaimedReward() = false for mail with rewardStatus=0, want true")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "wrong-typed rewardStatus") {
+		t.Errorf("expected a wrong-typed-rewardStatus warning, got log:\n%s", logged)
+	}
+
+	got := groupUnclaimedByType(mail)
+	if len(got) != 1 {
+		t.Fatalf("got %d distinct types, want 1 (the wrong-typed-rewardStatus mail must be excluded)", len(got))
+	}
+	if len(got[3]) != 1 || got[3][0] != "genuine-unclaimed-1" {
+		t.Errorf("type 3: got %v, want [genuine-unclaimed-1] -- wrong-type-1 (wrong-typed rewardStatus) must not appear", got[3])
 	}
 }
 

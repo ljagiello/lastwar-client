@@ -313,6 +313,52 @@ func TestParseInitBuildingsWrongTypedUUIDIsRejected(t *testing.T) {
 	}
 }
 
+// TestParseInitBuildingsWrongTypedBIdIsRejected is the round-29 regression test for the bId guard
+// added to ParseInitBuildings' population loop (buildings.go), mirroring
+// TestParseInitBuildingsWrongTypedUUIDIsRejected above exactly, just for bId instead of uuid. Before
+// this round's fix, a present-but-wrong-typed bId (e.g. sent as a string) silently coerced to bId=0
+// via BId()'s GetInt zero-value fallback -- not a correctness bug (collectCmdFor(0) never matches
+// any known building type, so the building was already excluded from CollectAll's collect loop
+// either way -- see this codebase's own fail-safe framing), but with zero diagnostic signal that the
+// entry was actually malformed rather than a genuine, if useless, bId=0. This guard is purely
+// consistency/diagnosability, matching the sibling uuid guard immediately above it in buildings.go.
+func TestParseInitBuildingsWrongTypedBIdIsRejected(t *testing.T) {
+	wrongTyped := NewSFSObject()
+	wrongTyped.PutLong("uuid", 111)
+	wrongTyped.PutUtfString("bId", "not-an-int") // wrong SFS type: bId must be an Int
+
+	genuineZero := NewSFSObject()
+	genuineZero.PutLong("uuid", 222)
+	genuineZero.PutInt("bId", 0) // a real, well-typed bId that happens to be zero (an unknown type)
+
+	arr := NewSFSArray()
+	arr.AddSFSObject(wrongTyped)
+	arr.AddSFSObject(genuineZero)
+	params := NewSFSObject()
+	params.PutSFSArray("building_new", arr)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := ParseInitBuildings(params)
+	slog.SetDefault(orig)
+
+	if len(got) != 1 {
+		t.Fatalf("ParseInitBuildings parsed %d buildings, want 1 (only the genuine, well-typed bId=0 entry -- the string-typed one must be rejected, not silently coerced to bId=0 too)", len(got))
+	}
+	if got[0].Uuid() != 222 || got[0].BId() != 0 {
+		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=222 bId=0 entry", got[0].Uuid(), got[0].BId())
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping building_new entry with wrong-typed bId field") {
+		t.Errorf("expected a wrong-typed-bId warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping building_new entry with no bId field") {
+		t.Errorf("wrong-typed bId must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
 // TestParseInitBuildingsRawItemCapBoundary is the round-28 boundary-condition regression test for
 // maxRawBuildingItemsPerPush: every prior raw-item-scan-cap test for this constant (see
 // TestParseInitBuildingsCapsRawItemsExaminedNotJustValidOutput above) overshoots the cap by a wide
@@ -385,6 +431,75 @@ func TestParseInitVisitors(t *testing.T) {
 		}
 		if got[0].Uid() != 444 {
 			t.Errorf("got uid %d, want 444", got[0].Uid())
+		}
+	})
+}
+
+// TestSfsFieldKindAccepts directly, exhaustively table-tests sfsFieldKindAccepts (buildings.go) --
+// the type-check function backing every requireFieldType call site across this codebase
+// (buildings.go/alliance.go/visitors.go/mail.go) -- against its full documented contract, rather
+// than only ever being exercised incidentally through requireFieldType at 2 of its 4 accepted
+// concrete Go types.
+//
+// Round-29 gap this closes: every existing wrong-typed-field regression test in this codebase
+// (TestParseInitBuildingsWrongTypedUUIDIsRejected, TestFindRecommendedTechWrongTypedScienceIdIsRejected,
+// TestParseInitVisitorsWrongTypedUIDIsRejected, and mail_orchestration_test.go's two sibling tests,
+// which this file doesn't own) only ever drives a STRING value against an int64/int32-expecting
+// field, or vice versa -- never int16 or byte, even though sfsFieldKindAccepts' own switch
+// (buildings.go) explicitly lists "int64, int32, int16, byte" as accepted for BOTH
+// sfsFieldKindLong and sfsFieldKindInt. A regression narrowing that switch's case list (e.g.
+// dropping int16/byte, or a typo'd case) would compile cleanly and pass every one of those
+// call-site tests untouched, since none of them ever construct an int16 or byte value -- this test
+// is the only thing that would catch it.
+//
+// sfsFieldKindLong and sfsFieldKindInt are documented (buildings.go's sfsFieldKind doc comments) to
+// accept the IDENTICAL four-type set, mirroring GetLong/GetInt's own identical accepted sets -- so
+// both are driven through the same four-type table below, plus sfsFieldKindString's own single
+// accepted type (string), and one genuinely-wrong-typed value per kind (bool and float64, neither
+// of which any accessor's own type switch -- sfsobject.go -- ever accepts) proving the false path
+// is real, not just an assumption from the absence of a true case.
+func TestSfsFieldKindAccepts(t *testing.T) {
+	// wrongTyped is shared across all three kinds below: bool and float64 are not in ANY
+	// accessor's accepted set (sfsobject.go's GetLong/GetInt/GetString), so both must be rejected
+	// by every kind, not just the one under test.
+	wrongTyped := []interface{}{true, float64(3.14)}
+
+	t.Run("sfsFieldKindLong", func(t *testing.T) {
+		for _, v := range []interface{}{int64(1), int32(1), int16(1), byte(1)} {
+			if !sfsFieldKindAccepts(sfsFieldKindLong, v) {
+				t.Errorf("sfsFieldKindAccepts(sfsFieldKindLong, %#v) = false, want true (%T is in GetLong's accepted set)", v, v)
+			}
+		}
+		for _, v := range wrongTyped {
+			if sfsFieldKindAccepts(sfsFieldKindLong, v) {
+				t.Errorf("sfsFieldKindAccepts(sfsFieldKindLong, %#v) = true, want false (%T is not in GetLong's accepted set)", v, v)
+			}
+		}
+	})
+
+	t.Run("sfsFieldKindInt", func(t *testing.T) {
+		for _, v := range []interface{}{int64(1), int32(1), int16(1), byte(1)} {
+			if !sfsFieldKindAccepts(sfsFieldKindInt, v) {
+				t.Errorf("sfsFieldKindAccepts(sfsFieldKindInt, %#v) = false, want true (%T is in GetInt's accepted set)", v, v)
+			}
+		}
+		for _, v := range wrongTyped {
+			if sfsFieldKindAccepts(sfsFieldKindInt, v) {
+				t.Errorf("sfsFieldKindAccepts(sfsFieldKindInt, %#v) = true, want false (%T is not in GetInt's accepted set)", v, v)
+			}
+		}
+	})
+
+	t.Run("sfsFieldKindString", func(t *testing.T) {
+		if !sfsFieldKindAccepts(sfsFieldKindString, "hello") {
+			t.Error("sfsFieldKindAccepts(sfsFieldKindString, \"hello\") = false, want true (string is GetString's sole accepted type)")
+		}
+		// int64 stands in for the numeric kinds' own accepted types here, proving
+		// sfsFieldKindString doesn't accidentally accept what sfsFieldKindLong/sfsFieldKindInt do.
+		for _, v := range append([]interface{}{int64(1)}, wrongTyped...) {
+			if sfsFieldKindAccepts(sfsFieldKindString, v) {
+				t.Errorf("sfsFieldKindAccepts(sfsFieldKindString, %#v) = true, want false (%T is not in GetString's accepted set)", v, v)
+			}
 		}
 	})
 }

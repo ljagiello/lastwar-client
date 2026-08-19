@@ -11,6 +11,27 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
+)
+
+// controlPipeRetries/controlPipeRetryDelay bound how many times RunInteractive's per-iteration
+// os.Stat/os.Open calls on the control FIFO (see statControlPipeWithRetry/openControlPipeWithRetry
+// below) retry a failure before giving up. Before this fix, ANY failure from either call -- even a
+// transient, local hiccup like a brief permission error or the pipe being momentarily
+// replaced/recreated by another process -- was immediately fatal (os.Exit(1)), discarding the
+// whole authenticated session, including its already-alive game connection, over what is often
+// self-correcting within milliseconds. This isn't just a startup concern: a FIFO reader sees EOF
+// once every writer closes, and RunInteractive's loop reopens the pipe to wait for the next
+// command, so a transient failure at reopen time is exactly as disruptive as one at startup. This
+// is the same bug class shouldAbortBeforeInteractive (main.go) exists to prevent elsewhere -- an
+// -interactive session shouldn't be discarded over a non-fatal, recoverable issue -- brought here.
+//
+// Kept intentionally small/bounded: this doesn't need to retry forever, just avoid killing a live
+// session over one transient hiccup. A failure that persists past this budget is still treated as
+// genuinely fatal, exactly as before this fix.
+const (
+	controlPipeRetries    = 5
+	controlPipeRetryDelay = 50 * time.Millisecond
 )
 
 // RunInteractive keeps the connection alive (heartbeat already running)
@@ -47,18 +68,22 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 	}()
 
 	for {
-		fi, statErr := os.Stat(controlPipe)
+		fi, statErr := statControlPipeWithRetry(controlPipe)
 		if statErr != nil {
-			slog.Error("stat control pipe failed", "controlPipe", controlPipe, "error", statErr)
+			slog.Error("stat control pipe failed", "controlPipe", controlPipe, "error", statErr, "retries", controlPipeRetries)
 			os.Exit(1)
 		}
 		if fi.Mode()&os.ModeNamedPipe == 0 {
+			// Not retried, unlike the stat/open failures above/below: a path that exists but isn't
+			// a FIFO is a permanent misconfiguration (-interactive pointed at a plain file, or
+			// mkfifo was simply never run), not a transient condition that resolves itself if we
+			// just wait and look again.
 			slog.Error("controlPipe exists but is not a FIFO -- did you forget mkfifo?", "controlPipe", controlPipe)
 			os.Exit(1)
 		}
-		f, err := os.Open(controlPipe)
+		f, err := openControlPipeWithRetry(controlPipe)
 		if err != nil {
-			slog.Error("open control pipe failed", "controlPipe", controlPipe, "error", err)
+			slog.Error("open control pipe failed", "controlPipe", controlPipe, "error", err, "retries", controlPipeRetries)
 			os.Exit(1)
 		}
 		scanner := bufio.NewScanner(f)
@@ -76,6 +101,44 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 		// A FIFO reader sees EOF once every writer closes; reopen and
 		// keep waiting for the next command instead of exiting.
 	}
+}
+
+// statControlPipeWithRetry stats controlPipe, retrying up to controlPipeRetries times (with a
+// controlPipeRetryDelay pause between attempts) before giving up -- see controlPipeRetries' own
+// doc comment for why a single os.Stat failure here must not be immediately fatal the way it used
+// to be. Returns the last error seen if every attempt fails.
+func statControlPipeWithRetry(controlPipe string) (os.FileInfo, error) {
+	var fi os.FileInfo
+	var err error
+	for attempt := 0; attempt <= controlPipeRetries; attempt++ {
+		fi, err = os.Stat(controlPipe)
+		if err == nil {
+			return fi, nil
+		}
+		if attempt < controlPipeRetries {
+			time.Sleep(controlPipeRetryDelay)
+		}
+	}
+	return nil, err
+}
+
+// openControlPipeWithRetry opens controlPipe for reading, retrying up to controlPipeRetries times
+// (with a controlPipeRetryDelay pause between attempts) before giving up -- symmetric to
+// statControlPipeWithRetry above, and for the identical reason (see controlPipeRetries' own doc
+// comment). Returns the last error seen if every attempt fails.
+func openControlPipeWithRetry(controlPipe string) (*os.File, error) {
+	var f *os.File
+	var err error
+	for attempt := 0; attempt <= controlPipeRetries; attempt++ {
+		f, err = os.Open(controlPipe)
+		if err == nil {
+			return f, nil
+		}
+		if attempt < controlPipeRetries {
+			time.Sleep(controlPipeRetryDelay)
+		}
+	}
+	return nil, err
 }
 
 func handleInteractiveLine(conn *GameConn, line string) {
@@ -169,7 +232,7 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		// the control FIFO once the connection -interactive exists to interact with is dead.
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			slog.Error("no matching response within 8s", "error", err)
+			slog.Error("no matching response within "+defaultCmdTimeout.String(), "error", err)
 			return
 		}
 		slog.Error("response wait failed -- connection appears dead, exiting interactive mode", "error", err)

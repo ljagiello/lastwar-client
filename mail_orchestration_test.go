@@ -329,6 +329,130 @@ func TestListMailWarnsOnMissingLastMailTime(t *testing.T) {
 	}
 }
 
+// TestListMailWarnsOnWrongTypedLastMailTime is the regression test for round 29's fix to ListMail's
+// lastMailTime guard: the previous guard (`!ok || v.Val == nil`) only caught a genuinely missing or
+// explicit-null lastMailTime, not a present-but-wrong-typed one. GetLong silently coerces ANY
+// non-nil value whose concrete Go type isn't in its accepted set (int64/int32/int16/byte) to
+// int64(0) -- indistinguishable from a legitimate cold-start `time` -- so a wrong-typed lastMailTime
+// used to reset reqTime to 0 with zero diagnostic signal, exactly like the missing/null case
+// TestListMailWarnsOnMissingLastMailTime covers, but without even a warning. The fake server here
+// sends lastMailTime as a string instead of a long; a correct ListMail must still advance clientseq
+// normally, reset reqTime to 0 for the next page, and now also log a warning naming lastMailTime.
+func TestListMailWarnsOnWrongTypedLastMailTime(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	type gotReq struct {
+		clientseq string
+		time      int64
+	}
+	var gotReqs []gotReq
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		readReq := func() (*ExtensionMessage, bool) {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return nil, false
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				return nil, false
+			}
+			gotReqs = append(gotReqs, gotReq{msg.Params.GetString("clientseq"), msg.Params.GetLong("time")})
+			return msg, true
+		}
+
+		msg, ok := readReq()
+		if !ok {
+			return
+		}
+		if msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("page 1 Cmd = %q, want chat.get.system.mails", msg.Cmd)
+		}
+		resp1 := NewSFSObject()
+		arr1 := NewSFSArray()
+		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0))
+		resp1.PutSFSArray("msg", arr1)
+		resp1.PutBool("more", true)
+		resp1.PutUtfString("lastUid", "uid-2")
+		resp1.PutUtfString("lastMailTime", "not-a-long") // wrong SFS type: lastMailTime must be a Long
+		if err := server.SendExtension("push.chat.get.system.mails", resp1); err != nil {
+			return
+		}
+
+		msg, ok = readReq()
+		if !ok {
+			return
+		}
+		if msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("page 2 Cmd = %q, want chat.get.system.mails", msg.Cmd)
+		}
+		resp2 := NewSFSObject()
+		arr2 := NewSFSArray()
+		arr2.AddSFSObject(newTestMailObj("uid-3", 9, 0))
+		resp2.PutSFSArray("msg", arr2)
+		resp2.PutBool("more", false)
+		_ = server.SendExtension("push.chat.get.system.mails", resp2)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	var got []Mail
+	var err error
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		got, err = ListMail(client)
+	}()
+
+	select {
+	case <-listDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ListMail never returned")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished both pages")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	wantUids := []string{"uid-1", "uid-3"}
+	if len(got) != len(wantUids) {
+		t.Fatalf("got %d mail entries, want %d", len(got), len(wantUids))
+	}
+	for i, m := range got {
+		if m.Uid() != wantUids[i] {
+			t.Errorf("mail[%d].Uid() = %q, want %q", i, m.Uid(), wantUids[i])
+		}
+	}
+
+	if len(gotReqs) != 2 {
+		t.Fatalf("fake server saw %d requests, want 2", len(gotReqs))
+	}
+	if gotReqs[1].clientseq != "uid-2" {
+		t.Errorf("page 2 request clientseq = %q, want %q (page 1's lastUid) -- the wrong-typed lastMailTime must not stop clientseq advancing", gotReqs[1].clientseq, "uid-2")
+	}
+	if gotReqs[1].time != 0 {
+		t.Errorf("page 2 request time = %d, want 0 -- lastMailTime was wrong-typed in page 1's response so reqTime resets to GetLong's zero value", gotReqs[1].time)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "lastMailTime") {
+		t.Errorf("expected a warning mentioning lastMailTime when more=true but lastMailTime is wrong-typed, got log:\n%s", logged)
+	}
+	if !strings.Contains(logged, "wrong-typed") {
+		t.Errorf("expected the warning to identify the field as wrong-typed (not missing/null), got log:\n%s", logged)
+	}
+}
+
 // TestListMailWarnsOnNonBoolMoreField is the regression test for this round's fix to ListMail's
 // pagination loop: a response whose `more` field is present but not a bool must not be silently
 // treated as more=false with zero diagnostic. Before the fix, `mv.Val.(bool)`'s failed assertion

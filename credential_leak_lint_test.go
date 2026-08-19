@@ -97,6 +97,7 @@ func TestNoRawSFSObjectDumpInLogsOrErrors(t *testing.T) {
 		`conn.go:slog.Warn(label+" no-op (status=0, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.String())`:      "same reasoning as the conn.go entry above",
 		`interactive.go:slog.Info("shutting down", "signal", sig.String())`:                                                "sig is an os.Signal, not an SFSObject -- String() here is the standard library's, unrelated to this bug class",
 		`interactive.go:slog.Error("unparseable JSON number", "key", key, "value", val.String())`:                          "val is a json.Number, not an SFSObject -- String() here is encoding/json's, unrelated to this bug class",
+		`interactive.go:slog.Error("no matching response within "+defaultCmdTimeout.String(), "error", err)`:               "defaultCmdTimeout is a time.Duration (const defaultCmdTimeout = 8 * time.Second, conn.go) -- String() here is the standard library's Duration.String(), unrelated to this bug class, same as the sig/val entries immediately above",
 	}
 
 	seen := map[string]bool{}
@@ -175,6 +176,62 @@ var getStringSensitiveKeyRe = regexp.MustCompile(`\.GetString\("(\w+)"\)`)
 // uses.
 var redactWrappedGetStringRe = regexp.MustCompile(`redact\([\w.]*GetString\("(\w+)"\)\)`)
 
+// sensitiveGetStringOccurrence describes one `.GetString("key")` occurrence found within a single
+// sink call's joined source text (see findUnsafeSensitiveGetStringCalls) -- key is the sensitive key
+// name involved, and offset is this occurrence's own byte position within the scanned text, used to
+// compute which physical line it actually sits on (which may differ from the line the sink call
+// itself starts on, for a multi-line call).
+type sensitiveGetStringOccurrence struct {
+	key    string
+	offset int
+}
+
+// findUnsafeSensitiveGetStringCalls scans rawJoined (the raw, unstripped joined text of one
+// slog.*/fmt.*/log.Print* sink call -- see joinSinkCall) for every `.GetString("key")` occurrence
+// whose key is registered in sensitiveSFSKeys and that is NOT wrapped in redact(...) AT THAT SAME
+// OCCURRENCE.
+//
+// Round-29 fix: this used to be computed differently, via a `safeKeys map[string]bool` populated
+// per matched KEY NAME from every redactWrappedGetStringRe match anywhere in the block, then ANY
+// getStringSensitiveKeyRe match for that key name was skipped if safeKeys[key] was true. That is a
+// real false-negative gap: a hypothetical line like
+// `slog.Info("x", "masked", redact(o.GetString("loginKey")), "raw", o.GetString("loginKey"))` would
+// set safeKeys["loginKey"]=true from the wrapped occurrence, and the SECOND, genuinely-unsafe raw
+// occurrence of GetString("loginKey") in the SAME sink call would then also be incorrectly skipped,
+// purely because it shares a key name with the safe one elsewhere in the block.
+//
+// Fixed by checking safety POSITIONALLY instead of by key name: a raw occurrence is safe only if its
+// own exact source span falls inside one of redactWrappedGetStringRe's own match spans -- which
+// necessarily contains that exact occurrence's `.GetString("key")` text, since that's the literal
+// substring the wrapping pattern matches around. A genuinely-unsafe raw occurrence elsewhere in the
+// same block, even one sharing a key name with a safe wrapped occurrence, therefore no longer
+// escapes detection. See TestFindUnsafeSensitiveGetStringCallsCatchesSameKeyPositionalFalseNegative
+// for the regression coverage proving this.
+func findUnsafeSensitiveGetStringCalls(rawJoined string) []sensitiveGetStringOccurrence {
+	safeSpans := redactWrappedGetStringRe.FindAllStringIndex(rawJoined, -1)
+
+	var out []sensitiveGetStringOccurrence
+	for _, m := range getStringSensitiveKeyRe.FindAllStringSubmatchIndex(rawJoined, -1) {
+		start, end := m[0], m[1]
+		key := rawJoined[m[2]:m[3]]
+		if !sensitiveSFSKeys[key] {
+			continue
+		}
+		safe := false
+		for _, span := range safeSpans {
+			if start >= span[0] && end <= span[1] {
+				safe = true
+				break
+			}
+		}
+		if safe {
+			continue
+		}
+		out = append(out, sensitiveGetStringOccurrence{key: key, offset: start})
+	}
+	return out
+}
+
 // TestNoSensitiveGetStringLoggedRaw is the round-28 sibling of TestNoRawSFSObjectDumpInLogsOrErrors
 // above, closing a related but distinct gap in the same credential-leak bug class. That test scans
 // for a raw .String()/.StringRedacted()-style dump of a *whole* SFSObject reaching a log/error sink;
@@ -194,9 +251,11 @@ var redactWrappedGetStringRe = regexp.MustCompile(`redact\([\w.]*GetString\("(\w
 // range rather than joinSinkCall's paren-balance-stripped text: stripStringsAndComments deliberately
 // erases string-literal CONTENTS (so a stray paren inside one can't confuse the paren tally), which
 // would erase the very key name -- `"un"` inside `GetString("un")` -- this scan needs to see. It
-// then flags a `.GetString("key")` call for a key registered in sensitiveSFSKeys, unless that same
-// call is wrapped in redact(...) (the one safe pattern this repo uses for logging a sensitive
-// field's value, e.g. login.go's `redact(msg2.Params.GetString("loginKey"))`).
+// then delegates to findUnsafeSensitiveGetStringCalls (above) to flag a `.GetString("key")` call for
+// a key registered in sensitiveSFSKeys, unless that same OCCURRENCE (not just the same key name
+// somewhere in the block -- see that function's own doc comment for the round-29 fix this
+// implements) is wrapped in redact(...) (the one safe pattern this repo uses for logging a
+// sensitive field's value, e.g. login.go's `redact(msg2.Params.GetString("loginKey"))`).
 //
 // Known, accepted limitation, mirroring the sibling test's own documented gap: this cannot catch a
 // GetString(...) result stashed in a local variable and logged several statements later -- only the
@@ -244,16 +303,12 @@ func TestNoSensitiveGetStringLoggedRaw(t *testing.T) {
 			// doc comment above for why the stripped version would hide the key name entirely.
 			rawJoined := strings.Join(lines[startIdx:endIdx+1], "\n")
 
-			safeKeys := map[string]bool{}
-			for _, m := range redactWrappedGetStringRe.FindAllStringSubmatch(rawJoined, -1) {
-				safeKeys[m[1]] = true
-			}
-
-			for _, m := range getStringSensitiveKeyRe.FindAllStringSubmatch(rawJoined, -1) {
-				key := m[1]
-				if !sensitiveSFSKeys[key] || safeKeys[key] {
-					continue
-				}
+			for _, occ := range findUnsafeSensitiveGetStringCalls(rawJoined) {
+				// The occurrence's own physical line, computed from its byte offset within
+				// rawJoined -- may differ from startIdx+1 (the sink call's OPENING line) for a
+				// multi-line sink call, so this points at the actual offending line rather than
+				// always the call's first line.
+				lineNum := startIdx + strings.Count(rawJoined[:occ.offset], "\n") + 1
 				trimmedStart := strings.TrimSpace(lines[startIdx])
 				allowKey := relName + ":" + trimmedStart
 				if _, ok := allowlist[allowKey]; ok {
@@ -266,7 +321,7 @@ func TestNoSensitiveGetStringLoggedRaw(t *testing.T) {
 					"cleartext. Log its length instead (mirroring the emailLen/usernameLen pattern), or "+
 					"wrap it in redact(...) if the value itself is genuinely useful to log, or add this "+
 					"line to the allowlist in this test with a one-line justification if it's genuinely "+
-					"safe.\n\tline: %s", relName, startIdx+1, key, key, trimmedStart)
+					"safe.\n\tline: %s", relName, lineNum, occ.key, occ.key, trimmedStart)
 			}
 		}
 		return nil
@@ -612,5 +667,122 @@ func TestStringCallReMatchesUnsafeRawStringToo(t *testing.T) {
 				t.Errorf("stringCallRe.MatchString(%q) = %v, want %v", tt.line, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestGetStringSensitiveKeyReMatches is a small table-driven test confirming getStringSensitiveKeyRe
+// (round-28) matches an ordinary `.GetString("key")` call and captures the literal key name, while
+// not matching an unrelated call shape -- mirroring the direct-unit-test pattern this file already
+// uses for sinkStartRe/stringCallRe above (round-29: this regex previously had no dedicated test of
+// its own, unlike every other regex this file defines).
+func TestGetStringSensitiveKeyReMatches(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		want    bool
+		wantKey string
+	}{
+		{"plain GetString call matches, captures key", `o.GetString("loginKey")`, true, "loginKey"},
+		{"GetString call on a chained selector matches", `msg.Params.GetString("un")`, true, "un"},
+		{"key with digits/underscores matches", `o.GetString("phone_model2")`, true, "phone_model2"},
+		{"GetInt does not match", `o.GetInt("level")`, false, ""},
+		{"GetString with no arguments does not match", `o.GetString()`, false, ""},
+		{"unrelated call does not match", `strings.TrimSpace(x)`, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := getStringSensitiveKeyRe.FindStringSubmatch(tt.line)
+			got := m != nil
+			if got != tt.want {
+				t.Fatalf("getStringSensitiveKeyRe.MatchString(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+			if got && m[1] != tt.wantKey {
+				t.Errorf("getStringSensitiveKeyRe captured key %q, want %q", m[1], tt.wantKey)
+			}
+		})
+	}
+}
+
+// TestRedactWrappedGetStringReMatches is a small table-driven test confirming
+// redactWrappedGetStringRe (round-28) matches the one safe form -- a GetString(key) call
+// immediately wrapped in redact(...) -- while not matching a bare, unwrapped GetString(key) call or
+// one wrapped in something else. Same round-29 "no dedicated test" gap as getStringSensitiveKeyRe
+// above.
+func TestRedactWrappedGetStringReMatches(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		want    bool
+		wantKey string
+	}{
+		{"redact-wrapped call on a chained selector matches", `redact(msg2.Params.GetString("loginKey"))`, true, "loginKey"},
+		{"redact-wrapped call on a bare receiver matches", `redact(o.GetString("at"))`, true, "at"},
+		{"bare unwrapped GetString does not match", `o.GetString("loginKey")`, false, ""},
+		{"GetString wrapped in something other than redact does not match", `strings.ToUpper(o.GetString("loginKey"))`, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := redactWrappedGetStringRe.FindStringSubmatch(tt.line)
+			got := m != nil
+			if got != tt.want {
+				t.Fatalf("redactWrappedGetStringRe.MatchString(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+			if got && m[1] != tt.wantKey {
+				t.Errorf("redactWrappedGetStringRe captured key %q, want %q", m[1], tt.wantKey)
+			}
+		})
+	}
+}
+
+// TestFindUnsafeSensitiveGetStringCallsCatchesSameKeyPositionalFalseNegative is the round-29
+// regression test for the false-negative gap findUnsafeSensitiveGetStringCalls' own doc comment
+// describes: a genuinely-unsafe raw GetString(key) occurrence in the same sink call as a safe
+// redact(...)-wrapped occurrence of the SAME key name must still be caught, not incorrectly skipped
+// just because a key-name-only safety check (the pre-round-29 logic) would have marked that whole
+// key name as safe from the wrapped occurrence alone.
+func TestFindUnsafeSensitiveGetStringCallsCatchesSameKeyPositionalFalseNegative(t *testing.T) {
+	// A sanity check that "loginKey" really is registered as sensitive, so this test fixture
+	// actually exercises the intended code path.
+	if !sensitiveSFSKeys["loginKey"] {
+		t.Fatal("test fixture assumes \"loginKey\" is a registered sensitive key (sensitiveSFSKeys, sfsobject.go)")
+	}
+
+	rawJoined := `slog.Info("x", "masked", redact(o.GetString("loginKey")), "raw", o.GetString("loginKey"))`
+
+	got := findUnsafeSensitiveGetStringCalls(rawJoined)
+	if len(got) != 1 {
+		t.Fatalf("findUnsafeSensitiveGetStringCalls found %d unsafe occurrence(s), want exactly 1 (the second, "+
+			"unwrapped GetString(\"loginKey\") call) -- got: %+v", len(got), got)
+	}
+	if got[0].key != "loginKey" {
+		t.Errorf("flagged occurrence key = %q, want %q", got[0].key, "loginKey")
+	}
+	// The flagged occurrence must be the SECOND (unwrapped) one, not the first (safely wrapped) one
+	// -- confirm its offset falls after the redact(...) call closes.
+	wrapEnd := strings.Index(rawJoined, "))") + len("))")
+	if got[0].offset < wrapEnd {
+		t.Errorf("flagged occurrence at offset %d falls inside/before the redact(...)-wrapped call "+
+			"(which ends at %d) -- the WRAPPED occurrence was incorrectly flagged instead of the raw one",
+			got[0].offset, wrapEnd)
+	}
+
+	// Sanity check this fixture actually reproduces the pre-round-29 bug condition: the OLD,
+	// key-name-only logic would have found zero unsafe occurrences here (since "loginKey" appearing
+	// wrapped once anywhere in the block was enough to mark the whole key name safe), even though a
+	// genuinely-unsafe raw occurrence is present.
+	oldSafeKeys := map[string]bool{}
+	for _, m := range redactWrappedGetStringRe.FindAllStringSubmatch(rawJoined, -1) {
+		oldSafeKeys[m[1]] = true
+	}
+	oldFoundUnsafe := false
+	for _, m := range getStringSensitiveKeyRe.FindAllStringSubmatch(rawJoined, -1) {
+		if sensitiveSFSKeys[m[1]] && !oldSafeKeys[m[1]] {
+			oldFoundUnsafe = true
+		}
+	}
+	if oldFoundUnsafe {
+		t.Fatal("test fixture no longer reproduces the pre-round-29 false-negative condition (the old, " +
+			"key-name-only logic would have caught this too) -- update the fixture so it still demonstrates " +
+			"the bug this test guards against")
 	}
 }

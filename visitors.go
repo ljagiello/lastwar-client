@@ -140,12 +140,27 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	}
 
 	limit := maxVisitorsDefensiveCeiling
-	if maxNum := visitorObj.GetInt("maxNum"); maxNum > 0 {
-		limit = int(maxNum)
-		if limit > maxVisitorsUpperBound {
-			slog.Warn("visitor.maxNum exceeds upper sanity bound; clamping",
-				"maxNum", maxNum, "cap", maxVisitorsUpperBound)
-			limit = maxVisitorsUpperBound
+	// maxNum's presence is checked separately from its type (round 29 audit), unlike the sibling
+	// uid guard below (requireFieldType, which conflates the two): maxNum being genuinely ABSENT is
+	// this function's own documented, expected fallback path (see this function's doc comment
+	// above) -- not a malformed-entry signal worth a Warn -- so only a PRESENT-but-wrong-typed
+	// maxNum (e.g. sent as a string) gets a diagnostic Warn here. Before this guard, a wrong-typed
+	// maxNum silently coerced to maxNum=0 via GetInt's own zero-value fallback, which is <= 0 and so
+	// was already indistinguishable from -- and fell back exactly like -- a genuinely-absent field:
+	// fail-safe (the more conservative maxVisitorsDefensiveCeiling always wins over trusting a
+	// wrong-typed value), but with zero diagnostic signal that the field was actually malformed
+	// rather than simply omitted. See TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning.
+	if maxNumV, ok := visitorObj.Get("maxNum"); ok && maxNumV.Val != nil {
+		if !sfsFieldKindAccepts(sfsFieldKindInt, maxNumV.Val) {
+			slog.Warn("visitor.maxNum field is present but wrong-typed; falling back to defensive ceiling",
+				"raw", visitorObj.StringRedacted(), "goType", fmt.Sprintf("%T", maxNumV.Val), "cap", maxVisitorsDefensiveCeiling)
+		} else if maxNum := visitorObj.GetInt("maxNum"); maxNum > 0 {
+			limit = int(maxNum)
+			if limit > maxVisitorsUpperBound {
+				slog.Warn("visitor.maxNum exceeds upper sanity bound; clamping",
+					"maxNum", maxNum, "cap", maxVisitorsUpperBound)
+				limit = maxVisitorsUpperBound
+			}
 		}
 	}
 	if len(arr.items) > limit {

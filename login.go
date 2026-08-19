@@ -89,6 +89,52 @@ func buildBaseZoneLoginAddr(ip string, port int) (string, error) {
 	return fmt.Sprintf("%s:%d", host, port), nil
 }
 
+// redirectIP reads a serverInfo redirect payload's "ip" field the same way the pre-round-29
+// unguarded siObj.GetString("ip") did, but distinguishes a present-but-wrong-typed field (logged
+// as a Warn) from a genuinely absent/empty one (silently "", exactly as before). This distinction
+// matters here in a way buildings.go's requireFieldType (which collapses missing-vs-wrong-typed
+// into the same Warn+reject, correct for a hard list-entry reject) does not fit: an absent/empty
+// ip on this object is the ORDINARY case seen on the vast majority of logins that never need a
+// redirect at all, and must stay silent, while a present-but-wrong-typed ip is a real,
+// non-theoretical risk worth a Warn -- gsl.go's getIntFlexible helper exists specifically because
+// this SAME serverInfo object's neighboring port field is documented as "confirmed live...
+// sometimes a UTF string instead" of a number in practice, and ip could just as easily arrive
+// wrong-typed too. This is exactly the field a real, live-confirmed shard redirect hinges on (see
+// this file's doc comment above the redirect-handling loop below, and crossserver.go's
+// DoCrossServerLogin doc comment, for why silently losing this signal is not merely theoretical).
+// context names the caller for the log line's benefit (e.g. "login.go base-zone Login").
+func redirectIP(siObj *SFSObject, context string) string {
+	v, ok := siObj.Get("ip")
+	if !ok || v.Val == nil {
+		return ""
+	}
+	if !sfsFieldKindAccepts(sfsFieldKindString, v.Val) {
+		slog.Warn("serverInfo redirect: ip field present but wrong-typed -- a live shard redirect may be silently missed",
+			"context", context, "goType", fmt.Sprintf("%T", v.Val), "raw", siObj.StringRedacted())
+		return ""
+	}
+	return siObj.GetString("ip")
+}
+
+// warnIfWrongTypedField logs a Warn when o has field present (non-nil) but its concrete decoded
+// Go type isn't one kind's corresponding GetLong/GetInt/GetString accessor (sfsobject.go) actually
+// reads -- distinct from field being genuinely absent, which every call site below already,
+// correctly, treats as "nothing to persist" and stays silent about. Unlike buildings.go's
+// requireFieldType (which collapses missing-vs-wrong-typed into the same Warn+reject, appropriate
+// for a hard list-entry reject), this only adds a diagnostic for the wrong-typed case: these call
+// sites' own GetString-then-compare-to-"" pattern is a deliberate "nothing to do" fallback, not a
+// hard rejection, so an absent field must not itself log anything.
+func warnIfWrongTypedField(o *SFSObject, field, context string, kind sfsFieldKind) {
+	v, ok := o.Get(field)
+	if !ok || v.Val == nil {
+		return
+	}
+	if !sfsFieldKindAccepts(kind, v.Val) {
+		slog.Warn("skipping "+context+" persist: "+field+" field present but wrong-typed",
+			"field", field, "goType", fmt.Sprintf("%T", v.Val))
+	}
+}
+
 // Login runs the full bootstrap: HTTP check-version, GSL getserverlist,
 // SFS2X TCP connect, base zone login, and -- unless a persisted loginKey
 // lets GSL resolve the account directly -- the email verification-code
@@ -242,7 +288,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		loginContent.PutSFSObject("p", loginParams)
 		if err := conn.SendEnvelope(controllerSystem, actionLogin, loginContent); err != nil {
 			conn.Close()
-			return nil, err
+			return nil, sendStageError{err: err}
 		}
 		slog.Info("login request sent, waiting for response", "gameUid", gameUid, "at", redact(accessTok))
 
@@ -274,13 +320,18 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			}
 		}
 
-		if siObj := findServerInfo(env.Content); siObj != nil && siObj.GetString("ip") != "" {
+		siObj := findServerInfo(env.Content)
+		redirectIPVal := ""
+		if siObj != nil {
+			redirectIPVal = redirectIP(siObj, "login.go base-zone Login")
+		}
+		if siObj != nil && redirectIPVal != "" {
 			redirectHops++
 			if redirectHops > maxRedirectHops {
 				conn.Close()
 				return nil, fmt.Errorf("login: too many serverInfo redirects (>%d), last addr=%s zone=%s", maxRedirectHops, addr, zone)
 			}
-			newAddr, err := buildBaseZoneLoginAddr(siObj.GetString("ip"), int(getIntFlexible(siObj, "port")))
+			newAddr, err := buildBaseZoneLoginAddr(redirectIPVal, int(getIntFlexible(siObj, "port")))
 			if err != nil {
 				conn.Close()
 				return nil, fmt.Errorf("login: serverInfo redirect: %w", err)
@@ -397,7 +448,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	sendCodeParams.PutUtfString("lang", "en")
 	if err := conn.SendExtension("account.login.send.verify.code", sendCodeParams); err != nil {
 		conn.Close()
-		return nil, err
+		return nil, sendStageError{err: err}
 	}
 	slog.Info("sent account.login.send.verify.code", "emailLen", len(opts.Email))
 
@@ -434,7 +485,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	finishParams.PutUtfString("airKey", ident.AirKey())
 	if err := conn.SendExtension("account.login.new", finishParams); err != nil {
 		conn.Close()
-		return nil, err
+		return nil, sendStageError{err: err}
 	}
 
 	ackMsg, err := waitForCmd(conn, 15*time.Second, "account.login.new")
@@ -471,6 +522,12 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	slog.Info("login success", "gameUid", msg2.Params.GetString("gameUid"), "loginKey", redact(msg2.Params.GetString("loginKey")))
 	result.Account = msg2.Params
 
+	// warnIfWrongTypedField below adds a diagnostic for the "field present but wrong-typed"
+	// case specifically -- distinct from genuinely absent, which the GetString-then-compare-to-""
+	// checks that follow already, deliberately, treat as "nothing to persist" and stay silent
+	// about. Without this, a wrong-typed field here degrades the next run to the full
+	// email-verification flow (or leaves gameUid/username stale) with no log line indicating why.
+	warnIfWrongTypedField(msg2.Params, "loginKey", "push.account.login.new", sfsFieldKindString)
 	if lk := msg2.Params.GetString("loginKey"); lk != "" {
 		if err := ident.SaveLoginKey(lk); err != nil {
 			slog.Warn("failed to persist loginKey", "error", err)
@@ -478,11 +535,13 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			slog.Info("persisted loginKey for future fast logins")
 		}
 	}
+	warnIfWrongTypedField(msg2.Params, "gameUid", "push.account.login.new", sfsFieldKindString)
 	if gu := msg2.Params.GetString("gameUid"); gu != "" {
 		if err := ident.SaveGameUid(gu); err != nil {
 			slog.Warn("failed to persist gameUid", "error", err)
 		}
 	}
+	warnIfWrongTypedField(msg2.Params, "gameUserName", "push.account.login.new", sfsFieldKindString)
 	if un := msg2.Params.GetString("gameUserName"); un != "" {
 		if err := ident.SaveUsername(un); err != nil {
 			slog.Warn("failed to persist username", "error", err)

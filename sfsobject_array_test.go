@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"testing"
 )
 
@@ -333,6 +334,71 @@ func TestGetIntGetLongCoercion(t *testing.T) {
 	}
 	if got := o.GetLong("i"); got != 9 {
 		t.Errorf("GetLong(int field) = %d, want 9", got)
+	}
+}
+
+// TestGetIntRejectsOutOfInt32RangeLong is the round-29 regression test for the MAJOR finding: GetInt
+// used to do a bare, unchecked int32(n) conversion in its int64 case, which Go silently
+// truncates/wraps modulo 2^32 rather than erroring on -- an out-of-int32-range Long used to come out
+// as a small, unrelated, possibly-negative int32 instead of being treated as invalid. This proves
+// that no longer happens: a value comfortably outside int32's range must now come back as the
+// documented zero-value fallback (the same fallback GetInt already uses for a wrong-Go-typed field),
+// not as a wrapped, corrupted int32.
+func TestGetIntRejectsOutOfInt32RangeLong(t *testing.T) {
+	tests := []struct {
+		name string
+		val  int64
+	}{
+		// 1<<32 + 5 wraps to 5 under naive int32(n) truncation -- picking a value whose wrapped
+		// result would itself look like a plausible small int32 is the whole point: a test value
+		// that wrapped to something already-implausible (e.g. still enormous) wouldn't actually
+		// prove the old bug is fixed.
+		{"just above MaxInt32, wraps to a small negative value under naive truncation", math.MaxInt32 + 1},
+		{"far above MaxInt32 (1<<32 + 5 wraps to 5)", int64(1)<<32 + 5},
+		{"just below MinInt32", math.MinInt32 - 1},
+		// -(1<<40) alone would coincidentally wrap to exactly 0 (it's a multiple of 1<<32), which
+		// wouldn't distinguish this from the already-correct zero-value fallback -- the -7 offset
+		// keeps it comfortably out of int32's range while still wrapping to a recognizably nonzero
+		// value (-7) under the naive conversion this test guards against.
+		{"far below MinInt32", -(int64(1) << 40) - 7},
+		{"math.MaxInt64", math.MaxInt64},
+		// math.MinInt64 alone would also coincidentally wrap to exactly 0 (same "multiple of 1<<32"
+		// reason as above) -- +1 keeps it at the extreme boundary while wrapping to a recognizably
+		// nonzero value (1) instead.
+		{"math.MinInt64 + 1", math.MinInt64 + 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := NewSFSObject()
+			o.PutLong("v", tt.val)
+
+			got := o.GetInt("v")
+
+			// The naive int32(n) conversion Go performs is the exact bug this test guards against --
+			// computing it here (rather than hardcoding an expected wrapped value) keeps the test
+			// resilient to exactly which wrapped value a given input produces, while still proving
+			// GetInt's real output is NOT that wrapped value.
+			wrapped := int32(tt.val)
+			if got == wrapped && wrapped != 0 {
+				t.Errorf("GetInt(%d) = %d, which is the silently-wrapped (int32(n)) value -- want the zero-value fallback (0) for an out-of-int32-range Long, not a wrapped/corrupted value", tt.val, got)
+			}
+			if got != 0 {
+				t.Errorf("GetInt(%d) = %d, want 0 (the documented zero-value fallback for an out-of-int32-range Long)", tt.val, got)
+			}
+		})
+	}
+
+	// Sanity/boundary check: values that DO fit in int32's range must still round-trip normally,
+	// proving this fix didn't accidentally over-tighten GetInt for legitimate in-range Longs
+	// (including the exact MinInt32/MaxInt32 boundary values themselves).
+	inRange := []int64{0, 1, -1, math.MaxInt32, math.MinInt32}
+	for _, v := range inRange {
+		o := NewSFSObject()
+		o.PutLong("v", v)
+		if got := o.GetInt("v"); got != int32(v) {
+			t.Errorf("GetInt(%d) = %d, want %d (an in-range Long must still round-trip normally)", v, got, int32(v))
+		}
 	}
 }
 

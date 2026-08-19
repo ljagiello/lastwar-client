@@ -640,6 +640,63 @@ func TestParseInitVisitorsWrongTypedUIDIsRejected(t *testing.T) {
 	}
 }
 
+// TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning is the round-29 regression test for the
+// diagnostic guard added around ParseInitVisitors' `visitorObj.GetInt("maxNum")` read (visitors.go):
+// before this round's fix, a present-but-wrong-typed maxNum (e.g. sent as a string) silently coerced
+// to maxNum=0 via GetInt's own zero-value fallback -- indistinguishable from, and falling back
+// exactly like, a genuinely-absent maxNum field (both are <= 0, so both take the
+// maxVisitorsDefensiveCeiling fallback path) -- fail-safe (the fallback is the MORE conservative of
+// the two possible ceilings), but with zero diagnostic signal that the field was actually malformed
+// rather than simply omitted.
+//
+// Unlike the sibling uid guard above, this must NOT skip/drop anything -- maxNum has no "entry" to
+// reject, only a value to distrust -- so this test asserts the visitor LIST is still parsed in full
+// (up to the fallback ceiling), the wrong-typed-maxNum warning fires, and critically that no
+// genuinely-absent-field warning is logged instead (proving presence and type are checked
+// separately, not conflated via a requireFieldType-style presence-first guard that would misreport
+// a present-but-wrong-typed field as merely "missing").
+//
+// Mutation check: reverting visitors.go's `if maxNumV, ok := visitorObj.Get("maxNum"); ok &&
+// maxNumV.Val != nil { if !sfsFieldKindAccepts(...) { ... } ... }` guard back to the bare `if maxNum
+// := visitorObj.GetInt("maxNum"); maxNum > 0 { ... }` makes this test fail on the warning
+// assertion -- len(out) would still correctly land on maxVisitorsDefensiveCeiling either way, since
+// a coerced maxNum=0 also takes the same fallback path, so only the log output distinguishes the
+// fixed behavior from the pre-fix one.
+func TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning(t *testing.T) {
+	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
+
+	list := NewSFSArray()
+	for i := 0; i < wantListLen; i++ {
+		v := NewSFSObject()
+		v.PutLong("uid", int64(9000+i))
+		v.PutInt("eventId", 3000+int32(i))
+		list.AddSFSObject(v)
+	}
+	visitor := NewSFSObject()
+	visitor.PutUtfString("maxNum", "not-an-int") // wrong SFS type: maxNum must be an Int
+	visitor.PutSFSArray("list", list)
+	params := NewSFSObject()
+	params.PutSFSObject("visitor", visitor)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := ParseInitVisitors(params)
+	slog.SetDefault(orig)
+
+	if len(got) != maxVisitorsDefensiveCeiling {
+		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (wrong-typed maxNum must fall back to the defensive ceiling, not be treated as 0 visitors or unbounded)", len(got), maxVisitorsDefensiveCeiling)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "visitor.maxNum field is present but wrong-typed") {
+		t.Errorf("expected a wrong-typed-maxNum warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "no maxNum field") {
+		t.Errorf("wrong-typed maxNum must not be logged as a missing field -- got log:\n%s", logged)
+	}
+}
+
 // eofConnWithWrites is a minimal net.Conn whose every Read returns bare io.EOF -- like
 // conn_wait_test.go's eofConn, simulating a peer's graceful close at the live-connection level -- but
 // unlike eofConn (which embeds a nil net.Conn and would panic if any other method were called), Write

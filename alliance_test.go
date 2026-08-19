@@ -267,6 +267,15 @@ func allianceScienceEntryWrongTypedScienceId(state int32) *SFSObject {
 	return e
 }
 
+// allianceScienceEntryWrongTypedState builds an entry with a well-typed scienceId but a state field
+// present with the WRONG concrete SFS type -- a UtfString rather than an Int.
+func allianceScienceEntryWrongTypedState(scienceId int32) *SFSObject {
+	e := NewSFSObject()
+	e.PutInt("scienceId", scienceId)
+	e.PutUtfString("state", "not-an-int") // wrong SFS type: state must be an Int
+	return e
+}
+
 // allianceScienceRefreshResponse builds a science.data.refresh response carrying the given
 // allianceScience entries.
 func allianceScienceRefreshResponse(entries ...*SFSObject) *SFSObject {
@@ -436,6 +445,45 @@ func TestFindRecommendedTechWrongTypedScienceIdIsRejected(t *testing.T) {
 	}
 	if strings.Contains(logged, "skipping allianceScience entry with no scienceId field") {
 		t.Errorf("wrong-typed scienceId must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
+// TestFindRecommendedTechWrongTypedStateIsRejected is the round-29 regression test for the state
+// guard added to findRecommendedTech (alliance.go), mirroring
+// TestFindRecommendedTechWrongTypedScienceIdIsRejected above for the sibling field: before this
+// round's fix, a present-but-wrong-typed state (e.g. sent as a string) silently coerced to state=0
+// via GetInt's own zero-value fallback, which simply fails the `!= 1` recommended-tech check and is
+// treated the same as a genuine, well-typed non-recommended entry -- not a correctness bug (fails
+// safe: never a false "recommended" match), but with zero diagnostic signal that the entry was
+// actually malformed rather than legitimately not recommended. This guard is purely
+// consistency/diagnosability, matching the sibling scienceId guard immediately below it in
+// alliance.go.
+//
+// Mutation check: reverting findRecommendedTech's `requireFieldType(tech, "state", ...)` guard
+// (immediately before the `tech.GetInt("state") != 1` check) makes this test's warning assertion
+// fail -- found would still correctly come back false either way, since a coerced state=0 also
+// fails the `!= 1` check, so only the log output distinguishes the fixed behavior from the
+// pre-fix one.
+func TestFindRecommendedTechWrongTypedStateIsRejected(t *testing.T) {
+	arr := NewSFSArray()
+	arr.AddSFSObject(allianceScienceEntryWrongTypedState(999))
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	id, found := findRecommendedTech(arr)
+	slog.SetDefault(orig)
+
+	if found {
+		t.Fatalf("findRecommendedTech() = (%d, true), want found=false (state is wrong-typed -- must not be coerced to 0 and compared)", id)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping allianceScience entry with wrong-typed state field") {
+		t.Errorf("expected a wrong-typed-state warning, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "skipping allianceScience entry with no state field") {
+		t.Errorf("wrong-typed state must log as wrong-typed, not as missing -- got log:\n%s", logged)
 	}
 }
 
