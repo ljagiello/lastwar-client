@@ -155,7 +155,12 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		loginContent.PutUtfString("pw", "")
 		loginContent.PutSFSObject("p", loginParams)
 		if os.Getenv("LWDEBUG_DUMP_LOGIN") != "" {
-			slog.Debug("full login content", "content", loginContent.String())
+			// Redacted, not a raw dump -- loginContent's nested "p" object carries the live
+			// access token (p.at) and shumeiBoxId in cleartext (see identity.go's
+			// BuildLoginParams), the same sensitivity LWDEBUG_DUMP_LOGIN_BODY already treats
+			// them with below and the "login request sent" log a few lines down already
+			// redacts them with.
+			slog.Debug("full login content", "content", loginContent.StringRedacted())
 		}
 		if f := os.Getenv("LWDEBUG_DUMP_LOGIN_BODY"); f != "" {
 			outer := NewSFSObject()
@@ -194,7 +199,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// Wrapped in ErrAuthRejected (defined in errors.go) so callers can
 			// distinguish "server actively rejected this login" (ec present) from
 			// a bare dial/timeout/I/O failure above, which stay unwrapped.
-			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.String(), ErrAuthRejected)
+			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), ErrAuthRejected)
 		}
 		slog.Info("login OK")
 

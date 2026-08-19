@@ -226,7 +226,7 @@ func logCommandResult(label string, msg *ExtensionMessage) {
 			slog.Warn(label+" no-op (status=0, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.String())
 		}
 	case outcomeFailure:
-		slog.Error(label+" failed", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.String())
+		slog.Error(label+" failed", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.StringRedacted())
 	}
 }
 
@@ -298,7 +298,7 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 				// from a bare dial/timeout/I/O failure above, which stay unwrapped --
 				// same pattern as login.go's LOGIN FAILED and crossserver.go's
 				// CROSS-SERVER LOGIN FAILED errors.
-				return nil, fmt.Errorf("HANDSHAKE FAILED: ec=%v full=%s: %w", ec.Val, env.Content.String(), ErrAuthRejected)
+				return nil, fmt.Errorf("HANDSHAKE FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), ErrAuthRejected)
 			}
 			return env.Content, nil
 		}

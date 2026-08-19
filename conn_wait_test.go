@@ -2,8 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -161,6 +164,50 @@ func TestWaitForCmdSkipsUnmatchedPushes(t *testing.T) {
 	}
 	if msg.Cmd != "wanted.cmd" {
 		t.Errorf("Cmd = %q, want wanted.cmd", msg.Cmd)
+	}
+}
+
+// TestWaitForCmdSkipRedactsCredentialFields is the round-11 regression test for waitFor's generic
+// "skipped push while waiting" Debug logger (login.go:513-515): if push.account.login.new --
+// which carries a live loginKey in cleartext -- arrives while a caller is waiting for a different
+// cmd (the exact race login.go:372/386's two separate waitForCmd calls leave open), it falls into
+// this skip-and-log branch instead of the dedicated, already-redacted push.account.login.new read
+// site the round-10 fix hardened. Proves the skip-logger's output never contains the raw loginKey.
+func TestWaitForCmdSkipRedactsCredentialFields(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-1234567890"
+
+	go func() {
+		push := NewSFSObject()
+		push.PutUtfString("loginKey", secretLoginKey)
+		push.PutUtfString("gameUid", "g1")
+		if err := server.SendExtension("push.account.login.new", push); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendExtension("account.login.new", resp)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	// Debug level explicitly enabled -- this skip-logger only fires under -log-level debug in
+	// production, so a default-level (Info) handler would never emit it and this test would pass
+	// vacuously either way.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	msg, err := waitForCmd(client, 500*time.Millisecond, "account.login.new")
+	if err != nil {
+		t.Fatalf("waitForCmd: %v", err)
+	}
+	if msg.Cmd != "account.login.new" {
+		t.Errorf("Cmd = %q, want account.login.new", msg.Cmd)
+	}
+
+	if logged := buf.String(); strings.Contains(logged, secretLoginKey) {
+		t.Errorf("waitFor's skip-logger leaks the raw loginKey in cleartext:\n%s", logged)
 	}
 }
 

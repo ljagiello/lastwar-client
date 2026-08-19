@@ -308,7 +308,10 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 	// wrap the real payload (AES-encrypted) inside a `bin` field.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(body, &top); err != nil {
-		return nil, fmt.Errorf("decode top-level GSL response: %w (body=%s)", err, string(body))
+		// Not the raw body -- on success this response legitimately carries a live at/rt
+		// session token (see LoginServerListRespon.At/Rt below), so a decode-failure error must
+		// never echo it back. A byte length is enough to diagnose a malformed response.
+		return nil, fmt.Errorf("decode top-level GSL response: %w (bodyLen=%d)", err, len(body))
 	}
 
 	var lsr LoginServerListRespon
@@ -323,13 +326,16 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 				return nil, fmt.Errorf("decrypt GSL response: %w", err)
 			}
 			if err := json.Unmarshal([]byte(plain), &lsr); err != nil {
-				return nil, fmt.Errorf("decode decrypted GSL response: %w (plain=%s)", err, plain)
+				// Not the raw plaintext -- it's the AES-decrypted response and, on success,
+				// carries a live at/rt session token. See the bodyLen comment above.
+				return nil, fmt.Errorf("decode decrypted GSL response: %w (plainLen=%d)", err, len(plain))
 			}
 			return &lsr, nil
 		}
 	}
 	if err := json.Unmarshal(body, &lsr); err != nil {
-		return nil, fmt.Errorf("decode plaintext GSL response: %w (body=%s)", err, string(body))
+		// Not the raw body -- same reasoning as the two decode-failure branches above.
+		return nil, fmt.Errorf("decode plaintext GSL response: %w (bodyLen=%d)", err, len(body))
 	}
 	return &lsr, nil
 }

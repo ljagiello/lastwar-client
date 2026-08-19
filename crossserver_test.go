@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -137,6 +139,67 @@ func TestDoCrossServerLoginNoRedirect(t *testing.T) {
 	}
 	if result.Content == nil {
 		t.Error("Content = nil, want the server's Login response payload")
+	}
+}
+
+// TestDoCrossServerLoginDebugDumpRedactsCredentials is the round-11 regression test for the
+// LWDEBUG_DUMP_LOGIN debug dump (crossserver.go, "full login content"): it used to log the full
+// outgoing login SFSObject raw via loginContent.String(), which carries the live access token
+// (p.at) and shumeiBoxId in cleartext -- inconsistent with this same function's sibling
+// LWDEBUG_DUMP_LOGIN_BODY dump (0600-permissioned, explicitly treated as sensitive) and its own
+// later Info log a few lines down (which already redacts the identical two fields). Proves the
+// debug dump's captured output never contains the raw access token or shumeiBoxId.
+func TestDoCrossServerLoginDebugDumpRedactsCredentials(t *testing.T) {
+	t.Setenv("LWDEBUG_DUMP_LOGIN", "1")
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	const secretAccessTok = "sensitive-secret-accesstok-must-not-leak-1234567890"
+	const secretShumeiBoxId = "sensitive-secret-shumeiboxid-must-not-leak-0987654321"
+
+	p := CrossServerLoginParams{
+		IP:          host,
+		Port:        port,
+		Zone:        "APS1",
+		GameUid:     "uid-1",
+		DeviceID:    "dev-1",
+		AirKey:      "airkey-1",
+		AccessTok:   secretAccessTok,
+		ShumeiBoxId: secretShumeiBoxId,
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	// Debug level explicitly enabled -- LWDEBUG_DUMP_LOGIN's dump is a slog.Debug call, which a
+	// default-level (Info) handler would never emit, making this test pass vacuously either way.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := DoCrossServerLogin(p)
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v", err)
+	}
+	defer result.Conn.Close()
+
+	logged := buf.String()
+	if !strings.Contains(logged, "full login content") {
+		t.Fatal("expected the LWDEBUG_DUMP_LOGIN debug dump to have fired, but no \"full login content\" log line was captured")
+	}
+	if strings.Contains(logged, secretAccessTok) {
+		t.Errorf("LWDEBUG_DUMP_LOGIN debug dump leaks the raw access token in cleartext:\n%s", logged)
+	}
+	if strings.Contains(logged, secretShumeiBoxId) {
+		t.Errorf("LWDEBUG_DUMP_LOGIN debug dump leaks the raw shumeiBoxId in cleartext:\n%s", logged)
 	}
 }
 

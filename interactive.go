@@ -94,7 +94,11 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		}
 	}
 
-	slog.Info("sending command", "cmd", cmd, "params", params.String())
+	// Not params.String() -- an operator can send literally any command over the control FIFO,
+	// including an account/login-family one, and its response may carry a live
+	// loginKey/accessToken/airKey/shumeiBoxId in cleartext. StringRedacted masks those fields
+	// (see sfsobject.go) instead of dumping everything raw.
+	slog.Info("sending command", "cmd", cmd, "params", params.StringRedacted())
 	if err := conn.SendExtension(cmd, params); err != nil {
 		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", err)
 		os.Exit(1)
@@ -105,7 +109,8 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		slog.Error("no matching response within 8s", "error", err)
 		return
 	}
-	slog.Info("received response", "cmd", msg.Cmd, "params", msg.Params.String())
+	// Not msg.Params.String() -- same reasoning as the "sending command" log above.
+	slog.Info("received response", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
 }
 
 func putJSONValue(o *SFSObject, key string, v any) bool {

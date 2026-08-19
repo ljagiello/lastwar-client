@@ -147,6 +147,80 @@ func formatSFSValue(v SFSValue) string {
 	}
 }
 
+// sensitiveSFSKeys lists the field names this protocol is known to carry live credentials/tokens
+// under, across every login/session response and request this repo decodes or builds (see
+// login.go's redact() call sites, identity.go's BuildLoginParams, and gsl.go's
+// LoginServerListRespon.At/Rt) -- loginKey/accountArr's sibling, gameUid, is deliberately not
+// included: it identifies an account but isn't a bearer credential by itself.
+var sensitiveSFSKeys = map[string]bool{
+	"loginKey":    true,
+	"at":          true,
+	"rt":          true,
+	"accessToken": true,
+	"airKey":      true,
+	"shumeiBoxId": true,
+	"pw":          true,
+	"password":    true,
+}
+
+// StringRedacted is String()'s safe-to-log twin: a decoded server response or outgoing request
+// can carry a live loginKey/accessToken/airKey/shumeiBoxId in cleartext (this protocol has no
+// separate "credentials" envelope -- they're ordinary fields mixed in with gameplay data), and
+// String()'s fully generic dump has no way to tell those fields apart from an ordinary uid or
+// building level. StringRedacted walks the same structure but masks any key in sensitiveSFSKeys
+// (recursing into nested SFSObject/SFSArray values the same way formatSFSValue does) instead of
+// printing its value, so a call site that wants to log/error-wrap a full decoded object for
+// debugging can do so without risking a credential leak.
+func (o *SFSObject) StringRedacted() string {
+	var b bytes.Buffer
+	b.WriteString("{")
+	for i, k := range o.keys {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		v := o.values[k]
+		if sensitiveSFSKeys[k] {
+			fmt.Fprintf(&b, "%s=%s", k, redactSFSValue(v))
+		} else {
+			fmt.Fprintf(&b, "%s=%s", k, formatSFSValueRedacted(v))
+		}
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+// formatSFSValueRedacted is formatSFSValue's redacted twin, used by StringRedacted.
+func formatSFSValueRedacted(v SFSValue) string {
+	switch val := v.Val.(type) {
+	case *SFSObject:
+		return val.StringRedacted()
+	case *SFSArray:
+		var b bytes.Buffer
+		b.WriteString("[")
+		for i, item := range val.items {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(formatSFSValueRedacted(item))
+		}
+		b.WriteString("]")
+		return b.String()
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
+// redactSFSValue masks a sensitive-keyed field's value. Every known sensitive key
+// (sensitiveSFSKeys) carries a plain string on the wire; a non-string value under one of those
+// keys would be unexpected, so it falls back to the ordinary safe recursive formatter rather than
+// printing a raw value this function doesn't recognize as safe to mask.
+func redactSFSValue(v SFSValue) string {
+	if s, ok := v.Val.(string); ok {
+		return redact(s)
+	}
+	return formatSFSValueRedacted(v)
+}
+
 // SFSArray is a sequential list of tagged values.
 type SFSArray struct {
 	items []SFSValue

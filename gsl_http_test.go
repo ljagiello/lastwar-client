@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -139,6 +140,106 @@ func TestFlexStringUnmarshalJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetServerListDecodeFailuresDoNotLeakRawResponse is the round-11 regression test for
+// gsl.go's three response-decode-failure branches: a real getserverlist.php response legitimately
+// carries a live at/rt session token on success (LoginServerListRespon.At/Rt), so none of these
+// branches may embed the raw body/decrypted plaintext in the returned error. Each subtest forces
+// a different one of the three json.Unmarshal calls in GetServerList to fail while a fake token
+// is present in the response, and asserts it never appears in the resulting error text.
+func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
+	const fakeToken = "FAKE-LIVE-SESSION-TOKEN-must-not-leak-abc123"
+
+	t.Run("top-level JSON invalid", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Not valid JSON at all -- fails the map[string]json.RawMessage unmarshal (gsl.go's
+			// "decode top-level GSL response" branch) before any decryption is attempted.
+			w.Write([]byte("not json at all, but carries " + fakeToken))
+		}))
+		defer server.Close()
+
+		priv, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("generate RSA key: %v", err)
+		}
+		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		if err == nil {
+			t.Fatal("GetServerList: expected a decode error, got nil")
+		}
+		if strings.Contains(err.Error(), fakeToken) {
+			t.Errorf("GetServerList error leaks the raw response body: %v", err)
+		}
+	})
+
+	t.Run("plaintext fallback type-mismatched", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Valid JSON with no "bin" field (so GetServerList falls to the plaintext-fallback
+			// branch), but "code" is a string where LoginServerListRespon.Code expects an int --
+			// the same kind of live server-side type flip this repo's own history has already
+			// hit once before (see LoginServerListRespon's Code doc comment).
+			fmt.Fprintf(w, `{"code":"bad-type carries %s","serverList":[]}`, fakeToken)
+		}))
+		defer server.Close()
+
+		priv, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("generate RSA key: %v", err)
+		}
+		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		if err == nil {
+			t.Fatal("GetServerList: expected a decode error, got nil")
+		}
+		if strings.Contains(err.Error(), fakeToken) {
+			t.Errorf("GetServerList error leaks the raw response body: %v", err)
+		}
+	})
+
+	t.Run("decrypted plaintext type-mismatched", func(t *testing.T) {
+		priv, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("generate RSA key: %v", err)
+		}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Play the server side of the real GSL crypto envelope (same recipe as
+			// TestGSLCryptoRoundTrip in crypto_gsl_test.go): recover the AES key from the
+			// client's RSA-encrypted uuid field, then encrypt a type-mismatched reply with it so
+			// GetServerList reaches its decrypted-plaintext decode-failure branch instead of the
+			// plaintext-fallback one above.
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse form: %v", err)
+				return
+			}
+			saltCT, err := urlSafeB64Decode(r.FormValue("uuid"))
+			if err != nil {
+				t.Errorf("decode uuid field: %v", err)
+				return
+			}
+			salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT)
+			if err != nil {
+				t.Errorf("rsa decrypt salt: %v", err)
+				return
+			}
+			key := md5HexKey(string(salt))
+			reply := fmt.Sprintf(`{"code":"bad-type carries %s","serverList":[]}`, fakeToken)
+			encReply, err := aesECBEncryptPKCS7([]byte(reply), key)
+			if err != nil {
+				t.Errorf("aes encrypt reply: %v", err)
+				return
+			}
+			fmt.Fprintf(w, `{"bin":%q}`, urlSafeB64Encode(encReply))
+		}))
+		defer server.Close()
+
+		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		if err == nil {
+			t.Fatal("GetServerList: expected a decode error, got nil")
+		}
+		if strings.Contains(err.Error(), fakeToken) {
+			t.Errorf("GetServerList error leaks the raw decrypted response: %v", err)
+		}
+	})
 }
 
 // testRSAPubKeyDER generates a throwaway RSA keypair and returns its public key as base64 DER,

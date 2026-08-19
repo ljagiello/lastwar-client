@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,5 +91,58 @@ func TestHandleInteractiveLineSendsParsedCommand(t *testing.T) {
 	}
 	if got := g.params.GetLong("num"); got != 42 {
 		t.Errorf(`params["num"] = %d, want 42`, got)
+	}
+}
+
+// TestHandleInteractiveLineRedactsCredentialFields is interactive.go's sibling of
+// TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey (login_integration_test.go):
+// RunInteractive's whole purpose is trying arbitrary commands -- including, plausibly,
+// account/login-family ones -- against a real authenticated session, so its "sending
+// command"/"received response" log lines must never dump a live credential in cleartext, on
+// either the outgoing params or the incoming response.
+func TestHandleInteractiveLineRedactsCredentialFields(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-1234567890"
+	const secretPw = "sensitive-secret-outgoing-pw-must-not-leak-abcdef"
+
+	go func() {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutUtfString("loginKey", secretLoginKey)
+		resp.PutUtfString("gameUid", "g1")
+		_ = server.SendExtension(msg.Cmd, resp)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleInteractiveLine(client, `account.login.new {"pw":"`+secretPw+`"}`)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleInteractiveLine did not return promptly")
+	}
+
+	logged := buf.String()
+	if strings.Contains(logged, secretLoginKey) {
+		t.Errorf("interactive log output leaks the response loginKey in cleartext:\n%s", logged)
+	}
+	if strings.Contains(logged, secretPw) {
+		t.Errorf("interactive log output leaks the outgoing pw in cleartext:\n%s", logged)
 	}
 }

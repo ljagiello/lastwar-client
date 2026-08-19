@@ -211,7 +211,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		}
 		if ec, ok := env.Content.Get("ec"); ok {
 			conn.Close()
-			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.String(), ErrAuthRejected)
+			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), ErrAuthRejected)
 		}
 		slog.Info("login OK", "un", env.Content.GetString("un"))
 		if un := env.Content.GetString("un"); un != "" && un != ident.Username {
@@ -489,7 +489,7 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 		if msg.Cmd == "init" {
 			return ParseInitBuildings(msg.Params), ParseInitVisitors(msg.Params), true
 		}
-		slog.Debug("skipped push while waiting for init", "cmd", msg.Cmd, "params", msg.Params.String())
+		slog.Debug("skipped push while waiting for init", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
 	}
 }
 
@@ -511,7 +511,7 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 			return env, nil
 		}
 		if msg, ok := env.AsExtension(); ok {
-			slog.Debug("skipped push while waiting", "cmd", msg.Cmd, "params", msg.Params.String())
+			slog.Debug("skipped push while waiting", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
 		}
 	}
 }
