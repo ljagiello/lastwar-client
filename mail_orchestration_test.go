@@ -199,6 +199,102 @@ func TestListMailStopsOnMissingLastUid(t *testing.T) {
 	}
 }
 
+// TestListMailWarnsOnMaxPagesTruncation is the regression test for the round-14 fix to ListMail's
+// pagination loop: if the loop exhausts all maxPages requests while the server's last response
+// still reported more=true (with a perfectly valid lastUid each time -- this is NOT the
+// lastUid-missing anomaly TestListMailStopsOnMissingLastUid covers), the collected mail list is
+// silently truncated. Before the fix, this exit path fell straight through to `return all, nil`
+// with zero logging, unlike the lastUid-missing early-exit which already warns. The fake server
+// here always answers with more=true and a fresh, incrementing lastUid, for every one of the
+// maxPages(=20) requests ListMail is allowed to send, so the loop can only stop by running out of
+// pages -- never by seeing more=false or a missing lastUid. This confirms both (a) ListMail still
+// returns after exactly maxPages requests instead of looping forever, and (b) it now emits a
+// warning identifying itself as a maxPages truncation, mentioning maxPages and how much mail was
+// collected before it gave up.
+func TestListMailWarnsOnMaxPagesTruncation(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const maxPages = 20 // must match ListMail's own unexported maxPages constant
+
+	var reqCount int
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for page := 0; page < maxPages; page++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				return
+			}
+			if msg.Cmd != "chat.get.system.mails" {
+				t.Errorf("page %d Cmd = %q, want chat.get.system.mails", page, msg.Cmd)
+			}
+			reqCount++
+			resp := NewSFSObject()
+			arr := NewSFSArray()
+			arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-page%d", page), 3, 0))
+			resp.PutSFSArray("msg", arr)
+			resp.PutBool("more", true) // always more -- the server never runs out on its own
+			resp.PutUtfString("lastUid", fmt.Sprintf("cursor-%d", page))
+			resp.PutLong("lastMailTime", int64(page))
+			if err := server.SendExtension("push.chat.get.system.mails", resp); err != nil {
+				return
+			}
+		}
+		// Intentionally does not read a (maxPages+1)th request -- see the test's own doc comment
+		// for why that's the point: a correct ListMail stops after exactly maxPages requests.
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	var got []Mail
+	var err error
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		got, err = ListMail(client)
+	}()
+
+	select {
+	case <-listDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ListMail never returned -- it should stop after exactly maxPages requests")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if reqCount != maxPages {
+		t.Fatalf("fake server saw %d requests, want exactly maxPages=%d", reqCount, maxPages)
+	}
+	if len(got) != maxPages {
+		t.Fatalf("got %d mail entries, want exactly maxPages=%d (one per page)", len(got), maxPages)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "maxPages") {
+		t.Errorf("expected a warning mentioning maxPages when pagination is truncated by the page cap, got log:\n%s", logged)
+	}
+	if !strings.Contains(logged, fmt.Sprintf("%d", maxPages)) {
+		t.Errorf("expected the warning to include the maxPages value (%d), got log:\n%s", maxPages, logged)
+	}
+	if !strings.Contains(logged, "collectedSoFar") || !strings.Contains(logged, fmt.Sprintf("%d", len(got))) {
+		t.Errorf("expected the warning to include collectedSoFar=%d, got log:\n%s", len(got), logged)
+	}
+}
+
 // mailBatchServer is the shared fake-server shape for the ClaimAllMail batching tests below: it
 // answers exactly one ListMail request with all of mails in a single page, then answers
 // wantReadBatches read-status batches and wantRewardBatches reward-claim batches, recording each

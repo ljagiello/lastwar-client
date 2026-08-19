@@ -79,8 +79,18 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 	clientseq := ""
 	reqTime := int64(0)
 	first := true
+	// truncated tracks whether the loop is currently mid-pagination (the most recent response
+	// had more=true and a usable lastUid, so another page was queued up) versus having stopped
+	// for a "real" reason (more=false, or the lastUid-missing anomaly below, both of which break
+	// out of the loop after resetting this back to false). It's reset at the top of every
+	// iteration and only set true again at the bottom once a page has been fully consumed and
+	// the next request is queued -- so if the for-loop instead exits because page reached
+	// maxPages, whatever truncated was left as by the final iteration tells us whether that exit
+	// happened while the server still had more mail to give (see the warning after the loop).
+	truncated := false
 
 	for page := 0; page < maxPages; page++ {
+		truncated = false
 		params := NewSFSObject()
 		params.PutUtfString("clientseq", clientseq)
 		params.PutLong("time", reqTime)
@@ -131,6 +141,15 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		clientseq = lastUid
 		reqTime = msg.Params.GetLong("lastMailTime")
 		first = false
+		truncated = true
+	}
+	// If the loop above ran out of pages (maxPages) while the last-seen response still reported
+	// more=true and a usable lastUid, that's a silent truncation: the account has more mail than
+	// this run collected, and the caller (ClaimAllMail, and beyond it the -collect flow) has no
+	// other way to notice. Mirror the lastUid-missing warning above so an operator can tell a run
+	// was cut short and roughly how much mail was left uncollected.
+	if truncated {
+		slog.Warn("list mail: reached maxPages while server still reported more mail available, stopping pagination -- collected mail is truncated", "maxPages", maxPages, "collectedSoFar", len(all))
 	}
 	return all, nil
 }

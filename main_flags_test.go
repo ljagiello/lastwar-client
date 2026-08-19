@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +73,36 @@ func TestIgnoredCrossServerFlags(t *testing.T) {
 			got := ignoredCrossServerFlags(c.visited)
 			if !slices.Equal(got, c.want) {
 				t.Errorf("ignoredCrossServerFlags(%v) = %v, want %v", c.visited, got, c.want)
+			}
+		})
+	}
+}
+
+func TestWarnIfDecodeLabelIgnored(t *testing.T) {
+	cases := []struct {
+		name         string
+		decodeStream string
+		decodeLabel  string
+		wantWarning  bool
+	}{
+		{"decode-label set without decode-stream", "", "c2s", true},
+		{"decode-label set with decode-stream also set", "stream.bin", "c2s", false},
+		{"neither set", "", "", false},
+		{"decode-stream set without decode-label", "stream.bin", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			defer slog.SetDefault(orig)
+
+			warnIfDecodeLabelIgnored(c.decodeStream, c.decodeLabel)
+
+			got := strings.Contains(buf.String(), "ignoring -decode-label because -decode-stream is not set")
+			if got != c.wantWarning {
+				t.Errorf("warnIfDecodeLabelIgnored(decodeStream=%q, decodeLabel=%q): warning present = %v, want %v (log output: %s)",
+					c.decodeStream, c.decodeLabel, got, c.wantWarning, buf.String())
 			}
 		})
 	}

@@ -196,7 +196,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			conn.Close()
 			return nil, err
 		}
-		slog.Info("login request sent, waiting for response", "un", gameUid, "at", redact(accessTok))
+		slog.Info("login request sent, waiting for response", "gameUid", gameUid, "at", redact(accessTok))
 
 		env, err := waitFor(conn, 15*time.Second, func(e *Envelope) bool {
 			return e.Controller == controllerSystem && e.Action == actionLogin

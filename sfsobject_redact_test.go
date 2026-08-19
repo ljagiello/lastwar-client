@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -194,6 +195,12 @@ func TestBuildLoginParamsIOSModeDoesNotLeakSecretsInAnalyticsBlob(t *testing.T) 
 // TestStringRedactedMatchesStringForNonSensitiveData proves StringRedacted is a pure superset of
 // String()'s behavior for data with no sensitive keys -- it must not, say, accidentally drop or
 // reorder ordinary fields.
+//
+// Since round 14's Fix 1, String() itself delegates straight to StringRedacted() (see
+// sfsobject.go), so this equality now holds unconditionally, not just for non-sensitive data --
+// this test still keeps its original non-sensitive-only fixture as basic coverage, while
+// TestFmtVerbAutoInvokesStringerSafely below is the test that specifically proves String() also
+// redacts sensitive data reached via implicit fmt.Stringer auto-invocation.
 func TestStringRedactedMatchesStringForNonSensitiveData(t *testing.T) {
 	o := NewSFSObject()
 	o.PutUtfString("uid", "1113165390000783")
@@ -202,5 +209,138 @@ func TestStringRedactedMatchesStringForNonSensitiveData(t *testing.T) {
 
 	if got, want := o.StringRedacted(), o.String(); got != want {
 		t.Errorf("StringRedacted() = %q, want it to match String() = %q when no sensitive keys are present", got, want)
+	}
+}
+
+// TestFmtVerbAutoInvokesStringerSafely is the round-14 regression test for Fix 1, the structural
+// fix to the credential-leak bug class this repo has hunted for four rounds: *SFSObject's String()
+// method used to be the raw, unredacted dump (now renamed unsafeRawString(), see sfsobject.go), so
+// ANY code path that handed a *SFSObject to fmt's %v/%s verbs, a Print-family function, or slog's
+// Any-kind attribute formatting would automatically invoke it via fmt.Stringer -- with zero literal
+// ".String()" text in the source, a pattern credential_leak_lint_test.go's text-scanning approach
+// structurally cannot see. This test exercises exactly that implicit-invocation path (never calling
+// .String()/.StringRedacted() explicitly) and confirms it never leaks a secret, proving Fix 1
+// actually closes the gap rather than merely relying on every call site remembering to opt in.
+func TestFmtVerbAutoInvokesStringerSafely(t *testing.T) {
+	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-via-stringer-1234567890"
+
+	o := NewSFSObject()
+	o.PutUtfString("loginKey", secretLoginKey)
+	o.PutUtfString("un", "player-one")
+
+	// %v is the classic implicit-Stringer verb -- no ".String()" substring appears anywhere in
+	// this call.
+	gotSprintfV := fmt.Sprintf("resp: %v", o)
+	if strings.Contains(gotSprintfV, secretLoginKey) {
+		t.Errorf("fmt.Sprintf(\"%%v\", o) leaks a secret via implicit Stringer auto-invocation: %s", gotSprintfV)
+	}
+	if !strings.Contains(gotSprintfV, "player-one") {
+		t.Errorf("fmt.Sprintf(\"%%v\", o) must not mask ordinary non-sensitive fields, got: %s", gotSprintfV)
+	}
+
+	// %s also auto-invokes Stringer.
+	gotSprintfS := fmt.Sprintf("resp: %s", o)
+	if strings.Contains(gotSprintfS, secretLoginKey) {
+		t.Errorf("fmt.Sprintf(\"%%s\", o) leaks a secret via implicit Stringer auto-invocation: %s", gotSprintfS)
+	}
+
+	// fmt.Errorf("...: %v", someSFSObject) is the exact ordinary, idiomatic pattern called out in
+	// the round-14 assignment as the one a future contributor might write without realizing
+	// SFSObject.String() used to be unredacted.
+	gotErrorf := fmt.Errorf("request failed: %v", o)
+	if strings.Contains(gotErrorf.Error(), secretLoginKey) {
+		t.Errorf("fmt.Errorf(\"...: %%v\", o) leaks a secret via implicit Stringer auto-invocation: %s", gotErrorf.Error())
+	}
+
+	// A Print-family sink (fmt.Fprintln, writing to a buffer instead of stdout so the test stays
+	// hermetic) also auto-invokes Stringer for a non-string argument.
+	var buf bytes.Buffer
+	fmt.Fprintln(&buf, o)
+	if strings.Contains(buf.String(), secretLoginKey) {
+		t.Errorf("fmt.Fprintln(w, o) leaks a secret via implicit Stringer auto-invocation: %s", buf.String())
+	}
+}
+
+// TestStringRedactedMasksSensitiveRawSFSArray is the round-14 regression test for Fix 2: a
+// sensitive key whose value is a raw *SFSArray (the wrapper type sfsArrayType decodes into, built
+// here the same way PutSFSArray's callers do) of scalar items used to fall through redactSFSValue
+// into formatSFSValueRedacted's *SFSArray case, which recurses via formatSFSValueRedacted (not
+// redactSFSValue) on each item -- losing the "sensitive" context one level down, so each raw scalar
+// item printed via the naive fmt.Sprintf("%v", val) default with no redaction at all. No current
+// PutSFSArray call site does this for a sensitive key, but a future decoded server response could.
+func TestStringRedactedMasksSensitiveRawSFSArray(t *testing.T) {
+	const secretItem1 = "secret-raw-array-item-must-not-leak-1"
+	const secretItem2 = "secret-raw-array-item-must-not-leak-2"
+
+	arr := NewSFSArray()
+	arr.add(SFSValue{sfsUtfString, secretItem1})
+	arr.add(SFSValue{sfsUtfString, secretItem2})
+
+	o := NewSFSObject()
+	o.PutSFSArray("loginKey", arr)
+	o.PutUtfString("un", "player-one")
+
+	got := o.StringRedacted()
+
+	for _, secret := range []string{secretItem1, secretItem2} {
+		if strings.Contains(got, secret) {
+			t.Errorf("StringRedacted leaks a raw *SFSArray-of-scalars value under a sensitive key: %s", got)
+		}
+	}
+	if !strings.Contains(got, "REDACTED") {
+		t.Errorf("StringRedacted should mask the *SFSArray via the [REDACTED N items] shape, got: %s", got)
+	}
+	if !strings.Contains(got, "player-one") {
+		t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+	}
+}
+
+// TestDecodeLargeByteArrayFieldNotChargedAgainstMaxDecodedNodes is the round-14 regression test for
+// Fix 3: sfsByteArray's decode case used to call chargeNodes(int(n)) for the raw byte count,
+// treating every decoded byte as a separate "node" toward the flat maxDecodedNodes(300_000) budget
+// -- making ~293,000 bytes a hard ceiling on any single legitimate byte-array field, even though a
+// Go []byte's memory cost is already a tight ~1:1 ratio with its wire cost (no per-element
+// allocation overhead the way e.g. []string has), so maxFrameSize's existing 64MiB wire-size cap
+// already bounds it with no amplification risk. This test decodes a single 1MiB sfsByteArray field
+// (comfortably over the old ~293,000-byte ceiling, comfortably under maxFrameSize) and confirms it
+// no longer spuriously fails.
+func TestDecodeLargeByteArrayFieldNotChargedAgainstMaxDecodedNodes(t *testing.T) {
+	const size = 1 << 20 // 1 MiB
+
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i)
+	}
+
+	o := NewSFSObject()
+	o.put("payload", SFSValue{sfsByteArray, data})
+
+	encoded, err := EncodeObject(o)
+	if err != nil {
+		t.Fatalf("EncodeObject: %v", err)
+	}
+
+	decoded, err := DecodeObject(encoded)
+	if err != nil {
+		t.Fatalf("DecodeObject of a legitimate %d-byte single sfsByteArray field failed: %v -- this field "+
+			"must not be charged per-byte against maxDecodedNodes (see sfsobject.go's sfsByteArray decode "+
+			"case)", size, err)
+	}
+
+	got, ok := decoded.Get("payload")
+	if !ok {
+		t.Fatal("decoded object is missing the payload field")
+	}
+	gotBytes, ok := got.Val.([]byte)
+	if !ok {
+		t.Fatalf("payload field has the wrong type: %T, want []byte", got.Val)
+	}
+	if len(gotBytes) != size {
+		t.Fatalf("decoded byte array length = %d, want %d", len(gotBytes), size)
+	}
+	for i := range gotBytes {
+		if gotBytes[i] != data[i] {
+			t.Fatalf("decoded byte array content mismatch at index %d: got %d, want %d", i, gotBytes[i], data[i])
+		}
 	}
 }

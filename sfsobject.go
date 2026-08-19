@@ -110,7 +110,17 @@ func (o *SFSObject) GetLong(key string) int64 {
 	}
 	return 0
 }
-func (o *SFSObject) String() string {
+
+// unsafeRawString is the raw, unredacted dump of o -- it does NOT satisfy fmt.Stringer (the name
+// deliberately isn't "String") specifically so that handing a *SFSObject to fmt's %v/%s verbs, a
+// Print-family function, or slog's Any-kind attribute formatting can never auto-invoke this and
+// leak a live credential. It is only ever called explicitly, from formatSFSValue's recursive case
+// (the raw dump path used by unsafeRawString itself, for nested objects). String() below is NOT
+// one of those callers -- it delegates to StringRedacted() instead. Do not call this from outside
+// sfsobject.go; if you need a full-fidelity dump for local debugging, prefer StringRedacted() at a
+// call site that's already confirmed safe, or add the field to sensitiveSFSKeys if it's genuinely
+// a credential.
+func (o *SFSObject) unsafeRawString() string {
 	var b bytes.Buffer
 	b.WriteString("{")
 	for i, k := range o.keys {
@@ -124,13 +134,25 @@ func (o *SFSObject) String() string {
 	return b.String()
 }
 
+// String makes *SFSObject satisfy fmt.Stringer safely: it delegates to StringRedacted() rather
+// than the raw unsafeRawString() dump, so any code path that hands a *SFSObject to fmt's %v/%s
+// verbs, a Print-family function, or slog's Any-kind attribute formatting -- all of which
+// auto-invoke Stringer with zero literal ".String()" text in the source, a pattern
+// credential_leak_lint_test.go's text-scanning approach structurally cannot see -- is redacted by
+// construction instead of leaking a live loginKey/accessToken/airKey/etc. This means an ordinary,
+// idiomatic fmt.Errorf("...: %v", someSFSObject) or slog.Info("resp", "params", someSFSObject) is
+// safe by default, closing the gap for good rather than only for today's known call sites.
+func (o *SFSObject) String() string {
+	return o.StringRedacted()
+}
+
 // formatSFSValue recurses into nested SFSObject/SFSArray values instead of
-// printing their Go pointer, so String() dumps are actually useful for
+// printing their Go pointer, so unsafeRawString() dumps are actually useful for
 // inspecting arrays-of-objects like `accountArr`/`defaultBuilds`.
 func formatSFSValue(v SFSValue) string {
 	switch val := v.Val.(type) {
 	case *SFSObject:
-		return val.String()
+		return val.unsafeRawString()
 	case *SFSArray:
 		var b bytes.Buffer
 		b.WriteString("[")
@@ -185,14 +207,15 @@ var sensitiveSFSKeys = map[string]bool{
 	"ta": true,
 }
 
-// StringRedacted is String()'s safe-to-log twin: a decoded server response or outgoing request
-// can carry a live loginKey/accessToken/airKey/shumeiBoxId in cleartext (this protocol has no
-// separate "credentials" envelope -- they're ordinary fields mixed in with gameplay data), and
-// String()'s fully generic dump has no way to tell those fields apart from an ordinary uid or
-// building level. StringRedacted walks the same structure but masks any key in sensitiveSFSKeys
-// (recursing into nested SFSObject/SFSArray values the same way formatSFSValue does) instead of
-// printing its value, so a call site that wants to log/error-wrap a full decoded object for
-// debugging can do so without risking a credential leak.
+// StringRedacted is unsafeRawString()'s safe-to-log twin (and, since String() now delegates to
+// this method, is the real implementation behind String() too): a decoded server response or
+// outgoing request can carry a live loginKey/accessToken/airKey/shumeiBoxId in cleartext (this
+// protocol has no separate "credentials" envelope -- they're ordinary fields mixed in with
+// gameplay data), and unsafeRawString()'s fully generic dump has no way to tell those fields apart
+// from an ordinary uid or building level. StringRedacted walks the same structure but masks any
+// key in sensitiveSFSKeys (recursing into nested SFSObject/SFSArray values the same way
+// formatSFSValue does) instead of printing its value, so a call site that wants to log/error-wrap
+// a full decoded object for debugging can do so without risking a credential leak.
 func (o *SFSObject) StringRedacted() string {
 	var b bytes.Buffer
 	b.WriteString("{")
@@ -238,14 +261,23 @@ func formatSFSValueRedacted(v SFSValue) string {
 // types readValuePayload's array-tag cases decode into -- []bool/[]byte/[]int16/[]int32/[]int64/
 // []float32/[]float64/[]string) still gets masked explicitly below, since formatSFSValueRedacted's
 // fallback for those types is the same naive fmt.Sprintf("%v", val) String() uses -- printing the
-// raw slice contents with no redaction at all, defeating this function's whole point. Any other
-// non-string, non-array shape falls back to the ordinary safe recursive formatter.
+// raw slice contents with no redaction at all, defeating this function's whole point. An *SFSArray
+// (the wrapper type sfsArrayType decodes into, as opposed to a primitive array) also gets masked
+// explicitly below, for the same reason one level deeper: formatSFSValueRedacted's own *SFSArray
+// case recurses via formatSFSValueRedacted (not redactSFSValue) on each item, so a raw scalar item
+// inside the array would lose the "sensitive" context and print via the naive fmt.Sprintf("%v",
+// val) default -- no current PutSFSArray call site puts a sensitive key's value in an *SFSArray of
+// scalars, but a future decoded server response could represent a sensitive field that way. Any
+// other non-string, non-array shape falls back to the ordinary safe recursive formatter.
 func redactSFSValue(v SFSValue) string {
 	if s, ok := v.Val.(string); ok {
 		return redact(s)
 	}
 	if n, ok := primitiveArrayLen(v.Val); ok {
 		return fmt.Sprintf("[REDACTED %d items]", n)
+	}
+	if arr, ok := v.Val.(*SFSArray); ok {
+		return fmt.Sprintf("[REDACTED %d items]", len(arr.items))
 	}
 	return formatSFSValueRedacted(v)
 }
@@ -566,7 +598,9 @@ const maxDecodedNodes = 300_000
 // container types (sfsArrayType/sfsObjectType) do, so without this it would only ever cost 1
 // toward the budget regardless of how many elements it actually contains -- letting many
 // primitive-array fields, each cheap on the wire, amplify into a Go heap far larger than the
-// wire-frame cap was meant to bound.
+// wire-frame cap was meant to bound. sfsByteArray is the one exception among the 8 primitive-array
+// types: it deliberately does NOT call this (see the comment on that case) since a Go []byte's
+// memory cost is already a tight ~1:1 ratio with its wire cost, unlike the other 7 shapes.
 func (r *sfsReader) chargeNodes(n int) error {
 	r.nodes += n
 	if r.nodes > maxDecodedNodes {
@@ -746,9 +780,16 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		if n < 0 {
 			return SFSValue{}, fmt.Errorf("sfsobject: byte array negative size: %d", n)
 		}
-		if err := r.chargeNodes(int(n)); err != nil {
-			return SFSValue{}, err
-		}
+		// No chargeNodes call here, unlike every other primitive-array case below: a Go []byte of n
+		// elements occupies exactly n bytes plus one O(1) slice header (no per-element header
+		// overhead, unlike e.g. []string's ~16-byte-per-element Go string headers), and the wire
+		// encoding of a byte array is also exactly n bytes plus a small fixed header -- so wire-size
+		// cost and Go-memory cost are already a tight ~1:1 ratio with no amplification.
+		// maxFrameSize's existing wire-size cap already bounds Go-memory size for byte arrays with
+		// no separate node-budget protection needed, exactly like sfsText (same 1:1 shape, no
+		// chargeNodes call either) already correctly assumes. Charging here doesn't add real
+		// protection; it just makes a legitimate multi-hundred-KB/multi-MB byte-array field fail
+		// spuriously against the flat maxDecodedNodes budget.
 		b, err := r.readBytes(int(n))
 		if err != nil {
 			return SFSValue{}, err

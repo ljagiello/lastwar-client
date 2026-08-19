@@ -62,6 +62,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// -version intentionally bypasses the ignored-flags warning machinery below (decodeModeIgnoredFlags,
+	// ignoredCrossServerFlags, the -config/-no-config check, the -email/-code-pipe check, and
+	// warnIfDecodeLabelIgnored): it returns here, before fs.Visit populates visitedFlags below, so
+	// stacking -version with any other flag (e.g. `-version -collect -cs-at X`) silently drops those
+	// other flags with no warning, unlike every other no-op-flag-combination case this file otherwise
+	// warns about. This is deliberate, not an oversight: stacking -version with live-run flags is an
+	// unlikely real operator mistake (low real-world impact), and keeping -version's exit simple,
+	// fast, and unconditional (no slog setup, no fs.Visit call) is judged worth more than closing this
+	// specific gap. Don't "fix" this by reordering fs.Visit() above this check without re-deriving
+	// that tradeoff first.
 	if *version {
 		printVersion()
 		return
@@ -85,6 +95,13 @@ func main() {
 		runDecode(*decodeLabel, *decodeStream)
 		return
 	}
+
+	// Symmetric to the decode-mode warning just above (for the opposite direction): -decode-label
+	// only has any effect as a prefix on -decode-stream's own output (see runDecode /
+	// decodeModeIgnoredFlags' doc comment) -- reaching here already means -decode-stream is unset
+	// (the block above returns otherwise), so -decode-label being set at this point is silently a
+	// no-op the rest of this file's flags don't rely on either.
+	warnIfDecodeLabelIgnored(*decodeStream, *decodeLabel)
 
 	if *noConfig && *configPath != "" {
 		slog.Warn("ignoring -config because -no-config is also set")
@@ -208,6 +225,19 @@ func decodeModeIgnoredFlags(visited []string) []string {
 		}
 	}
 	return ignored
+}
+
+// warnIfDecodeLabelIgnored logs a warning if -decode-label was explicitly given a non-empty value
+// but -decode-stream was not set -- -decode-label only has any effect as a prefix on
+// -decode-stream's own output (see decodeModeIgnoredFlags' doc comment), so outside that mode it's
+// silently a no-op that was otherwise never flagged, unlike every other no-op-flag-combination case
+// this file warns about. Taking decodeStream/decodeLabel as plain arguments (rather than being
+// inlined at the call site in main()) is what makes this testable via slog output capture, without
+// building a real FlagSet or invoking main() as a subprocess.
+func warnIfDecodeLabelIgnored(decodeStream, decodeLabel string) {
+	if decodeStream == "" && decodeLabel != "" {
+		slog.Warn("ignoring -decode-label because -decode-stream is not set")
+	}
 }
 
 // crossServerFlagNames are the -cs-* flags whose only effect is on the cross-server reconnect path
