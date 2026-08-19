@@ -85,3 +85,38 @@ func TestHasUnclaimedRewardMissingFieldIsNotUnclaimed(t *testing.T) {
 		t.Errorf("type 3: got %v, want [reward-1] -- notif-1 (no rewardStatus) must not appear", got[3])
 	}
 }
+
+// TestGroupUnclaimedByTypeMissingTypeFieldIsExcluded guards the analogous explicit-presence fix in
+// groupUnclaimedByType for the `type` field: a reward-bearing mail (HasUnclaimedReward() == true)
+// whose `type` key is genuinely absent must be skipped entirely, not defaulted into a `type=0`
+// bucket -- GetInt("type") returns the same int32 zero value for "genuinely absent" as it does for
+// a real type=0, so without the presence guard this mail would be indistinguishable from, and
+// silently merged into, a real type=0 batch. Reverting the requirePresentField guard in
+// groupUnclaimedByType (back to bare `byType[m.Type()] = append(...)`) would make this fail, since
+// the no-type mail would then be swept into byType[0].
+func TestGroupUnclaimedByTypeMissingTypeFieldIsExcluded(t *testing.T) {
+	noType := NewSFSObject()
+	noType.PutUtfString("uid", "no-type-1")
+	noType.PutInt("rewardStatus", 0)
+	// deliberately no PutInt("type", ...) call -- field genuinely absent, as opposed to an
+	// explicit 0.
+
+	explicitTypeZero := NewSFSObject()
+	explicitTypeZero.PutUtfString("uid", "type-zero-1")
+	explicitTypeZero.PutInt("type", 0)
+	explicitTypeZero.PutInt("rewardStatus", 0)
+
+	mail := []Mail{{Raw: noType}, {Raw: explicitTypeZero}}
+
+	if !mail[0].HasUnclaimedReward() || !mail[1].HasUnclaimedReward() {
+		t.Fatalf("both mail entries must be reward-bearing for this test to be meaningful")
+	}
+
+	got := groupUnclaimedByType(mail)
+	if len(got) != 1 {
+		t.Fatalf("got %d distinct types, want 1 (the no-type mail must be excluded, not bucketed under type=0)", len(got))
+	}
+	if len(got[0]) != 1 || got[0][0] != "type-zero-1" {
+		t.Errorf("type 0: got %v, want [type-zero-1] -- no-type-1 (no type field) must not appear", got[0])
+	}
+}

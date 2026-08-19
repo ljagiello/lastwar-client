@@ -392,3 +392,35 @@ func TestDecodedNodeCountRejected(t *testing.T) {
 		t.Fatal("expected an error once decoded node count exceeds maxDecodedNodes, got nil (this would allow unbounded heap amplification via wide, shallow nesting)")
 	}
 }
+
+// TestDecodedNodeCountRejectedForPrimitiveArrays is the round-13 regression test for the
+// maxDecodedNodes undercount the round-13 audit found: the 8 primitive-array decode cases
+// (sfsBoolArray..sfsUtfStringArray) each only charged 1 node regardless of how many elements they
+// actually decoded (up to 32767 per array, read directly via readByte/readInt16/etc. rather than
+// recursively through readValuePayload per element like the container types), so a wire payload
+// with many primitive-array fields could stay comfortably under the old (undercounted) budget
+// while decoding into far more Go heap than the budget was meant to bound. This payload is only
+// one level deep (an SFSObject with outerCount sibling fields, no nesting at all) but its
+// outerCount*arrayLen total element count crosses maxDecodedNodes(300_000) -- under the old,
+// per-field-flat-1 counting this would have cost only outerCount=10 nodes and sailed through.
+func TestDecodedNodeCountRejectedForPrimitiveArrays(t *testing.T) {
+	const outerCount = 10
+	const arrayLen = 32767 // max representable int16 array count; outerCount*arrayLen (327,670) > maxDecodedNodes (300_000)
+
+	var buf []byte
+	buf = binary.BigEndian.AppendUint16(buf, outerCount) // SFSObject key count
+	for i := 0; i < outerCount; i++ {
+		key := []byte{'k', byte('0' + i)}
+		buf = binary.BigEndian.AppendUint16(buf, uint16(len(key)))
+		buf = append(buf, key...)
+		buf = append(buf, sfsBoolArray) // field tag
+		buf = binary.BigEndian.AppendUint16(buf, uint16(arrayLen))
+		buf = append(buf, make([]byte, arrayLen)...) // arrayLen bool elements, all false
+	}
+
+	r := &sfsReader{data: buf}
+	_, err := r.readValuePayload(sfsObjectType)
+	if err == nil {
+		t.Fatal("expected an error once a primitive array's decoded element count pushes the total over maxDecodedNodes, got nil (this would allow ~8x Go-heap amplification within the existing wire-frame cap via many cheap-on-the-wire primitive-array fields)")
+	}
+}

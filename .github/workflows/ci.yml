@@ -24,5 +24,9 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./... -race -cover
+      - name: Fuzz DecodeObject (short, defense-in-depth)
+        run: go test -run=^$ -fuzz=FuzzDecodeObject -fuzztime=15s .
+      - name: Fuzz ReadPacket (short, defense-in-depth)
+        run: go test -run=^$ -fuzz=FuzzReadPacket -fuzztime=15s .
       - name: Vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

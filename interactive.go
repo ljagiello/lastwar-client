@@ -83,7 +83,13 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		dec.UseNumber()
 		var raw map[string]any
 		if err := dec.Decode(&raw); err != nil {
-			slog.Error("bad JSON params", "rawParams", rest, "error", err)
+			// Not "rawParams", rest -- an operator can send literally any command over the
+			// control FIFO, including an account/login-family one, and a JSON typo (missing
+			// quote, trailing comma) could leave a credential value sitting unparsed in rest.
+			// Go's encoding/json parse error names the problem (offset, token) without needing
+			// the raw text echoed back; see the "sending command" comment below for the same
+			// reasoning applied to params.
+			slog.Error("bad JSON params", "cmd", cmd, "error", err)
 			return
 		}
 		for k, v := range raw {

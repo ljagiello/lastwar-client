@@ -239,12 +239,26 @@ func batchByCountAndBytes(uids []string, maxCount, maxBytes int) [][]string {
 // groupUnclaimedByType buckets mail with an unclaimed reward by its type field -- pulled out of
 // ClaimAllMail as a standalone, network-free function so it can be unit tested without a live
 // connection.
+//
+// Same GetInt-can't-distinguish-missing-from-zero conflation HasUnclaimedReward guards against for
+// rewardStatus applies here to type: a reward-bearing mail whose `type` field is genuinely absent
+// or explicitly null would otherwise fall through m.Type()'s GetInt to the int32 zero value,
+// indistinguishable from a real type=0, and get silently bucketed into (and later sent as) a
+// `mail.reward.batch {type:0, ...}` request the server may not recognize. So this checks presence
+// via the shared requirePresentField guard (same one ListMail already uses for uid, and
+// alliance.go/buildings.go use for scienceId/uuid) before trusting m.Type(), and skips -- with a
+// warning -- any reward-bearing mail whose type is missing or explicitly null, rather than
+// defaulting it into a type=0 batch.
 func groupUnclaimedByType(mail []Mail) map[int32][]string {
 	byType := make(map[int32][]string)
 	for _, m := range mail {
-		if m.HasUnclaimedReward() {
-			byType[m.Type()] = append(byType[m.Type()], m.Uid())
+		if !m.HasUnclaimedReward() {
+			continue
 		}
+		if !requirePresentField(m.Raw, "type", "mail reward") {
+			continue
+		}
+		byType[m.Type()] = append(byType[m.Type()], m.Uid())
 	}
 	return byType
 }

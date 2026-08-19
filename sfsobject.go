@@ -176,6 +176,13 @@ var sensitiveSFSKeys = map[string]bool{
 	// documents a real captured Handshake response shape `{ct=3072, ms=1000000, tk=<32-hex>}`
 	// from the live production server, explicitly calling tk a session token.
 	"tk": true,
+	// ta is the iOS login's analytics blob (identity.go's BuildLoginParams/iosAnalyticsBlob):
+	// a JSON-marshaled string, not a scalar, so StringRedacted() has no way to redact secrets
+	// nested inside it field-by-field -- it can only mask the whole "ta" value or none of it.
+	// identity.go no longer puts real DeviceID/ShumeiBoxId/AirKey values into that blob, but
+	// this stays as defense-in-depth in case a future field embeds something sensitive inside
+	// this or another opaque string value.
+	"ta": true,
 }
 
 // StringRedacted is String()'s safe-to-log twin: a decoded server response or outgoing request
@@ -552,6 +559,22 @@ const maxNestDepth = 64
 // anything the real ~313KB init payload has ever needed.
 const maxDecodedNodes = 300_000
 
+// chargeNodes adds n to r.nodes and errors if the running total exceeds maxDecodedNodes -- the
+// same budget check readValuePayload already applies once per value via r.nodes++, but a
+// primitive array (sfsBoolArray..sfsUtfStringArray) decodes its up-to-32767 elements directly via
+// readByte/readInt16/etc. rather than recursively calling readValuePayload per element like the
+// container types (sfsArrayType/sfsObjectType) do, so without this it would only ever cost 1
+// toward the budget regardless of how many elements it actually contains -- letting many
+// primitive-array fields, each cheap on the wire, amplify into a Go heap far larger than the
+// wire-frame cap was meant to bound.
+func (r *sfsReader) chargeNodes(n int) error {
+	r.nodes += n
+	if r.nodes > maxDecodedNodes {
+		return fmt.Errorf("sfsobject: decoded node count exceeds %d", maxDecodedNodes)
+	}
+	return nil
+}
+
 func (r *sfsReader) remaining() int { return len(r.data) - r.pos }
 
 func (r *sfsReader) readByte() (byte, error) {
@@ -696,6 +719,9 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		if err != nil {
 			return SFSValue{}, err
 		}
+		if err := r.chargeNodes(int(n)); err != nil {
+			return SFSValue{}, err
+		}
 		out := make([]bool, n)
 		for i := range out {
 			b, err := r.readByte()
@@ -720,6 +746,9 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		if n < 0 {
 			return SFSValue{}, fmt.Errorf("sfsobject: byte array negative size: %d", n)
 		}
+		if err := r.chargeNodes(int(n)); err != nil {
+			return SFSValue{}, err
+		}
 		b, err := r.readBytes(int(n))
 		if err != nil {
 			return SFSValue{}, err
@@ -728,6 +757,9 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 	case sfsShortArray:
 		n, err := r.readArrayCount()
 		if err != nil {
+			return SFSValue{}, err
+		}
+		if err := r.chargeNodes(int(n)); err != nil {
 			return SFSValue{}, err
 		}
 		out := make([]int16, n)
@@ -744,6 +776,9 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		if err != nil {
 			return SFSValue{}, err
 		}
+		if err := r.chargeNodes(int(n)); err != nil {
+			return SFSValue{}, err
+		}
 		out := make([]int32, n)
 		for i := range out {
 			v, err := r.readInt32()
@@ -756,6 +791,9 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 	case sfsLongArray:
 		n, err := r.readArrayCount()
 		if err != nil {
+			return SFSValue{}, err
+		}
+		if err := r.chargeNodes(int(n)); err != nil {
 			return SFSValue{}, err
 		}
 		out := make([]int64, n)
@@ -772,6 +810,9 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		if err != nil {
 			return SFSValue{}, err
 		}
+		if err := r.chargeNodes(int(n)); err != nil {
+			return SFSValue{}, err
+		}
 		out := make([]float32, n)
 		for i := range out {
 			b, err := r.readBytes(4)
@@ -786,6 +827,9 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		if err != nil {
 			return SFSValue{}, err
 		}
+		if err := r.chargeNodes(int(n)); err != nil {
+			return SFSValue{}, err
+		}
 		out := make([]float64, n)
 		for i := range out {
 			b, err := r.readBytes(8)
@@ -798,6 +842,9 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 	case sfsUtfStringArray:
 		n, err := r.readArrayCount()
 		if err != nil {
+			return SFSValue{}, err
+		}
+		if err := r.chargeNodes(int(n)); err != nil {
 			return SFSValue{}, err
 		}
 		out := make([]string, n)

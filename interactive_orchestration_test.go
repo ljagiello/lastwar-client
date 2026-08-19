@@ -146,3 +146,44 @@ func TestHandleInteractiveLineRedactsCredentialFields(t *testing.T) {
 		t.Errorf("interactive log output leaks the outgoing pw in cleartext:\n%s", logged)
 	}
 }
+
+// TestHandleInteractiveLineDoesNotLeakRawParamsOnJSONParseError covers the "bad JSON params"
+// error path (handleInteractiveLine's json.Decoder.Decode failure branch), a case
+// TestHandleInteractiveLineRedactsCredentialFields above doesn't reach: that test's line is
+// well-formed JSON, so it exercises only the StringRedacted() calls on the successfully-parsed
+// params/response. An operator testing with a real captured credential who makes a JSON typo
+// (missing closing brace/quote, as below) never gets that far -- the raw, un-parsed command text
+// itself is what's at risk of being echoed into the log verbatim, and unlike the redacted-field
+// case, no .String()/.StringRedacted() call is involved for credential_leak_lint_test.go to catch,
+// so this has to be checked directly against the captured log output.
+func TestHandleInteractiveLineDoesNotLeakRawParamsOnJSONParseError(t *testing.T) {
+	client, _ := newPipeGameConnPair(t)
+
+	const secretPw = "secret-value-must-not-leak"
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Deliberately malformed: missing the closing quote and brace.
+		handleInteractiveLine(client, `account.login.new {"pw":"`+secretPw)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleInteractiveLine did not return promptly on malformed JSON params")
+	}
+
+	logged := buf.String()
+	if strings.Contains(logged, secretPw) {
+		t.Errorf("interactive log output leaks the raw unparsed params (containing the secret) on a JSON parse error:\n%s", logged)
+	}
+	if !strings.Contains(logged, "bad JSON params") {
+		t.Errorf("expected a \"bad JSON params\" log entry, got:\n%s", logged)
+	}
+}

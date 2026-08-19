@@ -27,7 +27,7 @@ func main() {
 	email := fs.String("email", "", "account email to log in with (only needed if no loginKey is on file yet)")
 	codePipe := fs.String("code-pipe", "", "path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin")
 	collect := fs.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both once-a-day VIP claims, after login")
-	listBuildings := fs.Bool("list-buildings", false, "print every owned building (id, type, level); the process still exits after -collect/-list-buildings finish unless -interactive is also set")
+	listBuildings := fs.Bool("list-buildings", false, "print every owned building (id, type, level) to stdout. NOTE: this print already happens by DEFAULT whenever -collect is NOT passed -- this flag only matters when -collect IS also passed, where it forces the same print to happen alongside collection instead of being skipped; the process still exits after -collect/-list-buildings finish unless -interactive is also set")
 	interactive := fs.String("interactive", "", "stay connected and read ad-hoc test commands from this control FIFO instead of exiting")
 
 	csIP := fs.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
@@ -252,22 +252,28 @@ func refreshHasUsableData(lsr *LoginServerListRespon) bool {
 }
 
 // crossServerSaveBackNeeded reports whether runCrossServerTest has anything new to persist back
-// to the session config: the FINAL address/zone/access-token a cross-server connection actually
-// used (newHost/newPort/newZone/newAccessTok, taken from CrossServerLoginResult) differing from
-// what was ORIGINALLY on disk/passed on the command line (origHost/origPort/origZone/
-// origAccessTok), before any -cs-rt refresh could have reassigned those.
+// to the session config: the FINAL address/zone/access-token/gameUid a cross-server connection
+// actually used (newHost/newPort/newZone/newAccessTok/newGameUid, taken from
+// CrossServerLoginResult) differing from what was ORIGINALLY on disk/passed on the command line
+// (origHost/origPort/origZone/origAccessTok/origGameUid), before any -cs-rt refresh could have
+// reassigned those.
 //
-// Bug fixed here: runCrossServerTest used to diff against its own ip/port/zone locals AFTER a
-// -cs-rt refresh block already reassigned them to the GSL response's values -- so in the ordinary
-// case (refresh succeeds, DoCrossServerLogin doesn't ALSO hit an unrelated serverInfo redirect of
-// its own), that comparison was always post-refresh-value against post-refresh-value, always
-// false, and a freshly obtained -cs-rt access token was silently never persisted. It also never
-// compared AccessTok at all, only host/port/zone. Taking every value as a plain argument (rather
-// than closing over runCrossServerTest's locals) is what makes both mistakes structurally
-// impossible to reintroduce silently, and what makes this testable without spinning up fake
-// GSL/game servers.
-func crossServerSaveBackNeeded(newHost string, newPort int, newZone, newAccessTok, origHost string, origPort int, origZone, origAccessTok string) bool {
-	return newHost != origHost || newPort != origPort || newZone != origZone || newAccessTok != origAccessTok
+// Bug fixed here (round 12): runCrossServerTest used to diff against its own ip/port/zone locals
+// AFTER a -cs-rt refresh block already reassigned them to the GSL response's values -- so in the
+// ordinary case (refresh succeeds, DoCrossServerLogin doesn't ALSO hit an unrelated serverInfo
+// redirect of its own), that comparison was always post-refresh-value against post-refresh-value,
+// always false, and a freshly obtained -cs-rt access token was silently never persisted. It also
+// never compared AccessTok at all, only host/port/zone.
+//
+// Bug fixed here (round 13): the same class of bug applied to GameUid -- it was never compared
+// either, so a -cs-rt refresh that changed ONLY GameUid (leaving host/port/zone/accessTok
+// unchanged) was silently never persisted.
+//
+// Taking every value as a plain argument (rather than closing over runCrossServerTest's locals)
+// is what makes all of these mistakes structurally impossible to reintroduce silently, and what
+// makes this testable without spinning up fake GSL/game servers.
+func crossServerSaveBackNeeded(newHost string, newPort int, newZone, newAccessTok, newGameUid, origHost string, origPort int, origZone, origAccessTok, origGameUid string) bool {
+	return newHost != origHost || newPort != origPort || newZone != origZone || newAccessTok != origAccessTok || newGameUid != origGameUid
 }
 
 // parseLogLevel maps a -log-level flag value to an slog.Level, defaulting to Info for the empty
@@ -346,11 +352,11 @@ func runCrossServerTest(o crossServerTestOpts) {
 	ip, port, zone, gameUid := o.ip, o.port, o.zone, o.gameUid
 
 	// Snapshot the values as they stood BEFORE the -cs-rt refresh block below can reassign
-	// ip/port/zone/accessTok to the GSL opt=refresh response's values. The save-back check
+	// ip/port/zone/gameUid/accessTok to the GSL opt=refresh response's values. The save-back check
 	// further down needs to diff the connection's final result against what's actually on
 	// disk/was actually passed in -- not against an already-mutated intermediate value -- see
 	// crossServerSaveBackNeeded's doc comment for the bug this specifically fixes.
-	origIP, origPort, origZone, origAccessTok := ip, port, zone, accessTok
+	origIP, origPort, origZone, origAccessTok, origGameUid := ip, port, zone, accessTok, gameUid
 
 	// GSL plumbing (HTTP client + gate host + RSA pubkey), threaded into CrossServerLoginParams so a
 	// mid-login serverInfo redirect can refresh AccessTok instead of reusing a stale one (see
@@ -438,6 +444,17 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 
+	// DoCrossServerLogin validates AccessTok itself (see its own p.AccessTok == "" check) but has
+	// no equivalent check for Port -- an unset/zero port isn't caught there, it's only caught much
+	// later by the OS dial call, producing a cryptic "dial tcp 127.0.0.1:0: connect: can't assign
+	// requested address" instead of a message that says what's actually missing. Checked here,
+	// after the -cs-rt refresh block above (which can replace port with a fresh server list
+	// entry), so a config/flag omission that IS resolved by -cs-rt doesn't false-positive.
+	if port <= 0 {
+		slog.Error("cross-server login: no port given (pass -cs-port or a session config with port)")
+		os.Exit(1)
+	}
+
 	result, err := DoCrossServerLogin(CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
 		DeviceID: deviceID, AirKey: airKey,
@@ -461,16 +478,16 @@ func runCrossServerTest(o crossServerTestOpts) {
 	// A serverInfo redirect (e.g. a real server merge moving this account to a different
 	// zone/host/port) leaves result.Addr/Zone different from what was actually passed in --
 	// and, independently, a -cs-rt refresh (whether or not any redirect also happened) can leave
-	// result.AccessTok different from the token that was actually passed in/on disk. Persist the
-	// resolved values back to the session config, if we loaded one, comparing against the
-	// ORIGINAL pre-refresh snapshot (origIP/origPort/origZone/origAccessTok, not the possibly-
-	// already-refreshed ip/port/zone locals -- see crossServerSaveBackNeeded's doc comment) so
-	// the next run connects directly, and with a still-valid token, instead of re-following the
-	// same redirect or reusing a token this run already knows was superseded.
+	// result.AccessTok and/or result.GameUid different from what was actually passed in/on disk.
+	// Persist the resolved values back to the session config, if we loaded one, comparing against
+	// the ORIGINAL pre-refresh snapshot (origIP/origPort/origZone/origAccessTok/origGameUid, not
+	// the possibly-already-refreshed ip/port/zone/gameUid locals -- see crossServerSaveBackNeeded's
+	// doc comment) so the next run connects directly, and with a still-valid token/gameUid, instead
+	// of re-following the same redirect or reusing values this run already knows were superseded.
 	if o.configSavePath != "" {
 		if newHost, newPortStr, splitErr := net.SplitHostPort(result.Addr); splitErr == nil {
 			if newPort, atoiErr := strconv.Atoi(newPortStr); atoiErr == nil {
-				if crossServerSaveBackNeeded(newHost, newPort, result.Zone, result.AccessTok, origIP, origPort, origZone, origAccessTok) {
+				if crossServerSaveBackNeeded(newHost, newPort, result.Zone, result.AccessTok, result.GameUid, origIP, origPort, origZone, origAccessTok, origGameUid) {
 					updated := &SessionConfig{
 						IP: newHost, Port: newPort, Zone: result.Zone,
 						GameUid: result.GameUid, DeviceID: deviceID,

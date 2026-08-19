@@ -174,6 +174,14 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 				slog.Error("failed to encode login body debug dump", "path", f, "error", err)
 			} else if err := os.WriteFile(f, encoded, 0600); err != nil {
 				slog.Error("failed to write login body debug dump", "path", f, "error", err)
+			} else if err := os.Chmod(f, 0600); err != nil {
+				// os.WriteFile's mode argument only applies when the file is newly created; on
+				// an existing file (e.g. a prior loosely-permissioned dump left at the same
+				// path) its previous mode wins. Chmod explicitly so the 0600 invariant this
+				// dump needs (it carries a live access token) actually holds on every write,
+				// not just at creation -- mirrors config.go's SaveSessionConfig and
+				// identity.go's saveStateFile, which hit this same gotcha.
+				slog.Error("failed to chmod login body debug dump to 0600", "path", f, "error", err)
 			}
 		}
 		if err := conn.SendEnvelope(controllerSystem, actionLogin, loginContent); err != nil {

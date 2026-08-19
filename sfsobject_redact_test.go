@@ -115,6 +115,82 @@ func TestStringRedactedMasksSensitivePrimitiveArray(t *testing.T) {
 	}
 }
 
+// TestStringRedactedMasksAllPrimitiveArrayTypes extends
+// TestStringRedactedMasksSensitivePrimitiveArray to cover all 8 primitive-array wire types
+// (sfsBoolArray..sfsUtfStringArray) under a sensitive key, not just []string/[]int32 -- proving
+// primitiveArrayLen's type switch (and therefore redactSFSValue's masking) has no gap for any of
+// the 8 shapes readValuePayload's array-tag cases can actually decode into.
+func TestStringRedactedMasksAllPrimitiveArrayTypes(t *testing.T) {
+	cases := []struct {
+		name     string
+		sfsType  byte
+		val      interface{}
+		wantSubs []string // substrings that must not appear in the redacted output
+	}{
+		{"BoolArray", sfsBoolArray, []bool{true, false, true}, nil},
+		{"ByteArray", sfsByteArray, []byte{0xDE, 0xAD, 0xBE, 0xEF}, nil},
+		{"ShortArray", sfsShortArray, []int16{-12345, 6789}, []string{"-12345", "6789"}},
+		{"IntArray", sfsIntArray, []int32{918273645, 192837465}, []string{"918273645", "192837465"}},
+		{"LongArray", sfsLongArray, []int64{1234567890123, 9876543210987}, []string{"1234567890123", "9876543210987"}},
+		{"FloatArray", sfsFloatArray, []float32{3.14159, 2.71828}, []string{"3.14159", "2.71828"}},
+		{"DoubleArray", sfsDoubleArray, []float64{1.6180339887, 1.4142135623}, []string{"1.618033", "1.414213"}},
+		{"StringArray", sfsUtfStringArray, []string{"secret-item-alpha", "secret-item-beta"}, []string{"secret-item-alpha", "secret-item-beta"}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := NewSFSObject()
+			o.put("loginKey", SFSValue{c.sfsType, c.val})
+			o.PutUtfString("un", "player-one")
+
+			got := o.StringRedacted()
+
+			for _, sub := range c.wantSubs {
+				if strings.Contains(got, sub) {
+					t.Errorf("StringRedacted leaks a %s primitive array under a sensitive key (found %q): %s", c.name, sub, got)
+				}
+			}
+			if !strings.Contains(got, "player-one") {
+				t.Errorf("StringRedacted must not mask ordinary non-sensitive fields, got: %s", got)
+			}
+			if !strings.Contains(got, "REDACTED") {
+				t.Errorf("StringRedacted should mask the %s array via the [REDACTED N items] shape, got: %s", c.name, got)
+			}
+		})
+	}
+}
+
+// TestBuildLoginParamsIOSModeDoesNotLeakSecretsInAnalyticsBlob is the round-13 regression test for
+// the credential leak the round-13 audit found: BuildLoginParams' IOSMode branch built the "ta"
+// analytics blob's LwDeviceID/LwShumeiID/LwAirKey fields directly from the real live
+// in.DeviceID/in.ShumeiBoxId/in.AirKey values, JSON-marshaled the result, and stored it as a plain
+// string under the "ta" key. Since "ta" wasn't in sensitiveSFSKeys, StringRedacted() masked the
+// top-level deviceId/airKey/shumeiBoxId keys correctly but printed the identical secret values in
+// full cleartext nested inside "ta"'s JSON value, in the same output string.
+func TestBuildLoginParamsIOSModeDoesNotLeakSecretsInAnalyticsBlob(t *testing.T) {
+	const secretDeviceID = "secret-device-id-must-not-leak-abcdef123456"
+	const secretAirKey = "secret-air-key-must-not-leak-ghijkl789012"
+	const secretShumeiBoxId = "secret-shumei-box-id-must-not-leak-mnopqr345678"
+
+	p := BuildLoginParams(LoginParamsInput{
+		FutureID:    1,
+		DeviceID:    secretDeviceID,
+		AirKey:      secretAirKey,
+		GameUid:     "g-123456",
+		ServerID:    "1234",
+		ShumeiBoxId: secretShumeiBoxId,
+		IOSMode:     true,
+	})
+
+	got := p.StringRedacted()
+
+	for _, secret := range []string{secretDeviceID, secretAirKey, secretShumeiBoxId} {
+		if strings.Contains(got, secret) {
+			t.Errorf("StringRedacted leaks a secret identity value (possibly nested inside the ta analytics blob) in cleartext (%q): %s", secret, got)
+		}
+	}
+}
+
 // TestStringRedactedMatchesStringForNonSensitiveData proves StringRedacted is a pure superset of
 // String()'s behavior for data with no sensitive keys -- it must not, say, accidentally drop or
 // reorder ordinary fields.

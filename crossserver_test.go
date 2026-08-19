@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -200,6 +202,131 @@ func TestDoCrossServerLoginDebugDumpRedactsCredentials(t *testing.T) {
 	}
 	if strings.Contains(logged, secretShumeiBoxId) {
 		t.Errorf("LWDEBUG_DUMP_LOGIN debug dump leaks the raw shumeiBoxId in cleartext:\n%s", logged)
+	}
+}
+
+// TestDoCrossServerLoginDebugDumpBodyFileIsChmodded0600 is the round-13 regression test for
+// crossserver.go's LWDEBUG_DUMP_LOGIN_BODY dump: it wrote the dump file via os.WriteFile(f,
+// encoded, 0600) with no follow-up os.Chmod call. os.WriteFile's mode argument only applies when
+// the file is newly CREATED -- on a pre-existing file at that path, the file's previous mode
+// wins and is left untouched -- so a pre-existing target file with looser permissions silently
+// kept them even though a live access token (p.at) gets written into it on every run. Mirrors
+// config.go's SaveSessionConfig and identity.go's saveStateFile, both of which already
+// WriteFile-then-Chmod for exactly this reason. Proves the dump file ends up 0600 even when it
+// started out 0644.
+func TestDoCrossServerLoginDebugDumpBodyFileIsChmodded0600(t *testing.T) {
+	dumpPath := filepath.Join(t.TempDir(), "login-body-dump.bin")
+	// Pre-create the target file with loose (0644) permissions, simulating a dump left behind
+	// by some other, less-careful process -- os.WriteFile alone would NOT tighten this back to
+	// 0600 on an existing file, which is exactly the bug this test guards against.
+	if err := os.WriteFile(dumpPath, []byte("stale"), 0644); err != nil {
+		t.Fatalf("pre-create dump file: %v", err)
+	}
+	t.Setenv("LWDEBUG_DUMP_LOGIN_BODY", dumpPath)
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+	result, err := DoCrossServerLogin(p)
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v", err)
+	}
+	defer result.Conn.Close()
+
+	fi, err := os.Stat(dumpPath)
+	if err != nil {
+		t.Fatalf("stat dump file: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0600 {
+		t.Errorf("dump file mode = %o, want 0600 (pre-existing looser permissions must be tightened, not just left alone -- see os.WriteFile's mode-applies-on-creation-only gotcha)", got)
+	}
+}
+
+// TestDoCrossServerLoginDebugDumpRedactsCredentialsIOSMode is the round-13 regression test for
+// the LWDEBUG_DUMP_LOGIN debug dump's IOSMode path specifically: identity.go's BuildLoginParams
+// builds an iOS-only "ta" analytics blob (JSON-marshaled into a single opaque string field) that
+// used to embed the live DeviceID/AirKey/ShumeiBoxId values directly -- a leak StringRedacted()
+// couldn't see, since it only masks known-sensitive *keys*, not secrets embedded inside another
+// field's string value, and "ta" itself wasn't even in that key list. Mirrors
+// TestDoCrossServerLoginDebugDumpRedactsCredentials but with IOSMode:true and its own
+// distinguishable secret values, so this specifically exercises the ta-blob path that test
+// (IOSMode left false, so BuildLoginParams never builds a "ta" blob at all) does not.
+func TestDoCrossServerLoginDebugDumpRedactsCredentialsIOSMode(t *testing.T) {
+	t.Setenv("LWDEBUG_DUMP_LOGIN", "1")
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	const secretAccessTok = "sensitive-secret-ios-accesstok-must-not-leak-1234567890"
+	const secretDeviceID = "sensitive-secret-ios-deviceid-must-not-leak-aaaaaaaaaa"
+	const secretAirKey = "sensitive-secret-ios-airkey-must-not-leak-bbbbbbbbbb"
+	const secretShumeiBoxId = "sensitive-secret-ios-shumeiboxid-must-not-leak-cccccccccc"
+
+	p := CrossServerLoginParams{
+		IP:          host,
+		Port:        port,
+		Zone:        "APS1",
+		GameUid:     "uid-1",
+		DeviceID:    secretDeviceID,
+		AirKey:      secretAirKey,
+		AccessTok:   secretAccessTok,
+		ShumeiBoxId: secretShumeiBoxId,
+		IOSMode:     true,
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	// Debug level explicitly enabled -- LWDEBUG_DUMP_LOGIN's dump is a slog.Debug call, which a
+	// default-level (Info) handler would never emit, making this test pass vacuously either way.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := DoCrossServerLogin(p)
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v", err)
+	}
+	defer result.Conn.Close()
+
+	logged := buf.String()
+	if !strings.Contains(logged, "full login content") {
+		t.Fatal("expected the LWDEBUG_DUMP_LOGIN debug dump to have fired, but no \"full login content\" log line was captured")
+	}
+	if strings.Contains(logged, secretAccessTok) {
+		t.Errorf("LWDEBUG_DUMP_LOGIN debug dump (IOSMode) leaks the raw access token in cleartext:\n%s", logged)
+	}
+	if strings.Contains(logged, secretDeviceID) {
+		t.Errorf("LWDEBUG_DUMP_LOGIN debug dump (IOSMode) leaks the raw device ID in cleartext (likely via the ta analytics blob):\n%s", logged)
+	}
+	if strings.Contains(logged, secretAirKey) {
+		t.Errorf("LWDEBUG_DUMP_LOGIN debug dump (IOSMode) leaks the raw air key in cleartext (likely via the ta analytics blob):\n%s", logged)
+	}
+	if strings.Contains(logged, secretShumeiBoxId) {
+		t.Errorf("LWDEBUG_DUMP_LOGIN debug dump (IOSMode) leaks the raw shumeiBoxId in cleartext (likely via the ta analytics blob):\n%s", logged)
 	}
 }
 

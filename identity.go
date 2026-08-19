@@ -322,10 +322,20 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 		// real captured iOS login sends, to isolate whether the server validates fields inside
 		// it (lw_zone/lw_device_id/lw_shumei_id echoing the top-level request) as part of the
 		// same token-binding check already confirmed for packageName/appVersion/versionCode.
-		// Built from the same in.* fields used for the top-level request elsewhere in this
-		// function, so the embedded copy can never silently disagree with the request it's
-		// nested in; the remaining fields (device/OS telemetry this client has no way to
-		// observe about itself) are fixed, deliberately round, clearly-synthetic placeholders.
+		//
+		// LwDeviceID/LwShumeiID/LwAirKey were originally set from the same in.DeviceID/
+		// in.ShumeiBoxId/in.AirKey values used for the top-level request fields elsewhere in
+		// this function. That leaked those live secrets in cleartext: this whole blob gets
+		// JSON-marshaled and stored as a single opaque string under the "ta" key, and
+		// SFSObject.StringRedacted() only masks known-sensitive *keys* -- it has no way to see
+		// or redact secrets embedded inside another field's string value. sensitiveSFSKeys now
+		// also lists "ta" itself (see sfsobject.go) as defense-in-depth, but the real fix is
+		// here: never put a live credential into a field that isn't itself a redacted key.
+		// These three fields are placeholders (empty string, matching this struct's existing
+		// pattern for telemetry we have no way to observe, e.g. Carrier/LwLine below) until/
+		// unless a live capture confirms the server actually validates their content -- their
+		// mere presence in the JSON shape is preserved in case some undocumented check depends
+		// on the keys existing at all.
 		blob := iosAnalyticsBlob{
 			OS: "iOS", Disk: "50.0/100.0", DeviceID: "00000000-0000-0000-0000-000000000000",
 			OSVersion: "0.0", SystemLanguage: "en", BundleID: iosPackageName, Carrier: "",
@@ -336,8 +346,8 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 			PdDl: 0, LwAb: "0", LwPlatform: "AppStore",
 			LwGameSessionID: "00000000-0000-0000-0000-000000000000", LwFirstLaunch: false,
 			LwAllianceID: "00000000000000000000000000000000",
-			LwDeviceID:   in.DeviceID, LwDeviceLevel: 0, LwMainLevel: 0,
-			LwShumeiID: in.ShumeiBoxId, LwAirKey: in.AirKey,
+			LwDeviceID:   "", LwDeviceLevel: 0, LwMainLevel: 0,
+			LwShumeiID: "", LwAirKey: "",
 			LwVersion: "0.0.0", LwPower: 0, LwZone: "APS" + in.ServerID,
 		}
 		if b, err := json.Marshal(blob); err == nil {
