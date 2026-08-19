@@ -241,6 +241,16 @@ func ignoredCrossServerFlags(visited []string) []string {
 	return ignored
 }
 
+// refreshHasUsableData reports whether a GSL opt=refresh response gives runCrossServerTest anything
+// to act on: either a fresh access token (At) or at least one server list entry. A response with
+// neither is not actionable -- see the call site in runCrossServerTest for why that case fails
+// clearly there instead of silently falling through to stale in-scope values. Taking the already-
+// decoded *LoginServerListRespon (rather than being inlined at the call site) is what makes this
+// testable without a live GSL round-trip.
+func refreshHasUsableData(lsr *LoginServerListRespon) bool {
+	return lsr.At != nil || len(lsr.ServerList) > 0
+}
+
 // parseLogLevel maps a -log-level flag value to an slog.Level, defaulting to Info for the empty
 // string (the flag's own default) and for anything unrecognized -- but an unrecognized value (e.g.
 // a typo) is reported to stderr first, since slog isn't configured yet at the point this runs: its
@@ -368,7 +378,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			os.Exit(1)
 		}
 		slog.Info("GSL refresh response", "code", lsr.Code, "serverListLen", len(lsr.ServerList))
-		if lsr.At == nil && len(lsr.ServerList) == 0 {
+		if !refreshHasUsableData(lsr) {
 			// A nil error only means the HTTP round-trip and envelope decrypt succeeded -- gsl.go
 			// deliberately doesn't validate lsr.Code yet (no live evidence exists for what a
 			// semantically-rejected-but-HTTP-200 refresh looks like on this endpoint). Neither a

@@ -780,24 +780,3 @@ func DecodeObject(data []byte) (*SFSObject, error) {
 	}
 	return v.Val.(*SFSObject), nil
 }
-
-// ToGo recursively converts an SFSValue tree into plain Go values
-// (map[string]interface{} / []interface{}) for easy printing/inspection.
-func (v SFSValue) ToGo() interface{} {
-	switch val := v.Val.(type) {
-	case *SFSObject:
-		m := make(map[string]interface{}, len(val.keys))
-		for _, k := range val.keys {
-			m[k] = val.values[k].ToGo()
-		}
-		return m
-	case *SFSArray:
-		arr := make([]interface{}, len(val.items))
-		for i, iv := range val.items {
-			arr[i] = iv.ToGo()
-		}
-		return arr
-	default:
-		return val
-	}
-}

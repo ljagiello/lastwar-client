@@ -75,6 +75,28 @@ func TestIgnoredCrossServerFlags(t *testing.T) {
 	}
 }
 
+func TestRefreshHasUsableData(t *testing.T) {
+	cases := []struct {
+		name       string
+		at         *LoginToken
+		serverList []LoginServerInfo
+		want       bool
+	}{
+		{"At present, ServerList non-empty", &LoginToken{Token: "tok"}, []LoginServerInfo{{}}, true},
+		{"At present, ServerList empty", &LoginToken{Token: "tok"}, nil, true},
+		{"At absent, ServerList non-empty", nil, []LoginServerInfo{{}}, true},
+		{"At absent, ServerList empty", nil, nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			lsr := &LoginServerListRespon{At: c.at, ServerList: c.serverList}
+			if got := refreshHasUsableData(lsr); got != c.want {
+				t.Errorf("refreshHasUsableData(At=%v, ServerList=%v) = %v, want %v", c.at, c.serverList, got, c.want)
+			}
+		})
+	}
+}
+
 // TestCrossServerFlagNamesRecognizesExactlySevenFlags pins down that crossServerFlagNames
 // recognizes precisely the 7 -cs-* flags that are consumed once the cross-server path is taken
 // (i.e. every -cs-* flag except -cs-ip/-cs-rt, which instead gate whether that path is taken at

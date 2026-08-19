@@ -212,6 +212,7 @@ Two things worth checking after setup, not just once but as ongoing habits:
 | `conn_handshake_test.go` | `DoHandshake`'s success path and its `ec`-bearing failure path wrapping `ErrAuthRejected`; `StartHeartbeat`'s periodic pings, stop-on-`Close`, and close-on-send-failure behavior |
 | `identity_test.go` | `BuildLoginParams`' Android/iOS and empty-vs-set-`GameUid` conditional field logic; `SaveLoginKey`/loose-permission warning and load/save round trip for the persisted device identity |
 | `main_test.go` | `parseLogLevel`'s recognized values and its unrecognized-value fallback-to-info behavior |
+| `main_flags_test.go` | `decodeModeIgnoredFlags` and `ignoredCrossServerFlags`'s exempt-flag filtering (`decode-stream`/`decode-label`/`log-level`, and the redirect-gating `cs-ip`/`cs-rt`, are never reported as ignored); a regression test scanning main.go's own `fs.String/Bool/Int("cs-...", ...)` declarations to keep `crossServerFlagNames` in sync with the FlagSet as flags are added, renamed, or removed |
 | `config_test.go` | Session config load/save: explicit-path loading, loose-file-permission warnings, permission tightening on save |
 | `login_test.go` | `redact`'s secret-masking for log output |
 | `buildings_visitors_test.go` | `BuildingNameOf`, `collectCmdFor`, and init-push building/visitor parsing (`ParseInitBuildings`/`ParseInitVisitors`, including malformed-entry skipping) |
@@ -224,6 +225,7 @@ Two things worth checking after setup, not just once but as ongoing habits:
 | `buildings_orchestration_test.go` | `FetchBuildings` parsing an `init` push's `building_new`/`visitor` fields and its timeout behavior with no data and with partial data; `CollectIdleReward`'s peek-then-claim two-call sequence; `CollectAll` aggregating a genuine mid-sequence failure (`al.help.all`) without short-circuiting the remaining calls |
 | `visitors_orchestration_test.go` | `GreetVisitors`: the empty-visitor-list short-circuit (nothing sent), one `visitor.operate` request per visitor in order, and error aggregation that folds away the benign `visitor_err_coming` errorCode while still surfacing a genuine failure, without stopping at the first error |
 | `interactive_orchestration_test.go` | `handleInteractiveLine` over a `net.Pipe`-backed connection: aborts without sending anything when a parsed JSON value has no `putJSONValue` case, and correctly parses/sends a well-formed `cmd.name {json}` line as an Extension call |
+| `decode_test.go` | `DecodeStreamFile`'s three branches against real `EncodePacket(EncodeObject(...))` output written to a temp file: clean end-of-stream after well-formed packets, a truncated-frame error naming the byte offset, and a corrupt-`SFSObject`-body packet whose `DecodeObject` error is logged inline while the stream continues decoding the packets that follow rather than aborting |
 | `tools/reassemble_stream.py` | Reassembles one TCP stream from a pcap into `-decode-stream`-ready files — see [Capturing and decoding traffic](docs/capturing-and-decoding-traffic.mdx) |
 
 ## License
