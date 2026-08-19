@@ -177,6 +177,7 @@ func DonateRecommendedAllianceTech(conn *GameConn) error {
 	}
 	arr, ok := v.Val.(*SFSArray)
 	if !ok {
+		slog.Warn("alliance tech tree: allianceScience field is present but not an array, skipping donation", "type", fmt.Sprintf("%T", v.Val))
 		return nil
 	}
 	recommendedID, found := findRecommendedTech(arr)

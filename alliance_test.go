@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
@@ -314,6 +316,13 @@ func TestDonateRecommendedAllianceTechNoAllianceScienceField(t *testing.T) {
 // TestDonateRecommendedAllianceTechWrongFieldType checks the second documented no-op branch: an
 // allianceScience field present but not an SFSArray must return nil, not an error, and must not
 // go on to send a donate request (same no-second-reader reasoning as the test above).
+//
+// It's also the regression test for this round's fix: before it, this branch returned nil with
+// zero logging, unlike the sibling branch two lines above (allianceScience field entirely
+// missing) which already logs an explanatory Info message -- if the server response shape ever
+// changed, -collect runs would silently stop donating alliance tech with no trace in the logs to
+// explain why. The fake server below sends allianceScience as a string instead of an array, and
+// the test asserts a Warn fires mentioning the field.
 func TestDonateRecommendedAllianceTechWrongFieldType(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
@@ -323,8 +332,16 @@ func TestDonateRecommendedAllianceTechWrongFieldType(t *testing.T) {
 		readAndReply(server, "", resp)
 	}()
 
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
 	if err := DonateRecommendedAllianceTech(client); err != nil {
 		t.Errorf("DonateRecommendedAllianceTech() = %v, want nil (non-array allianceScience field is tolerated)", err)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "allianceScience") {
+		t.Errorf("expected a warning mentioning allianceScience when the field is present but not an array, got log:\n%s", logged)
 	}
 }
 

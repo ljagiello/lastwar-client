@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -281,6 +282,104 @@ func TestFetchBuildingsDedupesBuildingUUIDAcrossSources(t *testing.T) {
 	}
 	if buildings[0].Uuid() != dupeUUID {
 		t.Errorf("got uuid %d, want %d", buildings[0].Uuid(), dupeUUID)
+	}
+}
+
+// TestFetchBuildingsWaitsForAuthoritativeInitDespiteEarlyPushInitBuild is the round-23 regression
+// test for the "push.init.build" case's deadline-shrink gate (buildings.go's gotAuthoritativeInit).
+// Contrast with TestFetchBuildingsDedupesBuildingUUIDAcrossSources above, which sends init THEN
+// push.init.build -- the already-correct ordering, where init has already arrived by the time
+// push.init.build's shrink fires, so shrinking to a short trailing window is fine. This test covers
+// the reverse, previously-buggy ordering: push.init.build arrives FIRST, with nothing else seen yet,
+// followed by a DELAYED authoritative init arriving more than 3 seconds later but still comfortably
+// inside the caller's original timeout.
+//
+// Before this fix, push.init.build's deadline-shrink applied unconditionally, identical to init's
+// own shrink -- so this exact sequence would have capped the deadline to ~3s after push.init.build,
+// well before the authoritative init at ~3.5s ever arrived, and FetchBuildings would have given up
+// early with only push.init.build's inferior defaultBuilds data (buildings.go's own doc comments are
+// emphatic that init/building_new, not push.init.build/defaultBuilds, is "the field that actually
+// matters"). Fixed by gating that shrink on gotAuthoritativeInit: push.init.build only gets to act as
+// a short trailing window once the authoritative init has already been captured, never before.
+//
+// docs/live-validation.mdx notes push.init.build has never actually fired once across roughly a
+// dozen real live sessions, so this ordering can't happen against the real production server today
+// -- but this file's own doc comments explicitly treat an arbitrary/hostile -cs-ip peer as in-scope
+// (see originalDeadline's doc comment), and nothing stops a non-standard or adversarial peer from
+// sending push.init.build before init.
+//
+// Mutation check: reverting the "push.init.build" case's `if gotAuthoritativeInit { ... }` gate in
+// buildings.go back to an unconditional `deadline = capDeadline(...)` makes this test fail: the
+// authoritative building (uuid 777) would be missing from the result, and err would be a plain nil
+// timeout instead of one wrapping io.EOF, since FetchBuildings would have given up at ~3s, before the
+// fake server ever got to send (or close the connection after) the delayed init.
+func TestFetchBuildingsWaitsForAuthoritativeInitDespiteEarlyPushInitBuild(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const (
+		callerTimeout = 6 * time.Second
+		// delayBeforeInit is deliberately > the 3-second push.init.build shrink window (see
+		// buildings.go's gotAuthoritativeInit doc comment) -- comfortably enough to absorb
+		// scheduling jitter -- while staying well under callerTimeout, so the fixed behavior
+		// (waiting the full original budget) still has room to actually read it.
+		delayBeforeInit   = 3500 * time.Millisecond
+		inferiorUUID      = int64(555)
+		authoritativeUUID = int64(777)
+	)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// push.init.build FIRST, with nothing else seen yet -- the previously-buggy ordering.
+		wrapper := NewSFSObject()
+		wrapper.PutSFSObject("buildInfo", newTestBuildingSFS(inferiorUUID, BuildingIronMine, 1))
+		defaultBuilds := NewSFSArray()
+		defaultBuilds.AddSFSObject(wrapper)
+		pibParams := NewSFSObject()
+		pibParams.PutSFSArray("defaultBuilds", defaultBuilds)
+		if err := server.SendExtension("push.init.build", pibParams); err != nil {
+			return
+		}
+
+		time.Sleep(delayBeforeInit)
+
+		// The DELAYED authoritative init, arriving well after the 3s shrink window would have
+		// already expired the pre-fix deadline.
+		initParams := NewSFSObject()
+		initArr := NewSFSArray()
+		initArr.AddSFSObject(newTestBuildingSFS(authoritativeUUID, BuildingFarmland, 5))
+		initParams.PutSFSArray("building_new", initArr)
+		if err := server.SendExtension("init", initParams); err != nil {
+			return
+		}
+		server.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment: ends the test fast instead of waiting out the post-init 3s window
+	}()
+
+	start := time.Now()
+	buildings, _, err := FetchBuildings(client, callerTimeout)
+	elapsed := time.Since(start)
+
+	select {
+	case <-done:
+	case <-time.After(delayBeforeInit + 3*time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("FetchBuildings() error = %v, want an error wrapping io.EOF (expected fake-server-hangup artifact once the delayed authoritative init was read; see doc comment) -- a plain nil/timeout here means FetchBuildings gave up before the authoritative init ever arrived, exactly the round-23 bug this test guards against", err)
+	}
+	if elapsed >= callerTimeout {
+		t.Fatalf("FetchBuildings took %v, want well under the %v caller timeout (should have returned shortly after reading the delayed authoritative init at ~%v, not run out the full budget)", elapsed, callerTimeout, delayBeforeInit)
+	}
+
+	if len(buildings) != 2 {
+		t.Fatalf("got %d buildings, want 2 (push.init.build's inferior uuid=%d plus the authoritative init's uuid=%d)", len(buildings), inferiorUUID, authoritativeUUID)
+	}
+	if buildings[0].Uuid() != inferiorUUID || buildings[0].BId() != BuildingIronMine {
+		t.Errorf("buildings[0] = uuid=%d bId=%d, want push.init.build's inferior uuid=%d bId=%d", buildings[0].Uuid(), buildings[0].BId(), inferiorUUID, BuildingIronMine)
+	}
+	if buildings[1].Uuid() != authoritativeUUID || buildings[1].BId() != BuildingFarmland || buildings[1].Level() != 5 {
+		t.Errorf("buildings[1] = uuid=%d bId=%d lv=%d, want the authoritative init/building_new uuid=%d bId=%d lv=5 -- push.init.build's early arrival must not shrink the deadline before this delayed-but-in-budget authoritative data is read", buildings[1].Uuid(), buildings[1].BId(), buildings[1].Level(), authoritativeUUID, BuildingFarmland)
 	}
 }
 
@@ -760,6 +859,17 @@ func TestContainsNonTimeoutNetError(t *testing.T) {
 		// errors.Join(timeout, non-timeout) above is the ordering where a plain errors.As gets it
 		// wrong -- both must report true regardless of which position the non-timeout error is in.
 		{"errors.Join(non-timeout, timeout)", errors.Join(nonTimeoutErr, timeoutErr), true},
+		// mail.go's ClaimAllMail wraps its ListMail failure via fmt.Errorf("list mail: %w", err)
+		// before appending it to errs and returning errors.Join(errs...) -- a different tree shape
+		// than GreetVisitors/ClaimAllianceGifts, which append per-item errors unwrapped (see
+		// TestCollectAllAbortsOnMaskedNonTimeoutNetErrorInJoinedSubActionError, which deliberately
+		// uses ClaimAllianceGifts, not ClaimAllMail, as its repro vehicle). These two cases prove
+		// containsNonTimeoutNetError correctly unwraps through that intermediate fmt.Errorf node --
+		// via its `interface{ Unwrap() error }` branch -- before reaching the net.Error, for both the
+		// genuine (non-timeout) and benign (timeout) cases, not just when a bare net.Error sits
+		// directly in the Join like the cases above.
+		{"errors.Join(fmt.Errorf-wrapped non-timeout)", errors.Join(fmt.Errorf("wrap: %w", nonTimeoutErr)), true},
+		{"errors.Join(fmt.Errorf-wrapped timeout)", errors.Join(fmt.Errorf("wrap: %w", timeoutErr)), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

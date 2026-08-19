@@ -204,6 +204,82 @@ func TestListMailStopsOnMissingLastUid(t *testing.T) {
 	}
 }
 
+// TestListMailWarnsOnNonBoolMoreField is the regression test for this round's fix to ListMail's
+// pagination loop: a response whose `more` field is present but not a bool must not be silently
+// treated as more=false with zero diagnostic. Before the fix, `mv.Val.(bool)`'s failed assertion
+// left the local `more` variable at its zero value (false) with no logging at all, so the loop
+// broke exactly as if the server had genuinely said "no more pages" -- indistinguishable in the
+// logs from a legitimate final page. The adjacent lastUid-missing check (see
+// TestListMailStopsOnMissingLastUid above) already warns for the equivalent anomaly on its own
+// field; this fix makes the `more` field's own type-assertion failure warn too. The fake server
+// here sends `more` as a string instead of a bool, so a correct ListMail must stop after page 1
+// (identical outward behavior to more=false) while now also logging a warning that names the
+// `more` field.
+func TestListMailWarnsOnNonBoolMoreField(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok {
+			return
+		}
+		if msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("Cmd = %q, want chat.get.system.mails", msg.Cmd)
+		}
+		resp := NewSFSObject()
+		arr := NewSFSArray()
+		arr.AddSFSObject(newTestMailObj("uid-1", 3, 0))
+		resp.PutSFSArray("msg", arr)
+		resp.PutUtfString("more", "yes") // wrong-typed: server-shape anomaly under test, not a bool
+		resp.PutUtfString("lastUid", "cursor-1")
+		resp.PutLong("lastMailTime", 999)
+		_ = server.SendExtension("push.chat.get.system.mails", resp)
+		// Intentionally does not read a second request -- a correct ListMail treats the wrong-typed
+		// more field as more=false and never sends one.
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	var got []Mail
+	var err error
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		got, err = ListMail(client)
+	}()
+
+	select {
+	case <-listDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ListMail never returned -- it should treat the non-bool more field as more=false and stop")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if len(got) != 1 || got[0].Uid() != "uid-1" {
+		t.Fatalf("got %v, want exactly the one page-1 mail entry (uid-1) -- pagination must stop after page 1", got)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "more") {
+		t.Errorf("expected a warning mentioning the more field when it is present but not a bool, got log:\n%s", logged)
+	}
+}
+
 // TestListMailWarnsOnMaxPagesTruncation is the regression test for the round-14 fix to ListMail's
 // pagination loop: if the loop exhausts all maxPages requests while the server's last response
 // still reported more=true (with a perfectly valid lastUid each time -- this is NOT the

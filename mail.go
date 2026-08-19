@@ -140,6 +140,8 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		if mv, ok := msg.Params.Get("more"); ok {
 			if b, ok := mv.Val.(bool); ok {
 				more = b
+			} else {
+				slog.Warn("list mail: response's more field is present but not a bool, treating as more=false and stopping pagination", "page", page, "collectedSoFar", len(all))
 			}
 		}
 		if !more {

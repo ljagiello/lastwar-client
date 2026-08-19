@@ -146,6 +146,98 @@ func TestWaitForTimeout(t *testing.T) {
 	}
 }
 
+// delayedFirstReadConn wraps a net.Conn and makes its first Read call sleep for a fixed delay
+// before delegating to the embedded conn, while making SetReadDeadline an unconditional no-op.
+// Used by TestWaitForDeadlineElapsedAfterNonMatchingEnvelope below to deterministically construct
+// waitFor's untested "loop iterated at least once (a non-matching envelope was read), THEN
+// remaining<=0 fired on a LATER iteration" exit, without racing a tight wall-clock timing window:
+// since SetReadDeadline here never actually arms a real deadline, the ONLY way a read in that
+// test can ever fail with a timeout is via waitFor's own remaining<=0 wall-clock check at the top
+// of its loop -- not a genuine per-read SetReadDeadline+ReadEnvelope timeout (the OTHER exit from
+// waitFor, already covered by TestWaitForTimeout). That makes the resulting error unambiguously
+// attributable to the branch under test.
+type delayedFirstReadConn struct {
+	net.Conn
+	delay     time.Duration
+	firstDone bool
+}
+
+func (c *delayedFirstReadConn) SetReadDeadline(time.Time) error { return nil }
+
+func (c *delayedFirstReadConn) Read(b []byte) (int, error) {
+	if !c.firstDone {
+		c.firstDone = true
+		time.Sleep(c.delay)
+	}
+	return c.Conn.Read(b)
+}
+
+// TestWaitForDeadlineElapsedAfterNonMatchingEnvelope is the regression test for waitFor's
+// wall-clock-deadline-elapsed exit (login.go: the `if remaining <= 0` check at the top of
+// waitFor's read loop). Before this round's fix, that branch returned a bare fmt.Errorf --  not a
+// net.Error -- which silently defeated every net.Error/Timeout() "benign timeout vs. dead
+// connection" distinction built on top of waitFor/waitForCmd across rounds 20-22 (buildings.go,
+// mail.go, visitors.go, alliance.go, interactive.go), all of which assume sendAndWait's/
+// waitForCmd's ordinary timeout outcome IS ITSELF a net.Error with Timeout()==true.
+// TestWaitForTimeout above already covers the OTHER exit from this same function (a genuine
+// per-read timeout when no envelope ever arrives at all) but never touches this one: it's only
+// reachable when a NON-matching envelope is successfully read close enough to the deadline that
+// time.Until(deadline) goes <=0 on a LATER loop iteration -- e.g. an unrelated game push arriving
+// just before an operator's -interactive command's response would.
+//
+// Constructed deterministically via delayedFirstReadConn rather than racing a tight timing
+// window: the first (and, since the envelope fits in one bufio.Reader fill, only) real read
+// deliberately takes far longer than the full waitFor timeout before returning a valid
+// non-matching envelope, while SetReadDeadline is a no-op the whole time -- so the read always
+// "succeeds" (no per-read timeout is even possible here), and by the time waitFor's loop goes
+// back to the top, the wall-clock deadline has already, unambiguously elapsed.
+func TestWaitForDeadlineElapsedAfterNonMatchingEnvelope(t *testing.T) {
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() {
+		c1.Close()
+		c2.Close()
+	})
+
+	const timeout = 30 * time.Millisecond
+	const readDelay = 10 * timeout // comfortably longer than the whole waitFor timeout
+
+	wrapped := &delayedFirstReadConn{Conn: c1, delay: readDelay}
+	client := &GameConn{conn: wrapped, reader: bufio.NewReaderSize(wrapped, 4096)}
+	server := &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
+
+	go func() {
+		unrelated := NewSFSObject()
+		unrelated.PutUtfString("noise", "an unrelated push, not what pred is waiting for")
+		_ = server.SendExtension("some.other.push", unrelated)
+	}()
+
+	start := time.Now()
+	env, err := waitFor(client, timeout, func(e *Envelope) bool {
+		msg, ok := e.AsExtension()
+		return ok && msg.Cmd == "never.arrives"
+	})
+	elapsed := time.Since(start)
+
+	if env != nil {
+		t.Fatalf("expected no matching envelope (only the unrelated push was ever sent), got %+v", env)
+	}
+	if err == nil {
+		t.Fatal("expected an error once the deadline elapsed after the non-matching envelope was read, got nil")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Errorf("err = %v (%T), want a net.Error with Timeout()=true -- the deadline-elapsed branch must satisfy net.Error just like the per-read-timeout branch does, so downstream errors.As(err, &netErr) checks (interactive.go, buildings.go, mail.go, visitors.go, alliance.go) treat it as benign rather than fatal", err, err)
+	}
+	// delayedFirstReadConn's SetReadDeadline is a deliberate no-op, so the real per-read network
+	// timeout mechanism can never fire in this test -- confirmed by construction, not just by the
+	// net.Error assertion above. elapsed must be at least readDelay: waitFor can only have
+	// returned after actually reading (and skipping) the non-matching envelope, which required
+	// blocking through the full artificial read delay first.
+	if elapsed < readDelay {
+		t.Errorf("waitFor returned after %v, want at least readDelay (%v): it must have blocked through the slow first read before hitting the deadline-elapsed check", elapsed, readDelay)
+	}
+}
+
 // TestWaitForCmdSkipsUnmatchedPushes checks that waitForCmd (and the waitFor it's built on) skips
 // past a push whose cmd doesn't match and keeps reading rather than returning the wrong message.
 func TestWaitForCmdSkipsUnmatchedPushes(t *testing.T) {

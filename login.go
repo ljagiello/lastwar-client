@@ -497,18 +497,41 @@ func redact(s string) string {
 	// name, e.g. CJK; mail is an internationalized email address). Raw byte-index
 	// slicing (the pre-fix s[:4]/s[len(s)-4:] here) can land mid-rune and emit
 	// invalid UTF-8 into both slog's JSON sink and StringRedacted()'s raw
-	// fmt.Printf terminal sink. For plain ASCII input, byte and rune indices
-	// coincide, so this is a no-op behavior change: same first-4/last-4 shape.
+	// fmt.Printf terminal sink.
 	r := []rune(s)
-	if len(r) <= 8 {
+	n := len(r)
+	if n <= 8 {
 		// Byte length is >8 (checked above) but rune count is small -- a short
 		// multi-byte string (e.g. a 3-rune CJK name at 3 bytes/rune = 9 bytes).
-		// Not enough runes to usefully show a non-overlapping first-4/last-4
+		// Not enough runes to usefully show a non-overlapping prefix/suffix
 		// slice without leaking most or all of it back out, so fully redact
 		// instead, same as the short-input case above.
 		return "***"
 	}
-	return string(r[:4]) + "..." + string(r[len(r)-4:])
+	// How many runes to reveal from each end. This used to be a flat 4/4
+	// regardless of length, which is fine for long opaque tokens
+	// (loginKey/accessToken, typically 32-64+ chars, where showing a fixed
+	// prefix/suffix as a correlation aid across log lines doesn't meaningfully
+	// weaken anything) but badly over-exposes realistic human password
+	// lengths: sfsobject.go's redactSFSValue calls this for EVERY sensitive
+	// string field, including "pw"/"password", not just long tokens, and the
+	// old flat rule revealed a clear MAJORITY of a realistic password --
+	// redact("Summer2024!") (11 runes) used to produce "Summ...024!", 8 of 11
+	// chars (~73%) visible.
+	//
+	// Scale k with length instead: n/8, capped at 4. This keeps the reveal a
+	// clear minority across the realistic password range (~18-25% visible for
+	// 9-20 rune input, well under a 40% ceiling) while converging on exactly
+	// the original first-4/last-4 shape once n reaches 32 -- long enough that
+	// revealing 8 chars is itself a small minority (25%) -- and never reveals
+	// more than that fixed 4/4 prefix/suffix for even longer tokens, keeping
+	// the shape useful for visually correlating "is this the same token as
+	// before" across log lines.
+	k := n / 8
+	if k > 4 {
+		k = 4
+	}
+	return string(r[:k]) + "..." + string(r[n-k:])
 }
 
 // waitForInitPush waits for the bare `init` bootstrap push (report 14 §5:
@@ -601,6 +624,23 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 	}
 }
 
+// deadlineExceededError is waitFor's own wall-clock-deadline-elapsed outcome: the loop read at
+// least one envelope (none of them matched pred), and the overall timeout ran out before another
+// one arrived. It satisfies net.Error with Timeout()==true so callers built on the "sendAndWait's
+// ordinary timeout outcome IS ITSELF a net.Error with Timeout()==true" premise (buildings.go,
+// mail.go, visitors.go, alliance.go, interactive.go -- see their errors.As-against-net.Error
+// checks) treat this exit the same benign way they already treat the OTHER exit from this
+// function: a genuine per-read SetReadDeadline+ReadEnvelope timeout, which returns a real
+// net.Error from the network layer itself. Before this type existed, this branch returned a bare
+// fmt.Errorf, which is not a net.Error at all -- indistinguishable from a genuine dead-connection
+// failure to every one of those callers' errors.As checks, even though it's exactly as benign as
+// the per-read-timeout exit right below it in this same function.
+type deadlineExceededError struct{}
+
+func (deadlineExceededError) Error() string   { return "timed out waiting for matching envelope" }
+func (deadlineExceededError) Timeout() bool   { return true }
+func (deadlineExceededError) Temporary() bool { return false }
+
 // waitFor reads envelopes until pred matches or timeout elapses, logging
 // everything it skips past along the way.
 func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (*Envelope, error) {
@@ -608,7 +648,7 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return nil, fmt.Errorf("timed out waiting for matching envelope")
+			return nil, deadlineExceededError{}
 		}
 		conn.conn.SetReadDeadline(time.Now().Add(remaining))
 		env, err := conn.ReadEnvelope()

@@ -247,6 +247,16 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 	originalDeadline := time.Now().Add(timeout)
 	deadline := originalDeadline
 	gotInitBuild := false
+	// gotAuthoritativeInit tracks specifically whether the "init" case below (the real
+	// building_new/visitor.list source -- see ParseInitBuildings' doc comment) has fired this
+	// session, as opposed to gotInitBuild above which is set by either "init" or
+	// "push.init.build" and so can't answer that question on its own. Gates the
+	// "push.init.build" case's deadline-shrink below: per this file's own doc comments,
+	// push.init.build/defaultBuilds is a rarely-fired secondary push carrying inferior data, so
+	// it must never be allowed to cut short the wait for the authoritative "init" push that
+	// hasn't arrived yet -- only once "init" has already been captured is push.init.build just
+	// icing worth a short trailing window for, not the only thing seen so far.
+	gotAuthoritativeInit := false
 
 	// seenBuildingUUIDs dedupes across the three population sources below (init/building_new,
 	// push.init.build/defaultBuilds, push.add.building/buildings): if more than one fires for the
@@ -308,6 +318,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			// actually matters; push.init.build is a rarely-fired secondary
 			// push.
 			gotInitBuild = true
+			gotAuthoritativeInit = true
 			for _, b := range ParseInitBuildings(msg.Params) {
 				appendBuilding(b)
 			}
@@ -338,9 +349,18 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 				}
 			}
 			slog.Info("push.init.build: buildings loaded", "count", len(buildings))
-			// Keep listening a little longer for queue pushes that often
-			// follow immediately, but we already have what we came for.
-			deadline = capDeadline(time.Now().Add(3*time.Second), originalDeadline)
+			// Only shrink the deadline here if the authoritative "init" push (building_new --
+			// see this function's doc comment and the "init" case above) has ALREADY arrived
+			// this session. If it hasn't, push.init.build's defaultBuilds is all we have so
+			// far -- inferior data per this file's own doc comments -- so shrinking the
+			// deadline now could let a delayed-but-still-within-timeout authoritative init
+			// never get read at all, silently settling for push.init.build's data instead.
+			// Once init HAS already been seen, push.init.build is just icing (e.g. trailing
+			// queue pushes), so the same short trailing window applies as it does after init
+			// itself.
+			if gotAuthoritativeInit {
+				deadline = capDeadline(time.Now().Add(3*time.Second), originalDeadline)
+			}
 		case "push.add.building":
 			if v, ok := msg.Params.Get("buildings"); ok {
 				if arr, ok := v.Val.(*SFSArray); ok {
