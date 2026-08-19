@@ -202,3 +202,68 @@ func TestDecodeStreamFile(t *testing.T) {
 		})
 	}
 }
+
+// mustEncodePushAccountLoginNewPacket builds one on-wire framed packet shaped like a real
+// server->client push.account.login.new (conn.go's SendEnvelope/SendExtension wire format:
+// outer {c,a,p}, with the extension content's own {c,r,p} carrying the cmd name and params) whose
+// params include a live loginKey, exactly the shape docs/capturing-and-decoding-traffic.mdx's
+// capture-a-real-login-and-decode-it workflow would hand to -decode-stream.
+func mustEncodePushAccountLoginNewPacket(t *testing.T, loginKey string) []byte {
+	t.Helper()
+	params := NewSFSObject()
+	params.PutUtfString("gameUid", "12345678")
+	params.PutUtfString("loginKey", loginKey)
+
+	extContent := NewSFSObject()
+	extContent.PutUtfString("c", "push.account.login.new")
+	extContent.PutInt("r", -1)
+	extContent.PutSFSObject("p", params)
+
+	outer := NewSFSObject()
+	outer.PutByte("c", controllerExtension)
+	outer.PutShort("a", actionCallExtension)
+	outer.PutSFSObject("p", extContent)
+
+	body, err := EncodeObject(outer)
+	if err != nil {
+		t.Fatalf("EncodeObject: %v", err)
+	}
+	packet, err := EncodePacket(body)
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+	return packet
+}
+
+// TestDecodeStreamFileRedactsCredentialFields is a regression test for the finding that
+// DecodeStreamFile printed obj.String() -- the raw, unredacted dump -- for every successfully
+// decoded packet, so a real capture spanning login (this tool's whole documented purpose per
+// docs/capturing-and-decoding-traffic.mdx) would print a live loginKey from
+// push.account.login.new straight to stdout. Reverting the obj.StringRedacted() fix back to
+// obj.String() would make this test fail: the raw secret would appear verbatim in stdout.
+func TestDecodeStreamFileRedactsCredentialFields(t *testing.T) {
+	const secretLoginKey = "SUPERSECRETLOGINKEYDONOTLEAK12345"
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.bin")
+	stream := mustEncodePushAccountLoginNewPacket(t, secretLoginKey)
+	if err := os.WriteFile(path, stream, 0o600); err != nil {
+		t.Fatalf("write test stream: %v", err)
+	}
+
+	var decodeErr error
+	stdout := captureStdout(t, func() {
+		decodeErr = DecodeStreamFile("test", path)
+	})
+	if decodeErr != nil {
+		t.Fatalf("expected nil error for a well-formed stream, got: %v", decodeErr)
+	}
+	if strings.Contains(stdout, secretLoginKey) {
+		t.Errorf("DecodeStreamFile leaked the raw loginKey in cleartext:\n%s", stdout)
+	}
+	// Sanity: prove the packet was actually decoded and printed (not silently skipped), so the
+	// absence of the secret above reflects redaction rather than the packet never being reached.
+	if !strings.Contains(stdout, "loginKey=") {
+		t.Errorf("stdout missing the redacted loginKey field entirely -- packet may not have been decoded/printed at all, got:\n%s", stdout)
+	}
+}

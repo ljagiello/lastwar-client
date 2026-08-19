@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -548,5 +550,141 @@ func TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), secretLoginKey) {
 		t.Errorf("Login error leaks the raw loginKey in cleartext: %v", err)
+	}
+}
+
+// TestLoginRedactsCodeDeviceIdAndAirKeyInLogs is the round-12 regression test for two credential-
+// leak fixes in Login() itself (not a downstream error path): (1) the "got code" log used to
+// include the raw one-time email-verification code in cleartext at default Info level on every
+// email login, immediately before that same code is used to complete account.login.new (fixed to
+// log codeLen instead); and (2) the "device identity"/"air key" logs at the very top of Login()
+// used to include the raw deviceId/airKey in cleartext, unconditionally, on every single Login()
+// call regardless of flow -- guest, email, or config reconnect (fixed to log deviceIdLen/
+// airKeyLen instead, matching the style main.go's runCrossServerTest already uses for the
+// identical two values).
+//
+// The email-verification path is used here (rather than the guest happy path) because it's the
+// only flow that also exercises the verification code, letting one test cover both fixes: deviceId
+// and airKey are logged right at the top of Login(), before any network I/O, and the code is
+// logged in step 7 then reused on the wire in step 8. Log output is captured at Info level -- the
+// default in production -- since both bugs fired unconditionally at that level, with no
+// -log-level debug needed for either to reproduce.
+func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const testEmail = "player@example.com"
+	const testCode = "654321"
+
+	pipePath := mkfifoT(t, t.TempDir(), "code.pipe")
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		// Step 4: base zone Login -- plain success, immediately followed by the `init` push, same
+		// as TestLoginEmailVerificationPath, so Login() falls through into the email-verification
+		// steps this test cares about.
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+			return
+		}
+
+		// Step 6: account.login.send.verify.code request, then its ack.
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		ack := NewSFSObject()
+		ack.PutBool("success", true)
+		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
+			return
+		}
+
+		// Step 8: account.login.new (type=0, mail+code+deviceId+airKey), then its terse ack.
+		if _, err := readNextExtension(server); err != nil {
+			return
+		}
+		finishAck := NewSFSObject()
+		finishAck.PutBool("success", true)
+		if err := server.SendExtension("account.login.new", finishAck); err != nil {
+			return
+		}
+
+		push := NewSFSObject()
+		push.PutUtfString("loginKey", "test-login-key")
+		push.PutUtfString("gameUid", "real-uid-1")
+		_ = server.SendExtension("push.account.login.new", push)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	// GameUid empty deliberately (same as TestLoginEmailVerificationPath): drives gslOptFor to
+	// opt=new, which keeps Login() off the opt=="login" fast-path return and routes it into the
+	// email-verification steps below.
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       0,
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	go func() {
+		f, err := os.OpenFile(pipePath, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(testCode + "\n")
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{Email: testEmail, CodePipe: pipePath})
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	defer result.Conn.Close()
+
+	if result.Ident == nil {
+		t.Fatal("result.Ident = nil")
+	}
+	// The device identity is freshly generated under this test's isolated HOME (t.Setenv above),
+	// so the raw values to check for are only known after Login() returns them on result.Ident --
+	// read them back off the live result rather than hardcoding a value the fix wouldn't otherwise
+	// be exercised against.
+	rawDeviceID := result.Ident.DeviceID
+	rawAirKey := result.Ident.AirKey()
+	if rawDeviceID == "" || rawAirKey == "" {
+		t.Fatalf("test setup: DeviceID/AirKey unexpectedly empty (DeviceID=%q, AirKey=%q)", rawDeviceID, rawAirKey)
+	}
+
+	logged := buf.String()
+
+	if strings.Contains(logged, testCode) {
+		t.Errorf("Login()'s logged output leaks the raw verification code %q in cleartext:\n%s", testCode, logged)
+	}
+	if !strings.Contains(logged, "codeLen") {
+		t.Errorf("Login()'s logged output is missing the codeLen replacement key -- the \"got code\" log line may not have fired at all:\n%s", logged)
+	}
+
+	if strings.Contains(logged, rawDeviceID) {
+		t.Errorf("Login()'s logged output leaks the raw deviceId %q in cleartext:\n%s", rawDeviceID, logged)
+	}
+	if !strings.Contains(logged, "deviceIdLen") {
+		t.Errorf("Login()'s logged output is missing the deviceIdLen replacement key -- the \"device identity\" log line may not have fired at all:\n%s", logged)
+	}
+
+	if strings.Contains(logged, rawAirKey) {
+		t.Errorf("Login()'s logged output leaks the raw airKey %q in cleartext:\n%s", rawAirKey, logged)
+	}
+	if !strings.Contains(logged, "airKeyLen") {
+		t.Errorf("Login()'s logged output is missing the airKeyLen replacement key -- the \"air key\" log line may not have fired at all:\n%s", logged)
 	}
 }

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -65,6 +68,66 @@ func TestDoHandshakeFailureWrapsErrAuthRejected(t *testing.T) {
 	}
 	if !errors.Is(err, ErrAuthRejected) {
 		t.Errorf("err = %v, want errors.Is(err, ErrAuthRejected)", err)
+	}
+}
+
+// TestDoHandshakeSkipRedactsCredentialFields is the round-12 regression test for the
+// "skipped envelope while waiting for handshake" fallback branch (conn.go, DoHandshake's read
+// loop): if some other envelope -- e.g. an out-of-order push shaped like push.account.login.new,
+// carrying a live loginKey -- arrives before the real system/actionHandshake response, DoHandshake
+// falls into this skip-and-log branch instead of erroring out. Round 11 added
+// SFSObject.StringRedacted() for exactly this kind of "log a full decoded object" call site, but
+// this particular site kept calling the raw, unredacted String() instead -- and evaded round-11's
+// credential_leak_lint_test.go regex specifically because the .String() call was stashed in a
+// local variable (contentStr) two lines above the slog.Info call rather than inline in it. This
+// proves the fallback's logged output never contains the raw loginKey, and (since the fake server
+// keeps reading after the skip) that DoHandshake still recovers and returns the real response.
+func TestDoHandshakeSkipRedactsCredentialFields(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-1234567890"
+
+	go func() {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		if env.Controller != controllerSystem || env.Action != actionHandshake {
+			return
+		}
+		// Simulate an out-of-order push arriving before the real handshake response: same
+		// {c,a,p} envelope shape as push.account.login.new, sent under an action id (actionLogin)
+		// DoHandshake isn't waiting for -- this drives it into the skip-and-log fallback branch
+		// rather than the normal-response or ec-rejection paths.
+		skipped := NewSFSObject()
+		skipped.PutUtfString("loginKey", secretLoginKey)
+		skipped.PutUtfString("gameUid", "g1")
+		if err := server.SendEnvelope(controllerExtension, actionLogin, skipped); err != nil {
+			return
+		}
+
+		resp := NewSFSObject()
+		resp.PutUtfString("sess", "abc123")
+		_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	// Debug/Info level explicitly enabled: the skip-logger fires at Info, but set the handler to
+	// Debug so this test would also catch the leak if the log level were ever lowered.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	got, err := client.DoHandshake(500 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("DoHandshake: %v", err)
+	}
+	if got == nil || got.GetString("sess") != "abc123" {
+		t.Fatalf("expected DoHandshake to recover past the skipped envelope and return the real handshake response, got %+v", got)
+	}
+
+	if logged := buf.String(); strings.Contains(logged, secretLoginKey) {
+		t.Errorf("DoHandshake's skip-and-log fallback leaks the raw loginKey in cleartext:\n%s", logged)
 	}
 }
 

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +120,82 @@ func TestListMailPaginates(t *testing.T) {
 	}
 	if gotReqs[1].clientseq != "uid-2" || gotReqs[1].time != 555 {
 		t.Errorf("page 2 request = %+v, want clientseq=\"uid-2\" time=555 (page 1's lastUid/lastMailTime)", gotReqs[1])
+	}
+}
+
+// TestListMailStopsOnMissingLastUid is the regression test for the round-12 fix to ListMail's
+// pagination loop: a response that claims `more: true` but omits `lastUid` must not be treated as
+// a valid cursor to keep paginating on. Before the fix, `msg.Params.GetString("lastUid")` silently
+// fell through to "" -- indistinguishable from the cold-start clientseq -- so ListMail would
+// re-send the exact same first-page request again (and again, up to maxPages times) instead of
+// stopping. The fake server here answers exactly one request and then goes silent, so a reverted
+// fix would make ListMail try to send a second request that nothing ever answers: SendExtension's
+// 10s write deadline (conn.go's writeTimeout) would eventually error it out, but this test's own
+// 3s bound catches that long before then and fails with a clear message instead of just going
+// slow.
+func TestListMailStopsOnMissingLastUid(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok {
+			return
+		}
+		if msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("Cmd = %q, want chat.get.system.mails", msg.Cmd)
+		}
+		resp := NewSFSObject()
+		arr := NewSFSArray()
+		arr.AddSFSObject(newTestMailObj("uid-1", 3, 0))
+		resp.PutSFSArray("msg", arr)
+		resp.PutBool("more", true)
+		// Deliberately no PutUtfString("lastUid", ...) call: `more: true` with a genuinely
+		// missing lastUid is exactly the malformed shape under test.
+		resp.PutLong("lastMailTime", 999)
+		_ = server.SendExtension("push.chat.get.system.mails", resp)
+		// Intentionally does not read a second request -- see the test's own doc comment for why
+		// that's the point: a correct ListMail never sends one.
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	var got []Mail
+	var err error
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		got, err = ListMail(client)
+	}()
+
+	select {
+	case <-listDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ListMail never returned -- it looped on the missing lastUid cursor instead of stopping pagination")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if len(got) != 1 || got[0].Uid() != "uid-1" {
+		t.Fatalf("got %v, want exactly the one page-1 mail entry (uid-1) -- pagination must stop after page 1", got)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "lastUid") {
+		t.Errorf("expected a warning mentioning lastUid when more=true but lastUid is missing, got log:\n%s", logged)
 	}
 }
 

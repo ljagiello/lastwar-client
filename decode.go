@@ -45,7 +45,7 @@ func DecodeStreamFile(label, path string) error {
 			fmt.Printf("[%s] #%d @offset %d: DecodeObject error: %v (body %d bytes, hex head: %x)\n", label, n, start, err, len(body), head)
 			continue
 		}
-		fmt.Printf("[%s] #%d @offset %d: %s\n", label, n, start, obj.String())
+		fmt.Printf("[%s] #%d @offset %d: %s\n", label, n, start, obj.StringRedacted())
 	}
 	fmt.Printf("[%s] total decoded: %d packets, %d bytes consumed of %d\n", label, n, len(data)-r.Len(), len(data))
 	return nil

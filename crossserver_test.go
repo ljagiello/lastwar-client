@@ -203,6 +203,79 @@ func TestDoCrossServerLoginDebugDumpRedactsCredentials(t *testing.T) {
 	}
 }
 
+// TestDoCrossServerLoginHandshakeLogRedactsSessionToken is the round-12 regression test for
+// crossserver.go's "handshake OK" log (the experimental -handshake path): it used to log the raw
+// Handshake response via hsResp.String(), but per docs/wire-protocol.mdx the live production
+// server's Handshake response carries a real session token in a `tk` field
+// (`{ct=3072, ms=1000000, tk=<32-hex>}`) -- unredacted logging of that response leaks a live
+// credential the same way the round-11 LWDEBUG_DUMP_LOGIN bug did (see
+// TestDoCrossServerLoginDebugDumpRedactsCredentials above). Proves the "handshake OK" log line's
+// captured output never contains the fake tk value, while also confirming the log line itself
+// fired (so the test isn't vacuously passing because the handshake path never ran).
+func TestDoCrossServerLoginHandshakeLogRedactsSessionToken(t *testing.T) {
+	const fakeTk = "sensitive-secret-handshake-tk-must-not-leak-abcdef0123456789"
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		// First envelope: the Handshake request (controllerSystem/actionHandshake, sent by
+		// conn.go's DoHandshake before Login).
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		hsResp := NewSFSObject()
+		hsResp.PutInt("ct", 3072)
+		hsResp.PutInt("ms", 1000000)
+		hsResp.PutUtfString("tk", fakeTk)
+		if err := server.SendEnvelope(controllerSystem, actionHandshake, hsResp); err != nil {
+			return
+		}
+
+		// Second envelope: the subsequent Login request, answered normally so
+		// DoCrossServerLogin completes.
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+		Handshake: true,
+	}
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	// Debug level explicitly enabled, matching TestDoCrossServerLoginDebugDumpRedactsCredentials's
+	// pattern -- "handshake OK" itself logs at Info, but capturing at Debug keeps this test
+	// consistent with this file's other log-capture tests and still catches it either way.
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := DoCrossServerLogin(p)
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v", err)
+	}
+	defer result.Conn.Close()
+
+	logged := buf.String()
+	if !strings.Contains(logged, "handshake OK") {
+		t.Fatal("expected the \"handshake OK\" log line to have fired, but it was not captured")
+	}
+	if strings.Contains(logged, fakeTk) {
+		t.Errorf("\"handshake OK\" log leaks the raw handshake session token (tk) in cleartext:\n%s", logged)
+	}
+}
+
 // TestDoCrossServerLoginSingleRedirect covers following exactly one serverInfo redirect: the
 // first fake server's Login response points at a second fake server, which then responds
 // normally (no further redirect). The result's Addr/Zone must reflect the POST-redirect server,

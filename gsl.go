@@ -301,7 +301,11 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 		return nil, fmt.Errorf("getserverlist.php: response body exceeds %d byte limit", maxGSLResponseSize)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("getserverlist.php: HTTP %d: %s", resp.StatusCode, string(body))
+		// Same reasoning as the three decode-failure branches below: a getserverlist.php
+		// response body -- even one accompanying a non-200 status -- may legitimately carry a
+		// live at/rt session token, so it must never be echoed into an error. A byte length is
+		// enough to diagnose the failure.
+		return nil, fmt.Errorf("getserverlist.php: HTTP %d (bodyLen=%d)", resp.StatusCode, len(body))
 	}
 
 	// The top-level response may itself be the plaintext respon, or may

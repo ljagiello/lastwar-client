@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -162,6 +163,40 @@ func TestLoadOrCreateDeviceIdentityWarnsOnLooseGameUidPermissions(t *testing.T) 
 	}
 	if !strings.Contains(buf.String(), "more permissive than 0600") {
 		t.Errorf("expected a permission warning in the log output, got: %s", buf.String())
+	}
+}
+
+// TestStateFilePathWarnsAndFallsBackWhenHomeDirUnavailable confirms stateFilePath's
+// os.UserHomeDir() fallback -- used for all four persisted device-identity state files, loginKey
+// included -- is no longer silent. On darwin/linux, os.UserHomeDir() reads $HOME directly (see
+// Go's os package: only windows/plan9/nacl/android/ios get special-cased env vars or hardcoded
+// paths), so an empty $HOME reproduces the same "home directory not determined" failure a minimal
+// container or misconfigured cron environment would hit for real. Before this fix, that fallback
+// silently redirected credential state files to the current working directory with no logged
+// trace; reverting the slog.Warn call in stateFilePath would make this test fail (the location
+// assertion would still pass) while every other identity_test.go test keeps passing, since none
+// of them exercise the os.UserHomeDir() error path.
+func TestStateFilePathWarnsAndFallsBackWhenHomeDirUnavailable(t *testing.T) {
+	t.Setenv("HOME", "")
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	const name = ".lastwar_goclient_test_marker"
+	got := stateFilePath(name)
+	want := filepath.Join(".", name)
+	if got != want {
+		t.Errorf("stateFilePath(%q) = %q, want %q (current-working-directory fallback)", name, got, want)
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "could not determine home directory") {
+		t.Errorf("expected a home-directory-fallback warning in the log output, got: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "dir=.") {
+		t.Errorf("expected the warning to record the fallback dir, got: %s", logOutput)
 	}
 }
 

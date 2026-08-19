@@ -161,6 +161,21 @@ var sensitiveSFSKeys = map[string]bool{
 	"shumeiBoxId": true,
 	"pw":          true,
 	"password":    true,
+	// verifyCode is the live one-time email-verification code account.login.new sends to
+	// complete login (see login.go's finishParams.PutUtfString("verifyCode", code)).
+	"verifyCode": true,
+	// deviceId is, together with airKey (already above), the actual SFS-layer bearer credential
+	// for the base zone Login (see login.go's/identity.go's BuildLoginParams doc comments) -- it
+	// always appears alongside airKey in loginParams, so it must redact the same way.
+	"deviceId": true,
+	// chatToken is documented (docs/auth.mdx, docs/alliance-chat-mail.mdx) as a live bearer
+	// credential for the separate chat WebSocket, carried in the `init` push's params. Not yet
+	// consumed by any Go code (chat isn't implemented) -- added pre-emptively/defense-in-depth.
+	"chatToken": true,
+	// tk is the vanilla SFS2X Handshake response's session token -- docs/wire-protocol.mdx
+	// documents a real captured Handshake response shape `{ct=3072, ms=1000000, tk=<32-hex>}`
+	// from the live production server, explicitly calling tk a session token.
+	"tk": true,
 }
 
 // StringRedacted is String()'s safe-to-log twin: a decoded server response or outgoing request
@@ -211,14 +226,47 @@ func formatSFSValueRedacted(v SFSValue) string {
 }
 
 // redactSFSValue masks a sensitive-keyed field's value. Every known sensitive key
-// (sensitiveSFSKeys) carries a plain string on the wire; a non-string value under one of those
-// keys would be unexpected, so it falls back to the ordinary safe recursive formatter rather than
-// printing a raw value this function doesn't recognize as safe to mask.
+// (sensitiveSFSKeys) carries a plain string on the wire in every case this repo has decoded; a
+// non-string value under one of those keys would be unexpected. A primitive array (one of the 8
+// types readValuePayload's array-tag cases decode into -- []bool/[]byte/[]int16/[]int32/[]int64/
+// []float32/[]float64/[]string) still gets masked explicitly below, since formatSFSValueRedacted's
+// fallback for those types is the same naive fmt.Sprintf("%v", val) String() uses -- printing the
+// raw slice contents with no redaction at all, defeating this function's whole point. Any other
+// non-string, non-array shape falls back to the ordinary safe recursive formatter.
 func redactSFSValue(v SFSValue) string {
 	if s, ok := v.Val.(string); ok {
 		return redact(s)
 	}
+	if n, ok := primitiveArrayLen(v.Val); ok {
+		return fmt.Sprintf("[REDACTED %d items]", n)
+	}
 	return formatSFSValueRedacted(v)
+}
+
+// primitiveArrayLen reports the length of val and true if val is one of the 8 primitive array
+// types readValuePayload's array-tag cases (sfsBoolArray..sfsUtfStringArray) decode into -- plain
+// unwrapped Go slices, as opposed to the *SFSArray wrapper type. Used by redactSFSValue to mask a
+// sensitive key's array value without dumping its raw contents.
+func primitiveArrayLen(val interface{}) (int, bool) {
+	switch a := val.(type) {
+	case []bool:
+		return len(a), true
+	case []byte:
+		return len(a), true
+	case []int16:
+		return len(a), true
+	case []int32:
+		return len(a), true
+	case []int64:
+		return len(a), true
+	case []float32:
+		return len(a), true
+	case []float64:
+		return len(a), true
+	case []string:
+		return len(a), true
+	}
+	return 0, false
 }
 
 // SFSArray is a sequential list of tagged values.

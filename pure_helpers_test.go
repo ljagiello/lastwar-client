@@ -48,3 +48,40 @@ func TestGroupUnclaimedByType(t *testing.T) {
 		t.Errorf("type 4: got %v, want [c]", got[4])
 	}
 }
+
+// TestHasUnclaimedRewardMissingFieldIsNotUnclaimed guards the explicit-null-vs-missing fix to
+// HasUnclaimedReward: mail with a genuinely-absent rewardStatus key (notification-only mail --
+// alliance markers, battle reports, and similar, per ClaimAllMail's doc comment) must NOT be
+// treated as unclaimed, even though GetInt("rewardStatus") returns the same int32 zero value for
+// "genuinely absent" as it does for a real rewardStatus=0. Reverting the presence check in
+// HasUnclaimedReward (back to a bare `RewardStatus() == 0`) would make this fail, since the
+// no-rewardStatus mail would then be misclassified as unclaimed and swept into byType.
+func TestHasUnclaimedRewardMissingFieldIsNotUnclaimed(t *testing.T) {
+	noRewardStatus := NewSFSObject()
+	noRewardStatus.PutUtfString("uid", "notif-1")
+	noRewardStatus.PutInt("type", 3)
+	// deliberately no PutInt("rewardStatus", ...) call -- field genuinely absent, as opposed to
+	// an explicit 0.
+
+	withRewardStatus := NewSFSObject()
+	withRewardStatus.PutUtfString("uid", "reward-1")
+	withRewardStatus.PutInt("type", 3)
+	withRewardStatus.PutInt("rewardStatus", 0)
+
+	mail := []Mail{{Raw: noRewardStatus}, {Raw: withRewardStatus}}
+
+	if mail[0].HasUnclaimedReward() {
+		t.Errorf("HasUnclaimedReward() = true for mail with no rewardStatus field, want false")
+	}
+	if !mail[1].HasUnclaimedReward() {
+		t.Errorf("HasUnclaimedReward() = false for mail with rewardStatus=0, want true")
+	}
+
+	got := groupUnclaimedByType(mail)
+	if len(got) != 1 {
+		t.Fatalf("got %d distinct types, want 1 (the no-rewardStatus mail must be excluded)", len(got))
+	}
+	if len(got[3]) != 1 || got[3][0] != "reward-1" {
+		t.Errorf("type 3: got %v, want [reward-1] -- notif-1 (no rewardStatus) must not appear", got[3])
+	}
+}

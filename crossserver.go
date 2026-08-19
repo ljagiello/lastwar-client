@@ -136,7 +136,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 				conn.Close()
 				return nil, fmt.Errorf("handshake: %w", err)
 			}
-			slog.Info("handshake OK", "response", hsResp.String())
+			slog.Info("handshake OK", "response", hsResp.StringRedacted())
 		}
 
 		loginParams := BuildLoginParams(LoginParamsInput{

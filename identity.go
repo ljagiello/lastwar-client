@@ -126,6 +126,10 @@ func stateFilePath(name string) string {
 	dir, err := os.UserHomeDir()
 	if err != nil {
 		dir = "."
+		// Credential state files (loginKey among them) would otherwise silently land in
+		// whatever the current working directory happens to be -- e.g. $HOME unset in a
+		// minimal container or misconfigured cron environment -- with no record of why.
+		slog.Warn("could not determine home directory; persisting credential state files in the current working directory instead", "error", err, "dir", dir)
 	}
 	return filepath.Join(dir, name)
 }

@@ -73,8 +73,8 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("device identity", "deviceId", ident.DeviceID)
-	slog.Info("air key", "airKey", ident.AirKey())
+	slog.Info("device identity", "deviceIdLen", len(ident.DeviceID))
+	slog.Info("air key", "airKeyLen", len(ident.AirKey()))
 	slog.Info("persisted state", "username", ident.Username, "gameUid", ident.GameUid, "loginKey", redact(ident.LoginKey))
 
 	opt := gslOptFor(ident)
@@ -160,7 +160,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 				conn.Close()
 				return nil, fmt.Errorf("handshake: %w", err)
 			}
-			slog.Info("handshake OK", "response", hsResp.String())
+			slog.Info("handshake OK", "response", hsResp.StringRedacted())
 		}
 
 		slog.Info("step 4: SFS zone login")
@@ -340,9 +340,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	if ec, ok := msg.Params.Get("errorCode"); ok {
 		conn.Close()
-		return nil, fmt.Errorf("SEND-CODE FAILED: errorCode=%v full=%s: %w", ec.Val, msg.Params.String(), ErrAuthRejected)
+		return nil, fmt.Errorf("SEND-CODE FAILED: errorCode=%v full=%s: %w", ec.Val, msg.Params.StringRedacted(), ErrAuthRejected)
 	}
-	slog.Info("server accepted", "response", msg.Params.String())
+	slog.Info("server accepted", "response", msg.Params.StringRedacted())
 	slog.Info("verification code should now be arriving", "email", opts.Email)
 
 	slog.Info("step 7: waiting for verification code")
@@ -354,7 +354,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		slog.Info("feed the 6-digit code on stdin")
 		code = readCodeFromStdin()
 	}
-	slog.Info("got code", "code", code)
+	slog.Info("got code", "codeLen", len(code))
 
 	slog.Info("step 8: complete login with account.login.new (type=0, mail+code)")
 	finishParams := NewSFSObject()
@@ -376,9 +376,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	if ec, ok := ackMsg.Params.Get("errorCode"); ok {
 		conn.Close()
-		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED: errorCode=%v full=%s: %w", ec.Val, ackMsg.Params.String(), ErrAuthRejected)
+		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED: errorCode=%v full=%s: %w", ec.Val, ackMsg.Params.StringRedacted(), ErrAuthRejected)
 	}
-	slog.Info("ack", "response", ackMsg.Params.String())
+	slog.Info("ack", "response", ackMsg.Params.StringRedacted())
 
 	// The direct response above is just a terse {success=true} ack; the
 	// actual account data (gameUid, loginKey, accountArr, ...) arrives

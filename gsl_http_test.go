@@ -142,12 +142,13 @@ func TestFlexStringUnmarshalJSON(t *testing.T) {
 	}
 }
 
-// TestGetServerListDecodeFailuresDoNotLeakRawResponse is the round-11 regression test for
-// gsl.go's three response-decode-failure branches: a real getserverlist.php response legitimately
-// carries a live at/rt session token on success (LoginServerListRespon.At/Rt), so none of these
-// branches may embed the raw body/decrypted plaintext in the returned error. Each subtest forces
-// a different one of the three json.Unmarshal calls in GetServerList to fail while a fake token
-// is present in the response, and asserts it never appears in the resulting error text.
+// TestGetServerListDecodeFailuresDoNotLeakRawResponse is the round-11/round-12 regression test for
+// gsl.go's response-error branches: a real getserverlist.php response legitimately carries a live
+// at/rt session token on success (LoginServerListRespon.At/Rt), so none of these branches may embed
+// the raw body/decrypted plaintext in the returned error. Three subtests force a different one of
+// the three json.Unmarshal calls in GetServerList to fail while a fake token is present in the
+// response; a fourth (round 12) covers the sibling HTTP-status-error branch, which round 11 missed.
+// Each asserts the fake token never appears in the resulting error text.
 func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 	const fakeToken = "FAKE-LIVE-SESSION-TOKEN-must-not-leak-abc123"
 
@@ -189,6 +190,29 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 		if err == nil {
 			t.Fatal("GetServerList: expected a decode error, got nil")
+		}
+		if strings.Contains(err.Error(), fakeToken) {
+			t.Errorf("GetServerList error leaks the raw response body: %v", err)
+		}
+	})
+
+	t.Run("HTTP status error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// A non-200 status whose body still carries what looks like a live session token --
+			// gsl.go's HTTP-status-error branch (a sibling of the three decode-failure branches
+			// above) must not echo it back either.
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, `{"error":"server error carries %s"}`, fakeToken)
+		}))
+		defer server.Close()
+
+		priv, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatalf("generate RSA key: %v", err)
+		}
+		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		if err == nil {
+			t.Fatal("GetServerList: expected an HTTP status error, got nil")
 		}
 		if strings.Contains(err.Error(), fakeToken) {
 			t.Errorf("GetServerList error leaks the raw response body: %v", err)

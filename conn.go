@@ -304,9 +304,16 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 		}
 		// Anything else this early (unlikely, but be tolerant) is logged and skipped rather
 		// than treated as a protocol violation. Content may legitimately be nil here too.
+		// Uses StringRedacted (not String): a skipped envelope can legitimately carry a live
+		// credential -- e.g. an out-of-order push.account.login.new-shaped payload arriving
+		// before the real handshake response -- and this is exactly the site round-11's
+		// credential_leak_lint_test.go doc comment named as a known, deliberately-uncaught
+		// gap (contentStr was a local variable, not an inline .String() call, so the lint
+		// regex missed it). See sfsobject.go's sensitiveSFSKeys/StringRedacted and
+		// TestDoHandshakeSkipRedactsCredentialFields (conn_handshake_test.go) for coverage.
 		contentStr := "<nil>"
 		if env.Content != nil {
-			contentStr = env.Content.String()
+			contentStr = env.Content.StringRedacted()
 		}
 		slog.Info("skipped envelope while waiting for handshake", "controller", env.Controller, "action", env.Action, "content", contentStr)
 	}

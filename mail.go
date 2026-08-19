@@ -28,10 +28,28 @@ type Mail struct {
 	Raw *SFSObject
 }
 
-func (m Mail) Uid() string              { return m.Raw.GetString("uid") }
-func (m Mail) Type() int32              { return m.Raw.GetInt("type") }
-func (m Mail) RewardStatus() int32      { return m.Raw.GetInt("rewardStatus") }
-func (m Mail) HasUnclaimedReward() bool { return m.RewardStatus() == 0 }
+func (m Mail) Uid() string         { return m.Raw.GetString("uid") }
+func (m Mail) Type() int32         { return m.Raw.GetInt("type") }
+func (m Mail) RewardStatus() int32 { return m.Raw.GetInt("rewardStatus") }
+
+// HasUnclaimedReward reports whether this mail has a reward still waiting to be claimed.
+// `rewardStatus == 0` is the confirmed "unclaimed" value (docs/live-validation.mdx's Mail
+// section), but GetInt can't distinguish a real 0 from a genuinely-absent field -- both come back
+// as the int32 zero value. That conflation matters here specifically: notification-only mail
+// (alliance markers, battle reports, and similar -- see ClaimAllMail's doc comment) never carries
+// a reward at all, and plausibly omits the rewardStatus key entirely rather than sending an
+// explicit 0. Treating a missing key as "unclaimed" would misclassify that mail as having a
+// reward it doesn't have. So this checks presence via Get first (same explicit-null-vs-missing
+// guard used by requirePresentField/findRecommendedTech's scienceId handling in alliance.go) and
+// only then compares the value -- a genuinely-absent rewardStatus field reads as "no reward"
+// (false), not "unclaimed".
+func (m Mail) HasUnclaimedReward() bool {
+	v, ok := m.Raw.Get("rewardStatus")
+	if !ok || v.Val == nil {
+		return false
+	}
+	return m.RewardStatus() == 0
+}
 
 // ListMail fetches the account's mail via `chat.get.system.mails`,
 // following the real client's own request shape
@@ -99,7 +117,18 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		if !more {
 			break
 		}
-		clientseq = msg.Params.GetString("lastUid")
+		// A response claiming more=true must also carry a genuine lastUid to seed the next
+		// page's clientseq -- without this check, a missing/wrong-typed lastUid falls through
+		// GetString's zero value ("") identical to the cold-start clientseq, which would send
+		// the exact same request again and loop on a stale cursor (up to maxPages times) instead
+		// of making forward progress. Treat that as a server-shape anomaly worth stopping for,
+		// not silently retrying.
+		lastUid := msg.Params.GetString("lastUid")
+		if lastUid == "" {
+			slog.Warn("list mail: response reported more=true but lastUid is missing/empty, stopping pagination instead of looping on a stale cursor", "page", page, "collectedSoFar", len(all))
+			break
+		}
+		clientseq = lastUid
 		reqTime = msg.Params.GetLong("lastMailTime")
 		first = false
 	}

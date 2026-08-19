@@ -221,6 +221,21 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 	deadline := time.Now().Add(timeout)
 	gotInitBuild := false
 
+	// seenBuildingUUIDs dedupes across the three population sources below (init/building_new,
+	// push.init.build/defaultBuilds, push.add.building/buildings): if more than one fires for the
+	// same uuid within one fetch window -- e.g. the bootstrap init push and a redundant
+	// push.init.build both describing the same building -- appendBuilding keeps only the first
+	// sighting, so callers like CollectAll never see (and redundantly collect) the same uuid twice.
+	seenBuildingUUIDs := make(map[int64]bool)
+	appendBuilding := func(b Building) {
+		uuid := b.Uuid()
+		if seenBuildingUUIDs[uuid] {
+			return
+		}
+		seenBuildingUUIDs[uuid] = true
+		buildings = append(buildings, b)
+	}
+
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -247,7 +262,9 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			// actually matters; push.init.build is a rarely-fired secondary
 			// push.
 			gotInitBuild = true
-			buildings = append(buildings, ParseInitBuildings(msg.Params)...)
+			for _, b := range ParseInitBuildings(msg.Params) {
+				appendBuilding(b)
+			}
 			visitors = append(visitors, ParseInitVisitors(msg.Params)...)
 			slog.Info("init: buildings loaded", "field", "building_new", "count", len(buildings))
 			slog.Info("init: visitors loaded", "field", "visitor.list", "count", len(visitors))
@@ -266,7 +283,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 								if !requirePresentField(bi, "uuid", "push.init.build") {
 									continue
 								}
-								buildings = append(buildings, Building{Raw: bi})
+								appendBuilding(Building{Raw: bi})
 							}
 						}
 					}
@@ -287,16 +304,23 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 						if !requirePresentField(bi, "uuid", "push.add.building") {
 							continue
 						}
-						buildings = append(buildings, Building{Raw: bi})
+						appendBuilding(Building{Raw: bi})
 					}
 				}
 			}
 		case "push.queue.add":
-			slog.Info("observed push.queue.add", "params", msg.Params.String())
+			// StringRedacted, not String(): this switch's default branch (and, in principle, any
+			// case here) sees whatever cmd the server sends while FetchBuildings is listening, and
+			// nothing in this function's control flow enforces that a credential-bearing push (e.g.
+			// push.account.login.new, or an init push's chatToken) can't land here. No currently
+			// reachable path does so today, but that rests on call-ordering elsewhere in the
+			// client, not on anything this switch itself checks -- redact defensively rather than
+			// rely on it.
+			slog.Info("observed push.queue.add", "params", msg.Params.StringRedacted())
 		case "push.build.queue.info":
-			slog.Info("observed push.build.queue.info", "params", msg.Params.String())
+			slog.Info("observed push.build.queue.info", "params", msg.Params.StringRedacted())
 		default:
-			slog.Info("observed other push", "cmd", msg.Cmd, "params", msg.Params.String())
+			slog.Info("observed other push", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
 		}
 	}
 
@@ -322,7 +346,7 @@ func PrintBuildings(buildings []Building) {
 	for bId, list := range byType {
 		fmt.Printf("building type: bId=%d name=%s instances=%d\n", bId, BuildingNameOf(bId), len(list))
 		for _, b := range list {
-			fmt.Printf("building instance: uuid=%d buildingLevel=%d pointId=%d raw=%s\n", b.Uuid(), b.Level(), b.PointId(), b.Raw.String())
+			fmt.Printf("building instance: uuid=%d buildingLevel=%d pointId=%d raw=%s\n", b.Uuid(), b.Level(), b.PointId(), b.Raw.StringRedacted())
 		}
 	}
 }

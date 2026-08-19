@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -168,6 +170,114 @@ func TestFetchBuildingsTimeoutKeepsPartialResults(t *testing.T) {
 	}
 	if len(buildings) != 1 || buildings[0].Uuid() != 333 || buildings[0].BId() != BuildingGoldMine {
 		t.Fatalf("got buildings=%v, want exactly one uuid=333 bId=%d (BuildingGoldMine)", buildings, BuildingGoldMine)
+	}
+}
+
+// TestFetchBuildingsRedactsCredentialFieldsInUnrecognizedPush is the round-12 regression test for
+// FetchBuildings' push-observer switch (buildings.go's "push.queue.add"/"push.build.queue.info"/
+// default cases): all three previously dumped msg.Params via the raw, unredacted String(), so any
+// credential-bearing push landing in this switch while FetchBuildings is listening -- e.g. an
+// unrecognized cmd carrying a sensitiveSFSKeys field like loginKey -- would leak it into the log.
+// No currently-reachable path is known to route such a push through here (the fix's own comment in
+// buildings.go explains why that's an unenforced assumption, not a proven invariant), but this test
+// doesn't rely on that: it sends an arbitrary unrecognized cmd carrying a live loginKey directly, so
+// it lands in the default case, and asserts the raw secret never appears in the captured log
+// output. Mirrors TestWaitForCmdSkipRedactsCredentialFields' (conn_wait_test.go) capture pattern.
+//
+// Mutation check: reverting buildings.go's three .StringRedacted() calls back to .String() makes
+// this test fail, since msg.Params.String() would print the loginKey in cleartext.
+func TestFetchBuildingsRedactsCredentialFieldsInUnrecognizedPush(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-buildings-1234567890"
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		push := NewSFSObject()
+		push.PutUtfString("loginKey", secretLoginKey)
+		push.PutUtfString("someField", "ordinary gameplay data")
+		_ = server.SendExtension("push.some.unrecognized.event", push)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	// push.some.unrecognized.event doesn't reset FetchBuildings' deadline (only init/
+	// push.init.build do -- see those cases' doc comments), so this short outer timeout governs
+	// the whole test, no 3-second tail involved (same reasoning as
+	// TestFetchBuildingsTimeoutKeepsPartialResults above).
+	_, _, err := FetchBuildings(client, 150*time.Millisecond)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished sending the unrecognized push")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil (a plain timeout is not itself an error)", err)
+	}
+	if logged := buf.String(); strings.Contains(logged, secretLoginKey) {
+		t.Errorf("FetchBuildings' push-observer switch leaks the raw loginKey in cleartext:\n%s", logged)
+	}
+}
+
+// TestFetchBuildingsDedupesBuildingUUIDAcrossSources is the round-12 regression test for
+// FetchBuildings' seenBuildingUUIDs dedupe: if the same building uuid arrives via more than one of
+// the three population sources within a single fetch window -- here, both the init push's
+// building_new and a following push.init.build/defaultBuilds carrying the same uuid -- it must
+// appear exactly once in the returned slice, not duplicated (a duplicate would otherwise cause
+// CollectAll to issue a redundant building.production.collect for it).
+//
+// Mutation check: reverting the three appendBuilding call sites in buildings.go back to plain
+// `buildings = append(buildings, ...)` makes this test fail with 2 buildings instead of 1.
+func TestFetchBuildingsDedupesBuildingUUIDAcrossSources(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const dupeUUID = int64(777)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		initParams := NewSFSObject()
+		initArr := NewSFSArray()
+		initArr.AddSFSObject(newTestBuildingSFS(dupeUUID, BuildingFarmland, 1))
+		initParams.PutSFSArray("building_new", initArr)
+		if err := server.SendExtension("init", initParams); err != nil {
+			return
+		}
+
+		wrapper := NewSFSObject()
+		wrapper.PutSFSObject("buildInfo", newTestBuildingSFS(dupeUUID, BuildingFarmland, 1))
+		defaultBuilds := NewSFSArray()
+		defaultBuilds.AddSFSObject(wrapper)
+		pibParams := NewSFSObject()
+		pibParams.PutSFSArray("defaultBuilds", defaultBuilds)
+		if err := server.SendExtension("push.init.build", pibParams); err != nil {
+			return
+		}
+		server.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment: ends the test fast instead of waiting out the post-push 3s window
+	}()
+
+	buildings, _, err := FetchBuildings(client, 2*time.Second)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("FetchBuildings() error = %v, want an error wrapping io.EOF (expected fake-server-hangup artifact, see doc comment)", err)
+	}
+	if len(buildings) != 1 {
+		t.Fatalf("got %d buildings, want exactly 1 (uuid %d arrived via both init and push.init.build)", len(buildings), dupeUUID)
+	}
+	if buildings[0].Uuid() != dupeUUID {
+		t.Errorf("got uuid %d, want %d", buildings[0].Uuid(), dupeUUID)
 	}
 }
 
