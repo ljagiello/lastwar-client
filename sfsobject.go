@@ -63,7 +63,6 @@ func (o *SFSObject) PutByte(key string, val byte)      { o.put(key, SFSValue{sfs
 func (o *SFSObject) PutShort(key string, val int16)    { o.put(key, SFSValue{sfsShort, val}) }
 func (o *SFSObject) PutInt(key string, val int32)      { o.put(key, SFSValue{sfsInt, val}) }
 func (o *SFSObject) PutLong(key string, val int64)     { o.put(key, SFSValue{sfsLong, val}) }
-func (o *SFSObject) PutFloat(key string, val float32)  { o.put(key, SFSValue{sfsFloat, val}) }
 func (o *SFSObject) PutDouble(key string, val float64) { o.put(key, SFSValue{sfsDouble, val}) }
 func (o *SFSObject) PutSFSObject(key string, val *SFSObject) {
 	o.put(key, SFSValue{sfsObjectType, val})
@@ -111,8 +110,6 @@ func (o *SFSObject) GetLong(key string) int64 {
 	}
 	return 0
 }
-func (o *SFSObject) Keys() []string { return o.keys }
-
 func (o *SFSObject) String() string {
 	var b bytes.Buffer
 	b.WriteString("{")
@@ -158,10 +155,7 @@ type SFSArray struct {
 func NewSFSArray() *SFSArray { return &SFSArray{} }
 
 func (a *SFSArray) add(v SFSValue)              { a.items = append(a.items, v) }
-func (a *SFSArray) AddUtfString(val string)     { a.add(SFSValue{sfsUtfString, val}) }
 func (a *SFSArray) AddInt(val int32)            { a.add(SFSValue{sfsInt, val}) }
-func (a *SFSArray) AddLong(val int64)           { a.add(SFSValue{sfsLong, val}) }
-func (a *SFSArray) AddBool(val bool)            { a.add(SFSValue{sfsBool, val}) }
 func (a *SFSArray) AddSFSObject(val *SFSObject) { a.add(SFSValue{sfsObjectType, val}) }
 
 // ---- Encoding ----

@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -203,5 +206,262 @@ func TestLoginRedirectRefreshesGameUid(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("post-redirect fake server never received a Login request")
+	}
+}
+
+// TestLoginTooManyRedirects is Login()'s counterpart to crossserver_test.go's
+// TestDoCrossServerLoginTooManyRedirects, covering the identical bound on the other side of the
+// "same gap" comment in login.go's serverInfo redirect block: maxRedirectHops+1 consecutive fake
+// game servers all respond to the base zone Login with a serverInfo redirect to the next one in
+// the chain. Login() must give up with the "too many serverInfo redirects" error rather than
+// looping past the guard (or dialing the address nothing listens on past the last server in the
+// chain -- the guard trips on receipt of the redirect, before any further dial).
+func TestLoginTooManyRedirects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const maxRedirectHops = 3 // must match login.go's unexported maxRedirectHops const
+	const numServers = maxRedirectHops + 1
+
+	lns := make([]net.Listener, numServers)
+	addrs := make([]string, numServers)
+	for i := range lns {
+		ln, addr := newFakeGameListener(t)
+		lns[i] = ln
+		addrs[i] = addr
+	}
+	for i, ln := range lns {
+		serveFakeGameServer(ln, func(server *GameConn) {
+			if _, err := server.ReadEnvelope(); err != nil {
+				return
+			}
+			// The last server in the chain "redirects" to an address nothing is listening on --
+			// Login()'s redirect-count guard must trip before it ever tries to dial that far, so
+			// this address is never actually connected to.
+			next := "127.0.0.1:1"
+			if i+1 < numServers {
+				next = addrs[i+1]
+			}
+			zone := fmt.Sprintf("APS%d", i+1)
+			_ = server.SendEnvelope(controllerSystem, actionLogin, putRedirectServerInfo(next, zone))
+		})
+	}
+
+	host, port := splitHostPortInt(t, addrs[0])
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       0,
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS0", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	result, err := Login(LoginOptions{})
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("expected an error after maxRedirectHops+1 consecutive serverInfo redirects, got nil")
+	}
+	if !strings.Contains(err.Error(), "too many serverInfo redirects") {
+		t.Errorf("err = %q, want it to mention \"too many serverInfo redirects\"", err.Error())
+	}
+}
+
+// readNextExtension reads envelopes off server until one decodes as an extension message,
+// silently skipping anything else -- in practice the client's own heartbeat pingpong (system
+// controller, sent every 4s per conn.go's StartHeartbeat), which TestLoginEmailVerificationPath's
+// fake server would otherwise misread as the next expected extension request if the client's real
+// FIFO round-trip for the verification code ever took long enough for a heartbeat to land in
+// between. Mirrors waitFor's own "skip anything that doesn't match" loop on the client side.
+func readNextExtension(server *GameConn) (*ExtensionMessage, error) {
+	for {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return nil, err
+		}
+		if msg, ok := env.AsExtension(); ok {
+			return msg, nil
+		}
+	}
+}
+
+// mkfifoT creates a FIFO at dir/name and returns its path, failing the test on error -- the real
+// mechanism login.go's readCodeFromPipe expects for LoginOptions.CodePipe (it os.Stat's the path
+// and requires os.ModeNamedPipe), not a plain file or in-memory reader.
+func mkfifoT(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := dir + "/" + name
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("mkfifo %s: %v", path, err)
+	}
+	return path
+}
+
+// TestLoginEmailVerificationPath exercises Login()'s email-verification flow (steps 6-8: request
+// a code via account.login.send.verify.code, block on LoginOptions.CodePipe for the code, then
+// account.login.new followed by the account data arriving separately as a push.account.login.new
+// push -- see login.go's step 6-8 comments), which neither TestLoginGuestHappyPath nor
+// TestLoginRedirectRefreshesGameUid reaches, since both call Login() with no Email set and so
+// always take the early guest-identity return instead.
+//
+// The verification code is delivered through a real FIFO (not an in-memory reader) because that's
+// the only path LoginOptions.CodePipe actually drives (readCodeFromPipe os.Opens the path, which
+// blocks until a writer appears) -- a background goroutine here plays that writer, opening the
+// FIFO and writing the test code the moment Login() itself opens the read end, so the two
+// naturally rendezvous without any test-side sleep/poll.
+func TestLoginEmailVerificationPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const testEmail = "player@example.com"
+	const testCode = "654321"
+	const wantLoginKey = "test-login-key"
+	const wantGameUid = "real-uid-1"
+	const wantUsername = "RealPlayer"
+
+	pipePath := mkfifoT(t, t.TempDir(), "code.pipe")
+
+	gotSendCodeEmail := make(chan string, 1)
+	gotFinishEmail := make(chan string, 1)
+	gotFinishCode := make(chan string, 1)
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		// Step 4: base zone Login -- plain success, no serverInfo redirect, immediately
+		// followed by the `init` push (same fakeInitPushServer pattern used above) so step 5
+		// completes fast and Login() falls through into the email-verification steps this
+		// test actually cares about.
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+			return
+		}
+
+		// Step 6: account.login.send.verify.code request, then its ack.
+		sendCodeMsg, err := readNextExtension(server)
+		if err != nil {
+			return
+		}
+		gotSendCodeEmail <- sendCodeMsg.Params.GetString("mail")
+		ack := NewSFSObject()
+		ack.PutBool("success", true)
+		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
+			return
+		}
+
+		// Step 8: account.login.new (type=0, mail+code), then its terse ack.
+		finishMsg, err := readNextExtension(server)
+		if err != nil {
+			return
+		}
+		gotFinishEmail <- finishMsg.Params.GetString("mail")
+		gotFinishCode <- finishMsg.Params.GetString("verifyCode")
+		finishAck := NewSFSObject()
+		finishAck.PutBool("success", true)
+		if err := server.SendExtension("account.login.new", finishAck); err != nil {
+			return
+		}
+
+		// The real account data arrives separately as a push, per login.go's own comment on
+		// why msg2 (not the ack above) is what Login() actually reads gameUid/loginKey from.
+		push := NewSFSObject()
+		push.PutUtfString("loginKey", wantLoginKey)
+		push.PutUtfString("gameUid", wantGameUid)
+		push.PutUtfString("gameUserName", wantUsername)
+		_ = server.SendExtension("push.account.login.new", push)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	// GameUid empty here (unlike the redirect tests) deliberately: a fresh device identity with
+	// no loginKey/gameUid drives gslOptFor to opt=new, which is what keeps Login() off the
+	// opt=="login" fast-path return and routes it into the email-verification steps below.
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       0,
+		ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: ""}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	go func() {
+		f, err := os.OpenFile(pipePath, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		_, _ = f.WriteString(testCode + "\n")
+	}()
+
+	result, err := Login(LoginOptions{Email: testEmail, CodePipe: pipePath})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	defer result.Conn.Close()
+
+	select {
+	case got := <-gotSendCodeEmail:
+		if got != testEmail {
+			t.Errorf("account.login.send.verify.code mail = %q, want %q", got, testEmail)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never received an account.login.send.verify.code request")
+	}
+	select {
+	case got := <-gotFinishEmail:
+		if got != testEmail {
+			t.Errorf("account.login.new mail = %q, want %q", got, testEmail)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never received an account.login.new request")
+	}
+	select {
+	case got := <-gotFinishCode:
+		if got != testCode {
+			t.Errorf("account.login.new verifyCode = %q, want %q (the code written to CodePipe)", got, testCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never received an account.login.new request")
+	}
+
+	if result.Account == nil {
+		t.Fatal("result.Account = nil, want the push.account.login.new params")
+	}
+	if got := result.Account.GetString("loginKey"); got != wantLoginKey {
+		t.Errorf("result.Account loginKey = %q, want %q", got, wantLoginKey)
+	}
+
+	if result.Ident == nil {
+		t.Fatal("result.Ident = nil")
+	}
+	if result.Ident.LoginKey != wantLoginKey {
+		t.Errorf("Ident.LoginKey = %q, want %q", result.Ident.LoginKey, wantLoginKey)
+	}
+	if result.Ident.GameUid != wantGameUid {
+		t.Errorf("Ident.GameUid = %q, want %q", result.Ident.GameUid, wantGameUid)
+	}
+	if result.Ident.Username != wantUsername {
+		t.Errorf("Ident.Username = %q, want %q", result.Ident.Username, wantUsername)
+	}
+
+	// Confirm the account.login.new push's fields actually landed on disk too -- not just on
+	// the in-memory Ident this process happens to hold -- same reload-from-disk check
+	// TestLoginRedirectRefreshesGameUid uses for gameUid, extended here to loginKey/username
+	// since this is the path that populates all three.
+	if got, err := os.ReadFile(loginKeyStatePath()); err != nil {
+		t.Fatalf("read persisted loginKey: %v", err)
+	} else if strings.TrimSpace(string(got)) != wantLoginKey {
+		t.Errorf("persisted loginKey = %q, want %q", strings.TrimSpace(string(got)), wantLoginKey)
+	}
+	if got, err := os.ReadFile(gameUidStatePath()); err != nil {
+		t.Fatalf("read persisted gameUid: %v", err)
+	} else if strings.TrimSpace(string(got)) != wantGameUid {
+		t.Errorf("persisted gameUid = %q, want %q", strings.TrimSpace(string(got)), wantGameUid)
+	}
+	if got, err := os.ReadFile(usernameStatePath()); err != nil {
+		t.Fatalf("read persisted username: %v", err)
+	} else if strings.TrimSpace(string(got)) != wantUsername {
+		t.Errorf("persisted username = %q, want %q", strings.TrimSpace(string(got)), wantUsername)
 	}
 }
