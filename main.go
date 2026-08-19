@@ -16,29 +16,51 @@ import (
 )
 
 func main() {
-	email := flag.String("email", "", "account email to log in with (only needed if no loginKey is on file yet)")
-	codePipe := flag.String("code-pipe", "", "path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin")
-	collect := flag.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both once-a-day VIP claims, after login")
-	listBuildings := flag.Bool("list-buildings", false, "print every owned building (id, type, level); the process still exits after -collect/-list-buildings finish unless -interactive is also set")
-	interactive := flag.String("interactive", "", "stay connected and read ad-hoc test commands from this control FIFO instead of exiting")
+	// A plain flag.String/Bool/Int + flag.Parse() would use the package-level
+	// flag.CommandLine, which is constructed with ExitOnError -- on a bad flag
+	// (unknown flag, bad value) that calls os.Exit(2) directly, colliding with
+	// this program's own contract that exit code 2 means "confirmed
+	// server-side auth rejection" (see the ErrAuthRejected handling below).
+	// ContinueOnError instead hands the parse error back to us so we can pick
+	// a non-colliding exit code.
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	email := fs.String("email", "", "account email to log in with (only needed if no loginKey is on file yet)")
+	codePipe := fs.String("code-pipe", "", "path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin")
+	collect := fs.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck idle reward, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both once-a-day VIP claims, after login")
+	listBuildings := fs.Bool("list-buildings", false, "print every owned building (id, type, level); the process still exits after -collect/-list-buildings finish unless -interactive is also set")
+	interactive := fs.String("interactive", "", "stay connected and read ad-hoc test commands from this control FIFO instead of exiting")
 
-	csIP := flag.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
-	csPort := flag.Int("cs-port", 0, "port for -cs-ip")
-	csZone := flag.String("cs-zone", "", "zone for -cs-ip, e.g. APS1234")
-	csGameUid := flag.String("cs-gameuid", "", "composite gameUid for -cs-ip")
-	csDeviceID := flag.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
-	csShumei := flag.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
-	csRt := flag.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- the refresh response's server list also REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid")
-	csAt := flag.String("cs-at", "", "raw access token to send directly as p.at, skipping any GSL call entirely (e.g. one captured live from a real client)")
-	csIOS := flag.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
-	handshake := flag.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
-	configPath := flag.String("config", "", "path to a session config JSON (see config.example.json); if unset, auto-loads "+defaultSessionConfigPath()+" when present. Explicit -cs-* flags override individual config fields.")
-	noConfig := flag.Bool("no-config", false, "skip loading any session config, even the default file -- for a plain guest/email-flow run when a session config is also present")
-	decodeStream := flag.String("decode-stream", "", "decode a reassembled raw TCP byte stream file (see docs/capturing-and-decoding-traffic.mdx) and print every SFS2X packet, then exit -- no login, no network connection at all")
-	decodeLabel := flag.String("decode-label", "", "prefix label for -decode-stream output lines, e.g. \"c2s\" or \"s2c\" (default: \"stream\")")
-	logLevel := flag.String("log-level", "info", "log verbosity: debug, info, warn, or error")
-	version := flag.Bool("version", false, "print build info and exit")
-	flag.Parse()
+	csIP := fs.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
+	csPort := fs.Int("cs-port", 0, "port for -cs-ip")
+	csZone := fs.String("cs-zone", "", "zone for -cs-ip, e.g. APS1234")
+	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip")
+	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
+	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
+	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- the refresh response's server list also REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid")
+	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at, skipping any GSL call entirely (e.g. one captured live from a real client)")
+	csIOS := fs.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
+	handshake := fs.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
+	configPath := fs.String("config", "", "path to a session config JSON (see config.example.json); if unset, auto-loads "+defaultSessionConfigPath()+" when present. Explicit -cs-* flags override individual config fields.")
+	noConfig := fs.Bool("no-config", false, "skip loading any session config, even the default file -- for a plain guest/email-flow run when a session config is also present")
+	decodeStream := fs.String("decode-stream", "", "decode a reassembled raw TCP byte stream file (see docs/capturing-and-decoding-traffic.mdx) and print every SFS2X packet, then exit -- no login, no network connection at all")
+	decodeLabel := fs.String("decode-label", "", "prefix label for -decode-stream output lines, e.g. \"c2s\" or \"s2c\" (default: \"stream\")")
+	logLevel := fs.String("log-level", "info", "log verbosity: debug, info, warn, or error")
+	version := fs.Bool("version", false, "print build info and exit")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		// flag.ContinueOnError still runs the same failf/usage path flag.ExitOnError does (it
+		// prints the error and the usage text to stderr internally on every parse failure) -- it
+		// only differs in returning the error here instead of calling os.Exit itself, which is
+		// the whole point: it lets us pick the exit code instead of colliding with our own
+		// contract below. -h/-help isn't a usage error, just an explicit request for that same
+		// usage text, so it keeps exiting 0 as it always did with the default FlagSet. Any real
+		// parse error (unknown flag, bad value, missing argument) exits 1 rather than the
+		// colliding 2, keeping the exit-code contract binary: 2 means confirmed auth rejection,
+		// everything else means "look at the log".
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		os.Exit(1)
+	}
 
 	if *version {
 		printVersion()
@@ -49,7 +71,7 @@ func main() {
 
 	csIOSSetExplicitly := false
 	var ignoredInDecodeMode []string
-	flag.Visit(func(f *flag.Flag) {
+	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "cs-ios" {
 			csIOSSetExplicitly = true
 		}
@@ -314,7 +336,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 					updated := &SessionConfig{
 						IP: newHost, Port: newPort, Zone: result.Zone,
 						GameUid: gameUid, DeviceID: deviceID,
-						ShumeiBoxId: o.shumeiBoxId, AccessToken: accessTok,
+						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
 						IOSMode: o.iosMode,
 					}
 					if err := SaveSessionConfig(updated, o.configSavePath); err != nil {

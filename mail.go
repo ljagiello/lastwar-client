@@ -155,13 +155,30 @@ func ClaimAllMail(conn *GameConn) error {
 		slog.Info("no unclaimed mail rewards found", "totalMail", len(mail))
 		return errors.Join(errs...)
 	}
+	// maxRewardUIDsBytes keeps each joined "uids" string safely under the
+	// wire format's 65535-byte string-length limit (sfsobject.go's encoder
+	// panics past that). readBatchSize alone isn't enough protection here:
+	// a mail uid is a server-supplied string that can itself be up to
+	// 65535 bytes, so a handful of large uids -- or a mail backlog with
+	// many same-type unclaimed rewards -- can blow the joined length even
+	// well under 100 items.
+	const maxRewardUIDsBytes = 60000
 	for mailType, uids := range byType {
 		slog.Info("claiming mail reward", "type", mailType, "count", len(uids))
-		rewardParams := NewSFSObject()
-		rewardParams.PutUtfString("uids", strings.Join(uids, ","))
-		rewardParams.PutInt("type", mailType)
-		_, err := sendAndWait(conn, fmt.Sprintf("mail reward-batch (type %d)", mailType), "mail.reward.batch", rewardParams)
-		errs = append(errs, err)
+		for i := 0; i < len(uids); {
+			end := i
+			batchBytes := 0
+			for end < len(uids) && end-i < readBatchSize && (end == i || batchBytes+len(uids[end])+1 <= maxRewardUIDsBytes) {
+				batchBytes += len(uids[end]) + 1 // +1 for the joining comma
+				end++
+			}
+			rewardParams := NewSFSObject()
+			rewardParams.PutUtfString("uids", strings.Join(uids[i:end], ","))
+			rewardParams.PutInt("type", mailType)
+			_, err := sendAndWait(conn, fmt.Sprintf("mail reward-batch (type %d, batch %d, size %d)", mailType, i, end-i), "mail.reward.batch", rewardParams)
+			errs = append(errs, err)
+			i = end
+		}
 	}
 	return errors.Join(errs...)
 }

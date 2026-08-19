@@ -110,21 +110,30 @@ func ClaimAllianceGifts(conn *GameConn) error {
 // `maxNum=30` per day (confirmed live via `al.science.refreshNum`), so
 // only one attempt makes sense per `-collect` run.
 //
-// CORRECTED, third audit cycle: earlier revisions of this comment assumed
-// `refreshTimeBlock=1200000` (20 minutes) on the donate response was an
-// enforced per-donation cooldown, and expected a run within that window to
-// fail with a not-yet-captured errorCode. Live-tested this round: two
-// `-collect` runs roughly 3 minutes apart both donated successfully
-// (`state=1`, `donateCDTime=0` both times), with only the response's
-// `maxdonate.count` field decrementing (6 -> 5) -- no cooldown-shaped
-// failure at all. So `refreshTimeBlock` is NOT a per-donation cooldown
-// timer; the real daily gate is that consumable count against `maxNum=30`.
-// What errorCode (if any) the server returns once that daily count hits 0
-// is still unconfirmed -- deliberately not simulated by exhausting the
-// real account's daily donations just to capture it. If/when that's
-// observed live, add its errorCode to conn.go's benignErrorCodes the same
-// way the analogous building/VIP/visitor cooldowns already are.
-// The gem-cost path has no such
+// CORRECTED AGAIN, fourth audit cycle: the previous ("third audit cycle")
+// version of this correction drew the wrong conclusion from a real
+// observation. It ran two `-collect` runs roughly 3 minutes apart, both of
+// which donated successfully (`state=1`, `donateCDTime=0` both times, only
+// the response's `maxdonate.count` field decrementing 6 -> 5), and
+// concluded that `refreshTimeBlock=1200000` (20 minutes) wasn't a
+// per-donation cooldown at all -- only the `maxNum=30` daily count noted
+// above gates repeat donations. The raw observation was fine; the
+// conclusion wasn't. docs/live-validation.mdx documents an earlier
+// `al.science.donate` capture, from that same live-testing session, that
+// got back a real cooldown error -- `errorCode=120471, "Donate science CD
+// time is not finish"` -- because the real account had donated minutes
+// earlier. A per-donation cooldown does exist; the two successful test
+// runs just didn't happen to land inside its window. This project still
+// hasn't independently re-measured the cooldown's actual duration (whether
+// `refreshTimeBlock=1200000` is really it or something else) -- only that
+// it's real and has a known errorCode now. `120471` is registered in
+// conn.go's benignErrorCodes, so hitting it during `-collect` is correctly
+// treated as a benign no-op rather than a hard failure. The daily
+// `maxNum=30` count remains a separate, independent gate from this
+// per-donation cooldown; what errorCode (if any) the server returns once
+// that daily count hits 0 is still unconfirmed -- deliberately not
+// simulated by exhausting the real account's daily donations just to
+// capture it. The gem-cost path has no such
 // cooldown (`useGoldNum`/`maxGoldNum` both came back as 999999999, i.e.
 // unlimited) but spends real premium currency per use, so it's
 // deliberately left out rather than auto-spending gems without being

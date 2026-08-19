@@ -80,7 +80,10 @@ func (c *GameConn) SendEnvelope(controller byte, action int16, content *SFSObjec
 	outer.PutShort("a", action)
 	outer.PutSFSObject("p", content)
 
-	body := EncodeObject(outer)
+	body, err := EncodeObject(outer)
+	if err != nil {
+		return fmt.Errorf("encode envelope: %w", err)
+	}
 	packet, err := EncodePacket(body)
 	if err != nil {
 		return fmt.Errorf("encode packet: %w", err)
@@ -172,6 +175,7 @@ var benignErrorCodes = map[string]bool{
 	"602026":             true, // buildings.go: "In production, please be patient."
 	"120289":             true, // vip.go: "no score"/"no reward" -- already claimed today
 	"visitor_err_coming": true, // visitors.go: visitor not yet arrived/greetable
+	"120471":             true, // alliance.go: al.science.donate cooldown -- "Donate science CD time is not finish"
 }
 
 // commandOutcome classifies a collect/claim response into one of three buckets: a real success,
@@ -289,7 +293,12 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 				return nil, fmt.Errorf("HANDSHAKE FAILED: response had no p payload")
 			}
 			if ec, ok := env.Content.Get("ec"); ok {
-				return nil, fmt.Errorf("HANDSHAKE FAILED: ec=%v full=%s", ec.Val, env.Content.String())
+				// Wrapped in ErrAuthRejected (defined in errors.go) so callers can
+				// distinguish "server actively rejected this handshake" (ec present)
+				// from a bare dial/timeout/I/O failure above, which stay unwrapped --
+				// same pattern as login.go's LOGIN FAILED and crossserver.go's
+				// CROSS-SERVER LOGIN FAILED errors.
+				return nil, fmt.Errorf("HANDSHAKE FAILED: ec=%v full=%s: %w", ec.Val, env.Content.String(), ErrAuthRejected)
 			}
 			return env.Content, nil
 		}

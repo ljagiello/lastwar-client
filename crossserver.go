@@ -24,6 +24,14 @@ type CrossServerLoginResult struct {
 	// redirect every time.
 	Addr string
 	Zone string
+
+	// AccessTok is the FINAL access token actually used to log in -- this differs
+	// from CrossServerLoginParams.AccessTok whenever a serverInfo redirect was
+	// followed and the mid-redirect GSL refresh (see below) obtained a new one.
+	// Callers that persist connection details (e.g. a session config file) should
+	// save this, not the original input, so the next run doesn't retry a token
+	// this connection already knows was superseded.
+	AccessTok string
 }
 
 // CrossServerLoginParams mirrors the fields UIRoleLoginView:OnClickLogin
@@ -148,7 +156,10 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			outer.PutSFSObject("p", loginContent)
 			// 0600, not 0644 -- this dump includes p.at (the live access token), same
 			// sensitivity as the session config file (see config.go's SaveSessionConfig).
-			if err := os.WriteFile(f, EncodeObject(outer), 0600); err != nil {
+			if encoded, err := EncodeObject(outer); err != nil {
+				// Debug-only path -- don't fail the actual login over a failed debug dump.
+				slog.Error("failed to encode login body debug dump", "path", f, "error", err)
+			} else if err := os.WriteFile(f, encoded, 0600); err != nil {
 				slog.Error("failed to write login body debug dump", "path", f, "error", err)
 			}
 		}
@@ -213,7 +224,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		}
 
 		conn.conn.SetReadDeadline(time.Time{})
-		return &CrossServerLoginResult{Conn: conn, Content: env.Content, Addr: addr, Zone: zone}, nil
+		return &CrossServerLoginResult{Conn: conn, Content: env.Content, Addr: addr, Zone: zone, AccessTok: p.AccessTok}, nil
 	}
 }
 

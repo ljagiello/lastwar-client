@@ -168,57 +168,86 @@ func (a *SFSArray) AddSFSObject(val *SFSObject) { a.add(SFSValue{sfsObjectType, 
 
 // EncodeObject serializes a top-level SFSObject to its self-describing wire
 // form: tag(18) + i16 key count + per-key (UTF_STRING key + typed value).
-func EncodeObject(o *SFSObject) []byte {
+// Returns an error (rather than panicking) if any key/string/collection
+// along the way is too large to represent on the wire -- see int16Count and
+// writeUtfString.
+func EncodeObject(o *SFSObject) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte(sfsObjectType)
-	writeInt16(&buf, int16Count(len(o.keys), "keys"))
-	for _, k := range o.keys {
-		writeUtfString(&buf, k)
-		v := o.values[k]
-		writeTaggedValue(&buf, v)
+	n, err := int16Count(len(o.keys), "keys")
+	if err != nil {
+		return nil, err
 	}
-	return buf.Bytes()
+	writeInt16(&buf, n)
+	for _, k := range o.keys {
+		if err := writeUtfString(&buf, k); err != nil {
+			return nil, err
+		}
+		v := o.values[k]
+		if err := writeTaggedValue(&buf, v); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
 }
 
-func EncodeArray(a *SFSArray) []byte {
+// EncodeArray mirrors EncodeObject for a top-level SFSArray. No external
+// caller uses this today, but it's kept symmetric with EncodeObject (same
+// error-instead-of-panic contract) so internal/future callers get the same
+// safety for free.
+func EncodeArray(a *SFSArray) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte(sfsArrayType)
-	writeInt16(&buf, int16Count(len(a.items), "items"))
-	for _, v := range a.items {
-		writeTaggedValue(&buf, v)
+	n, err := int16Count(len(a.items), "items")
+	if err != nil {
+		return nil, err
 	}
-	return buf.Bytes()
+	writeInt16(&buf, n)
+	for _, v := range a.items {
+		if err := writeTaggedValue(&buf, v); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
 }
 
-func writeTaggedValue(buf *bytes.Buffer, v SFSValue) {
+func writeTaggedValue(buf *bytes.Buffer, v SFSValue) error {
 	buf.WriteByte(v.Type)
-	writeValuePayload(buf, v)
+	return writeValuePayload(buf, v)
 }
 
-func writeValuePayload(buf *bytes.Buffer, v SFSValue) {
+func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 	switch v.Type {
 	case sfsNull:
 		// no payload
+		return nil
 	case sfsBool:
 		if v.Val.(bool) {
 			buf.WriteByte(1)
 		} else {
 			buf.WriteByte(0)
 		}
+		return nil
 	case sfsByte:
 		buf.WriteByte(v.Val.(byte))
+		return nil
 	case sfsShort:
 		writeInt16(buf, v.Val.(int16))
+		return nil
 	case sfsInt:
 		writeInt32(buf, v.Val.(int32))
+		return nil
 	case sfsLong:
 		writeInt64(buf, v.Val.(int64))
+		return nil
 	case sfsFloat:
 		binary.Write(buf, binary.BigEndian, math.Float32bits(v.Val.(float32)))
+		return nil
 	case sfsDouble:
 		binary.Write(buf, binary.BigEndian, math.Float64bits(v.Val.(float64)))
+		return nil
 	case sfsUtfString:
-		writeUtfString(buf, v.Val.(string))
+		return writeUtfString(buf, v.Val.(string))
 	case sfsText:
 		// Same underlying representation as sfsUtfString (a Go string), but tagged sfsText on the
 		// wire and length-prefixed with a 4-byte count instead of 2 (mirrors readValuePayload's
@@ -226,9 +255,14 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) {
 		b := []byte(v.Val.(string))
 		writeInt32(buf, int32(len(b)))
 		buf.Write(b)
+		return nil
 	case sfsBoolArray:
 		arr := v.Val.([]bool)
-		writeInt16(buf, int16Count(len(arr), "bool array items"))
+		n, err := int16Count(len(arr), "bool array items")
+		if err != nil {
+			return err
+		}
+		writeInt16(buf, n)
 		for _, e := range arr {
 			if e {
 				buf.WriteByte(1)
@@ -236,65 +270,118 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) {
 				buf.WriteByte(0)
 			}
 		}
+		return nil
 	case sfsByteArray:
 		// Unlike every other array type (which use a 2-byte count), ByteArray uses a bare 4-byte
 		// int count (mirrors readValuePayload's sfsByteArray case -- see the comment there).
 		b := v.Val.([]byte)
 		writeInt32(buf, int32(len(b)))
 		buf.Write(b)
+		return nil
 	case sfsShortArray:
 		arr := v.Val.([]int16)
-		writeInt16(buf, int16Count(len(arr), "short array items"))
+		n, err := int16Count(len(arr), "short array items")
+		if err != nil {
+			return err
+		}
+		writeInt16(buf, n)
 		for _, e := range arr {
 			writeInt16(buf, e)
 		}
+		return nil
 	case sfsIntArray:
 		arr := v.Val.([]int32)
-		writeInt16(buf, int16Count(len(arr), "int array items"))
+		n, err := int16Count(len(arr), "int array items")
+		if err != nil {
+			return err
+		}
+		writeInt16(buf, n)
 		for _, e := range arr {
 			writeInt32(buf, e)
 		}
+		return nil
 	case sfsLongArray:
 		arr := v.Val.([]int64)
-		writeInt16(buf, int16Count(len(arr), "long array items"))
+		n, err := int16Count(len(arr), "long array items")
+		if err != nil {
+			return err
+		}
+		writeInt16(buf, n)
 		for _, e := range arr {
 			writeInt64(buf, e)
 		}
+		return nil
 	case sfsFloatArray:
 		arr := v.Val.([]float32)
-		writeInt16(buf, int16Count(len(arr), "float array items"))
+		n, err := int16Count(len(arr), "float array items")
+		if err != nil {
+			return err
+		}
+		writeInt16(buf, n)
 		for _, e := range arr {
 			binary.Write(buf, binary.BigEndian, math.Float32bits(e))
 		}
+		return nil
 	case sfsDoubleArray:
 		arr := v.Val.([]float64)
-		writeInt16(buf, int16Count(len(arr), "double array items"))
+		n, err := int16Count(len(arr), "double array items")
+		if err != nil {
+			return err
+		}
+		writeInt16(buf, n)
 		for _, e := range arr {
 			binary.Write(buf, binary.BigEndian, math.Float64bits(e))
 		}
+		return nil
 	case sfsUtfStringArray:
 		arr := v.Val.([]string)
-		writeInt16(buf, int16Count(len(arr), "utf string array items"))
-		for _, s := range arr {
-			writeUtfString(buf, s)
+		n, err := int16Count(len(arr), "utf string array items")
+		if err != nil {
+			return err
 		}
+		writeInt16(buf, n)
+		for _, s := range arr {
+			if err := writeUtfString(buf, s); err != nil {
+				return err
+			}
+		}
+		return nil
 	case sfsObjectType:
 		inner := v.Val.(*SFSObject)
-		writeInt16(buf, int16Count(len(inner.keys), "keys"))
-		for _, k := range inner.keys {
-			writeUtfString(buf, k)
-			writeTaggedValue(buf, inner.values[k])
+		n, err := int16Count(len(inner.keys), "keys")
+		if err != nil {
+			return err
 		}
+		writeInt16(buf, n)
+		for _, k := range inner.keys {
+			if err := writeUtfString(buf, k); err != nil {
+				return err
+			}
+			if err := writeTaggedValue(buf, inner.values[k]); err != nil {
+				return err
+			}
+		}
+		return nil
 	case sfsArrayType:
 		inner := v.Val.(*SFSArray)
-		writeInt16(buf, int16Count(len(inner.items), "items"))
-		for _, iv := range inner.items {
-			writeTaggedValue(buf, iv)
+		n, err := int16Count(len(inner.items), "items")
+		if err != nil {
+			return err
 		}
+		writeInt16(buf, n)
+		for _, iv := range inner.items {
+			if err := writeTaggedValue(buf, iv); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		// Every SFSDataType tag decode supports has an encode case above, except sfsClass (19),
 		// which is unused/unimplemented by the game itself (see the const block) and so has never
-		// had a decode case to mirror either.
+		// had a decode case to mirror either. Every other case here can only be reached via
+		// programmatically-constructed SFSValues (Put*/Add* helpers all set a valid Type), so an
+		// unsupported tag here means a genuine programmer/decode-desync bug, not untrusted server
+		// data -- unlike the two encode-time size limits below, this one stays a panic.
 		panic(fmt.Sprintf("sfsobject: unsupported encode type %d", v.Type))
 	}
 }
@@ -303,23 +390,28 @@ func writeInt16(buf *bytes.Buffer, v int16) { binary.Write(buf, binary.BigEndian
 func writeInt32(buf *bytes.Buffer, v int32) { binary.Write(buf, binary.BigEndian, v) }
 func writeInt64(buf *bytes.Buffer, v int64) { binary.Write(buf, binary.BigEndian, v) }
 
-// int16Count converts a length to int16 for a wire count field, panicking (matching
-// writeValuePayload's existing panic-on-unsupported-type precedent) instead of silently wrapping
-// into a wrong count if the value is ever too large to represent.
-func int16Count(n int, what string) int16 {
+// int16Count converts a length to int16 for a wire count field, returning an error instead of
+// silently wrapping into a wrong count -- or panicking, as this used to -- if the value is ever
+// too large to represent. Reachable from server-controlled data (e.g. a collection built up from
+// a paginated server response), so it must not crash the process.
+func int16Count(n int, what string) (int16, error) {
 	if n > 32767 {
-		panic(fmt.Sprintf("sfsobject: too many %s to encode (%d, max 32767)", what, n))
+		return 0, fmt.Errorf("sfsobject: too many %s to encode (%d, max 32767)", what, n)
 	}
-	return int16(n)
+	return int16(n), nil
 }
 
-func writeUtfString(buf *bytes.Buffer, s string) {
+// writeUtfString returns an error instead of panicking when s is too long to length-prefix with
+// a 2-byte count -- reachable from server-controlled data (e.g. a batched join of server-supplied
+// values), so it must not crash the process.
+func writeUtfString(buf *bytes.Buffer, s string) error {
 	b := []byte(s)
 	if len(b) > 65535 {
-		panic(fmt.Sprintf("sfsobject: string too long to encode (%d bytes, max 65535)", len(b)))
+		return fmt.Errorf("sfsobject: string too long to encode (%d bytes, max 65535)", len(b))
 	}
 	writeUint16(buf, uint16(len(b)))
 	buf.Write(b)
+	return nil
 }
 func writeUint16(buf *bytes.Buffer, v uint16) { binary.Write(buf, binary.BigEndian, v) }
 

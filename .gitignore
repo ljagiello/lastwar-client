@@ -38,6 +38,9 @@ go.work.sum
 
 # Session config / device identity -- these belong in the user's home directory
 # (~/.lastwar_goclient_*), never in the repo. This is a defensive backstop, not the
-# real safeguard, in case one ever ends up here by mistake.
+# real safeguard, in case one ever ends up here by mistake. Covers the session
+# config file plus the four persisted device-identity files written by
+# identity.go's stateFilePath() family (device_id, username, gameuid, loginkey).
 *.lastwar_goclient_session.json
+.lastwar_goclient_*
 config.local.json

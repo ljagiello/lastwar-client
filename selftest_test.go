@@ -19,7 +19,10 @@ func TestSFSObjectRoundTrip(t *testing.T) {
 	arr.AddInt(2)
 	o.PutSFSArray("arr", arr)
 
-	encoded := EncodeObject(o)
+	encoded, err := EncodeObject(o)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
 	decoded, err := DecodeObject(encoded)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
