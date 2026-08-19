@@ -24,7 +24,7 @@ const maxFrameSize = 64 << 20 // 64 MiB
 // zstd.NewReader is expensive; the docs recommend a single shared decoder
 // reused across calls. DecodeAll is safe for concurrent use.
 var zstdDecoder = func() *zstd.Decoder {
-	d, err := zstd.NewReader(nil)
+	d, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(maxFrameSize))
 	if err != nil {
 		panic(err) // only fails on invalid options, never at runtime
 	}
@@ -185,9 +185,13 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 			return nil, fmt.Errorf("zlib reader: %w", err)
 		}
 		defer zr.Close()
-		out, err := io.ReadAll(zr)
+		limited := io.LimitReader(zr, maxFrameSize+1)
+		out, err := io.ReadAll(limited)
 		if err != nil {
 			return nil, fmt.Errorf("zlib inflate: %w", err)
+		}
+		if len(out) > maxFrameSize {
+			return nil, fmt.Errorf("zlib inflated output exceeds %d bytes", maxFrameSize)
 		}
 		return out, nil
 	}

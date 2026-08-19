@@ -38,6 +38,15 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 	}()
 
 	for {
+		fi, statErr := os.Stat(controlPipe)
+		if statErr != nil {
+			slog.Error("stat control pipe failed", "controlPipe", controlPipe, "error", statErr)
+			os.Exit(1)
+		}
+		if fi.Mode()&os.ModeNamedPipe == 0 {
+			slog.Error("controlPipe exists but is not a FIFO -- did you forget mkfifo?", "controlPipe", controlPipe)
+			os.Exit(1)
+		}
 		f, err := os.Open(controlPipe)
 		if err != nil {
 			slog.Error("open control pipe failed", "controlPipe", controlPipe, "error", err)

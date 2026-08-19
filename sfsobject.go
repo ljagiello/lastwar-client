@@ -251,9 +251,16 @@ func writeUint16(buf *bytes.Buffer, v uint16) { binary.Write(buf, binary.BigEndi
 // ---- Decoding ----
 
 type sfsReader struct {
-	data []byte
-	pos  int
+	data  []byte
+	pos   int
+	depth int
 }
+
+// maxNestDepth bounds how many levels of nested SFSArray/SFSObject readValuePayload will
+// recurse into before returning a decode error instead of continuing -- real SFS2X payloads
+// from this game have never needed anywhere close to this, and unbounded recursion here is a
+// crash-the-process vector on a payload well under the existing frame-size cap.
+const maxNestDepth = 64
 
 func (r *sfsReader) remaining() int { return len(r.data) - r.pos }
 
@@ -508,6 +515,11 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		if err != nil {
 			return SFSValue{}, err
 		}
+		r.depth++
+		defer func() { r.depth-- }()
+		if r.depth > maxNestDepth {
+			return SFSValue{}, fmt.Errorf("sfsobject: nesting depth exceeds %d", maxNestDepth)
+		}
 		arr := NewSFSArray()
 		for i := int16(0); i < n; i++ {
 			v, err := r.readTaggedValue()
@@ -521,6 +533,11 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
+		}
+		r.depth++
+		defer func() { r.depth-- }()
+		if r.depth > maxNestDepth {
+			return SFSValue{}, fmt.Errorf("sfsobject: nesting depth exceeds %d", maxNestDepth)
 		}
 		obj := NewSFSObject()
 		for i := int16(0); i < n; i++ {

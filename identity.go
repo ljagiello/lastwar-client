@@ -262,6 +262,20 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 	p := NewSFSObject()
 	p.PutInt("_id", in.FutureID)
 	p.PutInt("netType", 2) // 2 = wifi, matches the common case
+	effectiveAppVersion, effectiveVersionCode := appVersion, versionCode
+	if in.IOSMode {
+		// A GSL-issued `at` access token is bound to the exact
+		// appVersion/versionCode it was obtained under, same as
+		// packageName/platform above -- confirmed live: our hardcoded
+		// Android 1.0.351/1835 build numbers, sent alongside a real
+		// captured iOS token issued to 1.0.344/786, still got ec=28/E005
+		// even after packageName/platform/pf matched. These iOS values
+		// are what that capture actually showed; there is no known way
+		// to derive them generically the way packageSign derives from
+		// packageName, so a fresh capture is needed if the real client's
+		// build ever moves on.
+		effectiveAppVersion, effectiveVersionCode = "1.0.344", "786"
+	}
 	ta := "{}"
 	if in.IOSMode {
 		// DIAGNOSTIC ONLY: reproduces the field structure/format of the ta analytics blob a
@@ -275,10 +289,10 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 		blob := iosAnalyticsBlob{
 			OS: "iOS", Disk: "50.0/100.0", DeviceID: "00000000-0000-0000-0000-000000000000",
 			OSVersion: "0.0", SystemLanguage: "en", BundleID: iosPackageName, Carrier: "",
-			AppVersion: "0.0.0", FPS: 0, RAM: "0.0/0.0", Simulator: false, ZoneOffset: 0,
+			AppVersion: effectiveAppVersion, FPS: 0, RAM: "0.0/0.0", Simulator: false, ZoneOffset: 0,
 			Manufacturer: "Apple", ScreenHeight: 0, NetworkType: "WIFI", DeviceModel: "unknown",
 			ScreenWidth: 0, InstallTime: "2000-01-01 00:00:00.000",
-			LwNet: "wifi", LwResVersion: "0.0", LwBuildcode: "0", LwLine: "",
+			LwNet: "wifi", LwResVersion: "0.0", LwBuildcode: effectiveVersionCode, LwLine: "",
 			PdDl: 0, LwAb: "0", LwPlatform: "AppStore",
 			LwGameSessionID: "00000000-0000-0000-0000-000000000000", LwFirstLaunch: false,
 			LwAllianceID: "00000000000000000000000000000000",
@@ -370,20 +384,6 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 	p.PutUtfString("osVersion", "GoClient/1.0")
 	p.PutUtfString("parseRegisterId", "")
 	p.PutUtfString("gameUid", in.GameUid)
-	effectiveAppVersion, effectiveVersionCode := appVersion, versionCode
-	if in.IOSMode {
-		// A GSL-issued `at` access token is bound to the exact
-		// appVersion/versionCode it was obtained under, same as
-		// packageName/platform above -- confirmed live: our hardcoded
-		// Android 1.0.351/1835 build numbers, sent alongside a real
-		// captured iOS token issued to 1.0.344/786, still got ec=28/E005
-		// even after packageName/platform/pf matched. These iOS values
-		// are what that capture actually showed; there is no known way
-		// to derive them generically the way packageSign derives from
-		// packageName, so a fresh capture is needed if the real client's
-		// build ever moves on.
-		effectiveAppVersion, effectiveVersionCode = "1.0.344", "786"
-	}
 	p.PutUtfString("appVersion", effectiveAppVersion)
 	p.PutUtfString("resVersion", "0")
 	p.PutUtfString("versionCode", effectiveVersionCode)

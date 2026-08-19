@@ -196,11 +196,15 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			conn.Close()
 			return nil, err
 		}
+		if env.Content == nil {
+			conn.Close()
+			return nil, fmt.Errorf("LOGIN FAILED: response had no p payload")
+		}
 		if ec, ok := env.Content.Get("ec"); ok {
 			conn.Close()
 			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s", ec.Val, env.Content.String())
 		}
-		slog.Info("login OK", "response", env.Content.String())
+		slog.Info("login OK", "un", env.Content.GetString("un"))
 		if un := env.Content.GetString("un"); un != "" && un != ident.Username {
 			if err := ident.SaveUsername(un); err != nil {
 				slog.Warn("failed to persist username", "error", err)
@@ -257,28 +261,6 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			break
 		}
 		slog.Error("no init push within timeout", "timeoutMs", initPushTimeout.Milliseconds())
-		if attempt < maxLoginAttempts {
-			conn.Close()
-			// A same-identity reconnect right after a just-closed
-			// connection got E011/E005 in testing, even for a brand-new
-			// guest -- reusing the same `at` access token across two
-			// separate TCP sessions is the leading suspect (SFS2X access
-			// tokens are commonly single-use per connection). Fetch a
-			// fresh one via GSL before redialing rather than reusing the
-			// stale one.
-			slog.Info("fetching fresh access token before reconnecting (suspected single-use-per-connection)")
-			freshOpt := opt
-			if ident.GameUid != "" {
-				freshOpt = GSLOpt{Opt: "fix"}
-			}
-			freshLsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, freshOpt, "", ident.GameUid)
-			if err != nil {
-				slog.Error("GSL refresh failed; reconnecting with stale token anyway", "error", err)
-			} else if freshLsr.At != nil {
-				accessTok = freshLsr.At.Token
-				slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
-			}
-		}
 	}
 	if !gotInit {
 		slog.Warn("giving up on init after all attempts; continuing anyway, building list may be empty")

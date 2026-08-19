@@ -254,14 +254,21 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 			return nil, fmt.Errorf("read handshake response: %w", err)
 		}
 		if env.Controller == controllerSystem && env.Action == actionHandshake {
+			if env.Content == nil {
+				return nil, fmt.Errorf("HANDSHAKE FAILED: response had no p payload")
+			}
 			if ec, ok := env.Content.Get("ec"); ok {
 				return nil, fmt.Errorf("HANDSHAKE FAILED: ec=%v full=%s", ec.Val, env.Content.String())
 			}
 			return env.Content, nil
 		}
-		// Anything else this early (unlikely, but be tolerant) is logged
-		// and skipped rather than treated as a protocol violation.
-		slog.Info("skipped envelope while waiting for handshake", "controller", env.Controller, "action", env.Action, "content", env.Content.String())
+		// Anything else this early (unlikely, but be tolerant) is logged and skipped rather
+		// than treated as a protocol violation. Content may legitimately be nil here too.
+		contentStr := "<nil>"
+		if env.Content != nil {
+			contentStr = env.Content.String()
+		}
+		slog.Info("skipped envelope while waiting for handshake", "controller", env.Controller, "action", env.Action, "content", contentStr)
 	}
 }
 

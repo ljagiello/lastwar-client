@@ -81,7 +81,7 @@ func main() {
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
 			iosMode: *csIOS, interactive: *interactive, handshake: *handshake,
-			collect: *collect, configSavePath: cfgSource,
+			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
 		})
 		return
 	}
@@ -152,7 +152,7 @@ func parseLogLevel(s string) slog.Level {
 type crossServerTestOpts struct {
 	ip, zone, gameUid, deviceID, shumeiBoxId, rt, at, interactive string
 	port                                                          int
-	handshake, iosMode, collect                                   bool
+	handshake, iosMode, collect, listBuildings                    bool
 	configSavePath                                                string // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
 }
 
@@ -255,14 +255,15 @@ func runCrossServerTest(o crossServerTestOpts) {
 		os.Exit(1)
 	}
 	slog.Info("got buildings", "count", len(buildings))
+	if o.listBuildings || !o.collect {
+		PrintBuildings(buildings)
+	}
 	if o.collect {
 		slog.Info("collecting resources")
 		if err := CollectAll(conn, buildings, visitors); err != nil {
 			slog.Error("collect run had failures", "error", err)
 			os.Exit(1)
 		}
-	} else {
-		PrintBuildings(buildings)
 	}
 
 	if o.interactive != "" {

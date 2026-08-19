@@ -148,11 +148,15 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			conn.Close()
 			return nil, err
 		}
+		if env.Content == nil {
+			conn.Close()
+			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: response had no p payload")
+		}
 		if ec, ok := env.Content.Get("ec"); ok {
 			conn.Close()
 			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s", ec.Val, env.Content.String())
 		}
-		slog.Info("login OK", "response", env.Content.String())
+		slog.Info("login OK")
 
 		// Note: unlike login.go's equivalent redirect path (which fetches a fresh access token
 		// before redialing, on the documented suspicion that a token is single-use-per-connection),

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 )
 
@@ -214,7 +215,11 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 		conn.conn.SetReadDeadline(time.Now().Add(remaining))
 		env, err := conn.ReadEnvelope()
 		if err != nil {
-			break // timeout or closed; return whatever we have
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				break // expected: waited long enough for this window, move on with what we have
+			}
+			return buildings, visitors, fmt.Errorf("read building list: %w", err)
 		}
 		msg, ok := env.AsExtension()
 		if !ok {
@@ -244,6 +249,10 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 						}
 						if biv, ok := wrapper.Get("buildInfo"); ok {
 							if bi, ok := biv.Val.(*SFSObject); ok {
+								if !bi.Has("uuid") {
+									slog.Warn("skipping push.init.build entry with no uuid field", "raw", bi.String())
+									continue
+								}
 								buildings = append(buildings, Building{Raw: bi})
 							}
 						}
@@ -258,9 +267,15 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			if v, ok := msg.Params.Get("buildings"); ok {
 				if arr, ok := v.Val.(*SFSArray); ok {
 					for _, item := range arr.items {
-						if bi, ok := item.Val.(*SFSObject); ok {
-							buildings = append(buildings, Building{Raw: bi})
+						bi, ok := item.Val.(*SFSObject)
+						if !ok {
+							continue
 						}
+						if !bi.Has("uuid") {
+							slog.Warn("skipping push.add.building entry with no uuid field", "raw", bi.String())
+							continue
+						}
+						buildings = append(buildings, Building{Raw: bi})
 					}
 				}
 			}

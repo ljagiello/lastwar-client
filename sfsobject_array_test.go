@@ -162,3 +162,22 @@ func TestNestedCountRejectsNegative(t *testing.T) {
 		}
 	})
 }
+
+func TestNestingDepthRejected(t *testing.T) {
+	// Comfortably over maxNestDepth. Each level is a 1-byte tag + 2-byte count=1, so this stays
+	// small and the depth check aborts well before any real recursion risk -- this test should
+	// run instantly, not build a giant structure.
+	const levels = 200
+	var buf []byte
+	buf = append(buf, 0, 1) // outermost array's count = 1 (no leading tag -- readValuePayload takes tag as a parameter, not read from the stream)
+	for i := 0; i < levels-1; i++ {
+		buf = append(buf, sfsArrayType, 0, 1) // one more nested array: tag byte + count=1
+	}
+	buf = append(buf, sfsBool, 1) // innermost leaf value: tag=bool, value=true
+
+	r := &sfsReader{data: buf}
+	_, err := r.readValuePayload(sfsArrayType)
+	if err == nil {
+		t.Fatal("expected an error for excessive nesting depth, got nil (this would have risked a stack overflow before the depth-limit fix)")
+	}
+}
