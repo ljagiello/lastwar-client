@@ -4,8 +4,7 @@
 # Ecosystems present in this repo:
 #   - gomod          -> go.mod / go.sum (module deps, e.g. github.com/klauspost/compress)
 #   - github-actions -> the actions pinned in .github/workflows/*.yml (checkout, setup-go, ...)
-# The docs/ site is Mintlify (docs.json + .mdx) with no package manifest, so there is nothing
-# there for Dependabot to track.
+#   - npm (/docs)    -> the Mintlify CLI (`mint`) pinned in docs/package.json for the docs site
 version: 2
 updates:
   # --- Go module dependencies -------------------------------------------------
@@ -46,6 +45,26 @@ updates:
       prefix: ci
     groups:
       actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # --- Docs site tooling (Mintlify CLI) ---------------------------------------
+  - package-ecosystem: npm
+    directory: /docs
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docs
+    commit-message:
+      prefix: docs
+    groups:
+      docs-minor-and-patch:
         update-types:
           - minor
           - patch

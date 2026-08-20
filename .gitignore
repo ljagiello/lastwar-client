@@ -55,3 +55,6 @@ config.local.json
 capture.pcap
 *_c2s.bin
 *_s2c.bin
+
+# Node / Mintlify docs tooling (docs/package.json)
+node_modules/
