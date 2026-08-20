@@ -230,6 +230,98 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 	}
 }
 
+// TestMainVersionFlag is the round-50 regression test for printVersion (main.go) and its -version
+// call site, which had zero test coverage: unlike every other main() exit path exercised by
+// TestMainFlagParseExitCodes above, -version deliberately returns from main() normally (see its
+// own doc comment on why it bypasses the ignored-flags warning machinery) rather than os.Exit-ing
+// non-zero, and prints to stdout via a bare fmt.Printf/fmt.Println rather than through slog -- so
+// it needs its own stdout-capturing subprocess harness instead of reusing
+// TestMainFlagParseExitCodes' stderr-only one. Reuses the identical re-exec-the-test-binary-as-a-
+// subprocess idiom (safe here for the same reason: -version's own doc comment guarantees it exits
+// before any network/login/config-loading code runs).
+func TestMainVersionFlag(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_VERSION") == "1" {
+		os.Args = []string{"lastwar-client", "-version"}
+		main()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMainVersionFlag$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS_VERSION=1")
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("subprocess did not exit cleanly: err=%v, stdout=%s, stderr=%s", err, stdout.String(), stderr.String())
+	}
+	got := strings.TrimSpace(stdout.String())
+	if !strings.HasPrefix(got, "lastwar-client") {
+		t.Errorf("stdout = %q, want it to start with %q", got, "lastwar-client")
+	}
+	if stderr.String() != "" {
+		t.Errorf("stderr = %q, want empty (-version must print only to stdout)", stderr.String())
+	}
+}
+
+// TestMainDecodeStreamFlag is the round-50 regression test for runDecode (decode.go) and its
+// -decode-stream call site, which had zero test coverage: decode_test.go exercises
+// DecodeStreamFile directly and extensively, but nothing drives runDecode itself, so neither its
+// empty-label-defaults-to-"stream" fallback nor its os.Exit(1)-on-failure branch was ever actually
+// covered. Mirrors TestMainVersionFlag's stdout-capturing subprocess harness (runDecode, like
+// printVersion, prints via bare fmt.Printf/Println rather than slog for its per-packet output,
+// though its failure path does go through slog.Error).
+func TestMainDecodeStreamFlag(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_DECODE") == "1" {
+		os.Args = []string{"lastwar-client", "-decode-stream", os.Getenv("LASTWAR_TEST_DECODE_PATH")}
+		main()
+		return
+	}
+
+	t.Run("empty label defaults to stream and exits 0", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "capture.bin")
+		if err := os.WriteFile(path, mustEncodePacket(t, "field", "value"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command(os.Args[0], "-test.run=^TestMainDecodeStreamFlag$")
+		cmd.Env = append(os.Environ(),
+			"LASTWAR_TEST_HELPER_PROCESS_DECODE=1",
+			"LASTWAR_TEST_DECODE_PATH="+path,
+		)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("subprocess did not exit cleanly: err=%v, stdout=%s, stderr=%s", err, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "[stream]") {
+			t.Errorf("stdout = %q, want it to contain the default %q label prefix (no -decode-label was set)", stdout.String(), "[stream]")
+		}
+	})
+
+	t.Run("invalid path exits 1", func(t *testing.T) {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestMainDecodeStreamFlag$")
+		cmd.Env = append(os.Environ(),
+			"LASTWAR_TEST_HELPER_PROCESS_DECODE=1",
+			"LASTWAR_TEST_DECODE_PATH="+filepath.Join(t.TempDir(), "does-not-exist.bin"),
+		)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		runErr := cmd.Run()
+		exitErr, ok := runErr.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("subprocess did not run/exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+		}
+		if exitErr.ExitCode() != 1 {
+			t.Errorf("exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "decode failed") {
+			t.Errorf("stderr = %q, want it to mention the decode failure", stderr.String())
+		}
+	})
+}
+
 // TestMainStrayPositionalArgumentDoesNotLeakContent is the round-37 regression test for the MAJOR
 // finding that the stray-positional-argument diagnostic (main.go, right after fs.Parse succeeds)
 // used to log the raw joined argument content via "args", strings.Join(fs.Args(), " ") --

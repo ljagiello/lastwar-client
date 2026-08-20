@@ -305,6 +305,53 @@ func TestNestingDepthExactlyAtCapSucceeds(t *testing.T) {
 	}
 }
 
+// TestNestingDepthRejectedSFSObject is the round-50 regression test for the sfsObjectType sibling
+// of TestNestingDepthRejected above: the depth check (r.depth > maxNestDepth) is applied
+// identically in the sfsObjectType case (sfsobject.go), but until now was only ever exercised via
+// nested SFSArrays, never nested SFSObjects -- a plausible independent regression site, since the
+// two cases increment/check/defer-decrement r.depth as separate, textually-duplicated blocks
+// rather than shared code.
+func TestNestingDepthRejectedSFSObject(t *testing.T) {
+	const levels = 200
+	var buf []byte
+	buf = append(buf, 0, 1) // outermost object's count = 1 (tag passed as a parameter, not read from the stream)
+	for i := 0; i < levels-1; i++ {
+		buf = append(buf, 0, 0)          // key: empty string (2-byte length = 0)
+		buf = append(buf, sfsObjectType) // one more nested object: tag byte
+		buf = append(buf, 0, 1)          // nested object's own count = 1
+	}
+	buf = append(buf, 0, 0)       // innermost leaf key: empty string
+	buf = append(buf, sfsBool, 1) // innermost leaf value: tag=bool, value=true
+
+	r := &sfsReader{data: buf}
+	_, err := r.readValuePayload(sfsObjectType)
+	if err == nil {
+		t.Fatal("expected an error for excessive nesting depth via nested SFSObjects, got nil (this would have risked a stack overflow before the depth-limit fix)")
+	}
+}
+
+// TestNestingDepthExactlyAtCapSucceedsSFSObject is the sfsObjectType sibling of
+// TestNestingDepthExactlyAtCapSucceeds above, proving the same off-by-one boundary
+// (r.depth > maxNestDepth) is correct for nested SFSObjects specifically, not just nested
+// SFSArrays.
+func TestNestingDepthExactlyAtCapSucceedsSFSObject(t *testing.T) {
+	const levels = maxNestDepth
+	var buf []byte
+	buf = append(buf, 0, 1) // outermost object's count = 1
+	for i := 0; i < levels-1; i++ {
+		buf = append(buf, 0, 0)
+		buf = append(buf, sfsObjectType)
+		buf = append(buf, 0, 1)
+	}
+	buf = append(buf, 0, 0)
+	buf = append(buf, sfsBool, 1)
+
+	r := &sfsReader{data: buf}
+	if _, err := r.readValuePayload(sfsObjectType); err != nil {
+		t.Errorf("readValuePayload() error = %v, want nil for exactly %d levels of nesting via nested SFSObjects (the boundary value itself, not over the cap)", err, levels)
+	}
+}
+
 func TestByteArrayRejectsNegativeCount(t *testing.T) {
 	negOne := int32(-1)
 	var buf []byte
@@ -331,6 +378,22 @@ func TestTextRejectsNegativeCount(t *testing.T) {
 	wantMsg := "sfsobject: text negative size: -1"
 	if err.Error() != wantMsg {
 		t.Fatalf("error = %q, want %q", err.Error(), wantMsg)
+	}
+}
+
+// TestReadBytesRejectsNegativeCount is the round-50 regression test for sfsReader.readBytes'
+// leading `n < 0` guard (sfsobject.go), which had zero direct test coverage: every existing
+// negative-count test above (TestNestedCountRejectsNegative, TestByteArrayRejectsNegativeCount,
+// TestTextRejectsNegativeCount, ...) only reaches this guard indirectly, through a caller that has
+// already independently validated non-negativity itself (readArrayCount's own `n < 0` check, or
+// sfsByteArray/sfsText's explicit int32-negative-length guards) before ever calling readBytes --
+// so readBytes' own guard, defense-in-depth for any call site that does NOT pre-validate, was never
+// actually exercised. Calls readBytes directly with n=-1, the one shape that can only ever reach
+// this specific guard.
+func TestReadBytesRejectsNegativeCount(t *testing.T) {
+	r := &sfsReader{data: []byte{1, 2, 3}}
+	if _, err := r.readBytes(-1); err == nil {
+		t.Fatal("expected an error for a negative byte count, got nil")
 	}
 }
 

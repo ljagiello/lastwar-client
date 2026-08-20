@@ -300,6 +300,99 @@ func TestDoHandshakeSurvivesCorruptEnvelope(t *testing.T) {
 	}
 }
 
+// TestDoHandshakeConsecutiveDecodeFailuresBoundary is the round-50 regression test for the MINOR
+// finding (minor since DoHandshake is only reachable behind the -handshake flag) that
+// DoHandshake's round-49 fix (tolerating a corrupt envelope instead of aborting, mirroring
+// waitFor/waitForInitPush/FetchBuildings) removed the only thing that used to bound how long a
+// hostile peer could keep it reading: nothing capped how many consecutive malformed/undecodable
+// frames it would silently tolerate before the caller-supplied wall-clock timeout eventually
+// fired. Proves maxConsecutiveDecodeFailures (login.go) is a strict `>` bound here too: exactly
+// that many corrupt frames in a row still lets the following valid handshake response be read,
+// one more makes DoHandshake give up with a wrapped error instead of continuing to tolerate them.
+func TestDoHandshakeConsecutiveDecodeFailuresBoundary(t *testing.T) {
+	sendCorruptThenRespond := func(t *testing.T, n int) (err error) {
+		client, server := newPipeGameConnPair(t)
+		// Deliberately not gated on the server goroutine finishing: once DoHandshake gives up
+		// early (the cap+1 case), the client stops reading mid-stream and net.Pipe's
+		// unbuffered/synchronous Write blocks forever waiting for a reader that will never come
+		// back -- newPipeGameConnPair's own t.Cleanup closes both ends of the pipe at test end,
+		// which unblocks that pending write with an error and lets the goroutine exit; there's
+		// nothing else worth synchronizing on here.
+		go func() {
+			if _, rerr := server.ReadEnvelope(); rerr != nil {
+				return
+			}
+			for i := 0; i < n; i++ {
+				if _, werr := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); werr != nil {
+					return
+				}
+			}
+			resp := NewSFSObject()
+			resp.PutUtfString("sess", "abc123")
+			_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
+		}()
+
+		_, err = client.DoHandshake(2 * time.Second)
+		return err
+	}
+
+	t.Run("exactly cap consecutive corrupt frames: still succeeds", func(t *testing.T) {
+		if err := sendCorruptThenRespond(t, maxConsecutiveDecodeFailures); err != nil {
+			t.Errorf("DoHandshake() error = %v, want nil (exactly the cap must still be tolerated)", err)
+		}
+	})
+
+	t.Run("cap+1 consecutive corrupt frames: gives up", func(t *testing.T) {
+		err := sendCorruptThenRespond(t, maxConsecutiveDecodeFailures+1)
+		if err == nil {
+			t.Fatal("DoHandshake() error = nil, want an error once the consecutive-failure cap is exceeded")
+		}
+		if !strings.Contains(err.Error(), "consecutive malformed/undecodable envelopes") {
+			t.Errorf("err = %v, want it to mention the consecutive-failure cap being exceeded", err)
+		}
+	})
+}
+
+// TestDoHandshakeRejectsMissingPPayload is the round-50 regression test for DoHandshake's
+// `if env.Content == nil` guard (conn.go), the HANDSHAKE FAILED sibling of login.go's and
+// crossserver.go's identical guards: had zero test coverage, since every existing DoHandshake test
+// hands the fake server's response an ordinary PutUtfString("sess", ...) body via SendEnvelope,
+// which always encodes a non-nil "p" field. A real server response that omits "p" entirely leaves
+// env.Content nil, and DoHandshake must fail with a clear "no p payload" error instead of
+// panicking on a nil-pointer dereference the moment it reaches the very next line's
+// env.Content.Get("ec") check.
+func TestDoHandshakeRejectsMissingPPayload(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	go func() {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		// Built by hand (not SendEnvelope, which always encodes a "p" field) to omit "p"
+		// entirely -- the one shape SendEnvelope itself cannot produce.
+		outer := NewSFSObject()
+		outer.PutByte("c", controllerSystem)
+		outer.PutShort("a", actionHandshake)
+		body, err := EncodeObject(outer)
+		if err != nil {
+			return
+		}
+		packet, err := EncodePacket(body)
+		if err != nil {
+			return
+		}
+		_, _ = server.conn.Write(packet)
+	}()
+
+	_, err := client.DoHandshake(2 * time.Second)
+	if err == nil {
+		t.Fatal("DoHandshake() error = nil, want an error for a response with no p payload")
+	}
+	if !strings.Contains(err.Error(), "response had no p payload") {
+		t.Errorf("err = %v, want it to mention the missing p payload", err)
+	}
+}
+
 // TestDoHandshakeSendFailureIsNonTimeoutNetError is the round-29 regression test for the MAJOR
 // finding that DoHandshake's own send-stage branch (its c.SendEnvelope call) used a bare
 // fmt.Errorf("send handshake: %w", err) instead of sendStageError -- the exact write-vs-read-

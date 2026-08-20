@@ -320,6 +320,54 @@ func TestLoginRejectsWrongTypedBuildingUUID(t *testing.T) {
 	}
 }
 
+// TestLoginRejectsMissingPPayload is the round-50 regression test for Login()'s
+// `if env.Content == nil` guard right after the base-zone login response is read (login.go), which
+// had zero test coverage: every existing Login() test hands the fake server's response an ordinary
+// PutBool("success", true) body via SendEnvelope, which always encodes a non-nil "p" field. A real
+// server response that omits "p" entirely (or sends it wrong-typed -- see
+// TestReadEnvelopeWrongTypedFieldsWarn, conn_test.go, for that half) leaves env.Content nil, and
+// Login() must fail with a clear "no p payload" error instead of panicking on a nil-pointer
+// dereference the moment it reaches the very next line's env.Content.Get("ec") call.
+func TestLoginRejectsMissingPPayload(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		// Built by hand (not SendEnvelope, which always encodes a "p" field) to omit "p"
+		// entirely -- the one shape SendEnvelope itself cannot produce.
+		outer := NewSFSObject()
+		outer.PutByte("c", controllerSystem)
+		outer.PutShort("a", actionLogin)
+		body, err := EncodeObject(outer)
+		if err != nil {
+			return
+		}
+		packet, err := EncodePacket(body)
+		if err != nil {
+			return
+		}
+		_, _ = server.conn.Write(packet)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	_, err := Login(LoginOptions{})
+	if err == nil {
+		t.Fatal("Login() error = nil, want an error for a response with no p payload")
+	}
+	if !strings.Contains(err.Error(), "response had no p payload") {
+		t.Errorf("err = %v, want it to mention the missing p payload", err)
+	}
+}
+
 // TestLoginConnectionFailureWhileWaitingForInit is the integration-level regression test for
 // round 17's fix in Login() itself (the "if initErr != nil { ...; conn.Close(); return nil,
 // fmt.Errorf(...) }" block in step 5, right after the waitForInitPush call): a genuine connection

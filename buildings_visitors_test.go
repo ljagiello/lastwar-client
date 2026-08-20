@@ -701,6 +701,50 @@ func TestParseInitBuildingsWrongTypedBIdIsRejected(t *testing.T) {
 	}
 }
 
+// TestParseInitBuildingsRejectsNonObjectArrayElement is the round-50 regression test for
+// ParseInitBuildings' population loop's leading type-assertion guard (`bi, ok :=
+// item.Val.(*SFSObject); if !ok { continue }`, buildings.go), which had zero test coverage: every
+// existing malformed-entry test above hands ParseInitBuildings a well-formed *SFSObject with a
+// wrong-typed FIELD inside it, never an array element that isn't an *SFSObject at all. A hostile
+// or desynced peer sending building_new as an array of bare scalars (or any other non-object
+// value) must be silently skipped item-by-item, not panic on the type assertion or on a later
+// *SFSObject-only accessor call.
+//
+// Removing the guard entirely doesn't panic here -- requireFieldType/requirePresentField's own
+// o.Get(field) call is nil-receiver-safe (see TestSFSObjectAccessorsOnNilReceiverDoNotPanic), so a
+// nil bi still routes to the same "skip this entry" outcome either way. The one real, mutation-
+// catchable difference is diagnostic: WITH the guard, a non-object element is skipped in total
+// silence (it's not an entry at all, just noise); WITHOUT it, the nil bi falls through into
+// requirePresentField and misleadingly logs "...entry with no uuid field", as if a real, well-
+// formed-but-incomplete entry had been sent. Asserts that warning is absent.
+func TestParseInitBuildingsRejectsNonObjectArrayElement(t *testing.T) {
+	genuine := NewSFSObject()
+	genuine.PutLong("uuid", 333)
+	genuine.PutInt("bId", BuildingIronMine)
+
+	arr := NewSFSArray()
+	arr.add(SFSValue{sfsInt, int32(42)}) // not an *SFSObject at all
+	arr.AddSFSObject(genuine)
+	params := NewSFSObject()
+	params.PutSFSArray("building_new", arr)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := ParseInitBuildings(params)
+	slog.SetDefault(orig)
+
+	if len(got) != 1 {
+		t.Fatalf("ParseInitBuildings parsed %d buildings, want 1 (only the genuine *SFSObject entry -- the non-object element must be skipped, not panic)", len(got))
+	}
+	if got[0].Uuid() != 333 || got[0].BId() != BuildingIronMine {
+		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=333 bId=%d entry", got[0].Uuid(), got[0].BId(), BuildingIronMine)
+	}
+	if logged := buf.String(); strings.Contains(logged, "no uuid field") {
+		t.Errorf("a non-object array element must be skipped in total silence, not misreported as an entry with a missing uuid field: got log:\n%s", logged)
+	}
+}
+
 // TestParseInitBuildingsRawItemCapBoundary is the round-28 boundary-condition regression test for
 // maxRawBuildingItemsPerPush: every prior raw-item-scan-cap test for this constant (see
 // TestParseInitBuildingsCapsRawItemsExaminedNotJustValidOutput above) overshoots the cap by a wide
@@ -872,6 +916,58 @@ func TestFetchBuildingsPushAddBuildingWrongTypedBIdIsRejected(t *testing.T) {
 	}
 	if strings.Contains(logged, "skipping push.add.building entry with no bId field") {
 		t.Errorf("wrong-typed bId must log as wrong-typed, not as missing -- got log:\n%s", logged)
+	}
+}
+
+// TestFetchBuildingsPushAddBuildingRejectsNonObjectArrayElement is the push.add.building sibling of
+// TestParseInitBuildingsRejectsNonObjectArrayElement above, covering the identical leading
+// type-assertion guard (`bi, ok := item.Val.(*SFSObject); if !ok { continue }`) in FetchBuildings'
+// OWN separate, textually-duplicated push.add.building loop (buildings.go) -- a distinct call site
+// from ParseInitBuildings' loop, so a regression in one would not necessarily be caught by a test
+// against the other. Also asserts the guard's removal-detectable log difference documented on
+// TestParseInitBuildingsRejectsNonObjectArrayElement above: the guard's own nil-safe fallthrough
+// means only the log output -- a spurious "no uuid field" warning -- distinguishes its presence.
+func TestFetchBuildingsPushAddBuildingRejectsNonObjectArrayElement(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		genuine := NewSFSObject()
+		genuine.PutLong("uuid", 333)
+		genuine.PutInt("bId", BuildingIronMine)
+
+		arr := NewSFSArray()
+		arr.add(SFSValue{sfsInt, int32(42)}) // not an *SFSObject at all
+		arr.AddSFSObject(genuine)
+		params := NewSFSObject()
+		params.PutSFSArray("buildings", arr)
+		_ = server.SendExtension("push.add.building", params)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	buildings, _, err := FetchBuildings(client, 150*time.Millisecond)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished sending push.add.building")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil", err)
+	}
+	if len(buildings) != 1 {
+		t.Fatalf("got %d buildings, want 1 (only the genuine *SFSObject entry -- the non-object element must be skipped, not panic)", len(buildings))
+	}
+	if buildings[0].Uuid() != 333 || buildings[0].BId() != BuildingIronMine {
+		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=333 bId=%d entry", buildings[0].Uuid(), buildings[0].BId(), BuildingIronMine)
+	}
+	if logged := buf.String(); strings.Contains(logged, "no uuid field") {
+		t.Errorf("a non-object array element must be skipped in total silence, not misreported as an entry with a missing uuid field: got log:\n%s", logged)
 	}
 }
 

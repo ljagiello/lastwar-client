@@ -222,6 +222,19 @@ func TestPkcs7UnpadRejectsMismatchedPaddingBytes(t *testing.T) {
 	}
 }
 
+// TestPkcs7UnpadRejectsEmptyInput is the round-50 regression test for pkcs7Unpad's leading
+// `len(data) == 0` guard (crypto.go), which had zero direct test coverage: every existing
+// pkcs7Unpad test above only reaches it indirectly through aesECBDecryptPKCS7, which itself
+// already rejects a zero-length ciphertext one guard earlier (see
+// TestAESECBDecryptPKCS7RejectsBadCiphertextLength below), so pkcs7Unpad's own empty-input branch
+// was never actually exercised by any of them. Calls pkcs7Unpad directly with a nil slice, the one
+// shape that can only ever reach this specific guard.
+func TestPkcs7UnpadRejectsEmptyInput(t *testing.T) {
+	if _, err := pkcs7Unpad(nil, 16); err == nil {
+		t.Fatal("expected an error for empty input, got nil")
+	}
+}
+
 // TestAESECBDecryptPKCS7RejectsBadCiphertextLength covers aesECBDecryptPKCS7's ciphertext-length
 // guard (crypto.go: `len(ciphertext) == 0 || len(ciphertext)%bs != 0`), which has zero existing
 // test coverage (grep confirms): a corrupted/truncated "bin" field from the server, or one that's

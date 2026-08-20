@@ -198,6 +198,29 @@ func TestLoadSessionConfigWarnsOnLoosePermissions(t *testing.T) {
 	}
 }
 
+// TestLoadSessionConfigRejectsMalformedJSON is the round-50 regression test for LoadSessionConfig's
+// json.Unmarshal error path (config.go), which had zero direct test coverage: every existing
+// LoadSessionConfig test above only ever hands it well-formed JSON. A session config file can be
+// corrupted by a partial write surviving a crash/SIGKILL between SaveSessionConfig's os.Rename and
+// the next read, or by a user hand-editing it -- LoadSessionConfig must return a clear, path-
+// prefixed error in that case, not panic or silently return a zero-value config that would then
+// get treated as a legitimate (if empty) prior session.
+func TestLoadSessionConfigRejectsMalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.json")
+	if err := os.WriteFile(path, []byte(`{"ip":"1.2.3.4","port":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadSessionConfig(path)
+	if err == nil {
+		t.Fatal("expected an error for malformed JSON, got nil")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("err = %v, want it to mention the file path %q so a corrupted config is identifiable", err, path)
+	}
+}
+
 // TestLoadEffectiveConfigDefaultPathAbsentReturnsNil confirms the genuine first-run case still
 // works correctly after dropping loadEffectiveConfig's separate os.Stat pre-check: with no
 // -config flag and nothing at all at the default session config path, loadEffectiveConfig must

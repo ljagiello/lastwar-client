@@ -1298,3 +1298,54 @@ func TestDoCrossServerLoginSendFailureIsNonTimeoutNetError(t *testing.T) {
 		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }
+
+// TestDoCrossServerLoginRejectsMissingPPayload is the round-50 regression test for
+// DoCrossServerLogin's `if env.Content == nil` guard right after the login response is read
+// (crossserver.go), the CROSS-SERVER LOGIN sibling of login.go's identical guard: had zero test
+// coverage, since every existing DoCrossServerLogin test hands the fake server's response an
+// ordinary PutBool("success", true) body via SendEnvelope, which always encodes a non-nil "p"
+// field. A real server response that omits "p" entirely leaves env.Content nil, and
+// DoCrossServerLogin must fail with a clear "no p payload" error instead of panicking on a
+// nil-pointer dereference the moment it reaches the very next line's env.Content.Get("ec") call.
+func TestDoCrossServerLoginRejectsMissingPPayload(t *testing.T) {
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		// Built by hand (not SendEnvelope, which always encodes a "p" field) to omit "p"
+		// entirely -- the one shape SendEnvelope itself cannot produce.
+		outer := NewSFSObject()
+		outer.PutByte("c", controllerSystem)
+		outer.PutShort("a", actionLogin)
+		body, err := EncodeObject(outer)
+		if err != nil {
+			return
+		}
+		packet, err := EncodePacket(body)
+		if err != nil {
+			return
+		}
+		_, _ = server.conn.Write(packet)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+	result, err := DoCrossServerLogin(p)
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("DoCrossServerLogin() error = nil, want an error for a response with no p payload")
+	}
+	if !strings.Contains(err.Error(), "response had no p payload") {
+		t.Errorf("err = %v, want it to mention the missing p payload", err)
+	}
+}

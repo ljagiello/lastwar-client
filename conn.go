@@ -392,6 +392,7 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 		return nil, sendStageError{err: fmt.Errorf("send handshake: %w", err)}
 	}
 	deadline := time.Now().Add(timeout)
+	consecutiveDecodeFailures := 0
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -425,9 +426,14 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 			// simply skipping the one malformed push and continuing to wait for the
 			// real handshake response, the same tolerance this loop already extends to
 			// a successfully-decoded-but-non-matching envelope a few lines below.
-			slog.Warn("DoHandshake: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err)
+			consecutiveDecodeFailures++
+			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
+				return nil, fmt.Errorf("DoHandshake: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err)
+			}
+			slog.Warn("DoHandshake: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue
 		}
+		consecutiveDecodeFailures = 0
 		if env.Controller == controllerSystem && env.Action == actionHandshake {
 			if env.Content == nil {
 				return nil, fmt.Errorf("HANDSHAKE FAILED: response had no p payload")

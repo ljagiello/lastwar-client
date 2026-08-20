@@ -91,6 +91,61 @@ func TestFetchBuildingsSurvivesCorruptPush(t *testing.T) {
 	}
 }
 
+// TestFetchBuildingsConsecutiveDecodeFailuresBoundary is the round-50 regression test for the
+// MAJOR finding that FetchBuildings' round-49 fix (tolerating a corrupt push instead of aborting)
+// removed the only thing that used to bound how long a hostile peer could keep this loop reading:
+// nothing capped how many consecutive malformed/undecodable frames it would silently tolerate
+// before the caller-supplied wall-clock timeout eventually fired. Proves
+// maxConsecutiveDecodeFailures (login.go) is a strict `>` bound here too: exactly that many
+// corrupt frames in a row still lets the following valid init push be parsed, one more makes the
+// loop give up early (break, not an error -- mirroring the existing net.Error-timeout give-up
+// path) with whatever was collected so far (nothing, since it never reaches the init push).
+func TestFetchBuildingsConsecutiveDecodeFailuresBoundary(t *testing.T) {
+	sendCorruptThenInit := func(t *testing.T, n int) (buildings []Building, logged string) {
+		client, server := newPipeGameConnPair(t)
+		go func() {
+			for i := 0; i < n; i++ {
+				if _, werr := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); werr != nil {
+					return
+				}
+			}
+			params := NewSFSObject()
+			arr := NewSFSArray()
+			arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
+			params.PutSFSArray("building_new", arr)
+			_ = server.SendExtension("init", params)
+		}()
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got, _, err := FetchBuildings(client, 300*time.Millisecond)
+		slog.SetDefault(orig)
+
+		if err != nil {
+			t.Fatalf("FetchBuildings() error = %v, want nil (giving up on too many consecutive decode failures is a graceful break, not an error)", err)
+		}
+		return got, buf.String()
+	}
+
+	t.Run("exactly cap consecutive corrupt frames: init push still parsed", func(t *testing.T) {
+		buildings, _ := sendCorruptThenInit(t, maxConsecutiveDecodeFailures)
+		if len(buildings) != 1 || buildings[0].Uuid() != 111 {
+			t.Fatalf("buildings = %+v, want exactly one building with uuid 111 (the cap must still be tolerated)", buildings)
+		}
+	})
+
+	t.Run("cap+1 consecutive corrupt frames: gives up before reaching the init push", func(t *testing.T) {
+		buildings, logged := sendCorruptThenInit(t, maxConsecutiveDecodeFailures+1)
+		if len(buildings) != 0 {
+			t.Errorf("buildings = %+v, want none (must give up before the init push ever arrives)", buildings)
+		}
+		if !strings.Contains(logged, "too many consecutive malformed/undecodable envelopes") {
+			t.Errorf("expected a Warn about giving up on too many consecutive failures, got:\n%s", logged)
+		}
+	})
+}
+
 // TestFetchBuildingsInitPushParsesBuildingsAndVisitors covers FetchBuildings' main documented
 // path: a bare `init` bootstrap push carrying `building_new` and `visitor` -- ParseInitBuildings'
 // doc comment explains this, not push.init.build/defaultBuilds, is the field that actually

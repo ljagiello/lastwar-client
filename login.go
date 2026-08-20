@@ -789,6 +789,7 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 	deadline := time.Now().Add(timeout)
 	halfway := time.Now().Add(timeout / 2)
 	sentActivePull := false
+	consecutiveDecodeFailures := 0
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -858,9 +859,14 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 				// log what actually went wrong instead of a generic timeout message.
 				return nil, nil, false, err
 			}
-			slog.Warn("waitForInitPush: failed to read/decode a push while waiting for init; continuing to wait, not treating this as a dead connection", "error", err)
+			consecutiveDecodeFailures++
+			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
+				return nil, nil, false, fmt.Errorf("waitForInitPush: %d consecutive malformed/undecodable pushes, giving up: %w", consecutiveDecodeFailures, err)
+			}
+			slog.Warn("waitForInitPush: failed to read/decode a push while waiting for init; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue
 		}
+		consecutiveDecodeFailures = 0
 		msg, ok := env.AsExtension()
 		if !ok {
 			continue
@@ -964,10 +970,27 @@ func (deadlineExceededError) Error() string   { return "timed out waiting for ma
 func (deadlineExceededError) Timeout() bool   { return true }
 func (deadlineExceededError) Temporary() bool { return false }
 
+// maxConsecutiveDecodeFailures bounds how many consecutive non-timeout, non-net.Error
+// ReadEnvelope failures (e.g. a malformed/undecodable frame) any of this codebase's independent
+// read loops will silently tolerate before giving up -- round-50 fix, closing a DoS gap the
+// round-48/49 Warn+continue fixes introduced across all four such loops (waitFor and
+// waitForInitPush here, buildings.go's FetchBuildings, conn.go's DoHandshake): tolerating a
+// SINGLE malformed frame is correct (ReadPacket has already fully consumed that frame's bytes
+// before DecodeObject ever ran, so the stream stays in sync -- see those fixes' own doc
+// comments), but tolerating an UNBOUNDED stream of them let a hostile peer burn CPU and log
+// volume for the full remaining wall-clock window of every wait, with only the caller-supplied
+// timeout (up to 45s for waitForInitPush) eventually stopping it. Mirrors interactive.go's own
+// consecutiveScanErrors/controlPipeRetries pattern for the identical class of gap in the
+// control-FIFO scanner. Kept small: a genuine peer only ever needs to survive ONE stray/
+// malformed frame; two dozen in a row is already far more tolerance than any real scenario
+// this was built for needs.
+const maxConsecutiveDecodeFailures = 20
+
 // waitFor reads envelopes until pred matches or timeout elapses, logging
 // everything it skips past along the way.
 func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (*Envelope, error) {
 	deadline := time.Now().Add(timeout)
+	consecutiveDecodeFailures := 0
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -1000,9 +1023,14 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 			// every sendAndWait/waitForCmd caller across mail.go/alliance.go/
 			// visitors.go/buildings.go/interactive.go -- even though the genuinely
 			// awaited response/push might arrive on the very next read.
-			slog.Warn("waitFor: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err)
+			consecutiveDecodeFailures++
+			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
+				return nil, fmt.Errorf("waitFor: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err)
+			}
+			slog.Warn("waitFor: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue
 		}
+		consecutiveDecodeFailures = 0
 		if pred(env) {
 			return env, nil
 		}

@@ -378,6 +378,56 @@ func TestWaitForSurvivesCorruptEnvelope(t *testing.T) {
 	}
 }
 
+// TestWaitForConsecutiveDecodeFailuresBoundary is the round-50 regression test for the MAJOR
+// finding that waitFor's round-49 fix (tolerating a corrupt envelope instead of aborting) removed
+// the only thing that used to bound how long a hostile peer could keep waitFor spinning: nothing
+// capped how many consecutive malformed/undecodable frames it would silently tolerate before the
+// caller-supplied wall-clock timeout eventually fired, letting a peer stream them as fast as the
+// link allows for the full window of every sendAndWait/waitForCmd call in the codebase. Proves
+// maxConsecutiveDecodeFailures (login.go) is a strict `>` bound: exactly that many corrupt frames
+// in a row still lets a subsequent matching envelope succeed, one more gives up with a clear error
+// instead of continuing to tolerate them.
+func TestWaitForConsecutiveDecodeFailuresBoundary(t *testing.T) {
+	sendCorruptThenMatch := func(t *testing.T, n int) (err error) {
+		client, server := newPipeGameConnPair(t)
+		// Deliberately not gated on the server goroutine finishing: once waitForCmd gives up
+		// early (the cap+1 case), the client stops reading mid-stream and net.Pipe's
+		// unbuffered/synchronous Write blocks forever waiting for a reader that will never come
+		// back -- newPipeGameConnPair's own t.Cleanup closes both ends of the pipe at test end,
+		// which unblocks that pending write with an error and lets the goroutine exit; there's
+		// nothing else worth synchronizing on here.
+		go func() {
+			for i := 0; i < n; i++ {
+				if _, werr := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); werr != nil {
+					return
+				}
+			}
+			resp := NewSFSObject()
+			resp.PutBool("success", true)
+			_ = server.SendExtension("wanted.cmd", resp)
+		}()
+
+		_, err = waitForCmd(client, 2*time.Second, "wanted.cmd")
+		return err
+	}
+
+	t.Run("exactly cap consecutive corrupt frames: still succeeds", func(t *testing.T) {
+		if err := sendCorruptThenMatch(t, maxConsecutiveDecodeFailures); err != nil {
+			t.Errorf("waitForCmd() error = %v, want nil (exactly the cap must still be tolerated)", err)
+		}
+	})
+
+	t.Run("cap+1 consecutive corrupt frames: gives up", func(t *testing.T) {
+		err := sendCorruptThenMatch(t, maxConsecutiveDecodeFailures+1)
+		if err == nil {
+			t.Fatal("waitForCmd() error = nil, want an error once the consecutive-failure cap is exceeded")
+		}
+		if !strings.Contains(err.Error(), "consecutive malformed/undecodable envelopes") {
+			t.Errorf("err = %v, want it to mention the consecutive-failure cap being exceeded", err)
+		}
+	})
+}
+
 // TestWaitForCmdSkipRedactsCredentialFields is the round-11 regression test for waitFor's generic
 // "skipped push while waiting" Debug logger (login.go:513-515): if push.account.login.new --
 // which carries a live loginKey in cleartext -- arrives while a caller is waiting for a different
@@ -739,6 +789,68 @@ func TestWaitForInitPushSendExtensionFailure(t *testing.T) {
 	if elapsed > window*3/4 {
 		t.Errorf("waitForInitPush took %v, want it to return promptly after the failed send rather than waiting out the full %v window", elapsed, window)
 	}
+}
+
+// TestWaitForInitPushConsecutiveDecodeFailuresBoundary is the round-50 regression test for the
+// MAJOR finding that waitForInitPush's round-48 fix (tolerating a corrupt push instead of aborting
+// the whole login) removed the only thing that used to bound how long a hostile peer could keep
+// this loop reading: nothing capped how many consecutive malformed/undecodable frames it would
+// silently tolerate before the caller-supplied wall-clock timeout eventually fired. Proves
+// maxConsecutiveDecodeFailures (login.go) is a strict `>` bound here too: exactly that many corrupt
+// frames in a row still lets the following valid init push be parsed, one more makes the function
+// give up early with a wrapped error instead of continuing to tolerate them.
+func TestWaitForInitPushConsecutiveDecodeFailuresBoundary(t *testing.T) {
+	sendCorruptThenInit := func(t *testing.T, n int) (buildings []Building, visitors []Visitor, gotInit bool, err error) {
+		client, server := newPipeGameConnPair(t)
+		// Deliberately not gated on the server goroutine finishing: once waitForInitPush gives up
+		// early (the cap+1 case), the client stops reading mid-stream and net.Pipe's
+		// unbuffered/synchronous Write blocks forever waiting for a reader that will never come
+		// back -- newPipeGameConnPair's own t.Cleanup closes both ends of the pipe at test end,
+		// which unblocks that pending write with an error and lets the goroutine exit; there's
+		// nothing else worth synchronizing on here.
+		go func() {
+			for i := 0; i < n; i++ {
+				if _, werr := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); werr != nil {
+					return
+				}
+			}
+			params := NewSFSObject()
+			arr := NewSFSArray()
+			arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
+			params.PutSFSArray("building_new", arr)
+			_ = server.SendExtension("init", params)
+		}()
+
+		// A window well short of the halfway-point active-pull fallback, so this test only ever
+		// exercises the plain read loop above it, not the login.init active-pull send path.
+		return waitForInitPush(client, 300*time.Millisecond)
+	}
+
+	t.Run("exactly cap consecutive corrupt frames: init push still parsed", func(t *testing.T) {
+		buildings, _, gotInit, err := sendCorruptThenInit(t, maxConsecutiveDecodeFailures)
+		if err != nil {
+			t.Fatalf("waitForInitPush() error = %v, want nil (exactly the cap must still be tolerated)", err)
+		}
+		if !gotInit {
+			t.Fatal("gotInit = false, want true (the init push must still be reached and parsed)")
+		}
+		if len(buildings) != 1 || buildings[0].Uuid() != 111 {
+			t.Fatalf("buildings = %+v, want exactly one building with uuid 111", buildings)
+		}
+	})
+
+	t.Run("cap+1 consecutive corrupt frames: gives up", func(t *testing.T) {
+		buildings, visitors, gotInit, err := sendCorruptThenInit(t, maxConsecutiveDecodeFailures+1)
+		if err == nil {
+			t.Fatal("waitForInitPush() error = nil, want an error once the consecutive-failure cap is exceeded")
+		}
+		if gotInit {
+			t.Fatalf("gotInit = true, want false (buildings=%v visitors=%v)", buildings, visitors)
+		}
+		if !strings.Contains(err.Error(), "consecutive malformed/undecodable pushes") {
+			t.Errorf("err = %v, want it to mention the consecutive-failure cap being exceeded", err)
+		}
+	})
 }
 
 // TestReadPacketGracefulCloseIsNonTimeoutNetError is the packet.go-level regression test for round

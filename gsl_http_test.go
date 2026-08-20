@@ -564,6 +564,34 @@ func TestFlexStringUnmarshalJSON(t *testing.T) {
 	}
 }
 
+// TestLoginServerListResponUnmarshalJSONNestedFailure is the round-50 regression test for
+// LoginServerListRespon.UnmarshalJSON's nested-decode error branches (gsl.go: the
+// "serverList:"/"loginServer:"/"at:"/"rt:"-prefixed fmt.Errorf wraps), which had zero test
+// coverage: every existing LoginServerListRespon test only ever hands it well-formed JSON.
+//
+// Only the "serverList:" branch is actually reachable today, empirically confirmed (not assumed)
+// by probing all four with deliberately malformed input before writing this test: LoginServerInfo,
+// AccountServerInfo, and LoginToken all have EVERY field typed flexString specifically so a
+// wrong-typed field value can never fail json.Unmarshal (flexString.UnmarshalJSON never itself
+// returns an error -- falls back to storing the raw bytes verbatim; see its own doc comment) -- so
+// for loginServer/at/rt, once looksLikeJSONObject's leading-'{' shape check passes, decoding into
+// their all-flexString target structs cannot fail regardless of what's nested inside. serverList
+// decodes into []LoginServerInfo instead, a genuinely-typed slice: a value that passes
+// looksLikeJSONArray's leading-'[' shape check but whose elements aren't JSON objects at all (e.g.
+// bare numbers) still fails, since unmarshaling a JSON number into the LoginServerInfo struct type
+// itself -- not one of its fields -- is what json.Unmarshal rejects.
+func TestLoginServerListResponUnmarshalJSONNestedFailure(t *testing.T) {
+	const body = `{"code":"0","serverList":[1,2,3]}`
+	var l LoginServerListRespon
+	err := json.Unmarshal([]byte(body), &l)
+	if err == nil {
+		t.Fatalf("Unmarshal(%s) error = nil, want an error for a serverList array of non-objects", body)
+	}
+	if !strings.Contains(err.Error(), "serverList:") {
+		t.Errorf("err = %v, want it prefixed with \"serverList:\" so the failing field is identifiable", err)
+	}
+}
+
 // TestFlexStringInt is the round-36 regression test for the MAJOR finding that flexString.Int()
 // (gsl.go) -- the accessor round 35 introduced specifically so a wrong-typed GetServerList field
 // could fall back to 0 instead of fatally failing json.Unmarshal for the whole response -- had its

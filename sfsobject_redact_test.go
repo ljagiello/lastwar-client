@@ -1479,3 +1479,56 @@ func TestStringRedactedTruncatesLargeStringAtRuneBoundary(t *testing.T) {
 		t.Errorf("StringRedacted() output contains the UTF-8 replacement character, suggesting a corrupted rune sequence:\n%q", got)
 	}
 }
+
+// TestTruncateAtRuneBoundaryNonPositiveMaxBytes is the round-50 regression test for
+// truncateAtRuneBoundary's `maxBytes <= 0` guard (sfsobject.go), which had zero direct test
+// coverage: every existing caller (formatSFSValueRedacted's bare-string case) only ever reaches
+// this function via chargeUpTo's `n <= fb.remaining` branch, which reports allowed>0 whenever
+// remaining>0 and n>0 -- so no prior test ever drove maxBytes down to exactly 0 or negative here.
+// Calls truncateAtRuneBoundary directly with a non-empty string (so the earlier
+// `maxBytes >= len(s)` fast path can't intercept first) and both a zero and a negative maxBytes.
+func TestTruncateAtRuneBoundaryNonPositiveMaxBytes(t *testing.T) {
+	const s = "hello, world"
+
+	if got := truncateAtRuneBoundary(s, 0); got != "" {
+		t.Errorf("truncateAtRuneBoundary(%q, 0) = %q, want \"\"", s, got)
+	}
+	if got := truncateAtRuneBoundary(s, -5); got != "" {
+		t.Errorf("truncateAtRuneBoundary(%q, -5) = %q, want \"\"", s, got)
+	}
+}
+
+// TestFormatSFSValueRedactedBareStringWithExhaustedBudget is the round-50 integration-level
+// companion to TestTruncateAtRuneBoundaryNonPositiveMaxBytes above: proves the maxBytes<=0 guard
+// is actually reachable through a real StringRedacted() call, not just directly.
+// TestChargeUpToAlreadyExhaustedBudget's own doc comment notes a TOP-LEVEL field can never reach
+// chargeUpTo with an already-exhausted budget, since charge() breaks the enclosing key loop before
+// formatting even starts -- but an array ITEM can: charge() may succeed for an item (driving
+// remaining down to exactly 0) immediately before formatSFSValueRedacted recurses into that same
+// item's value, so a bare string array item immediately following the very last unit of budget
+// lands here with fb.remaining already 0. Builds an array whose filler items drain the budget to
+// exactly 0 right before a final non-empty string item, so chargeUpTo(len(s)) returns (0, true)
+// and truncateAtRuneBoundary(s, 0) must produce "" rather than emitting the string's real content.
+func TestFormatSFSValueRedactedBareStringWithExhaustedBudget(t *testing.T) {
+	arr := NewSFSArray()
+	// The object's own "arr" key charge already consumes 1 of the maxFormattedNodes budget units
+	// before any array item is processed, leaving maxFormattedNodes-1 for the items themselves --
+	// maxFormattedNodes-2 filler items exactly drains the last remaining unit on the item
+	// immediately before the string, so the string item's own charge() call is what hits 0.
+	for i := 0; i < maxFormattedNodes-2; i++ {
+		arr.AddInt(int32(i))
+	}
+	arr.add(SFSValue{sfsUtfString, "nonempty-string-value-that-must-not-appear"})
+
+	o := NewSFSObject()
+	o.PutSFSArray("arr", arr)
+
+	got := o.StringRedacted()
+
+	if strings.Contains(got, "nonempty-string-value-that-must-not-appear") {
+		t.Errorf("StringRedacted() output contains the exhausted-budget string's real content, want it truncated to empty instead: %.300s", got)
+	}
+	if !strings.Contains(got, formatTruncatedMarker) {
+		t.Errorf("expected the truncation marker once the shared budget is exhausted, got: %.300s", got)
+	}
+}

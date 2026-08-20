@@ -476,6 +476,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 		visitors = append(visitors, v)
 	}
 
+	consecutiveDecodeFailures := 0
 	for {
 		// Round-36 fix: ParseInitVisitors/ParseInitBuildings and the two inline defaultBuilds/
 		// buildings loops above are each capped PER PUSH (maxVisitorsUpperBound=300,
@@ -529,9 +530,16 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			// this loop returned immediately on ANY such error, silently truncating the
 			// buildings/visitors accumulation for this whole fetch window instead of simply
 			// skipping the one malformed push and continuing to read.
-			slog.Warn("read building list: failed to read/decode an envelope; continuing to wait, not treating this as a dead connection", "error", err)
+			consecutiveDecodeFailures++
+			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
+				slog.Warn("read building list: too many consecutive malformed/undecodable envelopes, giving up early with whatever was already collected",
+					"consecutiveDecodeFailures", consecutiveDecodeFailures)
+				break
+			}
+			slog.Warn("read building list: failed to read/decode an envelope; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue
 		}
+		consecutiveDecodeFailures = 0
 		msg, ok := env.AsExtension()
 		if !ok {
 			continue
