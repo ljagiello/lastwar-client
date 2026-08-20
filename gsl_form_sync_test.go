@@ -129,3 +129,63 @@ func TestEncodeFormSortedRejectsAmpersandInValue(t *testing.T) {
 		t.Errorf("encodeFormSorted error = %q, want it to mention the offending character ('&')", err.Error())
 	}
 }
+
+// TestLoginServerListResponShadowStructFieldsMatch is the round-52 regression test for the MINOR
+// finding that LoginServerListRespon.UnmarshalJSON's shadow struct (gsl.go, the anonymous "raw"
+// struct used to pre-inspect serverList/loginServer/at/rt before shape-tolerant decoding) had zero
+// automated protection against drifting out of sync with the real LoginServerListRespon field
+// list -- UnmarshalJSON's own doc comment already warns a future field added to one and not the
+// other "will compile but silently stop round-tripping through this custom decoder", the identical
+// risk class TestEncodeFormSortedOrderMatchesGetServerListFields above already protects for this
+// same file's encodeFormSorted/GetServerList pair, just never extended to this second
+// hand-maintained-list-pair.
+//
+// Mirrors that test's technique exactly: reads gsl.go's own source and extracts every json tag
+// name from both struct literals, rather than hand-duplicating a third list here (which would
+// reproduce the exact drift risk this test exists to catch).
+func TestLoginServerListResponShadowStructFieldsMatch(t *testing.T) {
+	src, err := os.ReadFile("gsl.go")
+	if err != nil {
+		t.Fatalf("read gsl.go: %v", err)
+	}
+	source := string(src)
+
+	tagRe := regexp.MustCompile(`json:"([a-zA-Z]+)"`)
+
+	realRe := regexp.MustCompile(`(?s)type LoginServerListRespon struct \{(.*?)\n\}\n`)
+	realMatch := realRe.FindStringSubmatch(source)
+	if realMatch == nil {
+		t.Fatal("could not find LoginServerListRespon's struct literal in gsl.go -- the regexp is likely out of sync with how it's declared there")
+	}
+	realFields := make(map[string]bool)
+	for _, m := range tagRe.FindAllStringSubmatch(realMatch[1], -1) {
+		realFields[m[1]] = true
+	}
+	if len(realFields) == 0 {
+		t.Fatal("found zero json-tagged fields in LoginServerListRespon -- the regexp is likely out of sync with how it's declared there")
+	}
+
+	shadowRe := regexp.MustCompile(`(?s)var raw struct \{(.*?)\n\t\}\n`)
+	shadowMatch := shadowRe.FindStringSubmatch(source)
+	if shadowMatch == nil {
+		t.Fatal("could not find UnmarshalJSON's shadow \"raw\" struct literal in gsl.go -- the regexp is likely out of sync with how it's declared there")
+	}
+	shadowFields := make(map[string]bool)
+	for _, m := range tagRe.FindAllStringSubmatch(shadowMatch[1], -1) {
+		shadowFields[m[1]] = true
+	}
+	if len(shadowFields) == 0 {
+		t.Fatal("found zero json-tagged fields in UnmarshalJSON's shadow \"raw\" struct -- the regexp is likely out of sync with how it's declared there")
+	}
+
+	for name := range realFields {
+		if !shadowFields[name] {
+			t.Errorf("LoginServerListRespon has json tag %q but UnmarshalJSON's shadow \"raw\" struct does not -- add it there, or that field will silently stop round-tripping through the custom decoder", name)
+		}
+	}
+	for name := range shadowFields {
+		if !realFields[name] {
+			t.Errorf("UnmarshalJSON's shadow \"raw\" struct has json tag %q but LoginServerListRespon does not -- remove it, or check whether the field was renamed", name)
+		}
+	}
+}

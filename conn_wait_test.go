@@ -333,6 +333,39 @@ func TestWaitForCmdSkipsUnmatchedPushes(t *testing.T) {
 	}
 }
 
+// TestWaitForCmdSurvivesNonExtensionEnvelope is the round-52 regression test for the MAJOR finding
+// that two more, previously-overlooked siblings of round 51's AsExtension nil-msg guard fix
+// (buildings.go's FetchBuildings, login.go's waitForInitPush) had zero test coverage: waitForCmd's
+// own predicate closure (`msg, ok := e.AsExtension(); if !ok { return false }`, login.go) and
+// waitFor's "skipped push while waiting" debug logger (`if msg, ok := env.AsExtension(); ok {
+// slog.Debug(...) }`, login.go) -- both reached on every single sendAndWait/waitForCmd call across
+// the entire codebase (mail.go, alliance.go, visitors.go, vip.go, buildings.go's CollectAll), not
+// just the two less-central sites round 51 already covered. A controllerSystem envelope (e.g. the
+// client's own background heartbeat PingPong reply, sent every ~4s once connected) makes
+// AsExtension() return ok=false, exercising both guards in the same call. Sends one such envelope
+// before the actual awaited extension response, proving waitForCmd survives it silently instead of
+// panicking on a nil msg dereference.
+func TestWaitForCmdSurvivesNonExtensionEnvelope(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	go func() {
+		if err := server.SendEnvelope(controllerSystem, actionPingPong, NewSFSObject()); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendExtension("wanted.cmd", resp)
+	}()
+
+	msg, err := waitForCmd(client, 500*time.Millisecond, "wanted.cmd")
+	if err != nil {
+		t.Fatalf("waitForCmd: %v", err)
+	}
+	if msg.Cmd != "wanted.cmd" {
+		t.Errorf("Cmd = %q, want wanted.cmd", msg.Cmd)
+	}
+}
+
 // TestWaitForSurvivesCorruptEnvelope is the round-49 regression test for the MAJOR finding that
 // waitFor (login.go) -- the shared read-loop primitive underlying every sendAndWait/waitForCmd
 // call plus the raw login-response waits in login.go's Login and crossserver.go's
@@ -1025,6 +1058,70 @@ func TestReadEnvelopeGracefulCloseIsNonTimeoutNetError(t *testing.T) {
 	}
 	if netErr.Temporary() {
 		t.Errorf("netErr.Temporary() = true, want false")
+	}
+}
+
+// TestWaitForCmdSelfCloseWhileBlockedRespondsPromptly is the round-52 regression test for the
+// MINOR finding that the "goroutine B calls GameConn.Close() while goroutine A is blocked inside
+// ReadEnvelope/waitFor/waitForCmd on that same connection" scenario had no test anywhere in the
+// suite -- and that TestReadEnvelopeGracefulCloseIsNonTimeoutNetError above, despite being cited by
+// interactive.go's own doc comment as proof this is handled, doesn't actually exercise it: eofConn
+// is a synchronous fake with no live blocking read and no concurrent Close() call at all.
+//
+// On a real *net.TCPConn (the only kind a production GameConn is ever backed by -- see DialGame),
+// Close()'ing a connection while another goroutine is blocked in Read on it makes that Read return
+// promptly with a *net.OpError wrapping net.ErrClosed, which already satisfies net.Error natively.
+// This codebase's own standard concurrency-test fixture, newPipeGameConnPair (net.Pipe-backed),
+// used to diverge: closing the SAME end that's blocked in Read produced bare io.ErrClosedPipe,
+// which satisfied neither net.Error nor io.EOF/io.ErrUnexpectedEOF, so waitForCmd would silently
+// fall through to login.go's much slower maxConsecutiveDecodeFailures give-up path (~20 failed
+// reads) instead of aborting promptly on the first one -- masking any future regression in the
+// fast single-read classification real TCP actually depends on. Fixed by widening packet.go's
+// wrapIfClosed to also treat io.ErrClosedPipe as a dead connection, matching io.EOF/
+// io.ErrUnexpectedEOF's existing treatment (see its own doc comment for the full rationale). This
+// test proves both that a self-close now resolves fast (not via the ~20-iteration give-up path)
+// and that the resulting error is correctly classified as a genuine dead connection.
+func TestWaitForCmdSelfCloseWhileBlockedRespondsPromptly(t *testing.T) {
+	client, _ := newPipeGameConnPair(t)
+
+	start := time.Now()
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := waitForCmd(client, 5*time.Second, "wanted.cmd")
+		errCh <- err
+	}()
+
+	// Give the background goroutine a moment to actually block inside ReadEnvelope before closing
+	// out from under it -- otherwise Close() could race ahead of the read even starting.
+	time.Sleep(50 * time.Millisecond)
+	client.Close()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitForCmd did not return within 2s of a self-close while blocked -- want a prompt single-read failure, not the ~20-iteration give-up path (or worse, waiting out the full 5s timeout)")
+	}
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("waitForCmd() error = nil, want an error for a connection closed out from under a blocked read")
+	}
+	if elapsed > 1*time.Second {
+		t.Errorf("waitForCmd took %v to return after a self-close, want well under 1s -- an elapsed time this long suggests it took the slow maxConsecutiveDecodeFailures give-up path instead of failing promptly on the first read", elapsed)
+	}
+	if strings.Contains(err.Error(), "consecutive malformed/undecodable") {
+		t.Errorf("err = %v, want it NOT to be the maxConsecutiveDecodeFailures give-up error -- a self-close must be classified as a dead connection on the first failed read, not tolerated as a string of decode failures", err)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- a self-close is a genuine dead connection, not a benign timeout")
+	}
+	if !containsNonTimeoutNetError(err) {
+		t.Errorf("containsNonTimeoutNetError(err) = false, want true -- every 'abort remaining work on a genuinely dead connection' check in this codebase uses this helper")
 	}
 }
 

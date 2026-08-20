@@ -173,11 +173,32 @@ func (e deadConnError) Unwrap() error { return e.err }
 func (deadConnError) Timeout() bool   { return false }
 func (deadConnError) Temporary() bool { return false }
 
-// wrapIfClosed wraps err in deadConnError when it is, or unwraps to, io.EOF
-// or io.ErrUnexpectedEOF. Any other error (including an already-net.Error
-// network failure such as a connection reset, which arrives as a genuine
-// *net.OpError rather than a bare io.EOF/io.ErrUnexpectedEOF) passes through
-// unchanged. A nil err passes through unchanged too.
+// wrapIfClosed wraps err in deadConnError when it is, or unwraps to, io.EOF,
+// io.ErrUnexpectedEOF, or io.ErrClosedPipe. Any other error (including an
+// already-net.Error network failure such as a connection reset, which
+// arrives as a genuine *net.OpError rather than one of those three bare
+// sentinels) passes through unchanged. A nil err passes through unchanged
+// too.
+//
+// io.ErrClosedPipe -- round-52 addition -- is what a net.Pipe (this
+// codebase's own standard concurrency-test fixture, see conn_wait_test.go's
+// newPipeGameConnPair) returns from a blocked Read when the SAME end that's
+// blocked has Close() called on it from another goroutine, e.g.
+// interactive.go's signal-handling goroutine or StartHeartbeat's own
+// send-failure branch (conn.go) racing the main goroutine's blocked read. A
+// real *net.TCPConn's identical scenario instead returns a *net.OpError
+// wrapping net.ErrClosed, which already satisfies net.Error natively with no
+// wrapping needed here -- so this addition only ever changes net.Pipe-backed
+// TEST behavior, never a real production connection's (a real GameConn is
+// always backed by a *net.TCPConn -- see DialGame -- so io.ErrClosedPipe can
+// never actually occur there). Without it, a self-close-while-blocked-read
+// test written the idiomatic way for this codebase (newPipeGameConnPair,
+// close the client's own end from a background goroutine) would silently
+// exercise a much slower, different code path (login.go's
+// maxConsecutiveDecodeFailures give-up, ~20 failed reads) than what real TCP
+// actually does (abort on the very first failed read), instead of the fast,
+// single-read net.Error classification every other genuine dead-connection
+// shape in this file already gets.
 //
 // Only used at ReadPacket's leading header-byte read below -- readFrameField
 // (round-42 fix) now unconditionally wraps every one of its own errors in
@@ -187,7 +208,7 @@ func wrapIfClosed(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) {
 		return deadConnError{err: err}
 	}
 	return err
