@@ -357,7 +357,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			slog.Info("step 3b: SFS2X Handshake (experimental, see conn.go:DoHandshake)")
 			hsResp, err := conn.DoHandshake(10 * time.Second)
 			if err != nil {
-				conn.Close()
+				_ = conn.Close()
 				return nil, fmt.Errorf("handshake: %w", err)
 			}
 			slog.Info("handshake OK", "response", hsResp.StringRedacted())
@@ -393,7 +393,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		loginContent.PutUtfString("pw", "")
 		loginContent.PutSFSObject("p", loginParams)
 		if err := conn.SendEnvelope(controllerSystem, actionLogin, loginContent); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, sendStageError{err: err}
 		}
 		slog.Info("login request sent, waiting for response", "gameUid", gameUid, "at", sfs.Redact(accessTok))
@@ -402,15 +402,15 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			return e.Controller == controllerSystem && e.Action == actionLogin
 		})
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, err
 		}
 		if env.Content == nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("LOGIN FAILED: response had no p payload")
 		}
 		if ec, ok := env.Content.Get("ec"); ok {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), ErrAuthRejected)
 		}
 		// warnIfWrongTypedField below adds a diagnostic for the "field present but wrong-typed"
@@ -440,12 +440,12 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		if siObj != nil && redirectIPVal != "" {
 			redirectHops++
 			if redirectHops > maxRedirectHops {
-				conn.Close()
+				_ = conn.Close()
 				return nil, fmt.Errorf("login: too many serverInfo redirects (>%d), last addr=%s zone=%s", maxRedirectHops, addr, zone)
 			}
 			newAddr, err := buildBaseZoneLoginAddr(redirectIPVal, int(getIntFlexible(siObj, "port")))
 			if err != nil {
-				conn.Close()
+				_ = conn.Close()
 				return nil, fmt.Errorf("login: serverInfo redirect: %w", err)
 			}
 			// redirectZone (above) is redirectIP's sibling for this field -- see its doc comment
@@ -453,7 +453,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			// (unlike a wrong-typed ip) it doesn't stop the redirect itself from being followed.
 			newZone := redirectZone(siObj, "login.go base-zone Login")
 			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddr, "newZone", newZone, "oldAddr", addr, "oldZone", zone)
-			conn.Close()
+			_ = conn.Close()
 			addr = newAddr
 			if newZone != "" {
 				zone = newZone
@@ -518,7 +518,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		}
 
 		slog.Info("step 5: waiting for init push sequence")
-		conn.conn.SetReadDeadline(time.Time{})
+		_ = conn.conn.SetReadDeadline(time.Time{})
 		buildings, visitors, gotInit, initErr = waitForInitPush(conn, initPushTimeout)
 		if gotInit {
 			slog.Info("got init push", "buildings", len(buildings))
@@ -533,7 +533,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			// means conn is definitely dead -- fail fast instead of returning a nominally-successful
 			// LoginResult that wraps a broken connection with no indication anything went wrong.
 			slog.Error("no init push: connection failed while waiting", "error", initErr, "timeoutMs", initPushTimeout.Milliseconds())
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("login: connection failed while waiting for init push: %w", initErr)
 		}
 		slog.Error("no init push within timeout", "timeoutMs", initPushTimeout.Milliseconds())
@@ -575,18 +575,18 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	sendCodeParams.PutUtfString("mail", opts.Email)
 	sendCodeParams.PutUtfString("lang", "en")
 	if err := conn.SendExtension("account.login.send.verify.code", sendCodeParams); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, sendStageError{err: err}
 	}
 	slog.Info("sent account.login.send.verify.code", "emailLen", len(opts.Email))
 
 	msg, err := waitForCmd(conn, 15*time.Second, "account.login.send.verify.code", "push.account.send.verify.code")
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	if ec, ok := msg.Params.Get("errorCode"); ok {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("SEND-CODE FAILED: errorCode=%v full=%s: %w", ec.Val, msg.Params.StringRedacted(), ErrAuthRejected)
 	}
 	slog.Info("server accepted", "response", msg.Params.StringRedacted())
@@ -612,17 +612,17 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	finishParams.PutUtfString("deviceId", ident.DeviceID)
 	finishParams.PutUtfString("airKey", ident.AirKey())
 	if err := conn.SendExtension("account.login.new", finishParams); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, sendStageError{err: err}
 	}
 
 	ackMsg, err := waitForCmd(conn, 15*time.Second, "account.login.new")
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	if ec, ok := ackMsg.Params.Get("errorCode"); ok {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED: errorCode=%v full=%s: %w", ec.Val, ackMsg.Params.StringRedacted(), ErrAuthRejected)
 	}
 	slog.Info("ack", "response", ackMsg.Params.StringRedacted())
@@ -632,11 +632,11 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	// separately as a push.account.login.new push.
 	msg2, err := waitForCmd(conn, 15*time.Second, "push.account.login.new")
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, err
 	}
 	if ec, ok := msg2.Params.Get("errorCode"); ok {
-		conn.Close()
+		_ = conn.Close()
 		// Not msg2.Params.String() -- same as the success path just below: this push's full
 		// response shape carries loginKey (and accountArr) in cleartext regardless of whether
 		// it's reporting success or, as here, an error, and String() does no field-level
@@ -748,7 +748,7 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 		if !sentActivePull && halfway.Before(readUntil) {
 			readUntil = halfway
 		}
-		conn.conn.SetReadDeadline(readUntil)
+		_ = conn.conn.SetReadDeadline(readUntil)
 		env, err := conn.ReadEnvelope()
 		if err != nil {
 			var netErr net.Error
@@ -966,7 +966,7 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 		if remaining <= 0 {
 			return nil, deadlineExceededError{}
 		}
-		conn.conn.SetReadDeadline(time.Now().Add(remaining))
+		_ = conn.conn.SetReadDeadline(time.Now().Add(remaining))
 		env, err := conn.ReadEnvelope()
 		if err != nil {
 			var netErr net.Error
@@ -1068,7 +1068,7 @@ func readCodeFromPipe(path string, conn *GameConn) string {
 		closeConnBeforeExit(conn)
 		os.Exit(1)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return readCodeFrom(f, f, conn)
 }
 
@@ -1084,7 +1084,7 @@ func readCodeFromPipe(path string, conn *GameConn) string {
 // instead of directly at the exit site.
 func closeConnBeforeExit(conn *GameConn) {
 	if conn != nil {
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 
@@ -1130,7 +1130,7 @@ func readCodeFrom(r io.Reader, closer io.Closer, conn *GameConn) string {
 		if err != nil && line == "" {
 			slog.Error("input closed without a code", "error", err)
 			if closer != nil {
-				closer.Close()
+				_ = closer.Close()
 			}
 			closeConnBeforeExit(conn)
 			os.Exit(1)

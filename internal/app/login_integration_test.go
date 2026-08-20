@@ -121,7 +121,7 @@ func TestLoginGuestHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Ident == nil {
 		t.Fatal("result.Ident = nil")
@@ -211,7 +211,7 @@ func TestLoginDedupesInitPushBuildingsAndVisitors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if len(result.Buildings) != 2 {
 		t.Fatalf("got %d buildings, want 2 (uuid 111 deduped from 2 occurrences to 1, plus uuid 222)", len(result.Buildings))
@@ -312,7 +312,7 @@ func TestLoginRejectsWrongTypedBuildingUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if len(result.Buildings) != 1 {
 		t.Fatalf("got %d buildings, want exactly 1 (only the genuine, well-typed uuid=0 entry -- the string-typed one must be rejected outright, not silently coerced to uuid=0 and merged with the genuine one)", len(result.Buildings))
@@ -428,7 +428,7 @@ func TestLoginBaseZoneResponseWaitConnectionFailure(t *testing.T) {
 		}
 		// Deliberately never send a login response at all -- close outright, so the base-zone
 		// waitFor sees a real read error (EOF/reset), not a silence-until-deadline timeout.
-		server.Close()
+		_ = server.Close()
 	})
 	host, port := splitHostPortInt(t, addr)
 
@@ -442,7 +442,7 @@ func TestLoginBaseZoneResponseWaitConnectionFailure(t *testing.T) {
 	result, err := Login(LoginOptions{})
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("Login: expected a non-nil error when the connection fails while waiting for the base-zone login response, got nil")
 	}
@@ -492,7 +492,7 @@ func TestLoginConnectionFailureWhileWaitingForInit(t *testing.T) {
 		// deadline timeout. A plain timeout would take waitForInitPush's full 45s (Login()'s
 		// unexported initPushTimeout, not overridable from a test) and land Login() on the benign
 		// "giving up... continuing anyway" path instead of the fail-fast path this test is for.
-		server.Close()
+		_ = server.Close()
 	})
 	host, port := splitHostPortInt(t, addr)
 
@@ -509,7 +509,7 @@ func TestLoginConnectionFailureWhileWaitingForInit(t *testing.T) {
 
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("Login: expected a non-nil error when the connection fails while waiting for the init push, got nil")
 	}
@@ -585,7 +585,7 @@ func TestLoginSurvivesCorruptPushWhileWaitingForInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v (a single corrupt/undecodable push must not abort the login -- the stream stays in sync and a subsequent valid init push must still be read)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	logged := buf.String()
 	if !strings.Contains(logged, "failed to read/decode a push while waiting for init") {
@@ -645,7 +645,7 @@ func TestLoginRedirectRefreshesGameUid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Ident == nil {
 		t.Fatal("result.Ident = nil")
@@ -724,7 +724,7 @@ func TestLoginTooManyRedirects(t *testing.T) {
 	result, err := Login(LoginOptions{})
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("expected an error after maxRedirectHops+1 consecutive serverInfo redirects, got nil")
 	}
@@ -792,7 +792,7 @@ func TestLoginExactlyMaxRedirectHopsSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v, want it to succeed after exactly %d redirects (the boundary value)", err, maxRedirectHops)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 }
 
 // buildLoggableServerList returns an n-entry ServerList whose first entry is the real, reachable
@@ -837,7 +837,7 @@ func TestLoginServerListLogExactlyAtCapDoesNotTruncate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	logged := strings.Count(buf.String(), `msg="state server"`)
 	if logged != maxServerListLogEntries {
@@ -875,7 +875,7 @@ func TestLoginServerListLogOverCapTruncatesAndWarns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	logged := strings.Count(buf.String(), `msg="state server"`)
 	if logged != maxServerListLogEntries {
@@ -1013,7 +1013,7 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, _ = f.WriteString(testCode + "\n")
 	}()
 
@@ -1021,7 +1021,7 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	select {
 	case got := <-gotSendCodeEmail:
@@ -1158,7 +1158,7 @@ func TestLoginWarnsOnWrongTypedPersistenceFields(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, _ = f.WriteString(testCode + "\n")
 	}()
 
@@ -1173,7 +1173,7 @@ func TestLoginWarnsOnWrongTypedPersistenceFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v (a wrong-typed persistence field must not be fatal -- it degrades to \"nothing to persist\" for that field)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	logged := buf.String()
 	for _, field := range []string{"un", "loginKey", "gameUid", "gameUserName"} {
@@ -1285,7 +1285,7 @@ func TestLoginEmailVerificationPathWarnsOnPersistFailure(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, _ = f.WriteString(testCode + "\n")
 	}()
 
@@ -1302,7 +1302,7 @@ func TestLoginEmailVerificationPathWarnsOnPersistFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v, want success (a SaveGameUid/SaveUsername persist failure must only warn, not fail the login)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	// Confirm the fake server's own Mkdir calls actually succeeded (test setup), so a failure
 	// below is known to come from the SaveGameUid/SaveUsername warnings under test, not from the
@@ -1424,7 +1424,7 @@ func TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, _ = f.WriteString(testCode + "\n")
 	}()
 
@@ -1522,7 +1522,7 @@ func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, _ = f.WriteString(testCode + "\n")
 	}()
 
@@ -1537,7 +1537,7 @@ func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Ident == nil {
 		t.Fatal("result.Ident = nil")
@@ -1657,7 +1657,7 @@ func TestLoginRedactsEmailInLogs(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, _ = f.WriteString(testCode + "\n")
 	}()
 
@@ -1672,7 +1672,7 @@ func TestLoginRedactsEmailInLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	logged := buf.String()
 
@@ -1737,7 +1737,7 @@ func TestLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v (a wrong-typed ip must not be treated as a fatal error -- it degrades to \"no redirect\", same as a genuinely absent ip)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	logged := buf.String()
 	if !strings.Contains(logged, "wrong-typed") || !strings.Contains(logged, "ip") {
@@ -1799,7 +1799,7 @@ func TestLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v (a wrong-typed zone must not be a fatal error -- the redirect itself still follows on the well-typed ip/port)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	select {
 	case zn := <-gotSecondZone:
@@ -1862,7 +1862,7 @@ func TestLoginRejectsOversizedInitialZoneAccessTokAndGameUid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v (an oversized zone/accessTok/gameUid must fall back to \"\", not abort the login)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	select {
 	case zn := <-gotZn:
@@ -1938,7 +1938,7 @@ func TestLoginRedirectOversizedZoneIsWarned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v (an oversized zone must not be a fatal error -- the redirect itself still follows on the well-typed ip/port)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	select {
 	case zn := <-gotSecondZone:
@@ -2026,7 +2026,7 @@ func TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v (an oversized refreshed accessTok must fall back to the previous token, not fail the login)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	select {
 	case at := <-gotParamsAt:
@@ -2111,7 +2111,7 @@ func TestLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v (an empty refreshed accessTok must fall back to the previous token, not fail the login)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	select {
 	case at := <-gotParamsAt:
@@ -2179,7 +2179,7 @@ func TestLoginRedirectRefreshSkipsOversizedGameUid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v (an oversized refreshed gameUid must be skipped, not fail the login)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Ident.GameUid != oldGameUid {
 		t.Errorf("Ident.GameUid = %q, want %q (the oversized refreshed gameUid must be rejected, keeping the previous one)", result.Ident.GameUid, oldGameUid)
@@ -2237,7 +2237,7 @@ func TestLoginBaseZoneSendFailureIsNonTimeoutNetError(t *testing.T) {
 	if netErr.Timeout() {
 		t.Errorf("netErr.Timeout() = true, want false -- a send-stage failure must be distinguishable from Login()'s own benign wait-stage timeouts, even though the underlying write error itself reports Timeout()==true (mirroring a real deadline-exceeded net.Conn.Write)")
 	}
-	if netErr.Temporary() {
+	if netErr.Temporary() { //nolint:staticcheck // SA1019: asserts the returned net.Error contract, including the deprecated Temporary()
 		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }
@@ -2293,7 +2293,7 @@ func TestLoginSendVerifyCodeSendFailureIsNonTimeoutNetError(t *testing.T) {
 	if netErr.Timeout() {
 		t.Errorf("netErr.Timeout() = true, want false")
 	}
-	if netErr.Temporary() {
+	if netErr.Temporary() { //nolint:staticcheck // SA1019: asserts the returned net.Error contract, including the deprecated Temporary()
 		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }
@@ -2348,7 +2348,7 @@ func TestLoginAccountLoginNewSendFailureIsNonTimeoutNetError(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, _ = f.WriteString(testCode + "\n")
 	}()
 
@@ -2369,7 +2369,7 @@ func TestLoginAccountLoginNewSendFailureIsNonTimeoutNetError(t *testing.T) {
 	if netErr.Timeout() {
 		t.Errorf("netErr.Timeout() = true, want false")
 	}
-	if netErr.Temporary() {
+	if netErr.Temporary() { //nolint:staticcheck // SA1019: asserts the returned net.Error contract, including the deprecated Temporary()
 		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }

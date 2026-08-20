@@ -19,7 +19,7 @@ func TestReadPacketZstdBranch(t *testing.T) {
 		t.Fatalf("zstd writer: %v", err)
 	}
 	compressed := enc.EncodeAll(original, nil)
-	enc.Close()
+	_ = enc.Close()
 
 	encrypted := xorCrypt(compressed)
 
@@ -64,7 +64,7 @@ func TestReadPacketRejectsZstdBombOutput(t *testing.T) {
 		t.Fatalf("zstd writer: %v", err)
 	}
 	compressed := enc.EncodeAll(plain, nil)
-	enc.Close()
+	_ = enc.Close()
 	t.Logf("compressed %d plaintext bytes down to %d wire bytes", len(plain), len(compressed))
 
 	encrypted := xorCrypt(compressed)
@@ -120,7 +120,7 @@ func TestReadPacketAcceptsZstdUncompressedLengthExactlyAtCap(t *testing.T) {
 		t.Fatalf("zstd writer: %v", err)
 	}
 	compressed := enc.EncodeAll(original, nil)
-	enc.Close()
+	_ = enc.Close()
 
 	encrypted := xorCrypt(compressed)
 

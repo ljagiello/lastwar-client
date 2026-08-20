@@ -398,7 +398,7 @@ func TestBareSFSArrayNeverLeaksViaFmtVerbs(t *testing.T) {
 
 	cases := map[string]string{
 		"%v":  fmt.Sprintf("%v", arr),
-		"%s":  fmt.Sprintf("%s", arr),
+		"%s":  fmt.Sprintf("%s", arr), //nolint:staticcheck // S1025: intentionally exercises the %s/Stringer formatting path being tested for redaction
 		"%#v": fmt.Sprintf("%#v", arr),
 	}
 	for verb, got := range cases {
@@ -1028,7 +1028,7 @@ func TestSFSValueStringAndGoStringRedactSecret(t *testing.T) {
 	if got := fmt.Sprintf("%v", v); strings.Contains(got, secretLoginKey) {
 		t.Errorf("fmt.Sprintf(\"%%v\", sfsValue) leaks a real secret via the default reflection-based struct formatter: %s", got)
 	}
-	if got := fmt.Sprintf("%s", v); strings.Contains(got, secretLoginKey) {
+	if got := fmt.Sprintf("%s", v); strings.Contains(got, secretLoginKey) { //nolint:staticcheck // S1025: intentionally exercises the %s/Stringer formatting path being tested for redaction
 		t.Errorf("fmt.Sprintf(\"%%s\", sfsValue) leaks a real secret via implicit Stringer auto-invocation: %s", got)
 	}
 	if got := fmt.Sprintf("%#v", v); strings.Contains(got, secretLoginKey) {

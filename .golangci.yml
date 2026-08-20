@@ -1,0 +1,10 @@
+# golangci-lint configuration (v2 schema).
+# Runs the default linter set: errcheck, govet, ineffassign, staticcheck, unused.
+# No exclusions -- intentionally-ignored errors are marked with `_ =` at the call site, and the
+# handful of genuinely-required deprecated-API uses carry an inline //nolint with a reason.
+version: "2"
+# Report every finding: disable golangci-lint's default caps (50 per linter, 3 per identical
+# issue) so nothing is silently truncated in CI.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

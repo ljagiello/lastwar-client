@@ -321,7 +321,7 @@ func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T
 		if err := initServer.SendExtension("init", params); err != nil {
 			return
 		}
-		initServer.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment (buildings_orchestration_test.go): ends the test fast instead of waiting out the post-init 3s window
+		_ = initServer.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment (buildings_orchestration_test.go): ends the test fast instead of waiting out the post-init 3s window
 	}()
 
 	var buf bytes.Buffer

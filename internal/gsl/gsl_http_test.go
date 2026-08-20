@@ -25,7 +25,7 @@ func TestCheckVersionAgainstFakeServer(t *testing.T) {
 	pub := testRSAPubKeyDER(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := CheckVersionResponse{ResMsg: FlexString(pub)}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -56,7 +56,7 @@ func TestCheckVersionAgainstFakeServer(t *testing.T) {
 func TestCheckVersionResponseFieldsAcceptStringOrNumber(t *testing.T) {
 	pub := testRSAPubKeyDER(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"msg":12345,"downloadurl":67890,"resMsg":%q,"hotUpdateMsg":11111}`, pub)
+		_, _ = fmt.Fprintf(w, `{"msg":12345,"downloadurl":67890,"resMsg":%q,"hotUpdateMsg":11111}`, pub)
 	}))
 	defer server.Close()
 
@@ -96,7 +96,7 @@ func TestCheckVersionFallsBackToNextHostOnConnectionFailure(t *testing.T) {
 	pub := testRSAPubKeyDER(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := CheckVersionResponse{ResMsg: FlexString(pub)}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -126,14 +126,14 @@ func TestCheckVersionFallsBackToNextHostOnConnectionFailure(t *testing.T) {
 // happened at all, since the caller never sees an error.
 func TestCheckVersionLogsEachHostFailureBeforeFallingBackToNext(t *testing.T) {
 	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "not valid json{{{")
+		_, _ = fmt.Fprint(w, "not valid json{{{")
 	}))
 	defer badServer.Close()
 
 	pub := testRSAPubKeyDER(t)
 	goodServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := CheckVersionResponse{ResMsg: FlexString(pub)}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer goodServer.Close()
 
@@ -173,7 +173,7 @@ func TestCheckVersionLogsEachHostFailureBeforeFallingBackToNext(t *testing.T) {
 func TestCheckVersionRejectsServerErrorCode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := CheckVersionResponse{Code: "301", Msg: "client update required"}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -198,7 +198,7 @@ func TestCheckVersionRejectsServerErrorCode(t *testing.T) {
 // read the whole thing (or worse, an unbounded amount) into memory.
 func TestCheckVersionRejectsOversizedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(bytes.Repeat([]byte("a"), MaxGSLResponseSize+1))
+		_, _ = w.Write(bytes.Repeat([]byte("a"), MaxGSLResponseSize+1))
 	}))
 	defer server.Close()
 
@@ -234,7 +234,7 @@ func TestCheckVersionAcceptsExactlyMaxSizeResponse(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	}))
 	defer server.Close()
 
@@ -263,7 +263,7 @@ func TestCheckVersionAcceptsExactlyMaxSizeResponse(t *testing.T) {
 func TestCheckVersionRejectsNon200Status(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "internal server error")
+		_, _ = fmt.Fprint(w, "internal server error")
 	}))
 	defer server.Close()
 
@@ -290,7 +290,7 @@ func TestCheckVersionRejectsNon200Status(t *testing.T) {
 // return a clear decode error instead of a corrupted/zero-valued CheckVersionResponse.
 func TestCheckVersionRejectsMalformedJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "not valid json{{{")
+		_, _ = fmt.Fprint(w, "not valid json{{{")
 	}))
 	defer server.Close()
 
@@ -323,7 +323,7 @@ func TestGetServerListAgainstFakeServer(t *testing.T) {
 				{ID: flexPort(1), Name: "test-server", IP: "1.2.3.4", Port: flexPort(17783), Zone: "APS1", GameUid: "g1", Status: "0"},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -365,7 +365,7 @@ func TestGetServerListSuccessfulEncryptedRoundTrip(t *testing.T) {
 			t.Errorf("decode uuid field: %v", err)
 			return
 		}
-		salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT)
+		salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT) //nolint:staticcheck // SA1019: fake GSL server must mirror the real server's protocol-mandated PKCS#1 v1.5 salt decryption
 		if err != nil {
 			t.Errorf("rsa decrypt salt: %v", err)
 			return
@@ -388,7 +388,7 @@ func TestGetServerListSuccessfulEncryptedRoundTrip(t *testing.T) {
 			t.Errorf("aes encrypt reply: %v", err)
 			return
 		}
-		fmt.Fprintf(w, `{"bin":%q}`, crypto.URLSafeB64Encode(encReply))
+		_, _ = fmt.Fprintf(w, `{"bin":%q}`, crypto.URLSafeB64Encode(encReply))
 	}))
 	defer server.Close()
 
@@ -431,7 +431,7 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 				WsPort: flexPort(12346),
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
@@ -460,7 +460,7 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 				Port: flexPort(12345),
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server2.Close()
 
@@ -489,7 +489,7 @@ func TestGetServerListLoginServerAtRtAcceptEmptyArrayShape(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"code":"0","serverList":[{"id":"1","ip":"1.2.3.4","port":"9000","zone":"APS1","gameUid":"g1"}],"lastLoggedServer":"1","loginServer":[],"at":[],"rt":[]}`)
+		_, _ = fmt.Fprint(w, `{"code":"0","serverList":[{"id":"1","ip":"1.2.3.4","port":"9000","zone":"APS1","gameUid":"g1"}],"lastLoggedServer":"1","loginServer":[],"at":[],"rt":[]}`)
 	}))
 	defer server.Close()
 
@@ -531,7 +531,7 @@ func TestGetServerListServerListAcceptsObjectShape(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"code":"0","serverList":{"101":{"id":"101","ip":"1.2.3.4","port":"9000","zone":"APS1","gameUid":"g1"}},"lastLoggedServer":"1"}`)
+		_, _ = fmt.Fprint(w, `{"code":"0","serverList":{"101":{"id":"101","ip":"1.2.3.4","port":"9000","zone":"APS1","gameUid":"g1"}},"lastLoggedServer":"1"}`)
 	}))
 	defer server.Close()
 
@@ -559,7 +559,7 @@ func TestGetServerListRejectsOversizedResponse(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(bytes.Repeat([]byte("a"), MaxGSLResponseSize+1))
+		_, _ = w.Write(bytes.Repeat([]byte("a"), MaxGSLResponseSize+1))
 	}))
 	defer server.Close()
 
@@ -593,7 +593,7 @@ func TestGetServerListAcceptsExactlyMaxSizeResponse(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	}))
 	defer server.Close()
 
@@ -832,7 +832,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Not valid JSON at all -- fails the map[string]json.RawMessage unmarshal (gsl.go's
 			// "decode top-level GSL response" branch) before any decryption is attempted.
-			w.Write([]byte("not json at all, but carries " + fakeToken))
+			_, _ = w.Write([]byte("not json at all, but carries " + fakeToken))
 		}))
 		defer server.Close()
 
@@ -861,7 +861,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 			// empty ServerList instead of erroring), so it no longer exercises a decode failure at
 			// all -- the whole struct family has, by design, become effectively immune to type
 			// mismatches after 12 rounds of hardening.
-			fmt.Fprintf(w, `{"bin":12345,"note":"carries %s"}`, fakeToken)
+			_, _ = fmt.Fprintf(w, `{"bin":12345,"note":"carries %s"}`, fakeToken)
 		}))
 		defer server.Close()
 
@@ -884,7 +884,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 			// gsl.go's HTTP-status-error branch (a sibling of the three decode-failure branches
 			// above) must not echo it back either.
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, `{"error":"server error carries %s"}`, fakeToken)
+			_, _ = fmt.Fprintf(w, `{"error":"server error carries %s"}`, fakeToken)
 		}))
 		defer server.Close()
 
@@ -924,7 +924,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 				t.Errorf("decode uuid field: %v", err)
 				return
 			}
-			salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT)
+			salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT) //nolint:staticcheck // SA1019: fake GSL server must mirror the real server's protocol-mandated PKCS#1 v1.5 salt decryption
 			if err != nil {
 				t.Errorf("rsa decrypt salt: %v", err)
 				return
@@ -951,7 +951,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 
 			ct := make([]byte, bs)
 			block.Encrypt(ct, plain)
-			fmt.Fprintf(w, `{"bin":%q}`, crypto.URLSafeB64Encode(ct))
+			_, _ = fmt.Fprintf(w, `{"bin":%q}`, crypto.URLSafeB64Encode(ct))
 		}))
 		defer server.Close()
 
@@ -995,7 +995,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 				t.Errorf("decode uuid field: %v", err)
 				return
 			}
-			salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT)
+			salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT) //nolint:staticcheck // SA1019: fake GSL server must mirror the real server's protocol-mandated PKCS#1 v1.5 salt decryption
 			if err != nil {
 				t.Errorf("rsa decrypt salt: %v", err)
 				return
@@ -1007,7 +1007,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 				t.Errorf("aes encrypt reply: %v", err)
 				return
 			}
-			fmt.Fprintf(w, `{"bin":%q}`, crypto.URLSafeB64Encode(encReply))
+			_, _ = fmt.Fprintf(w, `{"bin":%q}`, crypto.URLSafeB64Encode(encReply))
 		}))
 		defer server.Close()
 
@@ -1034,7 +1034,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 // GetServerList must fail loud instead of returning a zero-valued success.
 func TestGetServerListBinFieldPresentButEmpty(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"bin":"","code":"0"}`)
+		_, _ = fmt.Fprintf(w, `{"bin":"","code":"0"}`)
 	}))
 	defer server.Close()
 
@@ -1077,7 +1077,7 @@ func TestGetServerListCodeAcceptsStringOrNumber(t *testing.T) {
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"code":%s,"serverList":[]}`, tt.codeJSON)
+				_, _ = fmt.Fprintf(w, `{"code":%s,"serverList":[]}`, tt.codeJSON)
 			}))
 			defer server.Close()
 
@@ -1117,7 +1117,7 @@ func TestGetServerListPortIDAcceptsStringOrNumber(t *testing.T) {
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"code":"0","serverList":[{"id":%s,"port":%s,"zone":"APS1","gameUid":"g1","status":"0"}]}`, tt.json, tt.json)
+				_, _ = fmt.Fprintf(w, `{"code":"0","serverList":[{"id":%s,"port":%s,"zone":"APS1","gameUid":"g1","status":"0"}]}`, tt.json, tt.json)
 			}))
 			defer server.Close()
 
@@ -1161,7 +1161,7 @@ func TestGetServerListUidAcceptsStringOrNumber(t *testing.T) {
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"code":"0","serverList":[{"id":"1","port":"9000","zone":"APS1","gameUid":"g1","uid":%s,"status":"0"}]}`, tt.json)
+				_, _ = fmt.Fprintf(w, `{"code":"0","serverList":[{"id":"1","port":"9000","zone":"APS1","gameUid":"g1","uid":%s,"status":"0"}]}`, tt.json)
 			}))
 			defer server.Close()
 
@@ -1202,7 +1202,7 @@ func TestGetServerListGameUidAcceptsStringOrNumber(t *testing.T) {
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"code":"0","serverList":[{"id":"1","port":"9000","zone":"APS1","gameUid":%s,"uid":"1","status":"0"}]}`, tt.json)
+				_, _ = fmt.Fprintf(w, `{"code":"0","serverList":[{"id":"1","port":"9000","zone":"APS1","gameUid":%s,"uid":"1","status":"0"}]}`, tt.json)
 			}))
 			defer server.Close()
 
@@ -1243,7 +1243,7 @@ func TestGetServerListNameIPWsIPZoneAcceptsStringOrNumber(t *testing.T) {
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"code":"0","serverList":[{"id":"1","name":%s,"ip":%s,"ws_ip":%s,"port":"9000","zone":%s,"gameUid":"g1","uid":"1","status":"0"}]}`,
+				_, _ = fmt.Fprintf(w, `{"code":"0","serverList":[{"id":"1","name":%s,"ip":%s,"ws_ip":%s,"port":"9000","zone":%s,"gameUid":"g1","uid":"1","status":"0"}]}`,
 					tt.json, tt.json, tt.json, tt.json)
 			}))
 			defer server.Close()
@@ -1292,7 +1292,7 @@ func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testin
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"code":"0","serverList":[],"loginServer":{"ip":"1.2.3.4","port":%s,"ws_ip":"1.2.3.4","ws_port":%s}}`, tt.json, tt.json)
+				_, _ = fmt.Fprintf(w, `{"code":"0","serverList":[],"loginServer":{"ip":"1.2.3.4","port":%s,"ws_ip":"1.2.3.4","ws_port":%s}}`, tt.json, tt.json)
 			}))
 			defer server.Close()
 
@@ -1336,7 +1336,7 @@ func TestGetServerListAccountServerInfoIPWsIPAcceptsStringOrNumber(t *testing.T)
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"code":"0","serverList":[],"loginServer":{"ip":%s,"port":"9000","ws_ip":%s,"ws_port":"9000"}}`, tt.json, tt.json)
+				_, _ = fmt.Fprintf(w, `{"code":"0","serverList":[],"loginServer":{"ip":%s,"port":"9000","ws_ip":%s,"ws_port":"9000"}}`, tt.json, tt.json)
 			}))
 			defer server.Close()
 
@@ -1380,7 +1380,7 @@ func TestGetServerListLoginTokenTimeAcceptsStringOrNumber(t *testing.T) {
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"code":"0","serverList":[],"at":{"token":"abc","time":%s}}`, tt.json)
+				_, _ = fmt.Fprintf(w, `{"code":"0","serverList":[],"at":{"token":"abc","time":%s}}`, tt.json)
 			}))
 			defer server.Close()
 
@@ -1426,7 +1426,7 @@ func TestGetServerListLoginTokenTokenAcceptsStringOrNumber(t *testing.T) {
 			}
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"code":"0","serverList":[],"at":{"token":%s,"time":"1699999999999"}}`, tt.json)
+				_, _ = fmt.Fprintf(w, `{"code":"0","serverList":[],"at":{"token":%s,"time":"1699999999999"}}`, tt.json)
 			}))
 			defer server.Close()
 

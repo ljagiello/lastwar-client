@@ -306,7 +306,7 @@ func TestFetchBuildingsInitPushParsesBuildingsAndVisitors(t *testing.T) {
 		if err := server.SendExtension("init", params); err != nil {
 			return
 		}
-		server.conn.Close() // see doc comment above: ends the test fast instead of waiting out the post-init 3s window
+		_ = server.conn.Close() // see doc comment above: ends the test fast instead of waiting out the post-init 3s window
 	}()
 
 	buildings, visitors, err := FetchBuildings(client, 2*time.Second)
@@ -489,7 +489,7 @@ func TestFetchBuildingsDedupesBuildingUUIDAcrossSources(t *testing.T) {
 		if err := server.SendExtension("push.init.build", pibParams); err != nil {
 			return
 		}
-		server.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment: ends the test fast instead of waiting out the post-push 3s window
+		_ = server.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment: ends the test fast instead of waiting out the post-push 3s window
 	}()
 
 	buildings, _, err := FetchBuildings(client, 2*time.Second)
@@ -578,7 +578,7 @@ func TestFetchBuildingsWaitsForAuthoritativeInitDespiteEarlyPushInitBuild(t *tes
 		if err := server.SendExtension("init", initParams); err != nil {
 			return
 		}
-		server.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment: ends the test fast instead of waiting out the post-init 3s window
+		_ = server.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment: ends the test fast instead of waiting out the post-init 3s window
 	}()
 
 	start := time.Now()
@@ -650,7 +650,7 @@ func TestFetchBuildingsDedupesVisitorUIDAcrossInitPushes(t *testing.T) {
 		if err := server.SendExtension("init", newInitParamsWithVisitor()); err != nil {
 			return
 		}
-		server.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment: ends the test fast instead of waiting out the post-init 3s window
+		_ = server.conn.Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment: ends the test fast instead of waiting out the post-init 3s window
 	}()
 
 	_, visitors, err := FetchBuildings(client, 2*time.Second)

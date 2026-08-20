@@ -2,7 +2,6 @@ package app
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
@@ -821,35 +820,6 @@ func TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogic
 	if !strings.Contains(log, "stat control pipe failed") {
 		t.Errorf("subprocess stderr = %s\nwant RunInteractive's own bogus-control-pipe failure -- confirms the exit code 1 came from there, not from some earlier, different failure", log)
 	}
-}
-
-// writeMalformedOversizedFrame writes a single malformed packet header directly on server's raw
-// connection: a declared body length over sfs.MaxFrameSize (packet.go's own "frame body too large"
-// guard, mirroring packet_oom_test.go's TestReadPacketRejectsOversizedDeclaredLength). sfs.ReadPacket
-// rejects this using only the header's length field, before ever attempting to read (let alone
-// allocate) a length-sized body.
-//
-// Round-43 fix: the resulting client-side error is now wrapped in packet.go's net.Error-satisfying
-// sfs.DeadConnError, NOT a plain fmt.Errorf -- this guard fires after the length field is already
-// consumed and returns without draining the declared body, so a peer that actually follows an
-// oversized header with real trailing bytes (unlike this helper, which sends only the 5-byte
-// header and nothing else) would leave the reader desynced. Since this helper's own trailing
-// silence is what makes sfs.ReadPacket's guard trip on JUST the header, it remains useful for testing
-// that the guard rejects using only the header fields (see the packet_oom_test.go tests above), but
-// is NO LONGER suitable for a test that needs a genuinely non-fatal, non-net.Error decode failure
-// -- use writeMalformedZlibBombFrame below for that instead.
-//
-// Takes no *testing.T deliberately, matching serveFakeGameServer's own established pattern
-// (crossserver_test.go): the fake server handlers that call this run in a background goroutine
-// that may still be executing after the test function itself has returned, and calling T methods
-// from such a goroutine is unsafe.
-func writeMalformedOversizedFrame(server *GameConn) {
-	var hdr bytes.Buffer
-	hdr.WriteByte(sfs.HdrBinary | sfs.HdrEncrypted | sfs.HdrBigSized)
-	var lb [4]byte
-	binary.BigEndian.PutUint32(lb[:], sfs.MaxFrameSize+1)
-	hdr.Write(lb[:])
-	_, _ = server.conn.Write(hdr.Bytes())
 }
 
 // malformedZlibBombPacket lazily builds and caches writeMalformedZlibBombFrame's packet bytes --

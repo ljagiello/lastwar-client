@@ -208,15 +208,15 @@ func writeTempStateFile(finalPath, content string) (tmpPath string, err error) {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			os.Remove(tmpPath)
+			_ = os.Remove(tmpPath)
 		}
 	}()
 	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return "", err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return "", err
 	}
 	if err := tmp.Close(); err != nil {
@@ -259,7 +259,7 @@ func createDeviceIDStateFile(path, id string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	return os.Link(tmpPath, path)
 }
 
@@ -290,7 +290,7 @@ func atomicWriteStateFile(path, content string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmpPath) // no-op once the rename below succeeds -- the path no longer exists
+	defer func() { _ = os.Remove(tmpPath) }() // no-op once the rename below succeeds -- the path no longer exists
 	return os.Rename(tmpPath, path)
 }
 

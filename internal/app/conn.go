@@ -110,7 +110,7 @@ func (c *GameConn) SendEnvelope(controller byte, action int16, content *sfs.SFSO
 		return fmt.Errorf("set write deadline: %w", err)
 	}
 	_, err = c.conn.Write(packet)
-	c.conn.SetWriteDeadline(time.Time{})
+	_ = c.conn.SetWriteDeadline(time.Time{})
 	return err
 }
 
@@ -404,7 +404,7 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*sfs.SFSObject, error) {
 			// -- see TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope below.
 			return nil, deadlineExceededError{}
 		}
-		c.conn.SetReadDeadline(time.Now().Add(remaining))
+		_ = c.conn.SetReadDeadline(time.Now().Add(remaining))
 		env, err := c.ReadEnvelope()
 		if err != nil {
 			var netErr net.Error
@@ -510,7 +510,7 @@ func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 					// invariant "every direct send-stage error in this package is sendStageError-
 					// wrapped" true package-wide for any future caller that does inspect it.
 					slog.Error("heartbeat send failed -- closing connection", "error", sendStageError{err: err})
-					c.Close()
+					_ = c.Close()
 					return
 				}
 			}

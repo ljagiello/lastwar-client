@@ -23,8 +23,8 @@ func newPipeGameConnPair(t *testing.T) (client, server *GameConn) {
 	t.Helper()
 	c1, c2 := net.Pipe()
 	t.Cleanup(func() {
-		c1.Close()
-		c2.Close()
+		_ = c1.Close()
+		_ = c2.Close()
 	})
 	client = &GameConn{conn: c1, reader: bufio.NewReaderSize(c1, 4096)}
 	server = &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
@@ -164,7 +164,7 @@ func TestSendAndWaitWriteStageFailureIsNonTimeoutNetError(t *testing.T) {
 	if netErr.Timeout() {
 		t.Errorf("netErr.Timeout() = true, want false -- a write-stage failure must be distinguishable from sendAndWait's ordinary benign wait-stage timeout (TestWaitForTimeout), even though the underlying write error itself reports Timeout()==true (mirroring a real deadline-exceeded net.Conn.Write); downstream containsNonTimeoutNetError-style checks (buildings.go, mail.go, alliance.go, visitors.go) must treat this as a genuine connection failure requiring abort, not a benign per-command timeout")
 	}
-	if netErr.Temporary() {
+	if netErr.Temporary() { //nolint:staticcheck // SA1019: asserts the returned net.Error contract, including the deprecated Temporary()
 		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }
@@ -266,8 +266,8 @@ func (c *delayedFirstReadConn) Read(b []byte) (int, error) {
 func TestWaitForDeadlineElapsedAfterNonMatchingEnvelope(t *testing.T) {
 	c1, c2 := net.Pipe()
 	t.Cleanup(func() {
-		c1.Close()
-		c2.Close()
+		_ = c1.Close()
+		_ = c2.Close()
 	})
 
 	const timeout = 30 * time.Millisecond
@@ -682,7 +682,7 @@ func TestLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 	result, err := Login(LoginOptions{})
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("expected an error for a pipe-malformed redirect ip, got nil")
 	}
@@ -730,7 +730,7 @@ func TestLoginRedirectRejectsMissingRedirectPort(t *testing.T) {
 	result, err := Login(LoginOptions{})
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("expected an error for a redirect payload with a missing port, got nil")
 	}
@@ -806,7 +806,7 @@ func TestWaitForInitPushHalfwayActivePull(t *testing.T) {
 // server just stay silent.
 func TestWaitForInitPushConnectionFailure(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
-	server.conn.Close() // simulate a real connection failure (EOF/reset), not silence
+	_ = server.conn.Close() // simulate a real connection failure (EOF/reset), not silence
 
 	const window = 200 * time.Millisecond
 	start := time.Now()
@@ -1102,7 +1102,7 @@ func TestReadPacketGracefulCloseIsNonTimeoutNetError(t *testing.T) {
 	if netErr.Timeout() {
 		t.Errorf("netErr.Timeout() = true, want false -- a graceful close is a genuine dead connection, not the benign kind of net.Error sendAndWait's ordinary per-command timeout produces (see TestWaitForTimeout), which downstream early-abort checks must NOT trip on")
 	}
-	if netErr.Temporary() {
+	if netErr.Temporary() { //nolint:staticcheck // SA1019: asserts the returned net.Error contract, including the deprecated Temporary()
 		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }
@@ -1168,7 +1168,7 @@ func TestReadEnvelopeGracefulCloseIsNonTimeoutNetError(t *testing.T) {
 	if netErr.Timeout() {
 		t.Errorf("netErr.Timeout() = true, want false -- ReadEnvelope's caller chain (waitFor/waitForCmd/sendAndWait) must be able to distinguish this from its own ordinary per-command timeout")
 	}
-	if netErr.Temporary() {
+	if netErr.Temporary() { //nolint:staticcheck // SA1019: asserts the returned net.Error contract, including the deprecated Temporary()
 		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }
@@ -1206,7 +1206,7 @@ func TestWaitForCmdSelfCloseWhileBlockedRespondsPromptly(t *testing.T) {
 	// Give the background goroutine a moment to actually block inside ReadEnvelope before closing
 	// out from under it -- otherwise Close() could race ahead of the read even starting.
 	time.Sleep(50 * time.Millisecond)
-	client.Close()
+	_ = client.Close()
 
 	var err error
 	select {

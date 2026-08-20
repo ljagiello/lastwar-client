@@ -364,7 +364,7 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("zlib reader: %w", err)
 		}
-		defer zr.Close()
+		defer func() { _ = zr.Close() }()
 		limited := io.LimitReader(zr, MaxFrameSize+1)
 		out, err := io.ReadAll(limited)
 		if err != nil {

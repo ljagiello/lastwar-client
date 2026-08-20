@@ -1052,10 +1052,10 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 		writeInt64(buf, v.Val.(int64))
 		return nil
 	case sfsFloat:
-		binary.Write(buf, binary.BigEndian, math.Float32bits(v.Val.(float32)))
+		_ = binary.Write(buf, binary.BigEndian, math.Float32bits(v.Val.(float32)))
 		return nil
 	case SFSDouble:
-		binary.Write(buf, binary.BigEndian, math.Float64bits(v.Val.(float64)))
+		_ = binary.Write(buf, binary.BigEndian, math.Float64bits(v.Val.(float64)))
 		return nil
 	case SFSUtfString:
 		return WriteUtfString(buf, v.Val.(string))
@@ -1138,7 +1138,7 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 		}
 		writeInt16(buf, n)
 		for _, e := range arr {
-			binary.Write(buf, binary.BigEndian, math.Float32bits(e))
+			_ = binary.Write(buf, binary.BigEndian, math.Float32bits(e))
 		}
 		return nil
 	case sfsDoubleArray:
@@ -1149,7 +1149,7 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 		}
 		writeInt16(buf, n)
 		for _, e := range arr {
-			binary.Write(buf, binary.BigEndian, math.Float64bits(e))
+			_ = binary.Write(buf, binary.BigEndian, math.Float64bits(e))
 		}
 		return nil
 	case sfsUtfStringArray:
@@ -1220,9 +1220,9 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 	}
 }
 
-func writeInt16(buf *bytes.Buffer, v int16) { binary.Write(buf, binary.BigEndian, v) }
-func writeInt32(buf *bytes.Buffer, v int32) { binary.Write(buf, binary.BigEndian, v) }
-func writeInt64(buf *bytes.Buffer, v int64) { binary.Write(buf, binary.BigEndian, v) }
+func writeInt16(buf *bytes.Buffer, v int16) { _ = binary.Write(buf, binary.BigEndian, v) }
+func writeInt32(buf *bytes.Buffer, v int32) { _ = binary.Write(buf, binary.BigEndian, v) }
+func writeInt64(buf *bytes.Buffer, v int64) { _ = binary.Write(buf, binary.BigEndian, v) }
 
 // int16Count converts a length to int16 for a wire count field, returning an error instead of
 // silently wrapping into a wrong count -- or panicking, as this used to -- if the value is ever
@@ -1257,7 +1257,7 @@ func WriteUtfString(buf *bytes.Buffer, s string) error {
 	buf.Write(b)
 	return nil
 }
-func writeUint16(buf *bytes.Buffer, v uint16) { binary.Write(buf, binary.BigEndian, v) }
+func writeUint16(buf *bytes.Buffer, v uint16) { _ = binary.Write(buf, binary.BigEndian, v) }
 
 // ---- Decoding ----
 

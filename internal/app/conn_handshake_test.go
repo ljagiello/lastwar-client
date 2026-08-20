@@ -159,8 +159,8 @@ func TestDoHandshakeSkipRedactsCredentialFields(t *testing.T) {
 func TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope(t *testing.T) {
 	c1, c2 := net.Pipe()
 	t.Cleanup(func() {
-		c1.Close()
-		c2.Close()
+		_ = c1.Close()
+		_ = c2.Close()
 	})
 
 	const timeout = 30 * time.Millisecond
@@ -234,7 +234,7 @@ func TestDoHandshakeReadEnvelopeFailure(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		server.conn.Close() // close without replying: forces a genuine ReadEnvelope failure, not a timeout
+		_ = server.conn.Close() // close without replying: forces a genuine ReadEnvelope failure, not a timeout
 	}()
 
 	_, err := client.DoHandshake(500 * time.Millisecond)
@@ -500,7 +500,7 @@ func TestDoHandshakeSendFailureIsNonTimeoutNetError(t *testing.T) {
 	if netErr.Timeout() {
 		t.Errorf("netErr.Timeout() = true, want false -- a send-stage failure must be distinguishable from DoHandshake's own benign deadline-elapsed timeout, even though the underlying write error itself reports Timeout()==true (mirroring a real deadline-exceeded net.Conn.Write)")
 	}
-	if netErr.Temporary() {
+	if netErr.Temporary() { //nolint:staticcheck // SA1019: asserts the returned net.Error contract, including the deprecated Temporary()
 		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }
@@ -547,7 +547,7 @@ func TestStartHeartbeatSendsPeriodicPingsAndStopsOnClose(t *testing.T) {
 		}
 	}
 
-	client.Close()
+	_ = client.Close()
 
 	select {
 	case <-pings:
@@ -573,7 +573,7 @@ func TestStartHeartbeatSendFailureClosesConn(t *testing.T) {
 
 	// Kill the transport out from under the heartbeat goroutine -- its next tick's
 	// SendEnvelope/Write will fail, which should drive it into c.Close().
-	client.conn.Close()
+	_ = client.conn.Close()
 
 	select {
 	case <-client.stopHeartbeat:

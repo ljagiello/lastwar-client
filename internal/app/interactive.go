@@ -106,7 +106,7 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 		sig := <-sigCh
 		slog.Info("shutting down", "signal", sig.String())
 		interactiveShuttingDown.Store(true)
-		conn.Close()
+		_ = conn.Close()
 		os.Exit(0)
 	}()
 
@@ -140,7 +140,7 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 			// process) never ran on any of this function's or handleInteractiveLine's os.Exit(1)
 			// paths. Close explicitly before exiting instead of relying on that now-unreachable
 			// defer.
-			conn.Close()
+			_ = conn.Close()
 			os.Exit(1)
 		}
 		if fi.Mode()&os.ModeNamedPipe == 0 {
@@ -154,7 +154,7 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 				return
 			}
 			slog.Error("controlPipe exists but is not a FIFO -- did you forget mkfifo?", "controlPipe", controlPipe)
-			conn.Close()
+			_ = conn.Close()
 			os.Exit(1)
 		}
 		f, err := openControlPipeWithRetry(controlPipe)
@@ -165,7 +165,7 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 				return
 			}
 			slog.Error("open control pipe failed", "controlPipe", controlPipe, "error", err, "retries", controlPipeRetries)
-			conn.Close()
+			_ = conn.Close()
 			os.Exit(1)
 		}
 		scanner := bufio.NewScanner(f)
@@ -185,7 +185,7 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 			}
 			handleInteractiveLine(conn, line)
 		}
-		f.Close()
+		_ = f.Close()
 		if err := scanner.Err(); err != nil {
 			consecutiveScanErrors++
 			slog.Error("control pipe scan error", "controlPipe", controlPipe, "error", err, "consecutiveScanErrors", consecutiveScanErrors)
@@ -203,7 +203,7 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 					return
 				}
 				slog.Error("control pipe scan error persisted too many times in a row, giving up", "controlPipe", controlPipe, "consecutiveScanErrors", consecutiveScanErrors)
-				conn.Close()
+				_ = conn.Close()
 				os.Exit(1)
 			}
 			// A writer still connected and producing bad input (e.g. one that keeps reopening the
@@ -369,7 +369,7 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", sendStageError{err: err})
 		// See RunInteractive's own round-41 fix doc comment: os.Exit skips the caller's `defer
 		// conn.Close()`, so close explicitly before exiting instead of relying on it.
-		conn.Close()
+		_ = conn.Close()
 		os.Exit(1)
 	}
 
@@ -401,7 +401,7 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		}
 		slog.Error("response wait failed -- connection appears dead, exiting interactive mode", "error", err)
 		// See the identical round-41 fix's doc comment on the sibling os.Exit(1) above.
-		conn.Close()
+		_ = conn.Close()
 		os.Exit(1)
 	}
 	// Not msg.Params.String() -- same reasoning as the "sending command" log above.

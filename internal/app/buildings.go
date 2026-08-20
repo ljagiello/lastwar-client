@@ -530,7 +530,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 		if remaining <= 0 {
 			break
 		}
-		conn.conn.SetReadDeadline(time.Now().Add(remaining))
+		_ = conn.conn.SetReadDeadline(time.Now().Add(remaining))
 		env, err := conn.ReadEnvelope()
 		if err != nil {
 			var netErr net.Error

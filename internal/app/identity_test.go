@@ -801,7 +801,7 @@ func TestWriteTempStateFileDoesNotTouchFinalPathBeforePublish(t *testing.T) {
 		t.Errorf("temp file content = %q, want the content to already be fully durable at the temp path before publish is even attempted", got)
 	}
 
-	os.Remove(tmpPath)
+	_ = os.Remove(tmpPath)
 }
 
 // TestSaveStateFileRoundTrip confirms saveStateFile's normal write-then-read round trip still

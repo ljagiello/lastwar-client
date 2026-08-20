@@ -161,7 +161,7 @@ func TestArrayEncodeDecodeRoundTrips(t *testing.T) {
 	t.Run("BoolArray", func(t *testing.T) {
 		want := []bool{true, false, true}
 		var buf bytes.Buffer
-		writeValuePayload(&buf, SFSValue{sfsBoolArray, want})
+		_ = writeValuePayload(&buf, SFSValue{sfsBoolArray, want})
 		r := &sfsReader{data: buf.Bytes()}
 		v, err := r.readValuePayload(sfsBoolArray)
 		if err != nil {
@@ -181,7 +181,7 @@ func TestArrayEncodeDecodeRoundTrips(t *testing.T) {
 	t.Run("IntArray", func(t *testing.T) {
 		want := []int32{-100, 0, 200}
 		var buf bytes.Buffer
-		writeValuePayload(&buf, SFSValue{sfsIntArray, want})
+		_ = writeValuePayload(&buf, SFSValue{sfsIntArray, want})
 		r := &sfsReader{data: buf.Bytes()}
 		v, err := r.readValuePayload(sfsIntArray)
 		if err != nil {
@@ -201,7 +201,7 @@ func TestArrayEncodeDecodeRoundTrips(t *testing.T) {
 	t.Run("ByteArray (4-byte count)", func(t *testing.T) {
 		want := []byte{1, 2, 3, 4}
 		var buf bytes.Buffer
-		writeValuePayload(&buf, SFSValue{sfsByteArray, want})
+		_ = writeValuePayload(&buf, SFSValue{sfsByteArray, want})
 		r := &sfsReader{data: buf.Bytes()}
 		v, err := r.readValuePayload(sfsByteArray)
 		if err != nil {
@@ -216,7 +216,7 @@ func TestArrayEncodeDecodeRoundTrips(t *testing.T) {
 	t.Run("UtfStringArray", func(t *testing.T) {
 		want := []string{"hello", "world"}
 		var buf bytes.Buffer
-		writeValuePayload(&buf, SFSValue{sfsUtfStringArray, want})
+		_ = writeValuePayload(&buf, SFSValue{sfsUtfStringArray, want})
 		r := &sfsReader{data: buf.Bytes()}
 		v, err := r.readValuePayload(sfsUtfStringArray)
 		if err != nil {
@@ -236,7 +236,7 @@ func TestArrayEncodeDecodeRoundTrips(t *testing.T) {
 	t.Run("Text", func(t *testing.T) {
 		want := "a long-form text field"
 		var buf bytes.Buffer
-		writeValuePayload(&buf, SFSValue{SFSText, want})
+		_ = writeValuePayload(&buf, SFSValue{SFSText, want})
 		r := &sfsReader{data: buf.Bytes()}
 		v, err := r.readValuePayload(SFSText)
 		if err != nil {

@@ -154,8 +154,8 @@ func TestReadEnvelopeWrongTypedFieldsWarn(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c1, c2 := net.Pipe()
-			defer c1.Close()
-			defer c2.Close()
+			defer func() { _ = c1.Close() }()
+			defer func() { _ = c2.Close() }()
 
 			var buf bytes.Buffer
 			orig := slog.Default()
@@ -180,7 +180,7 @@ func TestReadEnvelopeWrongTypedFieldsWarn(t *testing.T) {
 			}()
 
 			server := &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
-			c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+			_ = c2.SetReadDeadline(time.Now().Add(5 * time.Second))
 			env, err := server.ReadEnvelope()
 			if werr := <-writeDone; werr != nil {
 				t.Fatalf("write: %v", werr)
@@ -407,8 +407,8 @@ func TestClassifyResponseWrongTypedStatusIsNotBenign(t *testing.T) {
 
 func TestGameConnSendReceiveRoundTrip(t *testing.T) {
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 
 	client := &GameConn{conn: c1, reader: bufio.NewReaderSize(c1, 4096)}
 	server := &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
@@ -421,7 +421,7 @@ func TestGameConnSendReceiveRoundTrip(t *testing.T) {
 		sendDone <- client.SendExtension("test.roundtrip", params)
 	}()
 
-	c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = c2.SetReadDeadline(time.Now().Add(5 * time.Second))
 	env, readErr := server.ReadEnvelope()
 	if sendErr := <-sendDone; sendErr != nil {
 		t.Fatalf("SendExtension: %v", sendErr)
@@ -482,7 +482,7 @@ func (c *splitWriteConn) Write(b []byte) (int, error) {
 // ReadEnvelope decode failure/timeout or a cmd matched to the wrong params.
 func TestSendEnvelopeIsSafeForConcurrentUse(t *testing.T) {
 	c1, c2 := net.Pipe()
-	t.Cleanup(func() { c1.Close(); c2.Close() })
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
 	client := &GameConn{conn: &splitWriteConn{Conn: c1}, reader: bufio.NewReaderSize(c1, 4096)}
 	server := &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
 

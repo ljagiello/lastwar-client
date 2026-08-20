@@ -366,7 +366,7 @@ func Run() {
 		os.Exit(1)
 	}
 	conn := result.Conn
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	buildings := result.Buildings
 	visitors := result.Visitors
@@ -405,7 +405,7 @@ func Run() {
 				// accomplish, but latent: it would silently stop applying the moment Close()
 				// gains any real cleanup (a flush, a graceful FIN, a notification). Close
 				// explicitly before exiting instead of relying on the now-unreachable defer.
-				conn.Close()
+				_ = conn.Close()
 				os.Exit(1)
 			}
 		}
@@ -422,7 +422,7 @@ func Run() {
 			slog.Error("collect run had failures", "error", err)
 			if shouldAbortBeforeInteractive(err, *interactive != "") {
 				// See the identical round-40 fix's doc comment on the sibling os.Exit(1) above.
-				conn.Close()
+				_ = conn.Close()
 				os.Exit(1)
 			}
 		}
@@ -1153,7 +1153,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		os.Exit(1)
 	}
 	conn := result.Conn
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// A serverInfo redirect (e.g. a real server merge moving this account to a different
 	// zone/host/port) leaves result.Addr/Zone different from what was actually passed in --
@@ -1197,7 +1197,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			// See main()'s identical round-40 fix doc comment: os.Exit skips this function's own
 			// `defer conn.Close()` above, so close explicitly before exiting instead of relying
 			// on the now-unreachable defer.
-			conn.Close()
+			_ = conn.Close()
 			os.Exit(1)
 		}
 	}
@@ -1211,7 +1211,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			slog.Error("collect run had failures", "error", err)
 			if shouldAbortBeforeInteractive(err, o.interactive != "") {
 				// See the identical round-40 fix's doc comment on the sibling os.Exit(1) above.
-				conn.Close()
+				_ = conn.Close()
 				os.Exit(1)
 			}
 		}

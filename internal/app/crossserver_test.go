@@ -42,7 +42,7 @@ func newFakeGameListener(t *testing.T) (net.Listener, string) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	return ln, ln.Addr().String()
 }
 
@@ -170,7 +170,7 @@ func TestDoCrossServerLoginNoRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.AccessTok != "tok-1" {
 		t.Errorf("AccessTok = %q, want %q (unchanged -- no redirect happened)", result.AccessTok, "tok-1")
@@ -233,7 +233,7 @@ func TestDoCrossServerLoginDebugDumpRedactsCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	logged := buf.String()
 	if !strings.Contains(logged, "full login content") {
@@ -289,7 +289,7 @@ func TestDoCrossServerLoginDebugDumpBodyFileIsChmodded0600(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	fi, err := os.Stat(dumpPath)
 	if err != nil {
@@ -352,7 +352,7 @@ func TestDoCrossServerLoginDebugDumpRedactsCredentialsIOSMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	logged := buf.String()
 	if !strings.Contains(logged, "full login content") {
@@ -434,7 +434,7 @@ func TestDoCrossServerLoginHandshakeLogRedactsSessionToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	logged := buf.String()
 	if !strings.Contains(logged, "handshake OK") {
@@ -483,7 +483,7 @@ func TestDoCrossServerLoginSingleRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Addr != newAddr {
 		t.Errorf("Addr = %q, want %q (the post-redirect address)", result.Addr, newAddr)
@@ -546,7 +546,7 @@ func TestDoCrossServerLoginTooManyRedirects(t *testing.T) {
 	result, err := DoCrossServerLogin(p)
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("expected an error after maxRedirects+1 consecutive serverInfo redirects, got nil")
 	}
@@ -609,7 +609,7 @@ func TestDoCrossServerLoginExactlyMaxRedirectsSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v, want it to succeed after exactly %d redirects (the boundary value)", err, maxRedirects)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Addr != addrs[numServers-1] {
 		t.Errorf("Addr = %q, want %q (the final, maxRedirects-th server in the chain)", result.Addr, addrs[numServers-1])
@@ -652,7 +652,7 @@ func TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 	result, err := DoCrossServerLogin(p)
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("expected an error for a pipe-malformed redirect ip, got nil")
 	}
@@ -713,7 +713,7 @@ func TestDoCrossServerLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v (a wrong-typed ip must not be treated as a fatal error -- it degrades to \"no redirect\", same as a genuinely absent ip)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Addr != addr {
 		t.Errorf("Addr = %q, want %q (the wrong-typed ip must not resolve to a followed redirect)", result.Addr, addr)
@@ -751,7 +751,7 @@ func TestDoCrossServerLoginRejectsEmptyInitialIP(t *testing.T) {
 	result, err := DoCrossServerLogin(p)
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("expected an error for an empty/pipe-malformed initial ip, got nil")
 	}
@@ -779,7 +779,7 @@ func TestDoCrossServerLoginRejectsNonPositiveInitialPort(t *testing.T) {
 	result, err := DoCrossServerLogin(p)
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("expected an error for a non-positive initial port, got nil")
 	}
@@ -823,7 +823,7 @@ func TestDoCrossServerLoginRejectsOversizedZoneGameUidAccessTok(t *testing.T) {
 			result, err := DoCrossServerLogin(c.build(base))
 			if err == nil {
 				if result != nil && result.Conn != nil {
-					result.Conn.Close()
+					_ = result.Conn.Close()
 				}
 				t.Fatalf("expected an error for an oversized %s, got nil", c.name)
 			}
@@ -872,7 +872,7 @@ func TestDoCrossServerLoginAcceptsZoneGameUidAccessTokExactlyAtCap(t *testing.T)
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v, want a value of exactly maxIdentityFieldLen bytes to be accepted and proceed to dial", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Zone != atCap {
 		t.Errorf("Zone len = %d, want %d (the unmodified at-cap value)", len(result.Zone), len(atCap))
@@ -904,7 +904,7 @@ func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
 			ServerList: []gsl.LoginServerInfo{{GameUid: newGameUid}},
 			At:         &gsl.LoginToken{Token: newAccessTok},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	t.Cleanup(gslServer.Close)
 
@@ -955,7 +955,7 @@ func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Zone != "APS2" {
 		t.Errorf("Zone = %q, want %q (the post-redirect zone)", result.Zone, "APS2")
@@ -1001,7 +1001,7 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing
 			ServerList: []gsl.LoginServerInfo{{GameUid: gsl.FlexString(oversizedGameUid)}},
 			At:         &gsl.LoginToken{Token: oversizedAccessTok},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	t.Cleanup(gslServer.Close)
 
@@ -1059,7 +1059,7 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v (an oversized refreshed gameUid/accessTok must fall back to the previous value, not fail the login)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.AccessTok != oldAccessTok {
 		t.Errorf("AccessTok = %q, want %q (the oversized refreshed token must be rejected, keeping the previous one)", result.AccessTok, oldAccessTok)
@@ -1111,7 +1111,7 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.
 			Code: "0",
 			At:   &gsl.LoginToken{Token: ""}, // present but empty -- the shape under test
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	t.Cleanup(gslServer.Close)
 
@@ -1167,7 +1167,7 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v (an empty refreshed accessTok must fall back to the previous token, not fail the login)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.AccessTok != oldAccessTok {
 		t.Errorf("AccessTok = %q, want %q (an empty refreshed token must never clobber the previous one)", result.AccessTok, oldAccessTok)
@@ -1259,7 +1259,7 @@ func TestDoCrossServerLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v (a wrong-typed zone must not be a fatal error -- the redirect itself still follows on the well-typed ip/port)", err)
 	}
-	defer result.Conn.Close()
+	defer func() { _ = result.Conn.Close() }()
 
 	if result.Addr != newAddr {
 		t.Errorf("Addr = %q, want %q (the redirect must still be followed -- ip/port are well-typed, only zone is wrong-typed)", result.Addr, newAddr)
@@ -1376,7 +1376,7 @@ func TestDoCrossServerLoginSendFailureIsNonTimeoutNetError(t *testing.T) {
 	result, err := DoCrossServerLogin(p)
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("expected an error when the login send itself fails")
 	}
@@ -1390,7 +1390,7 @@ func TestDoCrossServerLoginSendFailureIsNonTimeoutNetError(t *testing.T) {
 	if netErr.Timeout() {
 		t.Errorf("netErr.Timeout() = true, want false -- a send-stage failure must be distinguishable from DoCrossServerLogin's own benign wait-stage timeout, even though the underlying write error itself reports Timeout()==true (mirroring a real deadline-exceeded net.Conn.Write)")
 	}
-	if netErr.Temporary() {
+	if netErr.Temporary() { //nolint:staticcheck // SA1019: asserts the returned net.Error contract, including the deprecated Temporary()
 		t.Errorf("netErr.Temporary() = true, want false")
 	}
 }
@@ -1437,7 +1437,7 @@ func TestDoCrossServerLoginRejectsMissingPPayload(t *testing.T) {
 	result, err := DoCrossServerLogin(p)
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("DoCrossServerLogin() error = nil, want an error for a response with no p payload")
 	}
@@ -1475,7 +1475,7 @@ func TestDoCrossServerLoginRejectsAuthRejection(t *testing.T) {
 	result, err := DoCrossServerLogin(p)
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("DoCrossServerLogin() error = nil, want an error for a response carrying an ec field")
 	}
@@ -1502,7 +1502,7 @@ func TestDoCrossServerLoginBaseZoneResponseWaitConnectionFailure(t *testing.T) {
 		// Deliberately never send a login response at all -- close outright, so the login-
 		// response waitFor sees a real read error (EOF/reset), not a silence-until-deadline
 		// timeout.
-		server.Close()
+		_ = server.Close()
 	})
 	host, port := splitHostPortInt(t, addr)
 
@@ -1518,7 +1518,7 @@ func TestDoCrossServerLoginBaseZoneResponseWaitConnectionFailure(t *testing.T) {
 	result, err := DoCrossServerLogin(p)
 	if err == nil {
 		if result != nil && result.Conn != nil {
-			result.Conn.Close()
+			_ = result.Conn.Close()
 		}
 		t.Fatal("DoCrossServerLogin: expected a non-nil error when the connection fails while waiting for the login response, got nil")
 	}

@@ -161,7 +161,7 @@ func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error
 			continue
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, MaxGSLResponseSize+1))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			lastErr = err
 			slog.Warn("check-version: host failed, trying next", "host", host, "error", err)
@@ -596,7 +596,7 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxGSLResponseSize+1))
 	if err != nil {
 		return nil, err

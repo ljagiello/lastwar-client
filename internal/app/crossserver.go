@@ -190,7 +190,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			slog.Info("SFS2X handshake (experimental)")
 			hsResp, err := conn.DoHandshake(10 * time.Second)
 			if err != nil {
-				conn.Close()
+				_ = conn.Close()
 				return nil, fmt.Errorf("handshake: %w", err)
 			}
 			slog.Info("handshake OK", "response", hsResp.StringRedacted())
@@ -242,7 +242,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			}
 		}
 		if err := conn.SendEnvelope(controllerSystem, actionLogin, loginContent); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, sendStageError{err: err}
 		}
 		slog.Info("login request sent, waiting for response",
@@ -252,15 +252,15 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			return e.Controller == controllerSystem && e.Action == actionLogin
 		})
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, err
 		}
 		if env.Content == nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: response had no p payload")
 		}
 		if ec, ok := env.Content.Get("ec"); ok {
-			conn.Close()
+			_ = conn.Close()
 			// Wrapped in ErrAuthRejected (defined in errors.go) so callers can
 			// distinguish "server actively rejected this login" (ec present) from
 			// a bare dial/timeout/I/O failure above, which stay unwrapped.
@@ -286,7 +286,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// so this would silently redial 127.0.0.1/::1 instead of erroring clearly.
 			newAddr, err := buildBaseZoneLoginAddr(redirectIPVal, int(getIntFlexible(siObj, "port")))
 			if err != nil {
-				conn.Close()
+				_ = conn.Close()
 				return nil, fmt.Errorf("cross-server login: serverInfo redirect: %w", err)
 			}
 			// redirectZone (login.go) is redirectIP's sibling for this field -- see its doc
@@ -350,7 +350,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 				slog.Warn("following serverInfo redirect with UNREFRESHED access token -- no HTTPClient/RSAPub/GateHost given to DoCrossServerLogin, so it cannot fetch a fresh one before redialing; if this redial fails with ec=28/E011, this reused token is the first thing to suspect")
 			}
 
-			conn.Close()
+			_ = conn.Close()
 			addr = newAddr
 			if newZone != "" {
 				zone = newZone
@@ -358,7 +358,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			continue
 		}
 
-		conn.conn.SetReadDeadline(time.Time{})
+		_ = conn.conn.SetReadDeadline(time.Time{})
 		return &CrossServerLoginResult{Conn: conn, Content: env.Content, Addr: addr, Zone: zone, AccessTok: p.AccessTok, GameUid: p.GameUid}, nil
 	}
 }

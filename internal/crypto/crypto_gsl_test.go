@@ -45,7 +45,7 @@ func TestGSLCryptoRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode uuid field: %v", err)
 	}
-	salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT)
+	salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT) //nolint:staticcheck // SA1019: fake GSL server must mirror the real server's protocol-mandated PKCS#1 v1.5 salt decryption
 	if err != nil {
 		t.Fatalf("rsa decrypt salt: %v", err)
 	}

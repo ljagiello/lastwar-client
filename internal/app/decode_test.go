@@ -33,7 +33,7 @@ func captureStdout(t *testing.T, fn func()) string {
 	outCh := make(chan string, 1)
 	go func() {
 		var buf bytes.Buffer
-		io.Copy(&buf, r)
+		_, _ = io.Copy(&buf, r)
 		outCh <- buf.String()
 	}()
 
@@ -44,7 +44,7 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("close pipe writer: %v", err)
 	}
 	out := <-outCh
-	r.Close()
+	_ = r.Close()
 	return out
 }
 

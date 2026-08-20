@@ -608,7 +608,7 @@ func TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorDoesNotExitDuringShutd
 func TestHandleInteractiveLineSendExtensionFailureExits(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		c1, c2 := net.Pipe()
-		defer c2.Close()
+		defer func() { _ = c2.Close() }()
 		failConn := &writeFailConn{Conn: c1, err: errors.New("simulated write failure")}
 		conn := &GameConn{conn: failConn, reader: bufio.NewReaderSize(failConn, 4096)}
 		handleInteractiveLine(conn, `some.command`)
@@ -647,8 +647,8 @@ func TestHandleInteractiveLineSendExtensionFailureDoesNotExitDuringShutdown(t *t
 	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
 
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 	failConn := &writeFailConn{Conn: c1, err: errors.New("simulated write failure")}
 	conn := &GameConn{conn: failConn, reader: bufio.NewReaderSize(failConn, 4096)}
 
@@ -715,7 +715,7 @@ func TestOpenControlPipeWithRetryRecoversFromTransientMissingFile(t *testing.T) 
 		time.Sleep(controlPipeRetryDelay)
 		f, err := os.Create(path)
 		if err == nil {
-			f.Close()
+			_ = f.Close()
 		}
 	}()
 
@@ -723,7 +723,7 @@ func TestOpenControlPipeWithRetryRecoversFromTransientMissingFile(t *testing.T) 
 	if err != nil {
 		t.Fatalf("openControlPipeWithRetry() error = %v, want nil once the file appears within the retry budget", err)
 	}
-	f.Close()
+	_ = f.Close()
 }
 
 // TestStatControlPipeWithRetryGivesUpOnPersistentFailure is the boundedness counterpart to
@@ -865,7 +865,7 @@ func TestRunInteractivePersistentScanErrorGivesUpBounded(t *testing.T) {
 					return
 				}
 				_, _ = f.Write(oversized)
-				f.Close()
+				_ = f.Close()
 			}
 		}()
 
@@ -994,7 +994,7 @@ func TestRunInteractivePersistentScanErrorDoesNotExitDuringShutdown(t *testing.T
 				return
 			}
 			_, _ = f.Write(oversized)
-			f.Close()
+			_ = f.Close()
 		}
 	}()
 
