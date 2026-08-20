@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -9,6 +10,62 @@ import (
 	"testing"
 	"time"
 )
+
+// TestDeviceIdentityStringGoStringRedact is the round-48 regression test for the MAJOR finding
+// that deviceIdentity -- which carries LoginKey, the single most sensitive credential in this
+// client -- had no String()/GoString() redaction, unlike gsl.go's LoginToken (round 47). Proves
+// both the bare value and a value/pointer nested inside a containing struct's %+v are redacted;
+// deviceIdentity is used as *deviceIdentity throughout the codebase (LoginResult.Ident), so both
+// receiver shapes are checked.
+func TestDeviceIdentityStringGoStringRedact(t *testing.T) {
+	const liveLoginKey = "FAKE-LIVE-LOGIN-KEY-must-not-leak-xyz789"
+	d := deviceIdentity{DeviceID: "dev-1", Username: "user-1", GameUid: "uid-1", LoginKey: liveLoginKey}
+
+	t.Run("String", func(t *testing.T) {
+		s := d.String()
+		if strings.Contains(s, liveLoginKey) {
+			t.Errorf("String() = %q, must not contain the live loginKey", s)
+		}
+	})
+	t.Run("GoString", func(t *testing.T) {
+		s := d.GoString()
+		if strings.Contains(s, liveLoginKey) {
+			t.Errorf("GoString() = %q, must not contain the live loginKey", s)
+		}
+	})
+	t.Run("nested pointer inside a containing struct's %+v", func(t *testing.T) {
+		wrapper := struct{ Ident *deviceIdentity }{Ident: &d}
+		formatted := fmt.Sprintf("%+v", wrapper)
+		if strings.Contains(formatted, liveLoginKey) {
+			t.Errorf("fmt.Sprintf(%%+v, wrapper) = %q, must not contain the live loginKey nested in .Ident", formatted)
+		}
+	})
+	t.Run("via fmt.Errorf %v", func(t *testing.T) {
+		err := fmt.Errorf("login failed: %v", d)
+		if strings.Contains(err.Error(), liveLoginKey) {
+			t.Errorf("err = %q, must not contain the live loginKey", err.Error())
+		}
+	})
+}
+
+// TestLoginParamsInputStringGoStringRedact is the round-48 regression test for the MINOR finding
+// that LoginParamsInput -- which carries AccessTok/GameUid, live credentials -- had no
+// String()/GoString() redaction, the same class of gap round 47/48 closed for
+// LoginToken/deviceIdentity/SessionConfig.
+func TestLoginParamsInputStringGoStringRedact(t *testing.T) {
+	const liveToken = "FAKE-LIVE-ACCESS-TOKEN-must-not-leak-ghi789"
+	in := LoginParamsInput{DeviceID: "dev-1", GameUid: "uid-1", AccessTok: liveToken}
+
+	if s := in.String(); strings.Contains(s, liveToken) {
+		t.Errorf("String() = %q, must not contain the live token", s)
+	}
+	if s := in.GoString(); strings.Contains(s, liveToken) {
+		t.Errorf("GoString() = %q, must not contain the live token", s)
+	}
+	if s := fmt.Sprintf("%+v", struct{ In LoginParamsInput }{In: in}); strings.Contains(s, liveToken) {
+		t.Errorf("fmt.Sprintf(%%+v, wrapper) = %q, must not contain the live token nested in .In", s)
+	}
+}
 
 // Confirms BuildLoginParams' Android/iOS and empty-vs-set-GameUid conditional field logic --
 // exactly the static-vs-dynamic field set whose mismatch caused the documented "reconnect wall"

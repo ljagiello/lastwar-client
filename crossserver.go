@@ -42,6 +42,14 @@ type CrossServerLoginResult struct {
 	GameUid string
 }
 
+// String/GoString are the round-48 regression fix for the MINOR finding that
+// CrossServerLoginResult -- which carries AccessTok, a live credential -- had no
+// redaction-by-construction, the same class of gap round 47/48 closed for
+// LoginToken/deviceIdentity/SessionConfig. No current call site logs a *CrossServerLoginResult
+// directly, so this is defense-in-depth, not an active leak fix.
+func (r CrossServerLoginResult) String() string   { return "[REDACTED CrossServerLoginResult]" }
+func (r CrossServerLoginResult) GoString() string { return r.String() }
+
 // CrossServerLoginParams mirrors the fields UIRoleLoginView:OnClickLogin
 // pulls off a role entry (ip/port/zone/gameUid) plus the deviceId/airKey
 // this device already presented.
@@ -69,6 +77,13 @@ type CrossServerLoginParams struct {
 	RSAPub     *rsa.PublicKey
 	GateHost   string
 }
+
+// String/GoString are CrossServerLoginResult's sibling for CrossServerLoginParams -- which
+// carries AccessTok/GameUid/ShumeiBoxId, live credentials -- the same round-48 fix. Every current
+// call site already logs individually-redacted fields (redact(p.AccessTok)/redact(p.ShumeiBoxId)),
+// not the struct directly, so this is defense-in-depth, not an active leak fix.
+func (p CrossServerLoginParams) String() string   { return "[REDACTED CrossServerLoginParams]" }
+func (p CrossServerLoginParams) GoString() string { return p.String() }
 
 // DoCrossServerLogin reimplements the client's CrossServerLogin FSM state
 // (Assembly-CSharp.decompiled.cs:108752-108812): UIRoleLoginView.OnClickLogin

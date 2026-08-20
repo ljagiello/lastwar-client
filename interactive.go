@@ -345,7 +345,15 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		if interactiveShuttingDown.Load() {
 			return
 		}
-		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", err)
+		// sendStageError: consistency with conn.go's heartbeat/sendAndWait/DoHandshake and the
+		// login-path send sites (round 48) -- this error is never returned across a function
+		// boundary or inspected for Timeout() today (it's logged and the connection is closed
+		// unconditionally either way), so wrapping it has no behavioral effect now, but keeps
+		// the invariant "every direct send-stage error in this package is sendStageError-
+		// wrapped" true package-wide for any future caller that does inspect it (e.g. if this
+		// were ever changed to only fatally exit on a genuine non-timeout net.Error, mirroring
+		// the Timeout()-gated check the very next lines already apply to waitForCmd's error).
+		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", sendStageError{err: err})
 		// See RunInteractive's own round-41 fix doc comment: os.Exit skips the caller's `defer
 		// conn.Close()`, so close explicitly before exiting instead of relying on it.
 		conn.Close()

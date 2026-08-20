@@ -695,6 +695,24 @@ func TestLoginTokenStringGoStringRedact(t *testing.T) {
 	})
 }
 
+// TestGSLOptStringGoStringRedact is the round-48 regression test for the MINOR finding that
+// GSLOpt -- which carries LoginKey/Rt, live credentials -- had no String()/GoString() redaction,
+// the same class of gap round 47/48 closed for LoginToken/deviceIdentity/SessionConfig.
+func TestGSLOptStringGoStringRedact(t *testing.T) {
+	const liveLoginKey = "FAKE-LIVE-LOGIN-KEY-must-not-leak-def456"
+	o := GSLOpt{Opt: "login", LoginKey: liveLoginKey}
+
+	if s := o.String(); strings.Contains(s, liveLoginKey) {
+		t.Errorf("String() = %q, must not contain the live loginKey", s)
+	}
+	if s := o.GoString(); strings.Contains(s, liveLoginKey) {
+		t.Errorf("GoString() = %q, must not contain the live loginKey", s)
+	}
+	if s := fmt.Sprintf("%+v", struct{ O GSLOpt }{O: o}); strings.Contains(s, liveLoginKey) {
+		t.Errorf("fmt.Sprintf(%%+v, wrapper) = %q, must not contain the live loginKey nested in .O", s)
+	}
+}
+
 // TestGetServerListDecodeFailuresDoNotLeakRawResponse is the round-11/round-12 regression test for
 // gsl.go's response-error branches: a real getserverlist.php response legitimately carries a live
 // at/rt session token on success (LoginServerListRespon.At/Rt), so none of these branches may embed

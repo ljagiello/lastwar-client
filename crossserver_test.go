@@ -106,6 +106,40 @@ func putRedirectServerInfo(addr, zone string) *SFSObject {
 	return resp
 }
 
+// TestCrossServerLoginStructsStringGoStringRedact is the round-48 regression test for the MINOR
+// finding that CrossServerLoginParams/CrossServerLoginResult -- which carry AccessTok, a live
+// credential -- had no String()/GoString() redaction, the same class of gap round 47/48 closed for
+// LoginToken/deviceIdentity/SessionConfig.
+func TestCrossServerLoginStructsStringGoStringRedact(t *testing.T) {
+	const liveToken = "FAKE-LIVE-ACCESS-TOKEN-must-not-leak-qrs456"
+
+	t.Run("CrossServerLoginParams", func(t *testing.T) {
+		p := CrossServerLoginParams{IP: "203.0.113.9", Port: 9339, AccessTok: liveToken}
+		if s := p.String(); strings.Contains(s, liveToken) {
+			t.Errorf("String() = %q, must not contain the live token", s)
+		}
+		if s := p.GoString(); strings.Contains(s, liveToken) {
+			t.Errorf("GoString() = %q, must not contain the live token", s)
+		}
+		if s := fmt.Sprintf("%+v", struct{ P CrossServerLoginParams }{P: p}); strings.Contains(s, liveToken) {
+			t.Errorf("fmt.Sprintf(%%+v, wrapper) = %q, must not contain the live token nested in .P", s)
+		}
+	})
+
+	t.Run("CrossServerLoginResult", func(t *testing.T) {
+		r := CrossServerLoginResult{AccessTok: liveToken}
+		if s := r.String(); strings.Contains(s, liveToken) {
+			t.Errorf("String() = %q, must not contain the live token", s)
+		}
+		if s := r.GoString(); strings.Contains(s, liveToken) {
+			t.Errorf("GoString() = %q, must not contain the live token", s)
+		}
+		if s := fmt.Sprintf("%+v", struct{ R CrossServerLoginResult }{R: r}); strings.Contains(s, liveToken) {
+			t.Errorf("fmt.Sprintf(%%+v, wrapper) = %q, must not contain the live token nested in .R", s)
+		}
+	})
+}
+
 // TestDoCrossServerLoginNoRedirect covers the plain path: the fake server's Login response
 // carries no serverInfo, so DoCrossServerLogin should return success on the very first
 // connection with none of the redirect-related fields (Addr/Zone/AccessTok) altered from what
@@ -799,6 +833,50 @@ func TestDoCrossServerLoginRejectsOversizedZoneGameUidAccessTok(t *testing.T) {
 				t.Errorf("err = %q, want it to mention the field being too long (i.e. rejected by the synchronous length check, not a dial failure)", err.Error())
 			}
 		})
+	}
+}
+
+// TestDoCrossServerLoginAcceptsZoneGameUidAccessTokExactlyAtCap is the round-48 regression test
+// for the MINOR finding that TestDoCrossServerLoginRejectsOversizedZoneGameUidAccessTok above only
+// tests the reject side of the round-47 entry-validation length guards on p.Zone/p.GameUid/
+// p.AccessTok (crossserver.go: strict len > maxIdentityFieldLen), never proving a value of exactly
+// maxIdentityFieldLen bytes is accepted and DoCrossServerLogin proceeds past validation to dial.
+// Without this, a future edit tightening any of the three `>` comparisons to `>=` would wrongly
+// reject a legitimate maximal-length zone/gameUid/accessTok while the existing test suite --
+// including the dedicated reject-side regression test -- kept passing throughout.
+func TestDoCrossServerLoginAcceptsZoneGameUidAccessTokExactlyAtCap(t *testing.T) {
+	atCap := strings.Repeat("x", maxIdentityFieldLen)
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      atCap,
+		GameUid:   atCap,
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: atCap,
+	}
+	result, err := DoCrossServerLogin(p)
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v, want a value of exactly maxIdentityFieldLen bytes to be accepted and proceed to dial", err)
+	}
+	defer result.Conn.Close()
+
+	if result.Zone != atCap {
+		t.Errorf("Zone len = %d, want %d (the unmodified at-cap value)", len(result.Zone), len(atCap))
+	}
+	if result.AccessTok != atCap {
+		t.Errorf("AccessTok len = %d, want %d (the unmodified at-cap value)", len(result.AccessTok), len(atCap))
 	}
 }
 

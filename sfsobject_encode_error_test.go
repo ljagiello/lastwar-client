@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -133,4 +134,33 @@ func TestEncodeObjectExactlyMaxArrayLengthSucceeds(t *testing.T) {
 	if len(gotArr.items) != 32767 {
 		t.Errorf("decoded array length = %d, want 32767", len(gotArr.items))
 	}
+}
+
+// TestInt32CountExactBoundary is the round-48 regression test for the MINOR finding that
+// int32Count (sfsText/sfsByteArray's wire-count overflow guard, the int32-wide sibling of
+// int16Count above and writeUtfString) had zero test coverage of any kind. Both siblings have
+// dedicated exact-boundary tests here (TestEncodeObjectExactlyMaxArrayLengthSucceeds/
+// TestEncodeObjectTooManyKeysReturnsError for int16Count; TestEncodeObjectStringExactlyMaxLenSucceeds/
+// TestEncodeObjectOversizedStringReturnsError for writeUtfString), each proving both accept-at-
+// boundary and reject-one-past-boundary behavior -- int32Count had none. A true end-to-end
+// EncodeObject test would need a >2GB string/byte-slice value to actually drive n past
+// math.MaxInt32, impractically expensive to construct and run; int32Count is called directly here
+// instead, mirroring int16Count's own pure-function-level testability.
+func TestInt32CountExactBoundary(t *testing.T) {
+	t.Run("exactly math.MaxInt32: accepted", func(t *testing.T) {
+		got, err := int32Count(math.MaxInt32, "x")
+		if err != nil {
+			t.Fatalf("int32Count(math.MaxInt32, ...) error = %v, want nil", err)
+		}
+		if got != math.MaxInt32 {
+			t.Errorf("got %d, want %d", got, int32(math.MaxInt32))
+		}
+	})
+
+	t.Run("math.MaxInt32 plus one: rejected", func(t *testing.T) {
+		_, err := int32Count(math.MaxInt32+1, "x")
+		if err == nil {
+			t.Fatal("int32Count(math.MaxInt32+1, ...) error = nil, want an overflow error")
+		}
+	})
 }

@@ -604,6 +604,15 @@ type GSLOpt struct {
 	Rt       string
 }
 
+// String/GoString are the round-48 regression fix for the MINOR finding that GSLOpt -- which
+// carries LoginKey/Rt, live credentials -- had no redaction-by-construction, the same class of gap
+// round 47/48 closed for LoginToken/deviceIdentity/SessionConfig. Every current call site only
+// logs the .Opt field (login.go), so this is defense-in-depth, not an active leak fix -- rated
+// minor rather than major since GSLOpt is short-lived (constructed and consumed within a single
+// GetServerList call) rather than held across a whole multi-hundred-line flow.
+func (o GSLOpt) String() string   { return "[REDACTED GSLOpt]" }
+func (o GSLOpt) GoString() string { return o.String() }
+
 // GetServerList performs the RSA+AES-wrapped GSL POST and returns the
 // decrypted, parsed response.
 func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey, deviceID string, opt GSLOpt, zone, gameUid string) (*LoginServerListRespon, error) {

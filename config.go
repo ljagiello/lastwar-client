@@ -28,6 +28,23 @@ type SessionConfig struct {
 	IOSMode     bool   `json:"iosMode"`
 }
 
+// String/GoString are the round-48 regression fix for the MAJOR finding that SessionConfig --
+// whose own doc comment above calls AccessToken "a real access token" -- had no
+// redaction-by-construction the way gsl.go's LoginToken (round 47) and identity.go's deviceIdentity
+// (round 48, same audit) got for the identical class of risk. main.go threads a live *SessionConfig
+// through roughly 50 lines of -cs-* flag/config merge logic, currently only ever accessing
+// individual fields, never logging cfg itself -- this is defense-in-depth for a future diagnostic
+// line (e.g. slog.Info("loaded session config", "cfg", cfg) or fmt.Errorf("invalid config: %+v",
+// cfg)) that would otherwise print AccessToken in clear text via Go's default struct formatter,
+// undermining the 0600-permission and atomic-write hardening this file otherwise carefully
+// implements for this exact file. Deliberately NOT also a json.Marshaler, mirroring LoginToken's
+// own precedent exactly: SaveSessionConfig (below) marshals a *SessionConfig to JSON as the ACTUAL
+// production persistence mechanism for this file (not just a test fixture, unlike LoginToken) --
+// overriding MarshalJSON here would permanently corrupt every session config ever saved to disk,
+// replacing the real access token with the redacted placeholder.
+func (c SessionConfig) String() string   { return "[REDACTED SessionConfig]" }
+func (c SessionConfig) GoString() string { return c.String() }
+
 func defaultSessionConfigPath() string {
 	return stateFilePath(".lastwar_goclient_session.json")
 }

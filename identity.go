@@ -122,6 +122,21 @@ type deviceIdentity struct {
 	LoginKey string
 }
 
+// String/GoString are the round-48 regression fix for the MAJOR finding that deviceIdentity --
+// which carries LoginKey, the single most sensitive credential in this client (alone sufficient to
+// re-authenticate the account via opt=login, per this file's own doc comments) -- had no
+// redaction-by-construction the way gsl.go's LoginToken got in round 47 for the identical class of
+// risk. Login() keeps a live *deviceIdentity in scope for its entire multi-hundred-line body and
+// hands it out further via LoginResult.Ident to every caller; every CURRENT call site already
+// extracts and wraps LoginKey in redact() before logging, so this is defense-in-depth for whatever
+// comes next, not a fix for an actively-triggered leak -- a future slog.Error("login failed",
+// "ident", ident) or fmt.Errorf("state: %+v", result) would otherwise fall through to Go's default
+// reflection-based struct formatter and print LoginKey/GameUid/Username in clear text. Value
+// receiver (not pointer) so both deviceIdentity and *deviceIdentity -- the type used throughout
+// this codebase -- satisfy fmt.Stringer, mirroring LoginToken's identical choice.
+func (d deviceIdentity) String() string   { return "[REDACTED deviceIdentity]" }
+func (d deviceIdentity) GoString() string { return d.String() }
+
 func stateFilePath(name string) string {
 	dir, err := os.UserHomeDir()
 	if err != nil {
@@ -468,6 +483,17 @@ type LoginParamsInput struct {
 	// the token itself, un, and every other field are valid and accepted.
 	IOSMode bool
 }
+
+// String/GoString are the round-48 regression fix for the MINOR finding that LoginParamsInput --
+// which carries AccessTok/GameUid, live credentials -- had no redaction-by-construction, the same
+// class of gap round 47/48 closed for LoginToken/deviceIdentity/SessionConfig. Every current call
+// site (login.go/crossserver.go) constructs and immediately passes this struct into
+// BuildLoginParams without logging it directly, so this is defense-in-depth, not an active leak
+// fix -- rated minor rather than major since LoginParamsInput is short-lived (constructed and
+// consumed within a single BuildLoginParams call) rather than held across a whole
+// multi-hundred-line flow.
+func (in LoginParamsInput) String() string   { return "[REDACTED LoginParamsInput]" }
+func (in LoginParamsInput) GoString() string { return in.String() }
 
 const iosPackageName = "com.lastwar.ios"
 

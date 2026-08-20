@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -9,6 +10,53 @@ import (
 	"strings"
 	"testing"
 )
+
+// TestSessionConfigStringGoStringRedact is the round-48 regression test for the MAJOR finding that
+// SessionConfig -- whose own doc comment calls AccessToken "a real access token" -- had no
+// String()/GoString() redaction, unlike gsl.go's LoginToken (round 47). Proves both the bare value
+// and, critically, a SessionConfig nested inside a containing value's %+v are redacted, and that
+// the actual JSON persistence path (SaveSessionConfig/LoadSessionConfig) still round-trips the
+// real, unredacted token -- confirming String()/GoString() don't interfere with encoding/json the
+// way a MarshalJSON override would have (see this fix's own doc comment in config.go for why
+// MarshalJSON was deliberately NOT added).
+func TestSessionConfigStringGoStringRedact(t *testing.T) {
+	const liveToken = "FAKE-LIVE-SESSION-ACCESS-TOKEN-must-not-leak-abc123"
+	cfg := SessionConfig{IP: "203.0.113.9", Port: 9339, Zone: "APS1", GameUid: "uid-1", AccessToken: liveToken}
+
+	t.Run("String", func(t *testing.T) {
+		s := cfg.String()
+		if strings.Contains(s, liveToken) {
+			t.Errorf("String() = %q, must not contain the live token", s)
+		}
+	})
+	t.Run("GoString", func(t *testing.T) {
+		s := cfg.GoString()
+		if strings.Contains(s, liveToken) {
+			t.Errorf("GoString() = %q, must not contain the live token", s)
+		}
+	})
+	t.Run("nested inside a containing value's %+v", func(t *testing.T) {
+		wrapper := struct{ Cfg SessionConfig }{Cfg: cfg}
+		formatted := fmt.Sprintf("%+v", wrapper)
+		if strings.Contains(formatted, liveToken) {
+			t.Errorf("fmt.Sprintf(%%+v, wrapper) = %q, must not contain the live token nested in .Cfg", formatted)
+		}
+	})
+	t.Run("JSON round trip still carries the real token", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "session.json")
+		if err := SaveSessionConfig(&cfg, path); err != nil {
+			t.Fatalf("SaveSessionConfig: %v", err)
+		}
+		loaded, err := LoadSessionConfig(path)
+		if err != nil {
+			t.Fatalf("LoadSessionConfig: %v", err)
+		}
+		if loaded.AccessToken != liveToken {
+			t.Errorf("loaded.AccessToken = %q, want the real token %q -- String()/GoString() must not corrupt the actual JSON persistence path", loaded.AccessToken, liveToken)
+		}
+	})
+}
 
 func TestApplyOverride(t *testing.T) {
 	if got := applyOverride("base", "override"); got != "override" {

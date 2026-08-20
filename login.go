@@ -275,7 +275,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 
 	stateSrv := lsr.ServerList[0]
 	zone := capOversizedIdentityField("zone", stateSrv.Zone.String(), "", "login initial GSL response")
-	gameUid := stateSrv.GameUid.String()
+	gameUid := capOversizedIdentityField("gameUid", stateSrv.GameUid.String(), "", "login initial GSL response")
 	if gameUid != "" && gameUid != ident.GameUid {
 		if err := ident.SaveGameUid(gameUid); err != nil {
 			slog.Warn("failed to persist gameUid", "error", err)
@@ -467,7 +467,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 				// DoCrossServerLogin's matching redirect path in crossserver.go,
 				// which had this same gap.
 				if len(freshLsr.ServerList) > 0 {
-					if newGameUid := freshLsr.ServerList[0].GameUid.String(); newGameUid != "" && newGameUid != gameUid {
+					if newGameUid := capOversizedIdentityField("gameUid", freshLsr.ServerList[0].GameUid.String(), "", "login serverInfo redirect GSL refresh"); newGameUid != "" && newGameUid != gameUid {
 						slog.Info("serverInfo redirect: gameUid changed on GSL refresh", "oldGameUid", gameUid, "newGameUid", newGameUid)
 						gameUid = newGameUid
 						if err := ident.SaveGameUid(gameUid); err != nil {
@@ -830,9 +830,23 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 				// server just never sends `init`. No error to report.
 				return nil, nil, false, nil
 			}
-			// A real connection failure, not a deadline -- surface it so the caller can log
-			// what actually went wrong instead of a generic timeout message.
-			return nil, nil, false, err
+			// Round-48 fix: only a genuine, non-timeout net.Error (ReadPacket's own I/O
+			// failures, wrapped in deadConnError -- see conn.go) is treated as a real
+			// connection failure worth aborting on. A plain DecodeObject parse error (wrapped
+			// only via fmt.Errorf, never a net.Error) means ReadPacket already fully consumed
+			// this frame's bytes off the wire before DecodeObject ever ran -- the stream stays
+			// in sync, exactly the same reasoning buildings.go's own containsNonTimeoutNetError
+			// callers use to classify this shape of error as non-fatal. Previously ANY
+			// non-timeout error here -- including a single malformed/unrecognized push -- was
+			// treated identically to a genuine dead connection and aborted the entire login,
+			// unlike every other unrecognized push in this same loop, which is simply skipped.
+			if containsNonTimeoutNetError(err) {
+				// A real connection failure, not a deadline -- surface it so the caller can
+				// log what actually went wrong instead of a generic timeout message.
+				return nil, nil, false, err
+			}
+			slog.Warn("waitForInitPush: failed to read/decode a push while waiting for init; continuing to wait, not treating this as a dead connection", "error", err)
+			continue
 		}
 		msg, ok := env.AsExtension()
 		if !ok {
@@ -858,16 +872,34 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 // the primary path lacked the protection the fallback path has had since round 12. This closes that
 // gap without touching buildings.go's own closures, which live in a different function and are out
 // of scope for this fix.
+//
+// Round-48 fix: also stops appending once maxAggregateBuildingsPerFetch (buildings.go) valid,
+// distinct-uuid entries have been kept, mirroring appendBuilding's own identical aggregate cap on
+// FetchBuildings' fallback path -- previously this, the PRIMARY path, had no aggregate cap of its
+// own at all, only ParseInitBuildings' much larger maxRawBuildingItemsPerPush (2000) raw-item-SCAN
+// ceiling. Every downstream consumer of the resulting slice -- PrintBuildings (buildings.go), which
+// issues one uncapped Raw.StringRedacted() format call per entry with no per-call budget of its
+// own, and CollectAll -- inherited that same unbounded-relative-to-input cost from a single crafted
+// init push.
 func dedupeBuildings(bs []Building) []Building {
 	var out []Building
 	seen := make(map[int64]bool, len(bs))
+	truncated := false
 	for _, b := range bs {
+		if len(out) >= maxAggregateBuildingsPerFetch {
+			truncated = true
+			break
+		}
 		uuid := b.Uuid()
 		if seen[uuid] {
 			continue
 		}
 		seen[uuid] = true
 		out = append(out, b)
+	}
+	if truncated {
+		slog.Warn("init push building_new longer than aggregate cap after dedup; truncating",
+			"rawCount", len(bs), "cap", maxAggregateBuildingsPerFetch)
 	}
 	return out
 }
@@ -876,17 +908,28 @@ func dedupeBuildings(bs []Building) []Building {
 // the full rationale (buildings.go's seenVisitorUUIDs/appendVisitor has applied the identical
 // protection to FetchBuildings' fallback path since round 12; GreetVisitors issues one real
 // visitor.operate network call per slice entry with no dedup of its own, so a doubled visitor list
-// here means a doubled real network call per uid, round 26).
+// here means a doubled real network call per uid, round 26). Round-48 fix: also caps the output at
+// maxVisitorsUpperBound (visitors.go), mirroring dedupeBuildings' own identical round-48 fix and
+// appendVisitor's aggregate cap on FetchBuildings' fallback path.
 func dedupeVisitors(vs []Visitor) []Visitor {
 	var out []Visitor
 	seen := make(map[int64]bool, len(vs))
+	truncated := false
 	for _, v := range vs {
+		if len(out) >= maxVisitorsUpperBound {
+			truncated = true
+			break
+		}
 		uid := v.Uid()
 		if seen[uid] {
 			continue
 		}
 		seen[uid] = true
 		out = append(out, v)
+	}
+	if truncated {
+		slog.Warn("init push visitor.list longer than aggregate cap after dedup; truncating",
+			"rawCount", len(vs), "cap", maxVisitorsUpperBound)
 	}
 	return out
 }

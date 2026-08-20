@@ -529,3 +529,94 @@ func TestOsExitInReadCodeFromCallsCloseConnBeforeExitFirst(t *testing.T) {
 		t.Errorf("found %d closeConnBeforeExit(conn)-immediately-before-os.Exit(1) sites in login.go, want %d -- every os.Exit(1) reached while conn is in scope in readCodeFromPipe/readCodeFrom must call closeConnBeforeExit(conn) explicitly first", len(matches), want)
 	}
 }
+
+// TestDedupeBuildingsCapsAggregateCount is the round-48 regression test for the MAJOR finding that
+// dedupeBuildings (login.go) -- unlike buildings.go's FetchBuildings fallback path, whose
+// appendBuilding closure enforces maxAggregateBuildingsPerFetch -- had no aggregate cap of its own
+// on waitForInitPush's result, the PRIMARY init-push path Login() actually uses. Every downstream
+// consumer (PrintBuildings' uncapped per-instance StringRedacted() calls, CollectAll) inherited
+// that unbounded-relative-to-input cost from a single crafted init push carrying up to
+// ParseInitBuildings' own maxRawBuildingItemsPerPush (2000) distinct-uuid entries. Proves the cap
+// is a strict `>=`-at-append-time boundary: exactly maxAggregateBuildingsPerFetch distinct uuids
+// all survive with no truncation warning, one more triggers truncation and the warning.
+func TestDedupeBuildingsCapsAggregateCount(t *testing.T) {
+	t.Run("exactly cap distinct uuids: all kept, no truncation warning", func(t *testing.T) {
+		var in []Building
+		for i := 0; i < maxAggregateBuildingsPerFetch; i++ {
+			in = append(in, newTestBuilding(int64(i), BuildingFarmland, 1))
+		}
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := dedupeBuildings(in)
+		slog.SetDefault(orig)
+
+		if len(got) != maxAggregateBuildingsPerFetch {
+			t.Fatalf("got %d buildings, want exactly %d (the cap, no truncation at this boundary)", len(got), maxAggregateBuildingsPerFetch)
+		}
+		if strings.Contains(buf.String(), "longer than aggregate cap") {
+			t.Errorf("unexpected truncation warning at exactly-cap boundary:\n%s", buf.String())
+		}
+	})
+
+	t.Run("cap+1 distinct uuids: truncated to cap, warning fires", func(t *testing.T) {
+		var in []Building
+		for i := 0; i < maxAggregateBuildingsPerFetch+1; i++ {
+			in = append(in, newTestBuilding(int64(i), BuildingFarmland, 1))
+		}
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := dedupeBuildings(in)
+		slog.SetDefault(orig)
+
+		if len(got) != maxAggregateBuildingsPerFetch {
+			t.Fatalf("got %d buildings, want exactly %d (cap+1 input must still truncate to the cap)", len(got), maxAggregateBuildingsPerFetch)
+		}
+		if !strings.Contains(buf.String(), "init push building_new longer than aggregate cap after dedup; truncating") {
+			t.Errorf("expected a truncation warning at cap+1, got:\n%s", buf.String())
+		}
+	})
+}
+
+// TestDedupeVisitorsCapsAggregateCount is TestDedupeBuildingsCapsAggregateCount's sibling for
+// dedupeVisitors (login.go), the identical round-48 gap on visitors.go's maxVisitorsUpperBound.
+func TestDedupeVisitorsCapsAggregateCount(t *testing.T) {
+	t.Run("exactly cap distinct uids: all kept, no truncation warning", func(t *testing.T) {
+		var in []Visitor
+		for i := 0; i < maxVisitorsUpperBound; i++ {
+			in = append(in, newTestVisitor(int64(i), 1, 1))
+		}
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := dedupeVisitors(in)
+		slog.SetDefault(orig)
+
+		if len(got) != maxVisitorsUpperBound {
+			t.Fatalf("got %d visitors, want exactly %d (the cap, no truncation at this boundary)", len(got), maxVisitorsUpperBound)
+		}
+		if strings.Contains(buf.String(), "longer than aggregate cap") {
+			t.Errorf("unexpected truncation warning at exactly-cap boundary:\n%s", buf.String())
+		}
+	})
+
+	t.Run("cap+1 distinct uids: truncated to cap, warning fires", func(t *testing.T) {
+		var in []Visitor
+		for i := 0; i < maxVisitorsUpperBound+1; i++ {
+			in = append(in, newTestVisitor(int64(i), 1, 1))
+		}
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := dedupeVisitors(in)
+		slog.SetDefault(orig)
+
+		if len(got) != maxVisitorsUpperBound {
+			t.Fatalf("got %d visitors, want exactly %d (cap+1 input must still truncate to the cap)", len(got), maxVisitorsUpperBound)
+		}
+		if !strings.Contains(buf.String(), "init push visitor.list longer than aggregate cap after dedup; truncating") {
+			t.Errorf("expected a truncation warning at cap+1, got:\n%s", buf.String())
+		}
+	})
+}
