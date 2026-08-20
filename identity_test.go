@@ -167,6 +167,54 @@ func TestSaveIdentityFieldRejectsOversizedValue(t *testing.T) {
 	}
 }
 
+// TestSaveIdentityFieldAcceptsValueExactlyAtCap is the round-47 regression test for the MINOR
+// finding that TestSaveIdentityFieldRejectsOversizedValue above only tests the reject side of
+// maxIdentityFieldLen's boundary (a strict len > maxIdentityFieldLen guard): it never proves a
+// value of exactly 65535 bytes -- the wire format's own hard limit, and thus the largest value
+// that's still guaranteed re-encodable later via PutUtfString -- is accepted. Without this, a
+// future edit tightening any of the three Save* methods' `>` comparisons to `>=` would wrongly
+// reject a legitimate maximal-length loginKey/gameUid/username while every existing test kept
+// passing. Proves all three Save* methods accept an exactly-at-cap value, storing it in BOTH the
+// in-memory field and the on-disk state file.
+func TestSaveIdentityFieldAcceptsValueExactlyAtCap(t *testing.T) {
+	atCap := strings.Repeat("a", maxIdentityFieldLen)
+
+	cases := []struct {
+		name string
+		save func(d *deviceIdentity, v string) error
+		get  func(d *deviceIdentity) string
+		path func() string
+	}{
+		{"loginKey", (*deviceIdentity).SaveLoginKey, func(d *deviceIdentity) string { return d.LoginKey }, loginKeyStatePath},
+		{"gameUid", (*deviceIdentity).SaveGameUid, func(d *deviceIdentity) string { return d.GameUid }, gameUidStatePath},
+		{"username", (*deviceIdentity).SaveUsername, func(d *deviceIdentity) string { return d.Username }, usernameStatePath},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("HOME", dir)
+
+			d := &deviceIdentity{}
+
+			if err := tt.save(d, atCap); err != nil {
+				t.Fatalf("expected a value of exactly maxIdentityFieldLen bytes to be accepted, got error: %v", err)
+			}
+
+			if got := tt.get(d); got != atCap {
+				t.Errorf("in-memory field len = %d, want %d (the unmodified at-cap value)", len(got), len(atCap))
+			}
+			onDisk, err := os.ReadFile(tt.path())
+			if err != nil {
+				t.Fatalf("expected the state file to be written for an at-cap value: %v", err)
+			}
+			if string(onDisk) != atCap {
+				t.Errorf("state file content len = %d, want %d (the unmodified at-cap value)", len(onDisk), len(atCap))
+			}
+		})
+	}
+}
+
 // TestLoadOrCreateDeviceIdentityWarnsOnLoosePermissions mirrors config_test.go's
 // TestLoadSessionConfigWarnsOnLoosePermissions -- the persisted loginKey is at least as sensitive
 // as the session config (see warnIfLoosePermissions' doc comment), so loading the device identity

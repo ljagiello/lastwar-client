@@ -752,6 +752,56 @@ func TestDoCrossServerLoginRejectsNonPositiveInitialPort(t *testing.T) {
 	}
 }
 
+// TestDoCrossServerLoginRejectsOversizedZoneGameUidAccessTok is the round-47 regression test for
+// the MAJOR finding that p.Zone/p.GameUid/p.AccessTok -- re-encoded verbatim via PutUtfString on
+// every hop of DoCrossServerLogin's loop (zn/un/p.at) -- had no length check at all, unlike
+// loginKey/gameUid/username which got exactly this guard (maxIdentityFieldLen) in round 46. Every
+// current caller sources these from an unguarded gsl.go flexString field or an unguarded SFS2X
+// serverInfo redirect (see capOversizedIdentityField's doc comment, login.go), so validating
+// synchronously here -- before any connection is even dialed -- closes the gap for every caller in
+// one place. Mirrors TestDoCrossServerLoginRejectsEmptyInitialIP/
+// TestDoCrossServerLoginRejectsNonPositiveInitialPort's no-fake-server-needed shape: the fix must
+// reject before ever attempting to dial.
+func TestDoCrossServerLoginRejectsOversizedZoneGameUidAccessTok(t *testing.T) {
+	oversized := strings.Repeat("x", maxIdentityFieldLen+1)
+	base := CrossServerLoginParams{
+		IP:        "203.0.113.9",
+		Port:      9339,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+
+	cases := []struct {
+		name  string
+		build func(p CrossServerLoginParams) CrossServerLoginParams
+	}{
+		{"zone", func(p CrossServerLoginParams) CrossServerLoginParams { p.Zone = oversized; return p }},
+		{"gameUid", func(p CrossServerLoginParams) CrossServerLoginParams { p.GameUid = oversized; return p }},
+		{"accessTok", func(p CrossServerLoginParams) CrossServerLoginParams { p.AccessTok = oversized; return p }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			result, err := DoCrossServerLogin(c.build(base))
+			if err == nil {
+				if result != nil && result.Conn != nil {
+					result.Conn.Close()
+				}
+				t.Fatalf("expected an error for an oversized %s, got nil", c.name)
+			}
+			// Must be the synchronous length-validation error, not a dial failure against the
+			// (non-listening, reserved TEST-NET-3) 203.0.113.9 address -- proving the field is
+			// rejected BEFORE any connection is attempted, not merely that some later step
+			// happens to fail too.
+			if !strings.Contains(err.Error(), "too long") {
+				t.Errorf("err = %q, want it to mention the field being too long (i.e. rejected by the synchronous length check, not a dial failure)", err.Error())
+			}
+		})
+	}
+}
+
 // TestDoCrossServerLoginRedirectRefreshesGameUid exercises the major fix in crossserver.go's
 // serverInfo redirect block: the mid-redirect GSL refresh (opt=fix) returns a fresh serverList
 // entry alongside the fresh access token, and its gameUid must be propagated into p.GameUid --
@@ -849,6 +899,118 @@ func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("post-redirect fake server never received a Login request")
+	}
+}
+
+// TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized is
+// TestDoCrossServerLoginRedirectRefreshesGameUid's sibling for an oversized (rather than
+// legitimate) mid-redirect GSL refresh: an oversized accessTok/gameUid returned by the opt=fix
+// refresh must fall back to the PREVIOUS value (capOversizedIdentityField, login.go) instead of
+// ever reaching PutUtfString with a value writeUtfString would hard-reject, which would otherwise
+// fail the post-redirect Login's encode step and get misclassified by sendStageError (conn.go) as
+// a genuine dead connection.
+func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing.T) {
+	const oldGameUid = "uid-old"
+	const oldAccessTok = "tok-1"
+	oversizedGameUid := strings.Repeat("g", maxIdentityFieldLen+1)
+	oversizedAccessTok := flexString(strings.Repeat("t", maxIdentityFieldLen+1))
+
+	gslServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := LoginServerListRespon{
+			Code:       "0",
+			ServerList: []LoginServerInfo{{GameUid: flexString(oversizedGameUid)}},
+			At:         &LoginToken{Token: oversizedAccessTok},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(gslServer.Close)
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	gotUn := make(chan string, 1)
+	gotParamsAt := make(chan string, 1)
+	newAddr := startFakeGameServer(t, func(server *GameConn) {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		gotUn <- env.Content.GetString("un")
+		if pv, ok := env.Content.Get("p"); ok {
+			if pObj, ok := pv.Val.(*SFSObject); ok {
+				gotParamsAt <- pObj.GetString("at")
+			}
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		_ = server.SendEnvelope(controllerSystem, actionLogin, putRedirectServerInfo(newAddr, "APS2"))
+	})
+	host, port := splitHostPortInt(t, oldAddr)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	p := CrossServerLoginParams{
+		IP:         host,
+		Port:       port,
+		Zone:       "APS1",
+		GameUid:    oldGameUid,
+		DeviceID:   "dev-1",
+		AirKey:     "airkey-1",
+		AccessTok:  oldAccessTok,
+		HTTPClient: defaultHTTPClient(),
+		RSAPub:     &priv.PublicKey,
+		GateHost:   gslServer.URL,
+	}
+	result, err := DoCrossServerLogin(p)
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v (an oversized refreshed gameUid/accessTok must fall back to the previous value, not fail the login)", err)
+	}
+	defer result.Conn.Close()
+
+	if result.AccessTok != oldAccessTok {
+		t.Errorf("AccessTok = %q, want %q (the oversized refreshed token must be rejected, keeping the previous one)", result.AccessTok, oldAccessTok)
+	}
+	if result.GameUid != oldGameUid {
+		t.Errorf("GameUid = %q, want %q (the oversized refreshed gameUid must be rejected, keeping the previous one)", result.GameUid, oldGameUid)
+	}
+
+	select {
+	case un := <-gotUn:
+		if un != oldGameUid {
+			t.Errorf("post-redirect Login `un` = %q, want %q (the stale, still-valid gameUid)", un, oldGameUid)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-redirect fake server never received a Login request")
+	}
+	select {
+	case at := <-gotParamsAt:
+		if at != oldAccessTok {
+			t.Errorf("post-redirect Login params.at = %q, want %q (the stale, still-valid access token)", at, oldAccessTok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-redirect fake server never received a Login request")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "gameUid exceeds identity field length cap") {
+		t.Errorf("expected a Warn about the oversized refreshed gameUid, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "accessTok exceeds identity field length cap") {
+		t.Errorf("expected a Warn about the oversized refreshed accessTok, got:\n%s", logged)
 	}
 }
 

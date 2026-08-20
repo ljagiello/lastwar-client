@@ -213,6 +213,33 @@ type LoginToken struct {
 	Time  flexString `json:"time"`
 }
 
+// String/GoString are the round-47 regression fix for the MAJOR finding that LoginToken --
+// unlike the SFSObject/SFSArray/SFSValue family, which got exactly this redaction-by-construction
+// treatment in rounds 14-15 for the identical reason -- carried a live bearer access/refresh token
+// in its Token field with nothing structurally stopping a future debug/error call site from
+// logging the struct (or a *LoginServerListRespon containing it, via its At/Rt fields) directly.
+// Every CURRENT call site (login.go/main.go/crossserver.go) already extracts and wraps only the
+// individual token string via Token.String()+redact() before logging -- this is defense-in-depth
+// for whatever comes next, not a fix for an actively-triggered leak. fmt's struct-field printer
+// checks each field for a Stringer/GoStringer implementation even when the CONTAINING struct
+// doesn't implement one itself, so this also redacts LoginToken automatically wherever it appears
+// nested inside a %v/%+v/%#v of a *LoginServerListRespon (e.g. a future fmt.Errorf("...: %+v",
+// lsr)). Blanket-masks unconditionally, mirroring SFSValue.String()'s own "no per-field key
+// context to lean on" reasoning -- Time is unread anywhere in this codebase, so redacting it too
+// alongside Token is behaviorally free.
+//
+// Deliberately NOT also a json.Marshaler: LoginToken is the direct json.Unmarshal target of a
+// real GSL HTTP response (never marshaled in production -- this client only ever receives it) and
+// several tests round-trip realistic fixtures through encoding/json.Marshal to simulate that wire
+// response (see login_integration_test.go's newFakeGSLServer and crossserver_test.go's inline GSL
+// fakes); a MarshalJSON override here would silently replace every such fixture's real token with
+// the redacted placeholder, breaking every test that asserts on propagated token content. The
+// concrete threat this closes (a String()/GoString()-checking call site) doesn't need it; a future
+// slog.Any("resp", lsr)-shaped leak via slog's JSON-handler-calls-json.Marshal path remains a
+// separate, currently latent gap this round leaves open rather than risk that regression.
+func (t LoginToken) String() string   { return "[REDACTED LoginToken]" }
+func (t LoginToken) GoString() string { return t.String() }
+
 type LoginServerInfo struct {
 	// ID and Port are flexString, not a bare int, for the same reason as Status just below (see
 	// this file's round-35 fix comment on flexString.Int): a wrong-typed value on either field

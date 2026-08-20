@@ -55,6 +55,52 @@ func TestGslOptFor(t *testing.T) {
 	}
 }
 
+// TestCapOversizedIdentityFieldExactBoundary is the round-47 regression test for
+// capOversizedIdentityField (login.go), the shared guard closing the MAJOR finding that
+// zone/gameUid/accessTok -- unlike loginKey/gameUid/username, which route through
+// SaveLoginKey/SaveGameUid/SaveUsername and got a maxIdentityFieldLen guard in round 46 -- were
+// re-encoded via PutUtfString with no length check at all. Proves both the exact 65535/65536-byte
+// boundary (mirroring identity.go's own maxIdentityFieldLen boundary test) and both fallback
+// shapes callers actually use: "" at a first-assignment site, and the previous value at a
+// mid-redirect refresh site.
+func TestCapOversizedIdentityFieldExactBoundary(t *testing.T) {
+	atCap := strings.Repeat("a", maxIdentityFieldLen)
+	overCap := strings.Repeat("a", maxIdentityFieldLen+1)
+
+	t.Run("exactly at cap: value itself is returned unchanged", func(t *testing.T) {
+		got := capOversizedIdentityField("zone", atCap, "fallback", "test")
+		if got != atCap {
+			t.Errorf("got %d bytes, want the unmodified %d-byte input", len(got), len(atCap))
+		}
+	})
+
+	t.Run("one byte over cap, empty fallback: falls back to \"\"", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := capOversizedIdentityField("zone", overCap, "", "test-context")
+		slog.SetDefault(orig)
+
+		if got != "" {
+			t.Errorf("got %d bytes, want \"\" (the oversized value must not be returned)", len(got))
+		}
+		logged := buf.String()
+		if !strings.Contains(logged, "zone exceeds identity field length cap") {
+			t.Errorf("expected a Warn naming the field, got:\n%s", logged)
+		}
+		if !strings.Contains(logged, "test-context") {
+			t.Errorf("expected the Warn to include the caller's context, got:\n%s", logged)
+		}
+	})
+
+	t.Run("one byte over cap, non-empty fallback: falls back to the previous value", func(t *testing.T) {
+		got := capOversizedIdentityField("accessTok", overCap, "previous-good-token", "test-context")
+		if got != "previous-good-token" {
+			t.Errorf("got %q, want the fallback value %q (a mid-redirect refresh must keep the last-known-good value, not clear it)", got, "previous-good-token")
+		}
+	})
+}
+
 func TestRedact(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -203,6 +249,55 @@ func TestRedactHugeInputAvoidsFullRuneScanAllocation(t *testing.T) {
 	if allocBytes := after.TotalAlloc - before.TotalAlloc; allocBytes > maxWantAllocBytes {
 		t.Errorf("redact(huge 10MB input) allocated %d bytes, want at most %d -- the fast path is not actually bounded, redact() likely still scans/allocates proportional to input size", allocBytes, maxWantAllocBytes)
 	}
+}
+
+// TestRedactRuneScanInputExactBoundary is the round-47 regression test for the MINOR finding that
+// maxRedactRuneScanInput's strict `len(s) > maxRedactRuneScanInput` branch selector (login.go) had
+// no test isolating the exact 1024/1025-byte boundary. TestRedact's large-input cases and
+// TestRedactHugeInputAvoidsFullRuneScanAllocation above are both far past this threshold; and
+// content alone can't distinguish the two paths here, since redact()'s length-scaling formula
+// (k := n/8, capped at 4) has already saturated at k=4 for any input this long, making the
+// full-rune-scan slow path and the bounded fast path produce byte-for-byte identical output
+// ("ABCD...WXYZ" for both). Only an allocation-based assertion can tell them apart: at exactly
+// maxRedactRuneScanInput bytes, the slow path's []rune(s) conversion allocates roughly 4 bytes per
+// ASCII rune (~4KB for a 1024-byte input); one byte more must take the bounded fast path, whose
+// firstNRunesPrefix/lastNRunesSuffix slicing plus a single small "..."-join allocates only a
+// handful of bytes, not thousands.
+func TestRedactRuneScanInputExactBoundary(t *testing.T) {
+	measureAlloc := func(t *testing.T, s string) uint64 {
+		t.Helper()
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		got := redact(s)
+		runtime.ReadMemStats(&after)
+		if got != "ABCD...WXYZ" {
+			t.Fatalf("redact(%d-byte input) = %q, want %q", len(s), got, "ABCD...WXYZ")
+		}
+		return after.TotalAlloc - before.TotalAlloc
+	}
+
+	t.Run("exactly at cap: slow full-rune-scan path, allocates proportionally", func(t *testing.T) {
+		s := "ABCD" + strings.Repeat("x", maxRedactRuneScanInput-8) + "WXYZ"
+		if len(s) != maxRedactRuneScanInput {
+			t.Fatalf("test setup bug: input is %d bytes, want exactly %d", len(s), maxRedactRuneScanInput)
+		}
+		const minWantAllocBytes = 3000 // a []rune conversion of ~1024 ASCII runes needs ~4096 bytes alone
+		if allocBytes := measureAlloc(t, s); allocBytes < minWantAllocBytes {
+			t.Errorf("redact(%d-byte input) allocated only %d bytes, want at least %d -- expected the slow full-rune-scan path (proportional allocation), got something that looks like the bounded fast path instead", len(s), allocBytes, minWantAllocBytes)
+		}
+	})
+
+	t.Run("one byte over cap: bounded fast path, allocation stays flat", func(t *testing.T) {
+		s := "ABCD" + strings.Repeat("x", maxRedactRuneScanInput-7) + "WXYZ"
+		if len(s) != maxRedactRuneScanInput+1 {
+			t.Fatalf("test setup bug: input is %d bytes, want exactly %d", len(s), maxRedactRuneScanInput+1)
+		}
+		const maxWantAllocBytesAtBoundary = 512
+		if allocBytes := measureAlloc(t, s); allocBytes > maxWantAllocBytesAtBoundary {
+			t.Errorf("redact(%d-byte input) allocated %d bytes, want at most %d -- expected the bounded fast path, got something that looks like the proportional slow path instead", len(s), allocBytes, maxWantAllocBytesAtBoundary)
+		}
+	})
 }
 
 // TestReadCodeFromNewlineTerminatedStaysSilent is the baseline case for

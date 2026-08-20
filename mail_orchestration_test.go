@@ -1574,6 +1574,48 @@ func TestClaimAllMailByteLengthBatching(t *testing.T) {
 	assertBatchesCoverExactly(t, "reward-claim", rewardBatches, []int{9, 2}, wantUids)
 }
 
+// TestBatchByCountAndBytesExactByteBoundary is the round-47 regression test for the MINOR finding
+// that batchByCountAndBytes' byte-budget guard (mail.go: `batchBytes+len(uids[end])+1 <= maxBytes`)
+// had no test pinning its exact boundary -- TestClaimAllMailByteLengthBatching above is the closest
+// existing coverage, but its uid lengths (6499 bytes, batches topping out at 58500 of the real
+// maxUIDsBytes=60000) never land the running total on maxBytes or maxBytes+1 exactly, leaving a
+// margin of 1500-6500 bytes on either side. Calls batchByCountAndBytes directly (it's already a
+// standalone, network-free function -- no fake server needed) with uid lengths engineered so the
+// running total after the second uid lands EXACTLY at maxBytes (must still be admitted into the
+// first batch) or exactly maxBytes+1 (must be excluded, starting a new batch).
+func TestBatchByCountAndBytesExactByteBoundary(t *testing.T) {
+	const maxBytes = 20
+	const maxCount = 10
+	uid1 := strings.Repeat("a", 7) // 7 bytes; +1 joining comma -> running total 8
+
+	t.Run("second uid lands exactly at maxBytes: both uids share one batch", func(t *testing.T) {
+		// 8 (running total after uid1) + 11 (uid2) + 1 (comma) == 20 == maxBytes exactly.
+		uid2 := strings.Repeat("b", 11)
+		got := batchByCountAndBytes([]string{uid1, uid2}, maxCount, maxBytes)
+		if len(got) != 1 {
+			t.Fatalf("got %d batches, want 1 (both uids must share a batch at exactly maxBytes)", len(got))
+		}
+		if len(got[0]) != 2 || got[0][0] != uid1 || got[0][1] != uid2 {
+			t.Errorf("batch = %v, want both uids together", got)
+		}
+	})
+
+	t.Run("second uid is one byte past maxBytes: starts a new batch", func(t *testing.T) {
+		// 8 (running total after uid1) + 12 (uid2) + 1 (comma) == 21 == maxBytes+1.
+		uid2 := strings.Repeat("b", 12)
+		got := batchByCountAndBytes([]string{uid1, uid2}, maxCount, maxBytes)
+		if len(got) != 2 {
+			t.Fatalf("got %d batches, want 2 (uid2 one byte over must start a new batch, not truncate)", len(got))
+		}
+		if len(got[0]) != 1 || got[0][0] != uid1 {
+			t.Errorf("batch[0] = %v, want [uid1] alone", got[0])
+		}
+		if len(got[1]) != 1 || got[1][0] != uid2 {
+			t.Errorf("batch[1] = %v, want [uid2] alone", got[1])
+		}
+	})
+}
+
 // TestClaimAllMailProcessesPartialMailOnListPageFailure is the regression test for the round-16
 // fix to ClaimAllMail's handling of a ListMail error: ListMail deliberately returns whatever mail
 // it already collected before a mid-pagination sendAndWait failure (see its own doc comment), not

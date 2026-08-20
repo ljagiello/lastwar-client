@@ -141,7 +141,33 @@ func redirectZone(siObj *SFSObject, context string) string {
 			"context", context, "goType", fmt.Sprintf("%T", v.Val), "raw", siObj.StringRedacted())
 		return ""
 	}
-	return siObj.GetString("zone")
+	return capOversizedIdentityField("zone", siObj.GetString("zone"), "", context)
+}
+
+// capOversizedIdentityField is the round-47 regression fix for the MAJOR finding that zone,
+// gameUid, and accessTok -- unlike loginKey/gameUid/username, which route through
+// SaveLoginKey/SaveGameUid/SaveUsername and got a maxIdentityFieldLen guard in round 46 -- are
+// re-encoded via PutUtfString on every login/redial attempt with no length check at all, despite
+// originating from the identical unguarded sources: a gsl.go flexString field bounded only by the
+// 1MiB whole-HTTP-body maxGSLResponseSize cap, or an SFS2X serverInfo redirect field that can
+// arrive tagged sfsText (bounded only by packet.go's 64MiB maxFrameSize) -- GetString cannot tell
+// that tag apart from the 65535-byte-capped sfsUtfString tag it also decodes to the identical Go
+// string type for. writeUtfString (sfsobject.go) hard-rejects anything over 65535 bytes, so an
+// oversized value reaching PutUtfString fails EncodeObject/SendEnvelope, and that purely local
+// encode failure gets wrapped in sendStageError (conn.go), which deliberately, by design, forces
+// Timeout()==false -- indistinguishable from a genuine dead connection to every caller. field/
+// context name the caller for the log line's benefit; fallback is the value used instead of the
+// oversized one -- callers pass "" at a first-assignment site (nothing to fall back to yet) or the
+// previous value at a mid-redirect refresh site (matching this codebase's existing "treat an
+// anomalous value as unchanged, not corrupting" philosophy, e.g. GetServerList refresh failures
+// already fall back to the stale token/zone rather than clearing it).
+func capOversizedIdentityField(field, value, fallback, context string) string {
+	if len(value) <= maxIdentityFieldLen {
+		return value
+	}
+	slog.Warn(field+" exceeds identity field length cap; using fallback instead of an unencodable value",
+		"context", context, "len", len(value), "cap", maxIdentityFieldLen)
+	return fallback
 }
 
 // dialGame indirects DialGame (conn.go) through a package var, mirroring gsl.go's
@@ -243,12 +269,12 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	accessTok := ""
 	if lsr.At != nil {
-		accessTok = lsr.At.Token.String()
+		accessTok = capOversizedIdentityField("accessTok", lsr.At.Token.String(), "", "login initial GSL response")
 		slog.Info("access token acquired", "tokenLen", len(accessTok))
 	}
 
 	stateSrv := lsr.ServerList[0]
-	zone := stateSrv.Zone.String()
+	zone := capOversizedIdentityField("zone", stateSrv.Zone.String(), "", "login initial GSL response")
 	gameUid := stateSrv.GameUid.String()
 	if gameUid != "" && gameUid != ident.GameUid {
 		if err := ident.SaveGameUid(gameUid); err != nil {
@@ -426,7 +452,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 				slog.Error("GSL refresh failed; following redirect with stale token anyway", "error", err)
 			} else {
 				if freshLsr.At != nil {
-					accessTok = freshLsr.At.Token.String()
+					accessTok = capOversizedIdentityField("accessTok", freshLsr.At.Token.String(), accessTok, "login serverInfo redirect GSL refresh")
 					slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
 				}
 				// The same refresh response also carries the account's current

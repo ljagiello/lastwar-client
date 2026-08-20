@@ -109,6 +109,25 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 	if p.AccessTok == "" {
 		return nil, fmt.Errorf("cross-server login: no access token given (pass -cs-at, -cs-rt, or a session config with accessToken) -- an empty token reliably fails with ec=28/E011")
 	}
+	// Round-47 fix: p.Zone/p.GameUid/p.AccessTok are re-encoded verbatim via PutUtfString on every
+	// hop of the loop below (zn/un/p.at), but -- unlike loginKey/gameUid/username, which route
+	// through SaveLoginKey/SaveGameUid/SaveUsername and got a maxIdentityFieldLen guard in round
+	// 46 -- nothing previously capped these fields' length here, and every current caller sources
+	// them from an unguarded gsl.go flexString field (main.go's -cs-rt refresh flow) or an
+	// unguarded SFS2X serverInfo redirect (see capOversizedIdentityField's doc comment, login.go).
+	// Rejecting synchronously here, before any connection is even dialed, is strictly better than
+	// letting an oversized value fail deep inside SendEnvelope's encode step, where sendStageError
+	// (conn.go) deliberately, by design, makes that local encode failure indistinguishable from a
+	// genuine dead connection.
+	if len(p.Zone) > maxIdentityFieldLen {
+		return nil, fmt.Errorf("cross-server login: zone too long (%d bytes, max %d)", len(p.Zone), maxIdentityFieldLen)
+	}
+	if len(p.GameUid) > maxIdentityFieldLen {
+		return nil, fmt.Errorf("cross-server login: gameUid too long (%d bytes, max %d)", len(p.GameUid), maxIdentityFieldLen)
+	}
+	if len(p.AccessTok) > maxIdentityFieldLen {
+		return nil, fmt.Errorf("cross-server login: accessTok too long (%d bytes, max %d)", len(p.AccessTok), maxIdentityFieldLen)
+	}
 
 	const maxRedirects = 3
 	// buildBaseZoneLoginAddr (login.go) is the same helper the redirect branch below and both of
@@ -264,7 +283,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 					slog.Error("GSL refresh failed; following redirect with stale access token anyway", "error", err)
 				} else {
 					if freshLsr.At != nil {
-						p.AccessTok = freshLsr.At.Token.String()
+						p.AccessTok = capOversizedIdentityField("accessTok", freshLsr.At.Token.String(), p.AccessTok, "cross-server login serverInfo redirect GSL refresh")
 						slog.Info("fresh access token acquired", "tokenLen", len(p.AccessTok))
 					}
 					// The same refresh response also carries the account's current
@@ -279,7 +298,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 					// "clear the uid" instruction, and clobbering a known-good value with
 					// "" is not a safe default to guess at.
 					if len(freshLsr.ServerList) > 0 {
-						if newGameUid := freshLsr.ServerList[0].GameUid.String(); newGameUid != "" && newGameUid != p.GameUid {
+						if newGameUid := capOversizedIdentityField("gameUid", freshLsr.ServerList[0].GameUid.String(), "", "cross-server login serverInfo redirect GSL refresh"); newGameUid != "" && newGameUid != p.GameUid {
 							slog.Info("serverInfo redirect: gameUid changed on GSL refresh", "oldGameUid", p.GameUid, "newGameUid", newGameUid)
 							p.GameUid = newGameUid
 						}

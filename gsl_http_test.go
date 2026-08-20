@@ -657,6 +657,44 @@ func TestFlexStringIntRedactsSensitiveKeyValue(t *testing.T) {
 	})
 }
 
+// TestLoginTokenStringGoStringRedact is the round-47 regression test for the MAJOR finding that
+// LoginToken -- unlike the SFSObject/SFSArray/SFSValue family, which got exactly this
+// redaction-by-construction treatment in rounds 14-15 -- carried a live bearer access/refresh
+// token with nothing structurally stopping a future call site from formatting it directly.
+// Proves String()/GoString() redact both the bare value and, critically, a LoginToken NESTED
+// inside a containing struct's %+v -- covering the concrete threat scenario the audit described
+// (a future fmt.Errorf("...: %+v", lsr)-shaped call site on the whole LoginServerListRespon).
+func TestLoginTokenStringGoStringRedact(t *testing.T) {
+	const liveToken = "FAKE-LIVE-BEARER-TOKEN-must-not-leak-xyz789"
+	tok := LoginToken{Token: flexString(liveToken), Time: "12345"}
+
+	t.Run("String", func(t *testing.T) {
+		s := tok.String()
+		if strings.Contains(s, liveToken) {
+			t.Errorf("String() = %q, must not contain the live token", s)
+		}
+	})
+	t.Run("GoString", func(t *testing.T) {
+		s := tok.GoString()
+		if strings.Contains(s, liveToken) {
+			t.Errorf("GoString() = %q, must not contain the live token", s)
+		}
+	})
+	t.Run("nested inside a containing struct's %+v", func(t *testing.T) {
+		lsr := LoginServerListRespon{Code: "0", At: &tok}
+		formatted := fmt.Sprintf("%+v", lsr)
+		if strings.Contains(formatted, liveToken) {
+			t.Errorf("fmt.Sprintf(%%+v, lsr) = %q, must not contain the live token nested in .At", formatted)
+		}
+	})
+	t.Run("via fmt.Errorf %v", func(t *testing.T) {
+		err := fmt.Errorf("refresh failed: %v", tok)
+		if strings.Contains(err.Error(), liveToken) {
+			t.Errorf("err = %q, must not contain the live token", err.Error())
+		}
+	})
+}
+
 // TestGetServerListDecodeFailuresDoNotLeakRawResponse is the round-11/round-12 regression test for
 // gsl.go's response-error branches: a real getserverlist.php response legitimately carries a live
 // at/rt session token on success (LoginServerListRespon.At/Rt), so none of these branches may embed

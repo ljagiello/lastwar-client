@@ -1621,6 +1621,217 @@ func TestLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
 	}
 }
 
+// TestLoginRejectsOversizedInitialZoneAndAccessTok is the round-47 regression test for the MAJOR
+// finding that Login()'s initial zone and accessTok -- read directly off the GSL
+// getserverlist.php JSON response's flexString fields, bounded only by the 1MiB whole-response
+// cap, not any per-field limit -- were re-encoded via PutUtfString with no length check at all,
+// unlike loginKey/gameUid/username which got exactly this guard (maxIdentityFieldLen) in round
+// 46. See capOversizedIdentityField's doc comment (login.go) for the full mechanism this closes.
+// Proves an oversized zone/accessTok from the GSL response falls back to "" instead of ever
+// reaching PutUtfString, Login() still succeeds end to end (dialing only needs stateSrv.IP, not
+// zone or the token), and a Warn is logged for each.
+func TestLoginRejectsOversizedInitialZoneAndAccessTok(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	gotZn := make(chan string, 1)
+	addr := startFakeGameServer(t, fakeInitPushServer(gotZn))
+	host, port := splitHostPortInt(t, addr)
+
+	oversizedZone := flexString(strings.Repeat("z", maxIdentityFieldLen+1))
+	oversizedTok := flexString(strings.Repeat("t", maxIdentityFieldLen+1))
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: oversizedZone, GameUid: "uid-1"}},
+		At:         &LoginToken{Token: oversizedTok},
+	})
+	useFakeGSLServer(t, gsl)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{})
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("Login: %v (an oversized zone/accessTok must fall back to \"\", not abort the login)", err)
+	}
+	defer result.Conn.Close()
+
+	select {
+	case zn := <-gotZn:
+		if zn != "" {
+			t.Errorf("Login sent zn=%q, want \"\" (the oversized zone must fall back to empty, not reach PutUtfString)", zn)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server never received a Login request")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "zone exceeds identity field length cap") {
+		t.Errorf("expected a Warn about the oversized zone, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "accessTok exceeds identity field length cap") {
+		t.Errorf("expected a Warn about the oversized accessTok, got:\n%s", logged)
+	}
+}
+
+// TestLoginRedirectOversizedZoneIsWarned is TestLoginRedirectWrongTypedZoneIsWarned's sibling for
+// an oversized (rather than wrong-typed) serverInfo redirect zone field: redirectZone's own
+// capOversizedIdentityField guard (login.go) must reject a well-typed but over-65535-byte zone
+// the identical way it rejects a wrong-typed one -- falling back to "" so the caller's existing
+// `if newZone != "" { zone = newZone }` guard keeps the stale pre-redirect zone instead of ever
+// reaching PutUtfString with an unencodable value. The oversized zone is written directly via
+// SFSObject.put with the sfsText wire tag (mirroring mail_orchestration_test.go's technique for
+// mail.go's uid/lastUid fields) since PutUtfString itself would fail to encode a >65535-byte
+// string.
+func TestLoginRedirectOversizedZoneIsWarned(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	gotSecondZone := make(chan string, 1)
+	newAddr := startFakeGameServer(t, fakeInitPushServer(gotSecondZone))
+	newHost, newPort := splitHostPortInt(t, newAddr)
+
+	oversizedZone := strings.Repeat("z", maxIdentityFieldLen+1)
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		si := NewSFSObject()
+		si.PutUtfString("ip", newHost) // well-typed: the redirect must still be followed
+		si.PutInt("port", int32(newPort))
+		si.put("zone", SFSValue{sfsText, oversizedZone}) // well-typed, but one byte over the wire cap
+		resp := NewSFSObject()
+		resp.PutSFSObject("serverInfo", si)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	oldHost, oldPort := splitHostPortInt(t, oldAddr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{})
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("Login: %v (an oversized zone must not be a fatal error -- the redirect itself still follows on the well-typed ip/port)", err)
+	}
+	defer result.Conn.Close()
+
+	select {
+	case zn := <-gotSecondZone:
+		if zn != "APS1" {
+			t.Errorf("second server saw Login zn=%q, want %q (unchanged/stale -- the oversized zone can't overwrite it)", zn, "APS1")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-redirect fake server never received a Login request")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "zone exceeds identity field length cap") {
+		t.Errorf("expected a Warn about the oversized zone, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "reconnecting to new address") {
+		t.Errorf("expected the serverInfo redirect to still have been followed (ip/port are well-typed, only zone is oversized), but the log shows none was:\n%s", logged)
+	}
+}
+
+// TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized covers the third of the three accessTok
+// call sites the round-47 fix closes (login.go:246 initial assignment, covered by
+// TestLoginRejectsOversizedInitialZoneAndAccessTok above; crossserver.go:267, covered by
+// TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized): the mid-redirect GSL refresh
+// (opt=fix) fetched before following a serverInfo redirect. An oversized refreshed token must fall
+// back to the PREVIOUS access token (capOversizedIdentityField, login.go) instead of ever reaching
+// PutUtfString with a value writeUtfString would hard-reject. newFakeGSLServer's variadic
+// responses let the first (initial) and second (mid-redirect refresh) GetServerList calls answer
+// differently.
+func TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const oldAccessTok = "tok-1"
+	oversizedAccessTok := flexString(strings.Repeat("t", maxIdentityFieldLen+1))
+
+	gotParamsAt := make(chan string, 1)
+	newAddr := startFakeGameServer(t, func(server *GameConn) {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		if pv, ok := env.Content.Get("p"); ok {
+			if pObj, ok := pv.Val.(*SFSObject); ok {
+				gotParamsAt <- pObj.GetString("at")
+			}
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		_ = server.SendExtension("init", NewSFSObject())
+	})
+	newHost, newPort := splitHostPortInt(t, newAddr)
+
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		_ = server.SendEnvelope(controllerSystem, actionLogin, putRedirectServerInfo(newAddr, "APS2"))
+	})
+	oldHost, oldPort := splitHostPortInt(t, oldAddr)
+
+	gsl := newFakeGSLServer(t,
+		LoginServerListRespon{
+			Code:       "0",
+			ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
+			At:         &LoginToken{Token: oldAccessTok},
+		},
+		LoginServerListRespon{
+			Code:       "0",
+			ServerList: []LoginServerInfo{{IP: flexString(newHost), Port: flexPort(newPort), Zone: "APS2", GameUid: "uid-1"}},
+			At:         &LoginToken{Token: oversizedAccessTok},
+		},
+	)
+	useFakeGSLServer(t, gsl)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{})
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("Login: %v (an oversized refreshed accessTok must fall back to the previous token, not fail the login)", err)
+	}
+	defer result.Conn.Close()
+
+	select {
+	case at := <-gotParamsAt:
+		if at != oldAccessTok {
+			t.Errorf("post-redirect Login params.at = %q, want %q (the stale, still-valid access token)", at, oldAccessTok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-redirect fake server never received a Login request")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "accessTok exceeds identity field length cap") {
+		t.Errorf("expected a Warn about the oversized refreshed accessTok, got:\n%s", logged)
+	}
+}
+
 // TestLoginBaseZoneSendFailureIsNonTimeoutNetError is the round-30 regression test for the
 // TESTING-RIGOR finding that login.go's base-zone Login() send (the conn.SendEnvelope call
 // wrapped in sendStageError, conn.go) had zero test coverage -- a coverage profile showed
