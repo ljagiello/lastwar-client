@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rsa"
 	"fmt"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net/http"
@@ -46,7 +47,7 @@ type CrossServerLoginResult struct {
 // String/GoString are the round-48 regression fix for the MINOR finding that
 // CrossServerLoginResult -- which carries AccessTok, a live credential -- had no
 // redaction-by-construction, the same class of gap round 47/48 closed for
-// LoginToken/deviceIdentity/SessionConfig. No current call site logs a *CrossServerLoginResult
+// gsl.LoginToken/deviceIdentity/SessionConfig. No current call site logs a *CrossServerLoginResult
 // directly, so this is defense-in-depth, not an active leak fix.
 func (r CrossServerLoginResult) String() string   { return "[REDACTED CrossServerLoginResult]" }
 func (r CrossServerLoginResult) GoString() string { return r.String() }
@@ -74,9 +75,9 @@ type CrossServerLoginParams struct {
 	IOSMode     bool   // send an iOS-flavored identity instead of Android; see LoginParamsInput.IOSMode
 
 	// HTTPClient/RSAPub/GateHost are OPTIONAL GSL plumbing, needed only to
-	// refresh AccessTok via GetServerList(opt=fix) if a serverInfo redirect
+	// refresh AccessTok via gsl.GetServerList(opt=fix) if a serverInfo redirect
 	// is hit mid-login (see the doc comment on DoCrossServerLogin). Callers
-	// that already have these in scope from their own CheckVersion() call
+	// that already have these in scope from their own gsl.CheckVersion() call
 	// (e.g. main.go's runCrossServerTest) should pass them through; callers
 	// that don't leave them nil/zero and DoCrossServerLogin degrades to
 	// reusing AccessTok unrefreshed across the redial, with a logged
@@ -109,10 +110,10 @@ func (p CrossServerLoginParams) LogValue() slog.Value { return slog.StringValue(
 // inherently blocked -- all previously live-tested and ruled out. Root
 // cause, confirmed by a byte-for-byte replay of a real client's captured
 // Login packet succeeding where our own serialization (same account, same
-// token) failed: `at` is bound to the packageName/platform it was issued
+// token) failed: `at` is bound to the PackageName/Platform it was issued
 // for, and this client always claimed Android while testing tokens that
 // happened to be obtained by a real iOS session. `p.at` must be INCLUDED
-// (a missing/empty token gets ec=28/E011 outright), and the platform
+// (a missing/empty token gets ec=28/E011 outright), and the Platform
 // fields must match whatever identity actually obtained the token
 // (IOSMode) -- see identity.go's BuildLoginParams.
 //
@@ -140,7 +141,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 	// hop of the loop below (zn/un/p.at), but -- unlike loginKey/gameUid/username, which route
 	// through SaveLoginKey/SaveGameUid/SaveUsername and got a maxIdentityFieldLen guard in round
 	// 46 -- nothing previously capped these fields' length here, and every current caller sources
-	// them from an unguarded gsl.go flexString field (main.go's -cs-rt refresh flow) or an
+	// them from an unguarded gsl.go gsl.FlexString field (main.go's -cs-rt refresh flow) or an
 	// unguarded SFS2X serverInfo redirect (see capOversizedIdentityField's doc comment, login.go).
 	// Rejecting synchronously here, before any connection is even dialed, is strictly better than
 	// letting an oversized value fail deep inside SendEnvelope's encode step, where sendStageError
@@ -267,7 +268,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		}
 		slog.Info("login OK")
 
-		siObj := findServerInfo(env.Content)
+		siObj := gsl.FindServerInfo(env.Content)
 		redirectIPVal := ""
 		if siObj != nil {
 			redirectIPVal = redirectIP(siObj, "crossserver.go cross-server Login")
@@ -279,7 +280,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// buildBaseZoneLoginAddr (login.go) guards against an empty resolved host --
 			// same "serverInfo" redirect shape and same gap login.go's Login() had until
 			// round 18: only siObj.GetString("ip") != "" was checked above, which doesn't
-			// catch inputs like "" or "|1.2.3.4" or a bare "|" that firstHost resolves down
+			// catch inputs like "" or "|1.2.3.4" or a bare "|" that gsl.FirstHost resolves down
 			// to an empty host. An unguarded fmt.Sprintf("%s:%d", "", port) wouldn't fail --
 			// Go's "host:port" dial syntax treats an empty host as the loopback interface,
 			// so this would silently redial 127.0.0.1/::1 instead of erroring clearly.
@@ -305,16 +306,16 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// failure right after this redial is immediately diagnosable.
 			if p.HTTPClient != nil && p.RSAPub != nil && p.GateHost != "" {
 				slog.Info("fetching fresh access token before following serverInfo redirect (suspected single-use-per-connection)")
-				freshLsr, err := GetServerList(p.HTTPClient, p.GateHost, p.RSAPub, p.DeviceID, GSLOpt{Opt: "fix"}, "", p.GameUid)
+				freshLsr, err := gsl.GetServerList(p.HTTPClient, p.GateHost, p.RSAPub, p.DeviceID, gsl.GSLOpt{Opt: "fix"}, "", p.GameUid)
 				if err != nil {
 					slog.Error("GSL refresh failed; following redirect with stale access token anyway", "error", err)
 				} else {
 					// Only overwrite on a non-empty refreshed token -- mirrors the gameUid guard
 					// just below (same reasoning, and the identical round-53 fix login.go's
 					// matching redirect path also got): freshLsr.At can be non-nil with an empty
-					// Token (gsl.go's LoginServerListRespon.UnmarshalJSON treats any
+					// Token (gsl.go's gsl.LoginServerListRespon.UnmarshalJSON treats any
 					// JSON-object-shaped "at" field, including "{}" or one with no/empty
-					// "token", as present via looksLikeJSONObject), and an empty token here is
+					// "token", as present via gsl.LooksLikeJSONObject), and an empty token here is
 					// more likely an unpopulated/degraded refresh response than a real
 					// "clear the token" instruction. Clobbering the caller-supplied, already-
 					// working p.AccessTok with "" would break the very redial this refresh

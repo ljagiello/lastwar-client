@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rsa"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"strings"
@@ -29,8 +30,8 @@ func TestCredentialTypesLogValueProtectsJSONHandler(t *testing.T) {
 		{"SessionConfig", SessionConfig{AccessToken: marker}, "[REDACTED SessionConfig]"},
 		{"CrossServerLoginResult", CrossServerLoginResult{AccessTok: marker}, "[REDACTED CrossServerLoginResult]"},
 		{"CrossServerLoginParams", CrossServerLoginParams{AccessTok: marker}, "[REDACTED CrossServerLoginParams]"},
-		{"LoginToken", LoginToken{Token: marker}, "[REDACTED LoginToken]"},
-		{"GSLOpt", GSLOpt{LoginKey: marker}, "[REDACTED GSLOpt]"},
+		{"LoginToken", gsl.LoginToken{Token: marker}, "[REDACTED LoginToken]"},
+		{"GSLOpt", gsl.GSLOpt{LoginKey: marker}, "[REDACTED GSLOpt]"},
 		{"deviceIdentity", deviceIdentity{LoginKey: marker}, "[REDACTED deviceIdentity]"},
 		{"LoginParamsInput", LoginParamsInput{AccessTok: marker}, "[REDACTED LoginParamsInput]"},
 		{"LoginOptions", LoginOptions{Email: marker}, "[REDACTED LoginOptions]"},

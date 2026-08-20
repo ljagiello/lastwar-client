@@ -1,4 +1,4 @@
-package main
+package gsl
 
 import (
 	"net/url"

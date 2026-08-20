@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
@@ -86,10 +87,10 @@ func splitHostPortInt(t *testing.T, addr string) (string, int) {
 	return host, port
 }
 
-// flexPort converts a plain int port into gsl.go's flexString shape, for building test
-// LoginServerInfo/AccountServerInfo fixtures now that Port/WsPort are flexString (round 35 --
-// see flexString.Int's own doc comment in gsl.go for why).
-func flexPort(n int) flexString { return flexString(strconv.Itoa(n)) }
+// flexPort converts a plain int port into gsl.go's gsl.FlexString shape, for building test
+// gsl.LoginServerInfo/gsl.AccountServerInfo fixtures now that Port/WsPort are gsl.FlexString (round 35 --
+// see gsl.FlexString.Int's own doc comment in gsl.go for why).
+func flexPort(n int) gsl.FlexString { return gsl.FlexString(strconv.Itoa(n)) }
 
 // putRedirectServerInfo builds a system Login response carrying a `serverInfo` redirect to addr
 // (best-effort host/port parsing -- called from background handler goroutines, so it can't use
@@ -110,7 +111,7 @@ func putRedirectServerInfo(addr, zone string) *sfs.SFSObject {
 // TestCrossServerLoginStructsStringGoStringRedact is the round-48 regression test for the MINOR
 // finding that CrossServerLoginParams/CrossServerLoginResult -- which carry AccessTok, a live
 // credential -- had no String()/GoString() redaction, the same class of gap round 47/48 closed for
-// LoginToken/deviceIdentity/SessionConfig.
+// gsl.LoginToken/deviceIdentity/SessionConfig.
 func TestCrossServerLoginStructsStringGoStringRedact(t *testing.T) {
 	const liveToken = "FAKE-LIVE-ACCESS-TOKEN-must-not-leak-qrs456"
 
@@ -617,9 +618,9 @@ func TestDoCrossServerLoginExactlyMaxRedirectsSucceeds(t *testing.T) {
 
 // TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP is the round-18 regression test for
 // DoCrossServerLogin's serverInfo redirect branch: it built the redialed address via a raw
-// fmt.Sprintf("%s:%d", firstHost(siObj.GetString("ip")), ...) guarded only by
-// siObj.GetString("ip") != "" -- the RAW string, not firstHost's resolved result. A pipe-malformed
-// ip like "|1.2.3.4" is non-empty raw but firstHost resolves it down to "", so the old code built a
+// fmt.Sprintf("%s:%d", gsl.FirstHost(siObj.GetString("ip")), ...) guarded only by
+// siObj.GetString("ip") != "" -- the RAW string, not gsl.FirstHost's resolved result. A pipe-malformed
+// ip like "|1.2.3.4" is non-empty raw but gsl.FirstHost resolves it down to "", so the old code built a
 // ":<port>"-shaped address, which Go's "host:port" dial syntax silently treats as the loopback
 // interface instead of failing clearly. Mirrors login.go's own TestLoginRedirectRejectsEmptyRedirectIP
 // for the same bug on Login()'s side (conn_wait_test.go); this fix routes DoCrossServerLogin's
@@ -630,7 +631,7 @@ func TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 			return
 		}
 		si := sfs.NewSFSObject()
-		si.PutUtfString("ip", "|1.2.3.4") // firstHost("|1.2.3.4") == "" -- the malformed case
+		si.PutUtfString("ip", "|1.2.3.4") // gsl.FirstHost("|1.2.3.4") == "" -- the malformed case
 		si.PutInt("port", 9339)
 		si.PutUtfString("zone", "APS2")
 		resp := sfs.NewSFSObject()
@@ -729,17 +730,17 @@ func TestDoCrossServerLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
 
 // TestDoCrossServerLoginRejectsEmptyInitialIP is the round-24 regression test for
 // DoCrossServerLogin's INITIAL dial address: it used to build addr via a raw
-// fmt.Sprintf("%s:%d", firstHost(p.IP), p.Port) with no validation at all -- unlike this same
+// fmt.Sprintf("%s:%d", gsl.FirstHost(p.IP), p.Port) with no validation at all -- unlike this same
 // function's own redirect branch (TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP above) and
 // both of login.go's Login() call sites, all three of which route through buildBaseZoneLoginAddr
 // and reject an empty resolved host with a clear error. A pipe-malformed ip like "|1.2.3.4" is
-// non-empty raw but firstHost resolves it down to "", so the old code built a ":<port>"-shaped
+// non-empty raw but gsl.FirstHost resolves it down to "", so the old code built a ":<port>"-shaped
 // address, which Go's "host:port" dial syntax silently treats as the loopback interface instead of
 // failing clearly. No fake game server is needed here -- the fix must reject this before ever
 // attempting to dial one.
 func TestDoCrossServerLoginRejectsEmptyInitialIP(t *testing.T) {
 	p := CrossServerLoginParams{
-		IP:        "|1.2.3.4", // firstHost("|1.2.3.4") == "" -- the malformed case
+		IP:        "|1.2.3.4", // gsl.FirstHost("|1.2.3.4") == "" -- the malformed case
 		Port:      9339,
 		Zone:      "APS1",
 		GameUid:   "uid-1",
@@ -791,7 +792,7 @@ func TestDoCrossServerLoginRejectsNonPositiveInitialPort(t *testing.T) {
 // the MAJOR finding that p.Zone/p.GameUid/p.AccessTok -- re-encoded verbatim via PutUtfString on
 // every hop of DoCrossServerLogin's loop (zn/un/p.at) -- had no length check at all, unlike
 // loginKey/gameUid/username which got exactly this guard (maxIdentityFieldLen) in round 46. Every
-// current caller sources these from an unguarded gsl.go flexString field or an unguarded SFS2X
+// current caller sources these from an unguarded gsl.go gsl.FlexString field or an unguarded SFS2X
 // serverInfo redirect (see capOversizedIdentityField's doc comment, login.go), so validating
 // synchronously here -- before any connection is even dialed -- closes the gap for every caller in
 // one place. Mirrors TestDoCrossServerLoginRejectsEmptyInitialIP/
@@ -893,15 +894,15 @@ func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
 	const newGameUid = "uid-new"
 	const newAccessTok = "tok-fresh"
 
-	// Fake GSL HTTP server: same plaintext-response fallback GetServerList already supports
+	// Fake GSL HTTP server: same plaintext-response fallback gsl.GetServerList already supports
 	// (see gsl_http_test.go's TestGetServerListAgainstFakeServer) -- returns a fresh access
 	// token plus a serverList entry carrying an updated gameUid, simulating an account that
 	// moved to a new gameUid as part of the same migration that triggered the redirect below.
 	gslServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := LoginServerListRespon{
+		resp := gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{GameUid: newGameUid}},
-			At:         &LoginToken{Token: newAccessTok},
+			ServerList: []gsl.LoginServerInfo{{GameUid: newGameUid}},
+			At:         &gsl.LoginToken{Token: newAccessTok},
 		}
 		json.NewEncoder(w).Encode(resp)
 	}))
@@ -946,7 +947,7 @@ func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
 		DeviceID:   "dev-1",
 		AirKey:     "airkey-1",
 		AccessTok:  "tok-1",
-		HTTPClient: defaultHTTPClient(),
+		HTTPClient: gsl.DefaultHTTPClient(),
 		RSAPub:     &priv.PublicKey,
 		GateHost:   gslServer.URL,
 	}
@@ -992,13 +993,13 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing
 	const oldGameUid = "uid-old"
 	const oldAccessTok = "tok-1"
 	oversizedGameUid := strings.Repeat("g", maxIdentityFieldLen+1)
-	oversizedAccessTok := flexString(strings.Repeat("t", maxIdentityFieldLen+1))
+	oversizedAccessTok := gsl.FlexString(strings.Repeat("t", maxIdentityFieldLen+1))
 
 	gslServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := LoginServerListRespon{
+		resp := gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{GameUid: flexString(oversizedGameUid)}},
-			At:         &LoginToken{Token: oversizedAccessTok},
+			ServerList: []gsl.LoginServerInfo{{GameUid: gsl.FlexString(oversizedGameUid)}},
+			At:         &gsl.LoginToken{Token: oversizedAccessTok},
 		}
 		json.NewEncoder(w).Encode(resp)
 	}))
@@ -1047,7 +1048,7 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing
 		DeviceID:   "dev-1",
 		AirKey:     "airkey-1",
 		AccessTok:  oldAccessTok,
-		HTTPClient: defaultHTTPClient(),
+		HTTPClient: gsl.DefaultHTTPClient(),
 		RSAPub:     &priv.PublicKey,
 		GateHost:   gslServer.URL,
 	}
@@ -1097,18 +1098,18 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing
 // for the MAJOR finding that DoCrossServerLogin's mid-redirect GSL refresh had the exact same
 // unguarded p.AccessTok = capOversizedIdentityField(...) overwrite as login.go's matching redirect
 // path, while its own adjacent gameUid reassignment was already correctly guarded against exactly
-// this shape. gsl.go's LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at"
-// field as present via looksLikeJSONObject, including "{}" or one with no/empty "token" -- a
+// this shape. gsl.go's gsl.LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at"
+// field as present via gsl.LooksLikeJSONObject, including "{}" or one with no/empty "token" -- a
 // plausible shape for a degraded or rejected opt=fix refresh response. Mirrors
 // TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized's technique, substituting an
-// empty-token LoginToken for the mid-redirect refresh response instead of an oversized one.
+// empty-token gsl.LoginToken for the mid-redirect refresh response instead of an oversized one.
 func TestDoCrossServerLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.T) {
 	const oldAccessTok = "tok-1-good"
 
 	gslServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := LoginServerListRespon{
+		resp := gsl.LoginServerListRespon{
 			Code: "0",
-			At:   &LoginToken{Token: ""}, // present but empty -- the shape under test
+			At:   &gsl.LoginToken{Token: ""}, // present but empty -- the shape under test
 		}
 		json.NewEncoder(w).Encode(resp)
 	}))
@@ -1155,7 +1156,7 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.
 		DeviceID:   "dev-1",
 		AirKey:     "airkey-1",
 		AccessTok:  oldAccessTok,
-		HTTPClient: defaultHTTPClient(),
+		HTTPClient: gsl.DefaultHTTPClient(),
 		RSAPub:     &priv.PublicKey,
 		GateHost:   gslServer.URL,
 	}

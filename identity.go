@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"math/big"
@@ -19,7 +20,7 @@ import (
 )
 
 // packageSignHex reproduces SDKManager.GetPackageSign() exactly:
-// SHA1(packageName), lowercase hex, no separators. (Confirmed from
+// SHA1(PackageName), lowercase hex, no separators. (Confirmed from
 // decompiled/Assembly-CSharp.decompiled.cs:93244 -- it hashes the package
 // NAME string, not the certificate, despite the field's name.) Confirmed
 // live for the iOS package too: SHA1("com.lastwar.ios") reproduces exactly
@@ -126,7 +127,7 @@ type deviceIdentity struct {
 // String/GoString are the round-48 regression fix for the MAJOR finding that deviceIdentity --
 // which carries LoginKey, the single most sensitive credential in this client (alone sufficient to
 // re-authenticate the account via opt=login, per this file's own doc comments) -- had no
-// redaction-by-construction the way gsl.go's LoginToken got in round 47 for the identical class of
+// redaction-by-construction the way gsl.go's gsl.LoginToken got in round 47 for the identical class of
 // risk. Login() keeps a live *deviceIdentity in scope for its entire multi-hundred-line body and
 // hands it out further via LoginResult.Ident to every caller; every CURRENT call site already
 // extracts and wraps LoginKey in sfs.Redact() before logging, so this is defense-in-depth for whatever
@@ -134,11 +135,11 @@ type deviceIdentity struct {
 // "ident", ident) or fmt.Errorf("state: %+v", result) would otherwise fall through to Go's default
 // reflection-based struct formatter and print LoginKey/GameUid/Username in clear text. Value
 // receiver (not pointer) so both deviceIdentity and *deviceIdentity -- the type used throughout
-// this codebase -- satisfy fmt.Stringer, mirroring LoginToken's identical choice.
+// this codebase -- satisfy fmt.Stringer, mirroring gsl.LoginToken's identical choice.
 func (d deviceIdentity) String() string   { return "[REDACTED deviceIdentity]" }
 func (d deviceIdentity) GoString() string { return d.String() }
 
-// LogValue makes deviceIdentity satisfy slog.LogValuer -- see gsl.go's LoginToken.LogValue for the
+// LogValue makes deviceIdentity satisfy slog.LogValuer -- see gsl.go's gsl.LoginToken.LogValue for the
 // full round-53 rationale. Value receiver, same reasoning as String()/GoString() above.
 func (d deviceIdentity) LogValue() slog.Value { return slog.StringValue(d.String()) }
 
@@ -479,19 +480,19 @@ type LoginParamsInput struct {
 	ServerID    string // zone minus "APS" prefix
 	ShumeiBoxId string // anti-fraud device-fingerprint token, if a real one is known
 
-	// IOSMode switches packageName/packageSign/platform/pf (and adds the
+	// IOSMode switches PackageName/packageSign/Platform/pf (and adds the
 	// iOS-only idfa/idfv/phone_native_screen fields) to match a real iOS
 	// client instead of the default Android identity. Confirmed live: an
-	// `at` access token is bound to the packageName/platform it was issued
-	// for -- reusing a token obtained under one platform's identity while
-	// claiming a different platform/package gets ec=28/E005, even though
+	// `at` access token is bound to the PackageName/Platform it was issued
+	// for -- reusing a token obtained under one Platform's identity while
+	// claiming a different Platform/package gets ec=28/E005, even though
 	// the token itself, un, and every other field are valid and accepted.
 	IOSMode bool
 }
 
 // String/GoString are the round-48 regression fix for the MINOR finding that LoginParamsInput --
 // which carries AccessTok/GameUid, live credentials -- had no redaction-by-construction, the same
-// class of gap round 47/48 closed for LoginToken/deviceIdentity/SessionConfig. Every current call
+// class of gap round 47/48 closed for gsl.LoginToken/deviceIdentity/SessionConfig. Every current call
 // site (login.go/crossserver.go) constructs and immediately passes this struct into
 // BuildLoginParams without logging it directly, so this is defense-in-depth, not an active leak
 // fix -- rated minor rather than major since LoginParamsInput is short-lived (constructed and
@@ -500,7 +501,7 @@ type LoginParamsInput struct {
 func (in LoginParamsInput) String() string   { return "[REDACTED LoginParamsInput]" }
 func (in LoginParamsInput) GoString() string { return in.String() }
 
-// LogValue makes LoginParamsInput satisfy slog.LogValuer -- see gsl.go's LoginToken.LogValue for
+// LogValue makes LoginParamsInput satisfy slog.LogValuer -- see gsl.go's gsl.LoginToken.LogValue for
 // the full round-53 rationale.
 func (in LoginParamsInput) LogValue() slog.Value { return slog.StringValue(in.String()) }
 
@@ -560,17 +561,17 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p := sfs.NewSFSObject()
 	p.PutInt("_id", in.FutureID)
 	p.PutInt("netType", 2) // 2 = wifi, matches the common case
-	effectiveAppVersion, effectiveVersionCode := appVersion, versionCode
+	effectiveAppVersion, effectiveVersionCode := gsl.AppVersion, gsl.VersionCode
 	if in.IOSMode {
 		// A GSL-issued `at` access token is bound to the exact
-		// appVersion/versionCode it was obtained under, same as
-		// packageName/platform above -- confirmed live: our hardcoded
+		// AppVersion/VersionCode it was obtained under, same as
+		// PackageName/Platform above -- confirmed live: our hardcoded
 		// Android 1.0.351/1835 build numbers, sent alongside a real
 		// captured iOS token issued to 1.0.344/786, still got ec=28/E005
-		// even after packageName/platform/pf matched. These iOS values
+		// even after PackageName/Platform/pf matched. These iOS values
 		// are what that capture actually showed; there is no known way
 		// to derive them generically the way packageSign derives from
-		// packageName, so a fresh capture is needed if the real client's
+		// PackageName, so a fresh capture is needed if the real client's
 		// build ever moves on.
 		effectiveAppVersion, effectiveVersionCode = "1.0.344", "786"
 	}
@@ -579,7 +580,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		// DIAGNOSTIC ONLY: reproduces the field structure/format of the ta analytics blob a
 		// real captured iOS login sends, to isolate whether the server validates fields inside
 		// it (lw_zone/lw_device_id/lw_shumei_id echoing the top-level request) as part of the
-		// same token-binding check already confirmed for packageName/appVersion/versionCode.
+		// same token-binding check already confirmed for PackageName/AppVersion/VersionCode.
 		//
 		// LwDeviceID/LwShumeiID/LwAirKey were originally set from the same in.DeviceID/
 		// in.ShumeiBoxId/in.AirKey values used for the top-level request fields elsewhere in
@@ -636,16 +637,16 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		p.PutUtfString("AndroidID", "")
 		p.PutUtfString("IMEI", "")
 	}
-	// Deliberately NOT gated on in.IOSMode, unlike every other platform-specific field in this
+	// Deliberately NOT gated on in.IOSMode, unlike every other Platform-specific field in this
 	// function. pshField always hashes cmdBaseTime against apkCertHex -- the Android APK
 	// (com.fun.lastwar.gp)'s own signing certificate DER bytes -- so under IOSMode this sends an
 	// Android-derived psh alongside an otherwise fully iOS-flavored identity. That's a real,
-	// known internal inconsistency, not an overlooked branch: unlike packageName/platform/pf/
-	// appVersion/versionCode/idfa/idfv/phone_native_screen above (all confirmed live from a real
+	// known internal inconsistency, not an overlooked branch: unlike PackageName/Platform/pf/
+	// AppVersion/VersionCode/idfa/idfv/phone_native_screen above (all confirmed live from a real
 	// captured iOS session, see docs/live-validation.mdx), there is no live iOS capture of this
 	// field to isolate what a genuine iOS client actually sends for it, and per this project's
 	// standing convention (docs/AGENTS.md) an unconfirmed formula must not be guessed at just to
-	// look more platform-consistent. Left Android-derived on purpose until a fresh iOS capture
+	// look more Platform-consistent. Left Android-derived on purpose until a fresh iOS capture
 	// settles it -- this is an open question, not a proven-working alternative, the same way
 	// `ta`'s exact minimal iOS content is flagged as open in docs/live-validation.mdx.
 	p.PutUtfString("psh", pshField(cmdBaseTime))
@@ -675,7 +676,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// whether it alone matters, but omitting the key entirely is now
 	// known to differ from every real login this server has ever seen.
 	p.PutUtfString("dataConfigMd5", "")
-	effectivePackageName := packageName
+	effectivePackageName := gsl.PackageName
 	platformCode := "1"   // Android
 	pf := "market_global" // Android storefront
 	if in.IOSMode {

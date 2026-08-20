@@ -1,4 +1,4 @@
-package main
+package gsl
 
 import (
 	"bytes"
@@ -24,16 +24,16 @@ import (
 func TestCheckVersionAgainstFakeServer(t *testing.T) {
 	pub := testRSAPubKeyDER(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := CheckVersionResponse{ResMsg: flexString(pub)}
+		resp := CheckVersionResponse{ResMsg: FlexString(pub)}
 		json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
-	origHosts := checkVersionHosts
-	checkVersionHosts = []string{server.URL}
-	defer func() { checkVersionHosts = origHosts }()
+	origHosts := CheckVersionHosts
+	CheckVersionHosts = []string{server.URL}
+	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, host, err := CheckVersion(defaultHTTPClient())
+	cv, host, err := CheckVersion(DefaultHTTPClient())
 	if err != nil {
 		t.Fatalf("CheckVersion: %v", err)
 	}
@@ -47,8 +47,8 @@ func TestCheckVersionAgainstFakeServer(t *testing.T) {
 
 // TestCheckVersionResponseFieldsAcceptStringOrNumber is the round-41 regression test for the MAJOR
 // finding that CheckVersionResponse.Msg/DownloadURL/ResMsg/HotUpdateMsg were still bare `string`
-// fields while their siblings Code/UpdateType were already flexString -- a wrong-typed value on
-// ANY field in this struct fails json.Unmarshal for the WHOLE response (flexString's own doc
+// fields while their siblings Code/UpdateType were already FlexString -- a wrong-typed value on
+// ANY field in this struct fails json.Unmarshal for the WHOLE response (FlexString's own doc
 // comment documents live evidence of exactly this endpoint sending a bare-string-typed field,
 // code, as a JSON number instead). Sends msg/downloadurl/hotUpdateMsg as bare JSON numbers
 // alongside a valid string-typed resMsg (the one field genuinely read, by crypto.ParseRSAPubKeyFromDER)
@@ -60,11 +60,11 @@ func TestCheckVersionResponseFieldsAcceptStringOrNumber(t *testing.T) {
 	}))
 	defer server.Close()
 
-	origHosts := checkVersionHosts
-	checkVersionHosts = []string{server.URL}
-	defer func() { checkVersionHosts = origHosts }()
+	origHosts := CheckVersionHosts
+	CheckVersionHosts = []string{server.URL}
+	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, _, err := CheckVersion(defaultHTTPClient())
+	cv, _, err := CheckVersion(DefaultHTTPClient())
 	if err != nil {
 		t.Fatalf("CheckVersion: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestCheckVersionResponseFieldsAcceptStringOrNumber(t *testing.T) {
 }
 
 // TestCheckVersionFallsBackToNextHostOnConnectionFailure is the round-41 regression test for the
-// MINOR finding that every existing CheckVersion test overrides checkVersionHosts to a single-URL
+// MINOR finding that every existing CheckVersion test overrides CheckVersionHosts to a single-URL
 // slice, so the multi-host fallback loop's continue branches (http.NewRequest error, httpClient.Do
 // network error, io.ReadAll error) were never exercised with more than one host -- confirmed via
 // mutation testing: short-circuiting the httpClient.Do-error branch from `continue` to an early
@@ -95,16 +95,16 @@ func TestCheckVersionResponseFieldsAcceptStringOrNumber(t *testing.T) {
 func TestCheckVersionFallsBackToNextHostOnConnectionFailure(t *testing.T) {
 	pub := testRSAPubKeyDER(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := CheckVersionResponse{ResMsg: flexString(pub)}
+		resp := CheckVersionResponse{ResMsg: FlexString(pub)}
 		json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
 
-	origHosts := checkVersionHosts
-	checkVersionHosts = []string{"http://127.0.0.1:1", server.URL}
-	defer func() { checkVersionHosts = origHosts }()
+	origHosts := CheckVersionHosts
+	CheckVersionHosts = []string{"http://127.0.0.1:1", server.URL}
+	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, host, err := CheckVersion(defaultHTTPClient())
+	cv, host, err := CheckVersion(DefaultHTTPClient())
 	if err != nil {
 		t.Fatalf("CheckVersion: %v, want it to fall back to the second, working host", err)
 	}
@@ -132,19 +132,19 @@ func TestCheckVersionLogsEachHostFailureBeforeFallingBackToNext(t *testing.T) {
 
 	pub := testRSAPubKeyDER(t)
 	goodServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := CheckVersionResponse{ResMsg: flexString(pub)}
+		resp := CheckVersionResponse{ResMsg: FlexString(pub)}
 		json.NewEncoder(w).Encode(resp)
 	}))
 	defer goodServer.Close()
 
-	origHosts := checkVersionHosts
-	checkVersionHosts = []string{badServer.URL, goodServer.URL}
-	defer func() { checkVersionHosts = origHosts }()
+	origHosts := CheckVersionHosts
+	CheckVersionHosts = []string{badServer.URL, goodServer.URL}
+	defer func() { CheckVersionHosts = origHosts }()
 
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	cv, host, err := CheckVersion(defaultHTTPClient())
+	cv, host, err := CheckVersion(DefaultHTTPClient())
 	slog.SetDefault(orig)
 
 	if err != nil {
@@ -177,11 +177,11 @@ func TestCheckVersionRejectsServerErrorCode(t *testing.T) {
 	}))
 	defer server.Close()
 
-	origHosts := checkVersionHosts
-	checkVersionHosts = []string{server.URL}
-	defer func() { checkVersionHosts = origHosts }()
+	origHosts := CheckVersionHosts
+	CheckVersionHosts = []string{server.URL}
+	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, _, err := CheckVersion(defaultHTTPClient())
+	cv, _, err := CheckVersion(DefaultHTTPClient())
 	if err == nil {
 		t.Fatalf("CheckVersion: expected an error for a non-empty rejection code, got nil (cv=%+v)", cv)
 	}
@@ -193,20 +193,20 @@ func TestCheckVersionRejectsServerErrorCode(t *testing.T) {
 	}
 }
 
-// TestCheckVersionRejectsOversizedResponse exercises maxGSLResponseSize's rejection branch: a
+// TestCheckVersionRejectsOversizedResponse exercises MaxGSLResponseSize's rejection branch: a
 // fake server that writes a body over the limit must produce the size-limit error, not silently
 // read the whole thing (or worse, an unbounded amount) into memory.
 func TestCheckVersionRejectsOversizedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(bytes.Repeat([]byte("a"), maxGSLResponseSize+1))
+		w.Write(bytes.Repeat([]byte("a"), MaxGSLResponseSize+1))
 	}))
 	defer server.Close()
 
-	origHosts := checkVersionHosts
-	checkVersionHosts = []string{server.URL}
-	defer func() { checkVersionHosts = origHosts }()
+	origHosts := CheckVersionHosts
+	CheckVersionHosts = []string{server.URL}
+	defer func() { CheckVersionHosts = origHosts }()
 
-	_, _, err := CheckVersion(defaultHTTPClient())
+	_, _, err := CheckVersion(DefaultHTTPClient())
 	if err == nil {
 		t.Fatal("CheckVersion: expected an error for an oversized response, got nil")
 	}
@@ -216,21 +216,21 @@ func TestCheckVersionRejectsOversizedResponse(t *testing.T) {
 }
 
 // TestCheckVersionAcceptsExactlyMaxSizeResponse is the round-43 regression test for the MINOR
-// finding that maxGSLResponseSize's strict greater-than boundary (len(body) > maxGSLResponseSize,
+// finding that MaxGSLResponseSize's strict greater-than boundary (len(body) > MaxGSLResponseSize,
 // gsl.go) was only tested on the rejection side (TestCheckVersionRejectsOversizedResponse above,
-// maxGSLResponseSize+1 bytes) -- no test proved a response of EXACTLY maxGSLResponseSize bytes is
+// MaxGSLResponseSize+1 bytes) -- no test proved a response of EXACTLY MaxGSLResponseSize bytes is
 // accepted by the size gate, which would catch an off-by-one `>=` mutation that rejected the
 // boundary value itself. Builds a real, minimal, successfully-decodable CheckVersionResponse
-// padded via its own resMsg field to land at exactly maxGSLResponseSize bytes, so a passing test
+// padded via its own resMsg field to land at exactly MaxGSLResponseSize bytes, so a passing test
 // proves the size gate accepted it AND the response still decoded correctly -- not just that some
 // later, unrelated failure happened to also return a non-"byte limit" error.
 func TestCheckVersionAcceptsExactlyMaxSizeResponse(t *testing.T) {
 	const prefix = `{"code":"","resMsg":"`
 	const suffix = `"}`
-	padLen := maxGSLResponseSize - len(prefix) - len(suffix)
+	padLen := MaxGSLResponseSize - len(prefix) - len(suffix)
 	body := prefix + strings.Repeat("a", padLen) + suffix
-	if len(body) != maxGSLResponseSize {
-		t.Fatalf("constructed test body is %d bytes, want exactly %d", len(body), maxGSLResponseSize)
+	if len(body) != MaxGSLResponseSize {
+		t.Fatalf("constructed test body is %d bytes, want exactly %d", len(body), MaxGSLResponseSize)
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -238,13 +238,13 @@ func TestCheckVersionAcceptsExactlyMaxSizeResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	origHosts := checkVersionHosts
-	checkVersionHosts = []string{server.URL}
-	defer func() { checkVersionHosts = origHosts }()
+	origHosts := CheckVersionHosts
+	CheckVersionHosts = []string{server.URL}
+	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, host, err := CheckVersion(defaultHTTPClient())
+	cv, host, err := CheckVersion(DefaultHTTPClient())
 	if err != nil {
-		t.Fatalf("CheckVersion() error = %v, want nil for a response body of exactly maxGSLResponseSize bytes (the boundary value, not over the cap)", err)
+		t.Fatalf("CheckVersion() error = %v, want nil for a response body of exactly MaxGSLResponseSize bytes (the boundary value, not over the cap)", err)
 	}
 	if host != server.URL {
 		t.Errorf("host = %q, want %q", host, server.URL)
@@ -267,11 +267,11 @@ func TestCheckVersionRejectsNon200Status(t *testing.T) {
 	}))
 	defer server.Close()
 
-	origHosts := checkVersionHosts
-	checkVersionHosts = []string{server.URL}
-	defer func() { checkVersionHosts = origHosts }()
+	origHosts := CheckVersionHosts
+	CheckVersionHosts = []string{server.URL}
+	defer func() { CheckVersionHosts = origHosts }()
 
-	_, _, err := CheckVersion(defaultHTTPClient())
+	_, _, err := CheckVersion(DefaultHTTPClient())
 	if err == nil {
 		t.Fatal("CheckVersion: expected an error for a non-200 HTTP status, got nil")
 	}
@@ -294,11 +294,11 @@ func TestCheckVersionRejectsMalformedJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	origHosts := checkVersionHosts
-	checkVersionHosts = []string{server.URL}
-	defer func() { checkVersionHosts = origHosts }()
+	origHosts := CheckVersionHosts
+	CheckVersionHosts = []string{server.URL}
+	defer func() { CheckVersionHosts = origHosts }()
 
-	_, _, err := CheckVersion(defaultHTTPClient())
+	_, _, err := CheckVersion(DefaultHTTPClient())
 	if err == nil {
 		t.Fatal("CheckVersion: expected an error for a malformed JSON body, got nil")
 	}
@@ -327,7 +327,7 @@ func TestGetServerListAgainstFakeServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 	if err != nil {
 		t.Fatalf("GetServerList: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestGetServerListAgainstFakeServer(t *testing.T) {
 // TestGetServerListSuccessfulEncryptedRoundTrip is the round-51 regression test for the MAJOR
 // finding that GetServerList's actual production code path -- a "bin" field present, non-empty,
 // and successfully AES-decrypted and JSON-decoded -- had zero test coverage (gsl.go's
-// "applyLoginServerFallback(&lsr, opt); return &lsr, nil" success return, reached only from inside
+// "ApplyLoginServerFallback(&lsr, opt); return &lsr, nil" success return, reached only from inside
 // the bin-present-and-decodable branch). TestGetServerListAgainstFakeServer above deliberately
 // tests the PLAINTEXT-fallback path (no "bin" field at all); every "bin"-field test in
 // TestGetServerListDecodeFailuresDoNotLeakRawResponse below deliberately injects a decode/decrypt
@@ -392,7 +392,7 @@ func TestGetServerListSuccessfulEncryptedRoundTrip(t *testing.T) {
 	}))
 	defer server.Close()
 
-	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 	if err != nil {
 		t.Fatalf("GetServerList: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestGetServerListSuccessfulEncryptedRoundTrip(t *testing.T) {
 }
 
 // TestGetServerListFallsBackToLoginServerWhenServerListEmpty covers the opt=new fallback added to
-// applyLoginServerFallback (gsl.go): a fake GSL server returns an empty ServerList but a populated
+// ApplyLoginServerFallback (gsl.go): a fake GSL server returns an empty ServerList but a populated
 // LoginServer -- the field AccountServerInfo's own doc comment says exists specifically for a
 // brand-new device with no account/state yet (opt=new). Before this fallback, login.go's caller
 // unconditionally treated an empty ServerList as "no servers returned" for every opt, including
@@ -435,7 +435,7 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 	}))
 	defer server.Close()
 
-	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 	if err != nil {
 		t.Fatalf("GetServerList: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 	}))
 	defer server2.Close()
 
-	lsrFix, err := GetServerList(defaultHTTPClient(), server2.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "fix"}, "", "")
+	lsrFix, err := GetServerList(DefaultHTTPClient(), server2.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "fix"}, "", "")
 	if err != nil {
 		t.Fatalf("GetServerList: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 // ENTIRE GetServerList response. Sends a response with loginServer/at/rt all as `[]` instead of
 // `{}`/absent, and confirms GetServerList still succeeds, with ServerList/Code/LastLoggedServer
 // intact and LoginServer/At/Rt all nil -- the same "absent" behavior every consumer already
-// expects (applyLoginServerFallback's `lsr.LoginServer == nil` check, login.go's/crossserver.go's/
+// expects (ApplyLoginServerFallback's `lsr.LoginServer == nil` check, login.go's/crossserver.go's/
 // main.go's `lsr.At != nil` checks).
 func TestGetServerListLoginServerAtRtAcceptEmptyArrayShape(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -493,7 +493,7 @@ func TestGetServerListLoginServerAtRtAcceptEmptyArrayShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 	if err != nil {
 		t.Fatalf("GetServerList() error = %v, want the malformed loginServer/at/rt shape to degrade gracefully, not fail the whole response", err)
 	}
@@ -522,7 +522,7 @@ func TestGetServerListLoginServerAtRtAcceptEmptyArrayShape(t *testing.T) {
 // json.Unmarshal for the ENTIRE GetServerList response with no recovery path anywhere (Login()
 // returns the error immediately). Sends a response with serverList as `{}` instead of `[]`/absent,
 // and confirms GetServerList still succeeds, with ServerList degrading to empty (the same "no
-// servers returned" case Login()'s own len(lsr.ServerList)==0 check and applyLoginServerFallback's
+// servers returned" case Login()'s own len(lsr.ServerList)==0 check and ApplyLoginServerFallback's
 // opt=new synthesis already handle) and Code/LastLoggedServer still intact.
 func TestGetServerListServerListAcceptsObjectShape(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -535,7 +535,7 @@ func TestGetServerListServerListAcceptsObjectShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 	if err != nil {
 		t.Fatalf("GetServerList() error = %v, want the malformed object-shaped serverList to degrade gracefully, not fail the whole response", err)
 	}
@@ -550,7 +550,7 @@ func TestGetServerListServerListAcceptsObjectShape(t *testing.T) {
 	}
 }
 
-// TestGetServerListRejectsOversizedResponse exercises maxGSLResponseSize's rejection branch on
+// TestGetServerListRejectsOversizedResponse exercises MaxGSLResponseSize's rejection branch on
 // the GetServerList side (its own io.ReadAll/LimitReader call site, separate from CheckVersion's).
 func TestGetServerListRejectsOversizedResponse(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -559,11 +559,11 @@ func TestGetServerListRejectsOversizedResponse(t *testing.T) {
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(bytes.Repeat([]byte("a"), maxGSLResponseSize+1))
+		w.Write(bytes.Repeat([]byte("a"), MaxGSLResponseSize+1))
 	}))
 	defer server.Close()
 
-	_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	_, err = GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 	if err == nil {
 		t.Fatal("GetServerList: expected an error for an oversized response, got nil")
 	}
@@ -575,9 +575,9 @@ func TestGetServerListRejectsOversizedResponse(t *testing.T) {
 // TestGetServerListAcceptsExactlyMaxSizeResponse is
 // TestCheckVersionAcceptsExactlyMaxSizeResponse's sibling for GetServerList's own
 // io.ReadAll/LimitReader call site -- round-43 regression test for the MINOR finding that
-// maxGSLResponseSize's strict greater-than boundary was only tested on the rejection side here
+// MaxGSLResponseSize's strict greater-than boundary was only tested on the rejection side here
 // too. Builds a real, minimal, plaintext (no "bin" field) LoginServerListRespon padded via its own
-// lastLoggedServer field to land at exactly maxGSLResponseSize bytes.
+// lastLoggedServer field to land at exactly MaxGSLResponseSize bytes.
 func TestGetServerListAcceptsExactlyMaxSizeResponse(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -586,10 +586,10 @@ func TestGetServerListAcceptsExactlyMaxSizeResponse(t *testing.T) {
 
 	const prefix = `{"code":"0","serverList":[],"lastLoggedServer":"`
 	const suffix = `"}`
-	padLen := maxGSLResponseSize - len(prefix) - len(suffix)
+	padLen := MaxGSLResponseSize - len(prefix) - len(suffix)
 	body := prefix + strings.Repeat("a", padLen) + suffix
-	if len(body) != maxGSLResponseSize {
-		t.Fatalf("constructed test body is %d bytes, want exactly %d", len(body), maxGSLResponseSize)
+	if len(body) != MaxGSLResponseSize {
+		t.Fatalf("constructed test body is %d bytes, want exactly %d", len(body), MaxGSLResponseSize)
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -597,16 +597,16 @@ func TestGetServerListAcceptsExactlyMaxSizeResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 	if err != nil {
-		t.Fatalf("GetServerList() error = %v, want nil for a response body of exactly maxGSLResponseSize bytes (the boundary value, not over the cap)", err)
+		t.Fatalf("GetServerList() error = %v, want nil for a response body of exactly MaxGSLResponseSize bytes (the boundary value, not over the cap)", err)
 	}
 	if got := len(lsr.LastLoggedServer); got != padLen {
 		t.Errorf("len(LastLoggedServer) = %d, want %d -- the response should have decoded correctly, not just avoided the size-limit error", got, padLen)
 	}
 }
 
-// TestFlexStringUnmarshalJSON covers the three shapes observed live for flexString fields: a
+// TestFlexStringUnmarshalJSON covers the three shapes observed live for FlexString fields: a
 // plain JSON string, a JSON string containing an escaped quote (the case naive
 // strings.Trim(`"`) got wrong -- it only strips the leading/trailing quote byte, leaving the
 // escape sequence in the middle untouched), and a bare JSON number.
@@ -622,7 +622,7 @@ func TestFlexStringUnmarshalJSON(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var f flexString
+			var f FlexString
 			if err := json.Unmarshal([]byte(tt.json), &f); err != nil {
 				t.Fatalf("Unmarshal(%s): %v", tt.json, err)
 			}
@@ -640,11 +640,11 @@ func TestFlexStringUnmarshalJSON(t *testing.T) {
 //
 // Only the "serverList:" branch is actually reachable today, empirically confirmed (not assumed)
 // by probing all four with deliberately malformed input before writing this test: LoginServerInfo,
-// AccountServerInfo, and LoginToken all have EVERY field typed flexString specifically so a
-// wrong-typed field value can never fail json.Unmarshal (flexString.UnmarshalJSON never itself
+// AccountServerInfo, and LoginToken all have EVERY field typed FlexString specifically so a
+// wrong-typed field value can never fail json.Unmarshal (FlexString.UnmarshalJSON never itself
 // returns an error -- falls back to storing the raw bytes verbatim; see its own doc comment) -- so
-// for loginServer/at/rt, once looksLikeJSONObject's leading-'{' shape check passes, decoding into
-// their all-flexString target structs cannot fail regardless of what's nested inside. serverList
+// for loginServer/at/rt, once LooksLikeJSONObject's leading-'{' shape check passes, decoding into
+// their all-FlexString target structs cannot fail regardless of what's nested inside. serverList
 // decodes into []LoginServerInfo instead, a genuinely-typed slice: a value that passes
 // looksLikeJSONArray's leading-'[' shape check but whose elements aren't JSON objects at all (e.g.
 // bare numbers) still fails, since unmarshaling a JSON number into the LoginServerInfo struct type
@@ -661,7 +661,7 @@ func TestLoginServerListResponUnmarshalJSONNestedFailure(t *testing.T) {
 	}
 }
 
-// TestFlexStringInt is the round-36 regression test for the MAJOR finding that flexString.Int()
+// TestFlexStringInt is the round-36 regression test for the MAJOR finding that FlexString.Int()
 // (gsl.go) -- the accessor round 35 introduced specifically so a wrong-typed GetServerList field
 // could fall back to 0 instead of fatally failing json.Unmarshal for the whole response -- had its
 // own two non-happy-path branches (the empty-string fast path and the malformed-value fallback)
@@ -672,18 +672,18 @@ func TestLoginServerListResponUnmarshalJSONNestedFailure(t *testing.T) {
 func TestFlexStringInt(t *testing.T) {
 	cases := []struct {
 		name string
-		f    flexString
+		f    FlexString
 		want int
 	}{
-		{"empty string", flexString(""), 0},
-		{"valid numeric string", flexString("17783"), 17783},
-		{"negative numeric string", flexString("-1"), -1},
-		{"malformed, non-numeric string", flexString("not-a-number"), 0},
+		{"empty string", FlexString(""), 0},
+		{"valid numeric string", FlexString("17783"), 17783},
+		{"negative numeric string", FlexString("-1"), -1},
+		{"malformed, non-numeric string", FlexString("not-a-number"), 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if got := c.f.Int("port"); got != c.want {
-				t.Errorf("flexString(%q).Int() = %d, want %d", string(c.f), got, c.want)
+				t.Errorf("FlexString(%q).Int() = %d, want %d", string(c.f), got, c.want)
 			}
 		})
 	}
@@ -692,9 +692,9 @@ func TestFlexStringInt(t *testing.T) {
 // TestFlexStringIntWarnsOnMalformedValue proves the malformed (non-numeric, non-empty) case logs
 // a diagnostic -- distinct from the empty-string case, which is the ordinary "field absent"
 // shape and stays silent by design, matching this codebase's established anomaly-diagnostic
-// convention (e.g. getIntFlexible's own absent-vs-malformed distinction).
+// convention (e.g. GetIntFlexible's own absent-vs-malformed distinction).
 func TestFlexStringIntWarnsOnMalformedValue(t *testing.T) {
-	run := func(t *testing.T, key string, f flexString) string {
+	run := func(t *testing.T, key string, f FlexString) string {
 		t.Helper()
 		var buf bytes.Buffer
 		orig := slog.Default()
@@ -705,13 +705,13 @@ func TestFlexStringIntWarnsOnMalformedValue(t *testing.T) {
 	}
 
 	t.Run("malformed value warns", func(t *testing.T) {
-		logged := run(t, "port", flexString("not-a-number"))
+		logged := run(t, "port", FlexString("not-a-number"))
 		if !strings.Contains(logged, "not-a-number") {
 			t.Errorf("expected a Warn mentioning the malformed value, got:\n%s", logged)
 		}
 	})
 	t.Run("empty value stays silent", func(t *testing.T) {
-		logged := run(t, "port", flexString(""))
+		logged := run(t, "port", FlexString(""))
 		if logged != "" {
 			t.Errorf("expected no log output for an empty/absent value, got:\n%s", logged)
 		}
@@ -719,9 +719,9 @@ func TestFlexStringIntWarnsOnMalformedValue(t *testing.T) {
 }
 
 // TestFlexStringIntRedactsSensitiveKeyValue is the round-42 regression test for the MINOR finding
-// that flexString.Int()'s malformed-value Warn logged both the raw value AND (via strconv's own
+// that FlexString.Int()'s malformed-value Warn logged both the raw value AND (via strconv's own
 // error text, which embeds the value a second time) the value again, with no sfs.IsSensitiveSFSKey
-// gate at all -- unlike this function's structural sibling getIntFlexible (same file), which
+// gate at all -- unlike this function's structural sibling GetIntFlexible (same file), which
 // received exactly this hardening in round 35. Both real call sites today (login.go/main.go's
 // "port") are non-sensitive, so this wasn't exploitable in practice, but a future caller passing
 // a sensitive key would otherwise leak its raw malformed value in cleartext, in both places it
@@ -732,7 +732,7 @@ func TestFlexStringIntRedactsSensitiveKeyValue(t *testing.T) {
 		var buf bytes.Buffer
 		orig := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-		flexString("not-a-number-secret-value").Int(key)
+		FlexString("not-a-number-secret-value").Int(key)
 		slog.SetDefault(orig)
 		return buf.String()
 	}
@@ -763,7 +763,7 @@ func TestFlexStringIntRedactsSensitiveKeyValue(t *testing.T) {
 // (a future fmt.Errorf("...: %+v", lsr)-shaped call site on the whole LoginServerListRespon).
 func TestLoginTokenStringGoStringRedact(t *testing.T) {
 	const liveToken = "FAKE-LIVE-BEARER-TOKEN-must-not-leak-xyz789"
-	tok := LoginToken{Token: flexString(liveToken), Time: "12345"}
+	tok := LoginToken{Token: FlexString(liveToken), Time: "12345"}
 
 	t.Run("String", func(t *testing.T) {
 		s := tok.String()
@@ -840,7 +840,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("generate RSA key: %v", err)
 		}
-		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		_, err = GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 		if err == nil {
 			t.Fatal("GetServerList: expected a decode error, got nil")
 		}
@@ -869,7 +869,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("generate RSA key: %v", err)
 		}
-		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		_, err = GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 		if err == nil {
 			t.Fatal("GetServerList: expected a decode error, got nil")
 		}
@@ -892,7 +892,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("generate RSA key: %v", err)
 		}
-		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		_, err = GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 		if err == nil {
 			t.Fatal("GetServerList: expected an HTTP status error, got nil")
 		}
@@ -955,7 +955,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		_, err = GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 		if err == nil {
 			t.Fatal("GetServerList: expected a decrypt error, got nil")
 		}
@@ -982,7 +982,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 			//
 			// Genuinely malformed JSON SYNTAX (an unterminated array), not just a type mismatch --
 			// round 44/45 made every field in LoginServerListRespon (ServerList/LoginServer/At/Rt,
-			// on top of every scalar field already widened to flexString in rounds 33-43)
+			// on top of every scalar field already widened to FlexString in rounds 33-43)
 			// JSON-shape-tolerant, degrading gracefully instead of failing json.Unmarshal, so a
 			// type-mismatched value (this subtest's original shape) no longer reaches this branch's
 			// decode-failure path at all. Only a genuine syntax error still does.
@@ -1011,7 +1011,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		}))
 		defer server.Close()
 
-		_, err = GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+		_, err = GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 		if err == nil {
 			t.Fatal("GetServerList: expected a decode error, got nil")
 		}
@@ -1043,7 +1043,7 @@ func TestGetServerListBinFieldPresentButEmpty(t *testing.T) {
 		t.Fatalf("generate RSA key: %v", err)
 	}
 
-	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 	if err == nil {
 		t.Fatalf("GetServerList: expected an error for a present-but-empty bin field, got nil (lsr=%+v)", lsr)
 	}
@@ -1054,9 +1054,9 @@ func TestGetServerListBinFieldPresentButEmpty(t *testing.T) {
 
 // TestGetServerListCodeAcceptsStringOrNumber proves LoginServerListRespon.Code decodes both a
 // string-typed and a bare-number `code` field without error, mirroring
-// TestFlexStringUnmarshalJSON's coverage of flexString's string/number tolerance but exercised
+// TestFlexStringUnmarshalJSON's coverage of FlexString's string/number tolerance but exercised
 // through LoginServerListRespon (and the full GetServerList round-trip) specifically. This is a
-// regression guard for the Code int -> flexString change (see LoginServerListRespon's doc
+// regression guard for the Code int -> FlexString change (see LoginServerListRespon's doc
 // comment): getserverlist.php's `code` field hasn't itself been observed flipping type live yet,
 // but its sibling endpoint (CheckVersionResponse.Code) has, and a bare int here would make a live
 // string-typed code fail json.Unmarshal with an opaque type-mismatch error instead of decoding.
@@ -1081,7 +1081,7 @@ func TestGetServerListCodeAcceptsStringOrNumber(t *testing.T) {
 			}))
 			defer server.Close()
 
-			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
@@ -1099,7 +1099,7 @@ func TestGetServerListCodeAcceptsStringOrNumber(t *testing.T) {
 // json.Unmarshal for the ENTIRE GetServerList response -- fatal on the primary login path
 // (login.go's Login) and the standalone -cs-rt refresh command (main.go), neither of which has a
 // fallback for a GetServerList error. Mirrors TestGetServerListCodeAcceptsStringOrNumber's raw-JSON
-// table shape, but for id/port specifically, and additionally proves flexString.Int() recovers the
+// table shape, but for id/port specifically, and additionally proves FlexString.Int() recovers the
 // correct integer value (not just that decoding didn't error).
 func TestGetServerListPortIDAcceptsStringOrNumber(t *testing.T) {
 	tests := []struct {
@@ -1121,7 +1121,7 @@ func TestGetServerListPortIDAcceptsStringOrNumber(t *testing.T) {
 			}))
 			defer server.Close()
 
-			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
@@ -1140,7 +1140,7 @@ func TestGetServerListPortIDAcceptsStringOrNumber(t *testing.T) {
 }
 
 // TestGetServerListUidAcceptsStringOrNumber is the round-37 regression test for the MAJOR finding
-// that LoginServerInfo.Uid was still a plain string, not flexString, while every other
+// that LoginServerInfo.Uid was still a plain string, not FlexString, while every other
 // numeric-looking sibling field on the same struct (ID/Port/Status) was already hardened in
 // rounds 33-36 -- a bare-numeric "uid" on any serverList entry used to fail json.Unmarshal for
 // the ENTIRE GetServerList response. Mirrors TestGetServerListPortIDAcceptsStringOrNumber's
@@ -1165,7 +1165,7 @@ func TestGetServerListUidAcceptsStringOrNumber(t *testing.T) {
 			}))
 			defer server.Close()
 
-			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
@@ -1180,7 +1180,7 @@ func TestGetServerListUidAcceptsStringOrNumber(t *testing.T) {
 }
 
 // TestGetServerListGameUidAcceptsStringOrNumber is the round-40 regression test for the MAJOR
-// finding that LoginServerInfo.GameUid was still a plain string, not flexString, while its
+// finding that LoginServerInfo.GameUid was still a plain string, not FlexString, while its
 // siblings ID/Port/Uid/Status on the same struct were already hardened in rounds 33-37 -- a
 // bare-numeric "gameUid" on any serverList entry used to fail json.Unmarshal for the ENTIRE
 // GetServerList response, fatal on the primary login path (login.go's Login). Unlike Uid,
@@ -1206,7 +1206,7 @@ func TestGetServerListGameUidAcceptsStringOrNumber(t *testing.T) {
 			}))
 			defer server.Close()
 
-			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
@@ -1226,7 +1226,7 @@ func TestGetServerListGameUidAcceptsStringOrNumber(t *testing.T) {
 // 33-41 -- a bare-numeric value on ANY of these four fields used to fail json.Unmarshal for the
 // ENTIRE GetServerList response, fatal on the primary login path. Zone is genuinely read (Login
 // reads it as the redial zone and resends it as the wire "zn" field), so this also proves the
-// value survives intact through GetServerList's caller-facing accessor via flexString.String().
+// value survives intact through GetServerList's caller-facing accessor via FlexString.String().
 func TestGetServerListNameIPWsIPZoneAcceptsStringOrNumber(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1248,7 +1248,7 @@ func TestGetServerListNameIPWsIPZoneAcceptsStringOrNumber(t *testing.T) {
 			}))
 			defer server.Close()
 
-			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
@@ -1274,7 +1274,7 @@ func TestGetServerListNameIPWsIPZoneAcceptsStringOrNumber(t *testing.T) {
 
 // TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber is
 // TestGetServerListPortIDAcceptsStringOrNumber's sibling for AccountServerInfo.Port/WsPort,
-// exercised through the opt=new applyLoginServerFallback path that actually reads them (see
+// exercised through the opt=new ApplyLoginServerFallback path that actually reads them (see
 // TestGetServerListFallsBackToLoginServerWhenServerListEmpty).
 func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testing.T) {
 	tests := []struct {
@@ -1296,7 +1296,7 @@ func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testin
 			}))
 			defer server.Close()
 
-			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
@@ -1316,9 +1316,9 @@ func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testin
 // TestGetServerListAccountServerInfoIPWsIPAcceptsStringOrNumber is
 // TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber's sibling for
 // AccountServerInfo.IP/WsIP -- round-42 regression test for the MAJOR finding that these two
-// fields were still bare string while Port/WsPort on the same struct were already flexString.
-// applyLoginServerFallback copies AccountServerInfo.IP directly into the synthesized
-// LoginServerInfo.IP (also flexString as of this round), so this proves the value round-trips
+// fields were still bare string while Port/WsPort on the same struct were already FlexString.
+// ApplyLoginServerFallback copies AccountServerInfo.IP directly into the synthesized
+// LoginServerInfo.IP (also FlexString as of this round), so this proves the value round-trips
 // intact through both structs with no conversion loss.
 func TestGetServerListAccountServerInfoIPWsIPAcceptsStringOrNumber(t *testing.T) {
 	tests := []struct {
@@ -1340,7 +1340,7 @@ func TestGetServerListAccountServerInfoIPWsIPAcceptsStringOrNumber(t *testing.T)
 			}))
 			defer server.Close()
 
-			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
@@ -1384,7 +1384,7 @@ func TestGetServerListLoginTokenTimeAcceptsStringOrNumber(t *testing.T) {
 			}))
 			defer server.Close()
 
-			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
@@ -1430,7 +1430,7 @@ func TestGetServerListLoginTokenTokenAcceptsStringOrNumber(t *testing.T) {
 			}))
 			defer server.Close()
 
-			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}

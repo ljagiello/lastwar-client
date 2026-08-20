@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"lastwar-client/internal/gsl"
 	"log/slog"
 	"os"
 	"regexp"
@@ -196,18 +197,18 @@ func TestWarnIfInteractiveExplicitlyEmpty(t *testing.T) {
 func TestRefreshHasUsableData(t *testing.T) {
 	cases := []struct {
 		name       string
-		at         *LoginToken
-		serverList []LoginServerInfo
+		at         *gsl.LoginToken
+		serverList []gsl.LoginServerInfo
 		want       bool
 	}{
-		{"At present, ServerList non-empty", &LoginToken{Token: "tok"}, []LoginServerInfo{{}}, true},
-		{"At present, ServerList empty", &LoginToken{Token: "tok"}, nil, true},
-		{"At absent, ServerList non-empty", nil, []LoginServerInfo{{}}, true},
+		{"At present, ServerList non-empty", &gsl.LoginToken{Token: "tok"}, []gsl.LoginServerInfo{{}}, true},
+		{"At present, ServerList empty", &gsl.LoginToken{Token: "tok"}, nil, true},
+		{"At absent, ServerList non-empty", nil, []gsl.LoginServerInfo{{}}, true},
 		{"At absent, ServerList empty", nil, nil, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			lsr := &LoginServerListRespon{At: c.at, ServerList: c.serverList}
+			lsr := &gsl.LoginServerListRespon{At: c.at, ServerList: c.serverList}
 			if got := refreshHasUsableData(lsr); got != c.want {
 				t.Errorf("refreshHasUsableData(At=%v, ServerList=%v) = %v, want %v", c.at, c.serverList, got, c.want)
 			}

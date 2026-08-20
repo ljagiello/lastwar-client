@@ -13,7 +13,7 @@ import (
 
 // TestSessionConfigStringGoStringRedact is the round-48 regression test for the MAJOR finding that
 // SessionConfig -- whose own doc comment calls AccessToken "a real access token" -- had no
-// String()/GoString() redaction, unlike gsl.go's LoginToken (round 47). Proves both the bare value
+// String()/GoString() redaction, unlike gsl.go's gsl.LoginToken (round 47). Proves both the bare value
 // and, critically, a SessionConfig nested inside a containing value's %+v are redacted, and that
 // the actual JSON persistence path (SaveSessionConfig/LoadSessionConfig) still round-trips the
 // real, unredacted token -- confirming String()/GoString() don't interfere with encoding/json the

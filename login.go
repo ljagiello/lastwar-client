@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"lastwar-client/internal/crypto"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
@@ -37,16 +38,16 @@ type LoginOptions struct {
 // whose Email field carries the operator's real account email, a value sfsobject.go's
 // sfs.SensitiveSFSKeys map already classifies as sensitive under the "mail" key -- had no
 // String()/GoString() redaction-by-construction, the same class of gap round 47/48 closed for
-// LoginToken/deviceIdentity/SessionConfig/GSLOpt/LoginParamsInput. opts is held live across
+// gsl.LoginToken/deviceIdentity/SessionConfig/gsl.GSLOpt/LoginParamsInput. opts is held live across
 // Login()'s entire body; every current call site that logs anything about the email logs only
 // len(opts.Email) (the emailLen convention), never opts itself, so this is defense-in-depth for a
 // future diagnostic line that would otherwise print the operator's real email address in clear
-// text via Go's default struct formatter. Rated minor (like GSLOpt/LoginParamsInput) rather than
+// text via Go's default struct formatter. Rated minor (like gsl.GSLOpt/LoginParamsInput) rather than
 // major, since Email is PII rather than a live bearer credential.
 func (o LoginOptions) String() string   { return "[REDACTED LoginOptions]" }
 func (o LoginOptions) GoString() string { return o.String() }
 
-// LogValue makes LoginOptions satisfy slog.LogValuer -- see gsl.go's LoginToken.LogValue for the
+// LogValue makes LoginOptions satisfy slog.LogValuer -- see gsl.go's gsl.LoginToken.LogValue for the
 // full round-53 rationale.
 func (o LoginOptions) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
@@ -56,14 +57,14 @@ func (o LoginOptions) LogValue() slog.Value { return slog.StringValue(o.String()
 //	loginKey known             -> opt=login (fastest, resolves the real account directly)
 //	gameUid known, no loginKey -> opt=fix
 //	neither known              -> opt=new (brand new device)
-func gslOptFor(ident *deviceIdentity) GSLOpt {
+func gslOptFor(ident *deviceIdentity) gsl.GSLOpt {
 	switch {
 	case ident.LoginKey != "":
-		return GSLOpt{Opt: "login", LoginKey: ident.LoginKey}
+		return gsl.GSLOpt{Opt: "login", LoginKey: ident.LoginKey}
 	case ident.GameUid != "":
-		return GSLOpt{Opt: "fix"}
+		return gsl.GSLOpt{Opt: "fix"}
 	default:
-		return GSLOpt{Opt: "new"}
+		return gsl.GSLOpt{Opt: "new"}
 	}
 }
 
@@ -73,7 +74,7 @@ func gslOptFor(ident *deviceIdentity) GSLOpt {
 // interface, so an unguarded fmt.Sprintf("%s:%d", "", port) wouldn't fail cleanly at all -- it
 // would silently attempt a real TCP connection to 127.0.0.1/::1 and return a misleading
 // "connection refused" instead of any indication that no host was ever given. Mirrors main.go's
-// equivalent `if firstHost(ip) == "" { ...; os.Exit(1) }` guard on the cross-server login path,
+// equivalent `if gsl.FirstHost(ip) == "" { ...; os.Exit(1) }` guard on the cross-server login path,
 // adapted to return an error rather than exit since this is a library-style function.
 //
 // Also guards against a non-positive port, mirroring main.go's own separate `if port <= 0 { ...;
@@ -94,12 +95,12 @@ func gslOptFor(ident *deviceIdentity) GSLOpt {
 // the guard.
 //
 // The GSL-entry call site itself is not observed live: reachable only if gsl.go's
-// applyLoginServerFallback synthesizes an empty-IP ServerList[0] entry, which itself requires
+// gsl.ApplyLoginServerFallback synthesizes an empty-IP ServerList[0] entry, which itself requires
 // LoginServer.IP to also be empty -- a low-probability, nested-unconfirmed-conditions scenario.
 // Guarded anyway since the failure mode (silently dialing loopback) is confusing enough to be
 // worth a clear error over a cryptic one.
 func buildBaseZoneLoginAddr(ip string, port int) (string, error) {
-	host := firstHost(ip)
+	host := gsl.FirstHost(ip)
 	if host == "" {
 		return "", fmt.Errorf("no ip in GSL server list entry (an empty host would dial the loopback interface instead of failing clearly)")
 	}
@@ -166,8 +167,8 @@ func redirectZone(siObj *sfs.SFSObject, context string) string {
 // gameUid, and accessTok -- unlike loginKey/gameUid/username, which route through
 // SaveLoginKey/SaveGameUid/SaveUsername and got a maxIdentityFieldLen guard in round 46 -- are
 // re-encoded via PutUtfString on every login/redial attempt with no length check at all, despite
-// originating from the identical unguarded sources: a gsl.go flexString field bounded only by the
-// 1MiB whole-HTTP-body maxGSLResponseSize cap, or an SFS2X serverInfo redirect field that can
+// originating from the identical unguarded sources: a gsl.go gsl.FlexString field bounded only by the
+// 1MiB whole-HTTP-body gsl.MaxGSLResponseSize cap, or an SFS2X serverInfo redirect field that can
 // arrive tagged sfs.SFSText (bounded only by packet.go's 64MiB sfs.MaxFrameSize) -- GetString cannot tell
 // that tag apart from the 65535-byte-capped sfs.SFSUtfString tag it also decodes to the identical Go
 // string type for. sfs.WriteUtfString (sfsobject.go) hard-rejects anything over 65535 bytes, so an
@@ -177,7 +178,7 @@ func redirectZone(siObj *sfs.SFSObject, context string) string {
 // context name the caller for the log line's benefit; fallback is the value used instead of the
 // oversized one -- callers pass "" at a first-assignment site (nothing to fall back to yet) or the
 // previous value at a mid-redirect refresh site (matching this codebase's existing "treat an
-// anomalous value as unchanged, not corrupting" philosophy, e.g. GetServerList refresh failures
+// anomalous value as unchanged, not corrupting" philosophy, e.g. gsl.GetServerList refresh failures
 // already fall back to the stale token/zone rather than clearing it).
 func capOversizedIdentityField(field, value, fallback, context string) string {
 	if len(value) <= maxIdentityFieldLen {
@@ -189,7 +190,7 @@ func capOversizedIdentityField(field, value, fallback, context string) string {
 }
 
 // dialGame indirects DialGame (conn.go) through a package var, mirroring gsl.go's
-// checkVersionHosts override pattern, so a test can substitute a fake dialer -- e.g. one that
+// gsl.CheckVersionHosts override pattern, so a test can substitute a fake dialer -- e.g. one that
 // hands back a real GameConn with its underlying net.Conn swapped for a write-failing wrapper
 // (conn_wait_test.go's writeFailConn, or login_integration_test.go's writeFailAfterConn for
 // targeting a specific later send in a multi-step flow) -- rather than trying to win an
@@ -225,7 +226,7 @@ func warnIfWrongTypedField(o *sfs.SFSObject, field, context string, kind sfsFiel
 }
 
 // maxServerListLogEntries bounds how many lsr.ServerList entries the per-entry "state server" Info
-// log below will emit. GetServerList's response is server-controlled and, like buildings.go's
+// log below will emit. gsl.GetServerList's response is server-controlled and, like buildings.go's
 // maxRawBuildingItemsPerPush, mail.go's mailListRawItemCap, and visitors.go's maxVisitorsUpperBound,
 // is not itself bounded by the SFS2X/HTTP protocol -- a malicious or buggy gate host returning an
 // enormous ServerList would otherwise make Login() emit one slog.Info call per entry with no
@@ -239,10 +240,10 @@ const maxServerListLogEntries = 500
 // lets GSL resolve the account directly -- the email verification-code
 // flow. Returns a live, authenticated connection with heartbeat running.
 func Login(opts LoginOptions) (*LoginResult, error) {
-	httpClient := defaultHTTPClient()
+	httpClient := gsl.DefaultHTTPClient()
 
 	slog.Info("check-version: fetch RSA pubkey and pick gate host")
-	cv, gateHost, err := CheckVersion(httpClient)
+	cv, gateHost, err := gsl.CheckVersion(httpClient)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +269,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 
 	opt := gslOptFor(ident)
 	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt)
-	lsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, opt, "", ident.GameUid)
+	lsr, err := gsl.GetServerList(httpClient, gateHost, pub, ident.DeviceID, opt, "", ident.GameUid)
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +432,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			}
 		}
 
-		siObj := findServerInfo(env.Content)
+		siObj := gsl.FindServerInfo(env.Content)
 		redirectIPVal := ""
 		if siObj != nil {
 			redirectIPVal = redirectIP(siObj, "login.go base-zone Login")
@@ -465,15 +466,15 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			// carrying the old one forward unverified.
 			slog.Info("fetching fresh access token before following serverInfo redirect (suspected single-use-per-connection)")
 			freshOpt := gslOptFor(ident)
-			freshLsr, err := GetServerList(httpClient, gateHost, pub, ident.DeviceID, freshOpt, "", ident.GameUid)
+			freshLsr, err := gsl.GetServerList(httpClient, gateHost, pub, ident.DeviceID, freshOpt, "", ident.GameUid)
 			if err != nil {
 				slog.Error("GSL refresh failed; following redirect with stale token anyway", "error", err)
 			} else {
 				// Only overwrite on a non-empty refreshed token -- mirrors the gameUid guard
 				// just below (same reasoning): freshLsr.At can be non-nil with an empty Token
-				// (gsl.go's LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped
+				// (gsl.go's gsl.LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped
 				// "at" field, including "{}" or one with no/empty "token", as present via
-				// looksLikeJSONObject), and an empty token here is more likely an
+				// gsl.LooksLikeJSONObject), and an empty token here is more likely an
 				// unpopulated/degraded refresh response than a real "clear the token"
 				// instruction. Clobbering a known-good, already-working accessTok with "" would
 				// break the very reconnect this refresh exists to support -- round-53 fix, the

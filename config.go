@@ -14,7 +14,7 @@ import (
 // These values come from a live packet capture of a real client login (see
 // the dossier's §14 "Solved: a field-by-field identity mismatch" section
 // for the full methodology) -- there's no way to derive them offline.
-// AccessToken in particular is tied to whatever platform identity
+// AccessToken in particular is tied to whatever Platform identity
 // (IOSMode) it was issued under; it is not single-use, but it will
 // eventually need refreshing from a fresh capture.
 type SessionConfig struct {
@@ -30,16 +30,16 @@ type SessionConfig struct {
 
 // String/GoString are the round-48 regression fix for the MAJOR finding that SessionConfig --
 // whose own doc comment above calls AccessToken "a real access token" -- had no
-// redaction-by-construction the way gsl.go's LoginToken (round 47) and identity.go's deviceIdentity
+// redaction-by-construction the way gsl.go's gsl.LoginToken (round 47) and identity.go's deviceIdentity
 // (round 48, same audit) got for the identical class of risk. main.go threads a live *SessionConfig
 // through roughly 50 lines of -cs-* flag/config merge logic, currently only ever accessing
 // individual fields, never logging cfg itself -- this is defense-in-depth for a future diagnostic
 // line (e.g. slog.Info("loaded session config", "cfg", cfg) or fmt.Errorf("invalid config: %+v",
 // cfg)) that would otherwise print AccessToken in clear text via Go's default struct formatter,
 // undermining the 0600-permission and atomic-write hardening this file otherwise carefully
-// implements for this exact file. Deliberately NOT also a json.Marshaler, mirroring LoginToken's
+// implements for this exact file. Deliberately NOT also a json.Marshaler, mirroring gsl.LoginToken's
 // own precedent exactly: SaveSessionConfig (below) marshals a *SessionConfig to JSON as the ACTUAL
-// production persistence mechanism for this file (not just a test fixture, unlike LoginToken) --
+// production persistence mechanism for this file (not just a test fixture, unlike gsl.LoginToken) --
 // overriding MarshalJSON here would permanently corrupt every session config ever saved to disk,
 // replacing the real access token with the redacted placeholder.
 func (c SessionConfig) String() string   { return "[REDACTED SessionConfig]" }

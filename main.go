@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"lastwar-client/internal/crypto"
+	"lastwar-client/internal/gsl"
 	"log/slog"
 	"net"
 	"net/http"
@@ -70,11 +71,11 @@ func main() {
 	csIP := fs.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
 	csPort := fs.Int("cs-port", 0, "port for -cs-ip -- must be a positive value; runtime validation rejects 0 or a negative port before ever attempting to dial (see runCrossServerTest's own port <= 0 check), producing a clear error instead of a cryptic OS-level dial failure")
 	csZone := fs.String("cs-zone", "", "zone for -cs-ip, e.g. APS1234")
-	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip -- also sent on every -cs-rt GSL opt=refresh call, unlike -cs-zone (which only matters for -cs-ip): gameUid is passed to GetServerList unconditionally, so it matters even for a bare -cs-rt with no -cs-ip at all")
+	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip -- also sent on every -cs-rt GSL opt=refresh call, unlike -cs-zone (which only matters for -cs-ip): gameUid is passed to gsl.GetServerList unconditionally, so it matters even for a bare -cs-rt with no -cs-ip at all")
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
 	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- IF the refresh response includes a non-empty server list, it REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and IF it includes a fresh access token, that REPLACES any explicitly-passed -cs-at; either can come back empty, in which case the corresponding -cs-* value passed here (or loaded from a session config) is used unchanged instead -- a warning is logged when that leaves a possibly-stale -cs-at in place with no refresh. If BOTH come back empty (no fresh access token AND no server list), that is NOT a graceful fallback: it is treated as a likely-rejected/expired refresh token and exits with code 2")
-	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at (e.g. one captured live from a real client) -- a cheap CheckVersion call is still made, to enable mid-login redirect-refresh capability, but no other GSL call happens unless -cs-rt is also set")
+	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at (e.g. one captured live from a real client) -- a cheap gsl.CheckVersion call is still made, to enable mid-login redirect-refresh capability, but no other GSL call happens unless -cs-rt is also set")
 	csIOS := fs.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
 	handshake := fs.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
 	configPath := fs.String("config", "", "path to a session config JSON (see config.example.json); if unset, auto-loads "+defaultSessionConfigPath()+" when present. Explicit -cs-* flags override individual config fields.")
@@ -684,9 +685,9 @@ func ignoredCrossServerFlags(visited []string) []string {
 // to act on: either a fresh access token (At) or at least one server list entry. A response with
 // neither is not actionable -- see the call site in runCrossServerTest for why that case fails
 // clearly there instead of silently falling through to stale in-scope values. Taking the already-
-// decoded *LoginServerListRespon (rather than being inlined at the call site) is what makes this
+// decoded *gsl.LoginServerListRespon (rather than being inlined at the call site) is what makes this
 // testable without a live GSL round-trip.
-func refreshHasUsableData(lsr *LoginServerListRespon) bool {
+func refreshHasUsableData(lsr *gsl.LoginServerListRespon) bool {
 	return lsr.At != nil || len(lsr.ServerList) > 0
 }
 
@@ -746,11 +747,11 @@ func serverListOverrideFlags(ip string, ipExplicit bool, port int, portExplicit 
 // either, so a -cs-rt refresh that changed ONLY GameUid (leaving host/port/zone/accessTok
 // unchanged) was silently never persisted.
 //
-// Bug fixed here (round 26): origHost is normalized through firstHost (gsl.go) below, before the
+// Bug fixed here (round 26): origHost is normalized through gsl.FirstHost (gsl.go) below, before the
 // comparison, rather than compared as the raw string the caller captured it as. -cs-ip/session-
 // config's ip value legitimately supports a pipe-delimited multi-host fallback list (e.g.
 // "host-a|host-b", documented in -cs-ip's own help text), and every dial path already normalizes
-// this via firstHost before actually connecting (see crossserver.go) -- but newHost here is
+// this via gsl.FirstHost before actually connecting (see crossserver.go) -- but newHost here is
 // always a single resolved host, parsed from the actual dialed address via net.SplitHostPort.
 // Comparing that single resolved host against a raw, un-normalized pipe-delimited origHost meant
 // an operator-supplied "host-a|host-b" that connected cleanly to the FIRST host, with NO redirect
@@ -765,7 +766,7 @@ func serverListOverrideFlags(ip string, ipExplicit bool, port int, portExplicit 
 // is what makes all of these mistakes structurally impossible to reintroduce silently, and what
 // makes this testable without spinning up fake GSL/game servers.
 func crossServerSaveBackNeeded(newHost string, newPort int, newZone, newAccessTok, newGameUid, origHost string, origPort int, origZone, origAccessTok, origGameUid string) bool {
-	origHost = firstHost(origHost)
+	origHost = gsl.FirstHost(origHost)
 	return newHost != origHost || newPort != origPort || newZone != origZone || newAccessTok != origAccessTok || newGameUid != origGameUid
 }
 
@@ -850,8 +851,8 @@ type crossServerTestOpts struct {
 // shumeiBoxId (anti-fraud device fingerprint), and deviceID -- had no String()/GoString()
 // redaction-by-construction, unlike its near-identical sibling CrossServerLoginParams
 // (crossserver.go, carrying the same AccessTok/ShumeiBoxId/DeviceID fields) and every other
-// credential-carrying struct in the codebase (SessionConfig, deviceIdentity, GSLOpt,
-// LoginParamsInput, CrossServerLoginParams, CrossServerLoginResult, LoginToken), all of which
+// credential-carrying struct in the codebase (SessionConfig, deviceIdentity, gsl.GSLOpt,
+// LoginParamsInput, CrossServerLoginParams, CrossServerLoginResult, gsl.LoginToken), all of which
 // received this exact fix in rounds 47-48. The local variable constructed in main() is held live
 // across runCrossServerTest's entire 300+ line body -- every current call site there logs only
 // individual, already-redacted/length-only fields, so this is defense-in-depth against a future
@@ -866,7 +867,7 @@ func (o crossServerTestOpts) GoString() string { return o.String() }
 // hypothetical example just above (slog.Error("cross-server test failed", "opts", o)) is exactly
 // the shape String()/GoString() alone do NOT protect against: slog.NewJSONHandler (the only
 // handler main.go ever installs) never consults fmt.Stringer/fmt.GoStringer, only slog.LogValuer,
-// which slog resolves before handler dispatch. See gsl.go's LoginToken.LogValue for the fuller
+// which slog resolves before handler dispatch. See gsl.go's gsl.LoginToken.LogValue for the fuller
 // rationale, shared across every credential-bearing type in this codebase.
 func (o crossServerTestOpts) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
@@ -887,7 +888,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	deviceID, airKey := ident.DeviceID, ident.AirKey()
 	if o.deviceID != "" {
 		deviceID = o.deviceID
-		airKey = "lwDid_" + b64OfString(deviceID)
+		airKey = "lwDid_" + gsl.B64OfString(deviceID)
 	}
 	slog.Info("using device identity", "deviceIdLen", len(deviceID), "airKeyLen", len(airKey), "iosMode", o.iosMode)
 
@@ -903,7 +904,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 
 	// GSL plumbing (HTTP client + gate host + RSA pubkey), threaded into CrossServerLoginParams so a
 	// mid-login serverInfo redirect can refresh AccessTok instead of reusing a stale one (see
-	// CrossServerLoginParams' doc comment). CheckVersion is a single cheap HTTP call, so it's made
+	// CrossServerLoginParams' doc comment). gsl.CheckVersion is a single cheap HTTP call, so it's made
 	// unconditionally here rather than only under -cs-rt: a plain SessionConfig reconnect with no
 	// -cs-rt at all (the primary case crossserver.go's own redirect-following doc comment is about --
 	// surviving a real server-merge zone migration) could otherwise never reach this safety net.
@@ -919,8 +920,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 	var gslRSAPub *rsa.PublicKey
 	var gslGateHost string
 	{
-		httpClient := defaultHTTPClient()
-		cv, gateHost, err := CheckVersion(httpClient)
+		httpClient := gsl.DefaultHTTPClient()
+		cv, gateHost, err := gsl.CheckVersion(httpClient)
 		if err != nil {
 			if o.rt != "" {
 				slog.Error("check-version failed", "error", err)
@@ -940,20 +941,20 @@ func runCrossServerTest(o crossServerTestOpts) {
 
 	if o.rt != "" {
 		slog.Info("GSL getserverlist (opt=refresh)")
-		lsr, err := GetServerList(gslHTTPClient, gslGateHost, gslRSAPub, deviceID, GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
+		lsr, err := gsl.GetServerList(gslHTTPClient, gslGateHost, gslRSAPub, deviceID, gsl.GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
 		if err != nil {
 			// Unlike the ErrAuthRejected-gated os.Exit(2) sites elsewhere in this file (the
 			// plain-login failure in main(), and the SFS2X cross-server-login failure further
-			// down in this function), a GetServerList error is never gated on errors.Is(err,
-			// ErrAuthRejected) here: GetServerList's own error returns (gsl.go) never wrap it --
+			// down in this function), a gsl.GetServerList error is never gated on errors.Is(err,
+			// ErrAuthRejected) here: gsl.GetServerList's own error returns (gsl.go) never wrap it --
 			// only the SFS2X handshake/login/cross-server-login paths (conn.go, login.go,
 			// crossserver.go) do, since those are the ones that decode an explicit server-side
 			// rejection error code from the game server. This HTTP-based GSL endpoint's own
 			// success-vs-rejection semantics haven't been confirmed live yet either (see
-			// LoginServerListRespon.Code's own doc comment), so there is nothing here an exit-2
+			// gsl.LoginServerListRespon.Code's own doc comment), so there is nothing here an exit-2
 			// branch could actually be gated on -- a prior version of this code had one anyway,
 			// unreachable, with a comment incorrectly claiming it matched those sibling sites.
-			// Every GetServerList failure -- network/HTTP/decode/decrypt, all of it -- is just a
+			// Every gsl.GetServerList failure -- network/HTTP/decode/decrypt, all of it -- is just a
 			// generic failure (1) until real evidence of a confirmed-rejection shape exists here.
 			slog.Error("GSL refresh failed", "error", err)
 			os.Exit(1)
@@ -978,8 +979,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 			os.Exit(2)
 		}
 		// lsr.At.Token.String() != "", not just lsr.At != nil -- round-53 fix: gsl.go's
-		// LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at" field
-		// (including "{}" or one with no/empty "token") as present via looksLikeJSONObject, so
+		// gsl.LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at" field
+		// (including "{}" or one with no/empty "token") as present via gsl.LooksLikeJSONObject, so
 		// lsr.At != nil alone doesn't guarantee a usable token. Without this, an empty-token
 		// response used to take this success branch, log the misleadingly-normal-looking "fresh
 		// access token acquired tokenLen=0", and silently clobber accessTok with "" -- instead
@@ -1049,7 +1050,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 
 	// Symmetric to the port <= 0 check just below, but arguably more important to catch here
-	// rather than downstream: crossserver.go's addr := fmt.Sprintf("%s:%d", firstHost(p.IP),
+	// rather than downstream: crossserver.go's addr := fmt.Sprintf("%s:%d", gsl.FirstHost(p.IP),
 	// p.Port) collapses an empty ip to just ":<port>", and Go's "host:port" dial syntax treats an
 	// empty host as the LOOPBACK interface -- so this doesn't fail cleanly at all, it silently
 	// attempts a real TCP connection to 127.0.0.1/::1 and returns a misleading "connection
@@ -1061,7 +1062,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	// falls through with ip left exactly as empty as it started. Checked here, after the -cs-rt
 	// refresh block above (which can replace ip with a fresh server list entry), so a config/flag
 	// omission that IS resolved by -cs-rt doesn't false-positive.
-	if firstHost(ip) == "" {
+	if gsl.FirstHost(ip) == "" {
 		if o.ipExplicit {
 			// Distinct from the "never given at all" wording just below: -cs-ip WAS actually typed
 			// on the command line (per o.ipExplicit, the same visitedFlags mechanism this file

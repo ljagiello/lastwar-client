@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"lastwar-client/internal/crypto"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"testing"
 )
@@ -307,7 +308,7 @@ func TestSecurityCodeAlgorithm(t *testing.T) {
 
 func TestPackageSignMatchesKnownValue(t *testing.T) {
 	// sha1("com.fun.lastwar.gp") lowercase hex, computed independently.
-	got := packageSignHex(packageName)
+	got := packageSignHex(gsl.PackageName)
 	if len(got) != 40 {
 		t.Errorf("expected 40-char sha1 hex, got %d: %q", len(got), got)
 	}

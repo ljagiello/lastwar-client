@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
@@ -583,7 +584,7 @@ func TestWaitForCmdSkipRedactsCredentialFields(t *testing.T) {
 // TestBuildBaseZoneLoginAddrEmptyIP is the regression test for buildBaseZoneLoginAddr's empty-ip
 // guard (login.go): an empty ip must produce a clear error rather than silently building a
 // ":<port>"-shaped address, which Go's "host:port" dial syntax treats as the loopback interface
-// (see main.go's equivalent firstHost(ip) == "" guard on the cross-server login path, which this
+// (see main.go's equivalent gsl.FirstHost(ip) == "" guard on the cross-server login path, which this
 // mirrors). Exercised directly against the small helper Login() calls -- rather than through a
 // full Login() integration test with fake GSL/game servers -- since this is a pure function of its
 // two arguments and doesn't need any network fakery to prove the guard fires.
@@ -611,12 +612,12 @@ func TestBuildBaseZoneLoginAddrNonEmptyIP(t *testing.T) {
 }
 
 // TestBuildBaseZoneLoginAddrFirstOfFallbackList confirms buildBaseZoneLoginAddr's guard checks
-// firstHost's result (the "|"-delimited list entry actually used to dial), not the raw ip string --
+// gsl.FirstHost's result (the "|"-delimited list entry actually used to dial), not the raw ip string --
 // a pipe-delimited list starting with an empty entry must still be caught, not let through just
 // because the raw string itself is non-empty.
 func TestBuildBaseZoneLoginAddrFirstOfFallbackList(t *testing.T) {
 	if _, err := buildBaseZoneLoginAddr("|203.0.113.5", 9339); err == nil {
-		t.Error("buildBaseZoneLoginAddr(\"|203.0.113.5\", 9339): expected an error (firstHost of this list is empty), got nil")
+		t.Error("buildBaseZoneLoginAddr(\"|203.0.113.5\", 9339): expected an error (gsl.FirstHost of this list is empty), got nil")
 	}
 	addr, err := buildBaseZoneLoginAddr("203.0.113.5|198.51.100.7", 9339)
 	if err != nil {
@@ -642,11 +643,11 @@ func TestBuildBaseZoneLoginAddrZeroPort(t *testing.T) {
 }
 
 // TestLoginRedirectRejectsEmptyRedirectIP is the round-18 regression test for the same
-// firstHost-without-emptiness-check gap crossserver_test.go's
+// gsl.FirstHost-without-emptiness-check gap crossserver_test.go's
 // TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP covers on the DoCrossServerLogin side:
 // Login()'s own serverInfo redirect branch only checked siObj.GetString("ip") != "", not
-// firstHost's resolved result -- so a pipe-malformed ip like "|1.2.3.4" (raw non-empty, but
-// firstHost resolves it down to "") built a ":<port>"-shaped dial address via a raw fmt.Sprintf,
+// gsl.FirstHost's resolved result -- so a pipe-malformed ip like "|1.2.3.4" (raw non-empty, but
+// gsl.FirstHost resolves it down to "") built a ":<port>"-shaped dial address via a raw fmt.Sprintf,
 // which Go's "host:port" dial syntax silently treats as the loopback interface, instead of
 // failing clearly. Reuses login_integration_test.go's fake-GSL/fake-game-server infrastructure
 // (newFakeGSLServer/useFakeGSLServer) and crossserver_test.go's fake game listener helpers
@@ -662,7 +663,7 @@ func TestLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 			return
 		}
 		si := sfs.NewSFSObject()
-		si.PutUtfString("ip", "|1.2.3.4") // firstHost("|1.2.3.4") == "" -- the malformed case
+		si.PutUtfString("ip", "|1.2.3.4") // gsl.FirstHost("|1.2.3.4") == "" -- the malformed case
 		si.PutInt("port", 9339)
 		si.PutUtfString("zone", "APS2")
 		resp := sfs.NewSFSObject()
@@ -671,10 +672,10 @@ func TestLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 	})
 	oldHost, oldPort := splitHostPortInt(t, oldAddr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -719,10 +720,10 @@ func TestLoginRedirectRejectsMissingRedirectPort(t *testing.T) {
 	})
 	oldHost, oldPort := splitHostPortInt(t, oldAddr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 

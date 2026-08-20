@@ -46,7 +46,7 @@ func DecodeStreamFile(label, path string) error {
 			// any raw slice of it bypasses that redaction entirely. Print only the error itself and
 			// the body's byte length (diagnostic, reveals nothing about content) -- never body's
 			// bytes. See decode_test.go's TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure.
-			fmt.Printf("[%s] #%d @offset %d: sfs.DecodeObject error: %v (body %d bytes)\n", label, n, start, err, len(body))
+			fmt.Printf("[%s] #%d @offset %d: DecodeObject error: %v (body %d bytes)\n", label, n, start, err, len(body))
 			continue
 		}
 		fmt.Printf("[%s] #%d @offset %d: %s\n", label, n, start, obj.StringRedacted())

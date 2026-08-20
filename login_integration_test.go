@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
@@ -18,26 +19,26 @@ import (
 	"time"
 )
 
-// Login() dials via DialGame and fetches its RSA pubkey/server list over real HTTP (CheckVersion,
-// GetServerList), so -- like crossserver_test.go's DoCrossServerLogin tests -- it can't be
+// Login() dials via DialGame and fetches its RSA pubkey/server list over real HTTP (gsl.CheckVersion,
+// gsl.GetServerList), so -- like crossserver_test.go's DoCrossServerLogin tests -- it can't be
 // exercised over net.Pipe alone. These tests reuse crossserver_test.go's net.Listen-based fake
 // SFS2X server helpers (newFakeGameListener/serveFakeGameServer/startFakeGameServer/
 // putRedirectServerInfo/splitHostPortInt) for the SFS2X side, and add a small combined fake HTTP
-// server for the CheckVersion + GetServerList side, since Login() always resolves both from the
-// same gateHost (the single host CheckVersion's checkVersionHosts fallback list happened to
+// server for the gsl.CheckVersion + gsl.GetServerList side, since Login() always resolves both from the
+// same gateHost (the single host gsl.CheckVersion's gsl.CheckVersionHosts fallback list happened to
 // answer from -- see gsl_http_test.go's TestCheckVersionAgainstFakeServer for the override
 // pattern this borrows). Device-identity state (deviceId/gameUid/loginKey persisted under HOME) is
 // isolated per test via t.Setenv("HOME", t.TempDir()), the same pattern identity_test.go uses.
 
-// newFakeGSLServer stands up one httptest.Server answering both CheckVersion's
+// newFakeGSLServer stands up one httptest.Server answering both gsl.CheckVersion's
 // getlsu3dversion.php (always the same canned response, carrying a throwaway RSA pubkey) and
-// GetServerList's getserverlist.php (like TestGetServerListAgainstFakeServer, a plaintext --
-// unencrypted -- LoginServerListRespon body, which GetServerList already falls back to when no
-// "bin" field is present). gslResponses is consumed one entry per GetServerList POST, in order;
+// gsl.GetServerList's getserverlist.php (like TestGetServerListAgainstFakeServer, a plaintext --
+// unencrypted -- gsl.LoginServerListRespon body, which gsl.GetServerList already falls back to when no
+// "bin" field is present). gslResponses is consumed one entry per gsl.GetServerList POST, in order;
 // once exhausted, the last entry repeats, so a test only needs to supply as many entries as it
-// cares to distinguish (one per distinct GetServerList call it expects, e.g. the initial
+// cares to distinguish (one per distinct gsl.GetServerList call it expects, e.g. the initial
 // opt=new/fix/login call and, separately, any mid-redirect opt=fix refresh call).
-func newFakeGSLServer(t *testing.T, gslResponses ...LoginServerListRespon) *httptest.Server {
+func newFakeGSLServer(t *testing.T, gslResponses ...gsl.LoginServerListRespon) *httptest.Server {
 	t.Helper()
 	pub := testRSAPubKeyDER(t)
 
@@ -46,7 +47,7 @@ func newFakeGSLServer(t *testing.T, gslResponses ...LoginServerListRespon) *http
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "getlsu3dversion.php"):
-			_ = json.NewEncoder(w).Encode(CheckVersionResponse{ResMsg: flexString(pub)})
+			_ = json.NewEncoder(w).Encode(gsl.CheckVersionResponse{ResMsg: gsl.FlexString(pub)})
 		case strings.HasSuffix(r.URL.Path, "getserverlist.php"):
 			mu.Lock()
 			idx := call
@@ -64,13 +65,13 @@ func newFakeGSLServer(t *testing.T, gslResponses ...LoginServerListRespon) *http
 	return server
 }
 
-// useFakeGSLServer points checkVersionHosts at server for the duration of the test, restoring the
-// real list on cleanup -- same override pattern as gsl_http_test.go's CheckVersion tests.
+// useFakeGSLServer points gsl.CheckVersionHosts at server for the duration of the test, restoring the
+// real list on cleanup -- same override pattern as gsl_http_test.go's gsl.CheckVersion tests.
 func useFakeGSLServer(t *testing.T, server *httptest.Server) {
 	t.Helper()
-	orig := checkVersionHosts
-	checkVersionHosts = []string{server.URL}
-	t.Cleanup(func() { checkVersionHosts = orig })
+	orig := gsl.CheckVersionHosts
+	gsl.CheckVersionHosts = []string{server.URL}
+	t.Cleanup(func() { gsl.CheckVersionHosts = orig })
 }
 
 // fakeInitPushServer replies to a base zone Login (whatever content it receives) with a plain
@@ -109,10 +110,10 @@ func TestLoginGuestHappyPath(t *testing.T) {
 	addr := startFakeGameServer(t, fakeInitPushServer(nil))
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -199,10 +200,10 @@ func TestLoginDedupesInitPushBuildingsAndVisitors(t *testing.T) {
 	addr := startFakeGameServer(t, fakeInitPushServerWithDuplicateUUIDs())
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -300,10 +301,10 @@ func TestLoginRejectsWrongTypedBuildingUUID(t *testing.T) {
 	addr := startFakeGameServer(t, fakeInitPushServerWithWrongTypedBuildingUUID())
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -353,10 +354,10 @@ func TestLoginRejectsMissingPPayload(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -390,10 +391,10 @@ func TestLoginRejectsAuthRejection(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -431,10 +432,10 @@ func TestLoginBaseZoneResponseWaitConnectionFailure(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -495,10 +496,10 @@ func TestLoginConnectionFailureWhileWaitingForInit(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -566,10 +567,10 @@ func TestLoginSurvivesCorruptPushWhileWaitingForInit(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -625,17 +626,17 @@ func TestLoginRedirectRefreshesGameUid(t *testing.T) {
 
 	gsl := newFakeGSLServer(t,
 		// Initial GSL call (opt=new): points at the first fake server, on the old gameUid.
-		LoginServerListRespon{
+		gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: oldGameUid}},
-			At:         &LoginToken{Token: "tok-1"},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: oldGameUid}},
+			At:         &gsl.LoginToken{Token: "tok-1"},
 		},
 		// Mid-redirect refresh (opt=fix): the account has since moved to a new gameUid -- this is
 		// the value that must propagate into the persisted identity, per this round's fix.
-		LoginServerListRespon{
+		gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{GameUid: newGameUid}},
-			At:         &LoginToken{Token: "tok-fresh"},
+			ServerList: []gsl.LoginServerInfo{{GameUid: newGameUid}},
+			At:         &gsl.LoginToken{Token: "tok-fresh"},
 		},
 	)
 	useFakeGSLServer(t, gsl)
@@ -713,10 +714,10 @@ func TestLoginTooManyRedirects(t *testing.T) {
 	}
 
 	host, port := splitHostPortInt(t, addrs[0])
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS0", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS0", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -780,10 +781,10 @@ func TestLoginExactlyMaxRedirectHopsSucceeds(t *testing.T) {
 	}
 
 	host, port := splitHostPortInt(t, addrs[0])
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS0", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS0", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -798,11 +799,11 @@ func TestLoginExactlyMaxRedirectHopsSucceeds(t *testing.T) {
 // state server (host/port from a fake game listener, used for the actual connection) and whose
 // remaining n-1 entries are unreachable placeholders that exist purely to pad ServerList's length
 // -- login.go's Login only ever dials ServerList[0], so these are never connected to, only logged.
-func buildLoggableServerList(host string, port int) []LoginServerInfo {
-	list := make([]LoginServerInfo, maxServerListLogEntries+1)
-	list[0] = LoginServerInfo{IP: flexString(host), Port: flexPort(port), Zone: "APS0", GameUid: "uid-1"}
+func buildLoggableServerList(host string, port int) []gsl.LoginServerInfo {
+	list := make([]gsl.LoginServerInfo, maxServerListLogEntries+1)
+	list[0] = gsl.LoginServerInfo{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS0", GameUid: "uid-1"}
 	for i := 1; i < len(list); i++ {
-		list[i] = LoginServerInfo{IP: "10.0.0.1", Port: flexPort(9999), Zone: "APS0", GameUid: flexString(fmt.Sprintf("uid-unreachable-%d", i))}
+		list[i] = gsl.LoginServerInfo{IP: "10.0.0.1", Port: flexPort(9999), Zone: "APS0", GameUid: gsl.FlexString(fmt.Sprintf("uid-unreachable-%d", i))}
 	}
 	return list
 }
@@ -821,10 +822,10 @@ func TestLoginServerListLogExactlyAtCapDoesNotTruncate(t *testing.T) {
 	host, port := splitHostPortInt(t, addr)
 
 	serverList := buildLoggableServerList(host, port)[:maxServerListLogEntries]
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
 		ServerList: serverList,
-		At:         &LoginToken{Token: "tok-1"},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -859,10 +860,10 @@ func TestLoginServerListLogOverCapTruncatesAndWarns(t *testing.T) {
 	host, port := splitHostPortInt(t, addr)
 
 	serverList := buildLoggableServerList(host, port)
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
 		ServerList: serverList,
-		At:         &LoginToken{Token: "tok-1"},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1000,10 +1001,10 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 	// GameUid empty here (unlike the redirect tests) deliberately: a fresh device identity with
 	// no loginKey/gameUid drives gslOptFor to opt=new, which is what keeps Login() off the
 	// opt=="login" fast-path return and routes it into the email-verification steps below.
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1145,10 +1146,10 @@ func TestLoginWarnsOnWrongTypedPersistenceFields(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1272,10 +1273,10 @@ func TestLoginEmailVerificationPathWarnsOnPersistFailure(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1411,10 +1412,10 @@ func TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1509,10 +1510,10 @@ func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
 	// GameUid empty deliberately (same as TestLoginEmailVerificationPath): drives gslOptFor to
 	// opt=new, which keeps Login() off the opt=="login" fast-path return and routes it into the
 	// email-verification steps below.
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1644,10 +1645,10 @@ func TestLoginRedactsEmailInLogs(t *testing.T) {
 	// GameUid empty deliberately (same as TestLoginEmailVerificationPath): drives gslOptFor to
 	// opt=new, which keeps Login() off the opt=="login" fast-path return and routes it into the
 	// email-verification steps below.
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1718,10 +1719,10 @@ func TestLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1780,10 +1781,10 @@ func TestLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
 	})
 	oldHost, oldPort := splitHostPortInt(t, oldAddr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1820,7 +1821,7 @@ func TestLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
 
 // TestLoginRejectsOversizedInitialZoneAccessTokAndGameUid is the round-47 regression test for the
 // MAJOR finding that Login()'s initial zone and accessTok -- read directly off the GSL
-// getserverlist.php JSON response's flexString fields, bounded only by the 1MiB whole-response
+// getserverlist.php JSON response's gsl.FlexString fields, bounded only by the 1MiB whole-response
 // cap, not any per-field limit -- were re-encoded via PutUtfString with no length check at all,
 // unlike loginKey/gameUid/username which got exactly this guard (maxIdentityFieldLen) in round
 // 46. See capOversizedIdentityField's doc comment (login.go) for the full mechanism this closes.
@@ -1839,14 +1840,14 @@ func TestLoginRejectsOversizedInitialZoneAccessTokAndGameUid(t *testing.T) {
 	addr := startFakeGameServer(t, fakeInitPushServer(gotZn))
 	host, port := splitHostPortInt(t, addr)
 
-	oversizedZone := flexString(strings.Repeat("z", maxIdentityFieldLen+1))
-	oversizedTok := flexString(strings.Repeat("t", maxIdentityFieldLen+1))
-	oversizedGameUid := flexString(strings.Repeat("u", maxIdentityFieldLen+1))
+	oversizedZone := gsl.FlexString(strings.Repeat("z", maxIdentityFieldLen+1))
+	oversizedTok := gsl.FlexString(strings.Repeat("t", maxIdentityFieldLen+1))
+	oversizedGameUid := gsl.FlexString(strings.Repeat("u", maxIdentityFieldLen+1))
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: oversizedZone, GameUid: oversizedGameUid}},
-		At:         &LoginToken{Token: oversizedTok},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: oversizedZone, GameUid: oversizedGameUid}},
+		At:         &gsl.LoginToken{Token: oversizedTok},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1919,10 +1920,10 @@ func TestLoginRedirectOversizedZoneIsWarned(t *testing.T) {
 	})
 	oldHost, oldPort := splitHostPortInt(t, oldAddr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -1964,13 +1965,13 @@ func TestLoginRedirectOversizedZoneIsWarned(t *testing.T) {
 // (opt=fix) fetched before following a serverInfo redirect. An oversized refreshed token must fall
 // back to the PREVIOUS access token (capOversizedIdentityField, login.go) instead of ever reaching
 // PutUtfString with a value sfs.WriteUtfString would hard-reject. newFakeGSLServer's variadic
-// responses let the first (initial) and second (mid-redirect refresh) GetServerList calls answer
+// responses let the first (initial) and second (mid-redirect refresh) gsl.GetServerList calls answer
 // differently.
 func TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	const oldAccessTok = "tok-1"
-	oversizedAccessTok := flexString(strings.Repeat("t", maxIdentityFieldLen+1))
+	oversizedAccessTok := gsl.FlexString(strings.Repeat("t", maxIdentityFieldLen+1))
 
 	gotParamsAt := make(chan string, 1)
 	newAddr := startFakeGameServer(t, func(server *GameConn) {
@@ -2001,15 +2002,15 @@ func TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized(t *testing.T) {
 	oldHost, oldPort := splitHostPortInt(t, oldAddr)
 
 	gsl := newFakeGSLServer(t,
-		LoginServerListRespon{
+		gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
-			At:         &LoginToken{Token: oldAccessTok},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
+			At:         &gsl.LoginToken{Token: oldAccessTok},
 		},
-		LoginServerListRespon{
+		gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(newHost), Port: flexPort(newPort), Zone: "APS2", GameUid: "uid-1"}},
-			At:         &LoginToken{Token: oversizedAccessTok},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(newHost), Port: flexPort(newPort), Zone: "APS2", GameUid: "uid-1"}},
+			At:         &gsl.LoginToken{Token: oversizedAccessTok},
 		},
 	)
 	useFakeGSLServer(t, gsl)
@@ -2047,11 +2048,11 @@ func TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized(t *testing.T) {
 // already-valid accessTok with freshLsr.At.Token.String() whenever freshLsr.At was non-nil, even
 // when the decoded Token field was empty -- unlike the byte-for-byte adjacent gameUid reassignment
 // a few lines below, which was already correctly guarded against exactly this shape. gsl.go's
-// LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at" field (via
-// looksLikeJSONObject) as present, including "{}" or one with no/empty "token" -- a plausible shape
+// gsl.LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at" field (via
+// gsl.LooksLikeJSONObject) as present, including "{}" or one with no/empty "token" -- a plausible shape
 // for a degraded or rejected opt=fix refresh response. Mirrors
 // TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized's technique exactly, substituting an
-// empty-token LoginToken for the mid-redirect refresh response instead of an oversized one.
+// empty-token gsl.LoginToken for the mid-redirect refresh response instead of an oversized one.
 func TestLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -2086,15 +2087,15 @@ func TestLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.T) {
 	oldHost, oldPort := splitHostPortInt(t, oldAddr)
 
 	gsl := newFakeGSLServer(t,
-		LoginServerListRespon{
+		gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
-			At:         &LoginToken{Token: oldAccessTok},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
+			At:         &gsl.LoginToken{Token: oldAccessTok},
 		},
-		LoginServerListRespon{
+		gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(newHost), Port: flexPort(newPort), Zone: "APS2", GameUid: "uid-1"}},
-			At:         &LoginToken{Token: ""}, // present but empty -- the shape under test
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(newHost), Port: flexPort(newPort), Zone: "APS2", GameUid: "uid-1"}},
+			At:         &gsl.LoginToken{Token: ""}, // present but empty -- the shape under test
 		},
 	)
 	useFakeGSLServer(t, gsl)
@@ -2140,7 +2141,7 @@ func TestLoginRedirectRefreshSkipsOversizedGameUid(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	const oldGameUid = "uid-old"
-	oversizedGameUid := flexString(strings.Repeat("g", maxIdentityFieldLen+1))
+	oversizedGameUid := gsl.FlexString(strings.Repeat("g", maxIdentityFieldLen+1))
 
 	newAddr := startFakeGameServer(t, fakeInitPushServer(nil))
 	newHost, newPort := splitHostPortInt(t, newAddr)
@@ -2154,15 +2155,15 @@ func TestLoginRedirectRefreshSkipsOversizedGameUid(t *testing.T) {
 	oldHost, oldPort := splitHostPortInt(t, oldAddr)
 
 	gsl := newFakeGSLServer(t,
-		LoginServerListRespon{
+		gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: oldGameUid}},
-			At:         &LoginToken{Token: "tok-1"},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: oldGameUid}},
+			At:         &gsl.LoginToken{Token: "tok-1"},
 		},
-		LoginServerListRespon{
+		gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(newHost), Port: flexPort(newPort), Zone: "APS2", GameUid: oversizedGameUid}},
-			At:         &LoginToken{Token: "tok-1"},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(newHost), Port: flexPort(newPort), Zone: "APS2", GameUid: oversizedGameUid}},
+			At:         &gsl.LoginToken{Token: "tok-1"},
 		},
 	)
 	useFakeGSLServer(t, gsl)
@@ -2212,10 +2213,10 @@ func TestLoginBaseZoneSendFailureIsNonTimeoutNetError(t *testing.T) {
 	addr := startFakeGameServer(t, func(server *GameConn) {})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -2268,10 +2269,10 @@ func TestLoginSendVerifyCodeSendFailureIsNonTimeoutNetError(t *testing.T) {
 	// GameUid empty here, same as TestLoginEmailVerificationPath: a fresh device identity with no
 	// loginKey/gameUid drives gslOptFor to opt=new, which keeps Login() off the opt=="login"
 	// fast-path return and routes it into the email-verification steps this test needs to reach.
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 
@@ -2335,10 +2336,10 @@ func TestLoginAccountLoginNewSendFailureIsNonTimeoutNetError(t *testing.T) {
 	})
 	host, port := splitHostPortInt(t, addr)
 
-	gsl := newFakeGSLServer(t, LoginServerListRespon{
+	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
-		At:         &LoginToken{Token: "tok-1"},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: ""}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
 

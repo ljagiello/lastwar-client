@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"math"
@@ -19,7 +20,7 @@ func TestFindServerInfo(t *testing.T) {
 		p.PutSFSObject("serverInfo", si)
 		content := sfs.NewSFSObject()
 		content.PutSFSObject("p", p)
-		got := findServerInfo(content)
+		got := gsl.FindServerInfo(content)
 		if got == nil || got.GetString("ip") != "1.2.3.4" {
 			t.Fatalf("expected nested serverInfo to be found, got %v", got)
 		}
@@ -29,23 +30,23 @@ func TestFindServerInfo(t *testing.T) {
 		si.PutUtfString("ip", "5.6.7.8")
 		content := sfs.NewSFSObject()
 		content.PutSFSObject("serverInfo", si)
-		got := findServerInfo(content)
+		got := gsl.FindServerInfo(content)
 		if got == nil || got.GetString("ip") != "5.6.7.8" {
 			t.Fatalf("expected top-level serverInfo to be found, got %v", got)
 		}
 	})
 	t.Run("absent", func(t *testing.T) {
 		content := sfs.NewSFSObject()
-		if got := findServerInfo(content); got != nil {
+		if got := gsl.FindServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
 		}
 	})
 	t.Run("nil content", func(t *testing.T) {
-		if got := findServerInfo(nil); got != nil {
+		if got := gsl.FindServerInfo(nil); got != nil {
 			t.Fatalf("expected nil, got %v", got)
 		}
 	})
-	// The four subtests below are the round-39 regression tests for findServerInfo's
+	// The four subtests below are the round-39 regression tests for gsl.FindServerInfo's
 	// present-but-wrong-typed-vs-genuinely-absent diagnostic gap: three anomaly shapes must now
 	// warn, and the fourth (p.serverInfo genuinely absent) must stay silent, exactly mirroring
 	// login.go's redirectIP/redirectZone convention on the same object.
@@ -57,7 +58,7 @@ func TestFindServerInfo(t *testing.T) {
 
 		content := sfs.NewSFSObject()
 		content.PutUtfString("serverInfo", "not-an-object")
-		if got := findServerInfo(content); got != nil {
+		if got := gsl.FindServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
 		}
 		if logged := buf.String(); !strings.Contains(logged, "top-level serverInfo field is present but not an object") {
@@ -72,7 +73,7 @@ func TestFindServerInfo(t *testing.T) {
 
 		content := sfs.NewSFSObject()
 		content.PutUtfString("p", "not-an-object")
-		if got := findServerInfo(content); got != nil {
+		if got := gsl.FindServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
 		}
 		if logged := buf.String(); !strings.Contains(logged, "p field is present but not an object") {
@@ -89,7 +90,7 @@ func TestFindServerInfo(t *testing.T) {
 		p.PutUtfString("serverInfo", "not-an-object")
 		content := sfs.NewSFSObject()
 		content.PutSFSObject("p", p)
-		if got := findServerInfo(content); got != nil {
+		if got := gsl.FindServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
 		}
 		if logged := buf.String(); !strings.Contains(logged, "p.serverInfo field is present but not an object") {
@@ -105,7 +106,7 @@ func TestFindServerInfo(t *testing.T) {
 		p := sfs.NewSFSObject()
 		content := sfs.NewSFSObject()
 		content.PutSFSObject("p", p)
-		if got := findServerInfo(content); got != nil {
+		if got := gsl.FindServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
 		}
 		if logged := buf.String(); logged != "" {
@@ -147,7 +148,7 @@ func TestGetIntFlexible(t *testing.T) {
 // TestGetIntFlexibleRejectsOutOfInt32RangeString is the round-30 regression test for the MAJOR
 // finding: getIntFlexible's string-fallback path used to do a bare, unchecked int32(n) conversion
 // on strconv.Atoi's result, reintroducing the exact int64-to-int32 unchecked-narrowing bug round 29
-// fixed in sfsobject.go's GetInt. On a 64-bit platform Go's int is 64-bit, so Atoi parses a numeric
+// fixed in sfsobject.go's GetInt. On a 64-bit Platform Go's int is 64-bit, so Atoi parses a numeric
 // string outside int32's range without error, and the bare conversion used to silently wrap it
 // (e.g. "4294967301" -> 5) instead of rejecting it -- a corrupted/hostile numeric-string port would
 // then have sailed straight past buildBaseZoneLoginAddr's only guard (rejecting non-positive

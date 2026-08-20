@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"lastwar-client/internal/gsl"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ import (
 
 // TestDeviceIdentityStringGoStringRedact is the round-48 regression test for the MAJOR finding
 // that deviceIdentity -- which carries LoginKey, the single most sensitive credential in this
-// client -- had no String()/GoString() redaction, unlike gsl.go's LoginToken (round 47). Proves
+// client -- had no String()/GoString() redaction, unlike gsl.go's gsl.LoginToken (round 47). Proves
 // both the bare value and a value/pointer nested inside a containing struct's %+v are redacted;
 // deviceIdentity is used as *deviceIdentity throughout the codebase (LoginResult.Ident), so both
 // receiver shapes are checked.
@@ -51,7 +52,7 @@ func TestDeviceIdentityStringGoStringRedact(t *testing.T) {
 // TestLoginParamsInputStringGoStringRedact is the round-48 regression test for the MINOR finding
 // that LoginParamsInput -- which carries AccessTok/GameUid, live credentials -- had no
 // String()/GoString() redaction, the same class of gap round 47/48 closed for
-// LoginToken/deviceIdentity/SessionConfig.
+// gsl.LoginToken/deviceIdentity/SessionConfig.
 func TestLoginParamsInputStringGoStringRedact(t *testing.T) {
 	const liveToken = "FAKE-LIVE-ACCESS-TOKEN-must-not-leak-ghi789"
 	in := LoginParamsInput{DeviceID: "dev-1", GameUid: "uid-1", AccessTok: liveToken}
@@ -115,11 +116,11 @@ func TestBuildLoginParamsConditionalFields(t *testing.T) {
 				}
 			}
 
-			wantPackageName := packageName
+			wantPackageName := gsl.PackageName
 			wantPlatform := "1"
 			wantPf := "market_global"
-			wantAppVersion := appVersion
-			wantVersionCode := versionCode
+			wantAppVersion := gsl.AppVersion
+			wantVersionCode := gsl.VersionCode
 			if c.iosMode {
 				wantPackageName = iosPackageName
 				wantPlatform = "0"
@@ -128,19 +129,19 @@ func TestBuildLoginParamsConditionalFields(t *testing.T) {
 				wantVersionCode = "786"
 			}
 			if got := p.GetString("packageName"); got != wantPackageName {
-				t.Errorf("packageName = %q, want %q", got, wantPackageName)
+				t.Errorf("PackageName = %q, want %q", got, wantPackageName)
 			}
 			if got := p.GetString("platform"); got != wantPlatform {
-				t.Errorf("platform = %q, want %q", got, wantPlatform)
+				t.Errorf("Platform = %q, want %q", got, wantPlatform)
 			}
 			if got := p.GetString("pf"); got != wantPf {
 				t.Errorf("pf = %q, want %q", got, wantPf)
 			}
 			if got := p.GetString("appVersion"); got != wantAppVersion {
-				t.Errorf("appVersion = %q, want %q", got, wantAppVersion)
+				t.Errorf("AppVersion = %q, want %q", got, wantAppVersion)
 			}
 			if got := p.GetString("versionCode"); got != wantVersionCode {
-				t.Errorf("versionCode = %q, want %q", got, wantVersionCode)
+				t.Errorf("VersionCode = %q, want %q", got, wantVersionCode)
 			}
 		})
 	}

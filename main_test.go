@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"os"
@@ -392,9 +393,9 @@ func TestMainStrayPositionalArgumentDoesNotLeakContent(t *testing.T) {
 // -cs-shumei/-cs-at each explicitly passed as empty on the command line. -cs-port is also
 // explicitly passed as 0 (already covered on its own by round 33, reused here purely as a
 // deterministic, pre-dial exit point: runCrossServerTest's port<=0 check fires and os.Exit(1)s
-// right after the unconditional CheckVersion call, before ever attempting a real TCP dial -- see
+// right after the unconditional gsl.CheckVersion call, before ever attempting a real TCP dial -- see
 // TestRunCrossServerTestPortExplicitButInvalidWording for the same technique). A fake GSL server
-// satisfies that CheckVersion call. Asserts every new explicitly-empty warning fired, and that
+// satisfies that gsl.CheckVersion call. Asserts every new explicitly-empty warning fired, and that
 // -cs-gameuid (left non-empty here, not part of this round's fix) did NOT warn, proving the new
 // checks are scoped correctly rather than firing indiscriminately.
 func TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback(t *testing.T) {
@@ -402,7 +403,7 @@ func TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback(t *testing
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 
-		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
 		useFakeGSLServer(t, gsl)
 
 		cfgPath := filepath.Join(home, "session.json")
@@ -496,7 +497,7 @@ func TestMainConfigMergeCsIPExplicitlyEmptyWarns(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 
-		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
 		useFakeGSLServer(t, gsl)
 
 		cfgPath := filepath.Join(home, "session.json")
@@ -612,7 +613,7 @@ func TestDetectSwallowedFlagValue(t *testing.T) {
 
 // TestRunCrossServerTestPortExplicitButInvalidWording is the regression test for this round's
 // Fix 2: runCrossServerTest's "port <= 0" pre-flight guard (main.go, right below the
-// firstHost(ip) == "" guard) used to log the exact same "no port given" message whether -cs-port
+// gsl.FirstHost(ip) == "" guard) used to log the exact same "no port given" message whether -cs-port
 // was never passed at all OR was actually typed with an invalid (<=0) value (e.g. a typo'd
 // negative number) -- indistinguishable wording for two very different operator mistakes, despite
 // o.portExplicit (crossServerTestOpts' own visitedFlags-derived field, populated in main() via the
@@ -632,13 +633,13 @@ func TestRunCrossServerTestPortExplicitButInvalidWording(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
 		useFakeGSLServer(t, gsl)
 
 		// ip is a valid, non-empty value -- this test targets the port-invalid wording
 		// specifically, not the ip check (TestRunCrossServerTestExitsWhenIPEmpty already covers
 		// that one). No -cs-rt is set, so this never reaches the GSL-refresh block at all; the
-		// fake GSL server above only exists to satisfy the unconditional CheckVersion call that
+		// fake GSL server above only exists to satisfy the unconditional gsl.CheckVersion call that
 		// happens before the ip/port checks are reached.
 		runCrossServerTest(crossServerTestOpts{
 			ip:           "1.2.3.4",
@@ -781,10 +782,10 @@ func TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogic
 		addr := startFakeGameServer(t, mainCollectInteractiveFakeGameServer())
 		host, port := splitHostPortInt(t, addr)
 
-		gsl := newFakeGSLServer(t, LoginServerListRespon{
+		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-			At:         &LoginToken{Token: "tok-1"},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+			At:         &gsl.LoginToken{Token: "tok-1"},
 		})
 		useFakeGSLServer(t, gsl)
 
@@ -981,10 +982,10 @@ func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t
 		addr := startFakeGameServer(t, mainFetchBuildingsFailureFakeGameServer())
 		host, port := splitHostPortInt(t, addr)
 
-		gsl := newFakeGSLServer(t, LoginServerListRespon{
+		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-			At:         &LoginToken{Token: "tok-1"},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+			At:         &gsl.LoginToken{Token: "tok-1"},
 		})
 		useFakeGSLServer(t, gsl)
 
@@ -1131,10 +1132,10 @@ func TestMainZeroBuildingsFallbackPreservesNonEmptyVisitors(t *testing.T) {
 		addr := startFakeGameServer(t, mainZeroBuildingsFallbackFakeGameServer(&gotVisitorUID))
 		host, port := splitHostPortInt(t, addr)
 
-		gsl := newFakeGSLServer(t, LoginServerListRespon{
+		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
-			At:         &LoginToken{Token: "tok-1"},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+			At:         &gsl.LoginToken{Token: "tok-1"},
 		})
 		useFakeGSLServer(t, gsl)
 

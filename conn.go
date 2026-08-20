@@ -140,7 +140,7 @@ func (c *GameConn) ReadEnvelope() (*Envelope, error) {
 	env := &Envelope{}
 	// Round-40 fix: all three fields below used to silently coerce a present-but-wrong-typed
 	// value to its Go zero value with zero diagnostic, unlike every other field-read site in this
-	// codebase (gsl.go's findServerInfo, buildings.go's requireFieldType, etc.). This mattered in
+	// codebase (gsl.go's gsl.FindServerInfo, buildings.go's requireFieldType, etc.). This mattered in
 	// a real, not just theoretical, way: Controller's zero value (0) is controllerSystem, and
 	// Action's zero value (0) is actionHandshake -- so a wrong-typed "c"/"a" used to be
 	// indistinguishable from a genuine system/Handshake envelope, spuriously satisfying

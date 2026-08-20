@@ -106,7 +106,7 @@ func TestAsExtension(t *testing.T) {
 // TestReadEnvelopeWrongTypedFieldsWarn is the round-40 regression test for the MAJOR finding that
 // ReadEnvelope silently coerced a present-but-wrong-typed "c"/"a"/"p" field to its Go zero value
 // with zero diagnostic, unlike every other field-read site in this codebase (gsl.go's
-// findServerInfo, buildings.go's requireFieldType, etc.). This mattered in a real way: a
+// gsl.FindServerInfo, buildings.go's requireFieldType, etc.). This mattered in a real way: a
 // wrong-typed "c"/"a" used to be silently indistinguishable from a genuine
 // controllerSystem/actionHandshake envelope, since both zero-value to exactly those constants.
 func TestReadEnvelopeWrongTypedFieldsWarn(t *testing.T) {
