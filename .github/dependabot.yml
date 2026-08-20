@@ -1,0 +1,51 @@
+# Dependabot keeps dependencies current by opening PRs when updates are available.
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Ecosystems present in this repo:
+#   - gomod          -> go.mod / go.sum (module deps, e.g. github.com/klauspost/compress)
+#   - github-actions -> the actions pinned in .github/workflows/*.yml (checkout, setup-go, ...)
+# The docs/ site is Mintlify (docs.json + .mdx) with no package manifest, so there is nothing
+# there for Dependabot to track.
+version: 2
+updates:
+  # --- Go module dependencies -------------------------------------------------
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: deps
+    # Batch routine (minor/patch) bumps into a single PR to cut review noise; a major bump still
+    # gets its own PR so it can be reviewed on its own.
+    groups:
+      go-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # --- GitHub Actions used in workflows ---------------------------------------
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch
