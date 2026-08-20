@@ -349,10 +349,14 @@ var sensitiveSFSKeys = map[string]bool{
 	// device/tracking identifier: it's a real person's name, not just an identifier for one.
 	"googleName": true,
 	// googlePlay sits in the same Google-identity field cluster identity.go's BuildLoginParams
-	// constructs consecutively with googleName/gcmRegisterId immediately above/below (set in this
-	// order: googlePlay, androidDid, googleName, deeplinkParams, pfId) -- same "only ever sent as
-	// an empty-string placeholder by this Go client today, but a real captured non-Go-client login
-	// decoded via -decode-stream would leak it in cleartext" reasoning as its neighbors.
+	// constructs consecutively with androidDid/googleName immediately above/below (set in this
+	// order: googlePlay, androidDid, googleName, deeplinkParams, pfId -- deeplinkParams/pfId are
+	// listed here only for that call-order context, NOT as sharing this sensitivity reasoning: both
+	// are deliberately classified non-sensitive in sfsobject_sensitive_keys_sync_test.go's
+	// knownNonSensitiveSFSKeys, for their own unrelated reasons documented there) -- googlePlay
+	// itself gets the same "only ever sent as an empty-string placeholder by this Go client today,
+	// but a real captured non-Go-client login decoded via -decode-stream would leak it in
+	// cleartext" reasoning as its actual sensitive neighbors, androidDid/googleName.
 	"googlePlay": true,
 	// mt sits in the same field cluster per docs/live-validation.mdx's "complete Login params
 	// field list" (`AndroidID, IMEI, psh, mt, deviceId, airKey, ...`) -- undocumented meaning, but

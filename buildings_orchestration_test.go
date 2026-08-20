@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -662,6 +664,43 @@ func TestFetchBuildingsAggregateBuildingCeilingAcrossManyPushes(t *testing.T) {
 	// unaggregated potential", not an exact count.
 	if maxWant := maxAggregateBuildingsPerFetch + buildingsPerPush; len(buildings) > maxWant {
 		t.Errorf("got %d buildings, want at most %d (maxAggregateBuildingsPerFetch=%d plus at most one push's own overshoot)", len(buildings), maxWant, maxAggregateBuildingsPerFetch)
+	}
+}
+
+// TestFetchBuildingsAggregateCeilingUsesDedicatedConstant is the round-38 regression test for the
+// NIT/MINOR finding that TestFetchBuildingsAggregateBuildingCeilingAcrossManyPushes above can't
+// actually distinguish enforcement of the correct, dedicated maxAggregateBuildingsPerFetch from a
+// reversion back to the old, semantically-wrong maxCollectibleBuildingsPerRun (the exact bug round
+// 37 fixed) -- confirmed via mutation testing: both constants happen to equal 300 today, so
+// reverting buildings.go's FetchBuildings aggregate check to reference
+// maxCollectibleBuildingsPerRun again still passes that black-box, count-only test unchanged.
+//
+// Rather than forcing the two constants to artificially different values (they're deliberately the
+// same order-of-magnitude "generously large" defensive ceiling by design, not independently tuned
+// protocol limits), this instead reads buildings.go's own source directly -- the same technique
+// TestEncodeFormSortedOrderMatchesGetServerListFields (gsl_form_sync_test.go) and
+// TestCrossServerFlagNamesMatchesDeclarations (main_flags_test.go) already use for this exact
+// class of "prove the right identifier is referenced, not just the right behavior" problem -- and
+// asserts the aggregate-ceiling check literally names maxAggregateBuildingsPerFetch, not
+// maxCollectibleBuildingsPerRun, independent of what either constant's current value happens to be.
+func TestFetchBuildingsAggregateCeilingUsesDedicatedConstant(t *testing.T) {
+	src, err := os.ReadFile("buildings.go")
+	if err != nil {
+		t.Fatalf("read buildings.go: %v", err)
+	}
+
+	// Isolate the specific "if len(buildings) >= ..." guard inside FetchBuildings' loop-top
+	// aggregate-ceiling block -- distinct from the unrelated len(buildings)==0 zero-buildings
+	// check elsewhere in this file, and from the sibling len(visitors) check just above it.
+	re := regexp.MustCompile(`if len\(buildings\) >= (\w+) \{`)
+	m := re.FindSubmatch(src)
+	if m == nil {
+		t.Fatal("could not find FetchBuildings' \"if len(buildings) >= ...\" aggregate-ceiling guard in buildings.go -- the regexp is likely out of sync with how it's written there")
+	}
+	got := string(m[1])
+	if got != "maxAggregateBuildingsPerFetch" {
+		t.Errorf("FetchBuildings' aggregate building-ceiling guard references %q, want %q -- reusing any other constant here (most notably maxCollectibleBuildingsPerRun, a POST-filter constant scoped to only the ~19 collectible building types) reintroduces the exact round-37 bug: silently truncating -list-buildings output and CollectAll's building pool for any account whose TOTAL building count, not just the collectible subset, exceeds the reused constant's value",
+			got, "maxAggregateBuildingsPerFetch")
 	}
 }
 

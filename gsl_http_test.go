@@ -44,6 +44,36 @@ func TestCheckVersionAgainstFakeServer(t *testing.T) {
 	}
 }
 
+// TestCheckVersionRejectsServerErrorCode is the round-38 regression test for the MAJOR finding
+// that CheckVersion's server-rejection check (cv.Code != "") had zero test coverage -- confirmed
+// via mutation testing (disabling the check entirely still passed the full suite). This is a
+// confirmed-live rejection path, not speculative: CheckVersionResponse.Code's own doc comment
+// states the server has been observed returning a non-empty numeric code (e.g. 301) on rejection.
+// Proves a non-empty code makes CheckVersion return an error naming the code/msg, not a
+// nil-error CheckVersionResponse an unsuspecting caller might otherwise proceed with.
+func TestCheckVersionRejectsServerErrorCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := CheckVersionResponse{Code: "301", Msg: "client update required"}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	origHosts := checkVersionHosts
+	checkVersionHosts = []string{server.URL}
+	defer func() { checkVersionHosts = origHosts }()
+
+	cv, _, err := CheckVersion(defaultHTTPClient())
+	if err == nil {
+		t.Fatalf("CheckVersion: expected an error for a non-empty rejection code, got nil (cv=%+v)", cv)
+	}
+	if !strings.Contains(err.Error(), "301") {
+		t.Errorf("CheckVersion error = %q, want it to mention the rejection code %q", err.Error(), "301")
+	}
+	if !strings.Contains(err.Error(), "client update required") {
+		t.Errorf("CheckVersion error = %q, want it to mention the rejection message", err.Error())
+	}
+}
+
 // TestCheckVersionRejectsOversizedResponse exercises maxGSLResponseSize's rejection branch: a
 // fake server that writes a body over the limit must produce the size-limit error, not silently
 // read the whole thing (or worse, an unbounded amount) into memory.

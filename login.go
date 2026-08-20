@@ -880,8 +880,33 @@ func readCodeFromPipe(path string) string {
 	return readCodeFrom(f)
 }
 
+// maxCodePipeLineSize bounds how much readCodeFrom will ever read from stdin/-code-pipe,
+// mirroring interactive.go's maxControlPipeLineSize for the identical reason: an unbounded
+// accumulating read would otherwise let a misbehaving writer (a broken -code-pipe script, or
+// literal megabytes piped into stdin with no newline) force unbounded memory growth. A real
+// verification code is a handful of characters, so this is generous headroom, not a guess at an
+// actual protocol limit -- see maxControlPipeLineSize's own doc comment for the sibling case this
+// mirrors.
+const maxCodePipeLineSize = 64 * 1024
+
+// readCodeFrom reads one non-blank line from r, trimmed of surrounding whitespace, blocking
+// (retrying blank lines) until it gets one or the input closes.
+//
+// Round-38 fix: previously used a bare bufio.Reader.ReadString('\n') with no size bound at all
+// (the unbounded-memory-growth gap above) and, separately, silently discarded ReadString's own
+// error whenever the returned line was non-empty -- indistinguishable, with zero diagnostic, from
+// a normal newline-terminated read. ReadString returns the accumulated partial line PLUS a
+// non-nil error (typically io.EOF) whenever the input closes before a '\n' is ever seen, so a
+// killed/crashed -code-pipe writer that emitted only a few characters of a real code before dying
+// was silently accepted as if it were the complete, intended code -- the resulting server
+// rejection then surfaced as an opaque ErrAuthRejected with no hint the real cause was a
+// truncated local read, not a wrong/expired code. This can't be fixed by rejecting an
+// EOF-without-newline read outright, since that's also the normal shape of a legitimate final
+// line with no trailing newline (e.g. `printf '123456'` into -code-pipe, or Ctrl+D right after
+// typing the code) -- so this now warns instead, giving an operator debugging a rejection a
+// concrete signal to check for truncation without breaking the legitimate no-trailing-newline case.
 func readCodeFrom(r io.Reader) string {
-	reader := bufio.NewReader(r)
+	reader := bufio.NewReader(io.LimitReader(r, maxCodePipeLineSize))
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && line == "" {
@@ -890,6 +915,10 @@ func readCodeFrom(r io.Reader) string {
 		}
 		code := strings.TrimSpace(line)
 		if code != "" {
+			if err != nil {
+				slog.Warn("code read closed without seeing a trailing newline -- accepting it as-is, but this can also mean a truncated write from a killed/crashed writer or the size cap being hit; double check the code below if login fails",
+					"codeLen", len(code), "cap", maxCodePipeLineSize, "error", err)
+			}
 			return code
 		}
 	}

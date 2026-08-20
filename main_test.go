@@ -346,11 +346,77 @@ func TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback(t *testing
 			t.Errorf("subprocess stderr missing expected warning %q; stderr=%s", want, out)
 		}
 	}
+	if !strings.Contains(out, "-cs-port was explicitly given as 0") {
+		t.Errorf("subprocess stderr missing the expected \"-cs-port was explicitly given as 0\" warning (this run passes -cs-port 0 explicitly); stderr=%s", out)
+	}
 	if strings.Contains(out, "-cs-gameuid was explicitly given as empty") {
 		t.Errorf("subprocess stderr unexpectedly warned about -cs-gameuid, which was passed non-empty in this test; stderr=%s", out)
 	}
 	if !strings.Contains(out, `"iosMode":true`) {
 		t.Errorf("subprocess stderr missing iosMode=true -- the config's IOSMode:true should have taken effect since -cs-ios was never passed; stderr=%s", out)
+	}
+}
+
+// TestMainConfigMergeCsIPExplicitlyEmptyWarns is the round-38 regression test for the MINOR
+// finding that -cs-ip's own explicit-vs-config merge (main.go, mergeExplicitOrConfigString) had no
+// end-to-end coverage at all -- TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback
+// above always passes -cs-ip as a real, non-empty value, so it can never observe -cs-ip's own
+// explicit-empty branch (a non-empty flag value behaves identically whether routed through the
+// old applyOverride pattern or the new mergeExplicitOrConfigString one -- confirmed via mutation
+// testing: reverting -cs-ip's merge call site to the pre-round-33 pattern left every existing test
+// passing unchanged). -cs-ip gates whether main() takes the cross-server branch at all
+// (`if *csIP != "" || *csRt != ""`), so this also sets -cs-rt to stay on that branch -- the fake
+// GSL server's empty-ServerList, no-access-token response then makes runCrossServerTest's own
+// "refresh returned nothing usable" guard exit 2 quickly and deterministically, with no real
+// network dial ever attempted.
+func TestMainConfigMergeCsIPExplicitlyEmptyWarns(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_CS_IP_EMPTY") == "1" {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		useFakeGSLServer(t, gsl)
+
+		cfgPath := filepath.Join(home, "session.json")
+		cfgJSON, err := json.Marshal(SessionConfig{IP: "9.9.9.9", Port: 9999, Zone: "APS9999", GameUid: "cfg-gameuid"})
+		if err != nil {
+			t.Fatalf("marshal session config: %v", err)
+		}
+		if err := os.WriteFile(cfgPath, cfgJSON, 0600); err != nil {
+			t.Fatalf("write session config: %v", err)
+		}
+
+		os.Args = []string{
+			"lastwar-client",
+			"-config", cfgPath,
+			"-cs-ip", "",
+			"-cs-rt", "some-refresh-token",
+		}
+		main()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMainConfigMergeCsIPExplicitlyEmptyWarns$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS_CS_IP_EMPTY=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	gotCode := 0
+	if runErr != nil {
+		exitErr, ok := runErr.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("subprocess did not run/exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+		}
+		gotCode = exitErr.ExitCode()
+	}
+	if gotCode != 2 {
+		t.Errorf("subprocess exit code = %d, want 2 (the -cs-rt refresh-returned-nothing-usable guard); stderr=%s", gotCode, stderr.String())
+	}
+
+	out := stderr.String()
+	if !strings.Contains(out, "-cs-ip was explicitly given as empty") {
+		t.Errorf("subprocess stderr missing the expected \"-cs-ip was explicitly given as empty\" warning; stderr=%s", out)
 	}
 }
 

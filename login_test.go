@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -142,5 +144,80 @@ func TestRedact(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestReadCodeFromNewlineTerminatedStaysSilent is the baseline case for
+// TestReadCodeFromEOFTerminatedWarnsButStillAccepts below: a normal, complete,
+// newline-terminated code must return correctly with no diagnostic at all.
+func TestReadCodeFromNewlineTerminatedStaysSilent(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := readCodeFrom(strings.NewReader("123456\n"))
+	slog.SetDefault(orig)
+
+	if got != "123456" {
+		t.Errorf("readCodeFrom = %q, want %q", got, "123456")
+	}
+	if buf.String() != "" {
+		t.Errorf("expected no log output for a normal newline-terminated read, got:\n%s", buf.String())
+	}
+}
+
+// TestReadCodeFromEOFTerminatedWarnsButStillAccepts is the round-38 regression test for the MAJOR
+// finding that readCodeFrom (login.go) used to silently accept a code read that closed via EOF
+// before ever seeing a trailing newline -- indistinguishable, with zero diagnostic, from a normal
+// complete read. bufio.Reader.ReadString('\n') returns the accumulated partial line PLUS a
+// non-nil error (io.EOF) whenever the delimiter is never seen, so a killed/crashed -code-pipe
+// writer that emitted only a partial code was silently treated as if it had sent the complete,
+// intended code. This can't be rejected outright (a legitimate final line with no trailing
+// newline, e.g. `printf '123456'`, produces the identical signature), so this proves the fix
+// instead warns -- giving an operator debugging a downstream rejection a concrete signal -- while
+// still returning the read value rather than discarding it.
+func TestReadCodeFromEOFTerminatedWarnsButStillAccepts(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := readCodeFrom(strings.NewReader("123456")) // no trailing newline -- EOF terminates it
+	slog.SetDefault(orig)
+
+	if got != "123456" {
+		t.Errorf("readCodeFrom = %q, want %q (an EOF-terminated read must still be accepted, not discarded)", got, "123456")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "trailing newline") {
+		t.Errorf("expected a Warn mentioning the missing trailing newline, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "codeLen=6") {
+		t.Errorf("expected the Warn to include codeLen=6, got:\n%s", logged)
+	}
+}
+
+// TestReadCodeFromBoundedBySizeCap is the round-38 regression test for the MAJOR finding that
+// readCodeFrom had no size bound at all (unlike interactive.go's maxControlPipeLineSize for its
+// own FIFO reads) -- a misbehaving writer sending unbounded data with no newline could force
+// unbounded memory growth. Feeds far more than maxCodePipeLineSize bytes with no newline and
+// proves the call returns promptly with output capped at the size limit, not hanging or growing
+// without bound, and that the missing-trailing-newline Warn fires here too (the cap is hit before
+// any newline is ever seen, the identical signature to a truncated write).
+func TestReadCodeFromBoundedBySizeCap(t *testing.T) {
+	huge := strings.Repeat("A", maxCodePipeLineSize*4) // far more than the cap, no newline anywhere
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := readCodeFrom(strings.NewReader(huge))
+	slog.SetDefault(orig)
+
+	if len(got) > maxCodePipeLineSize {
+		t.Fatalf("readCodeFrom returned %d bytes, want at most %d (maxCodePipeLineSize) -- the size cap did not bound the read", len(got), maxCodePipeLineSize)
+	}
+	if len(got) == 0 {
+		t.Fatalf("readCodeFrom returned an empty string for a huge, non-empty input")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "trailing newline") {
+		t.Errorf("expected a Warn mentioning the missing trailing newline (the size cap was hit before any newline), got:\n%s", logged)
 	}
 }
