@@ -1,4 +1,4 @@
-package main
+package crypto
 
 import (
 	"crypto/aes"
@@ -36,22 +36,22 @@ func randomSalt(n int) (string, error) {
 	return string(out), nil
 }
 
-// urlSafeB64Encode matches AESHelper.ToUrlSafeBase64: standard base64,
+// URLSafeB64Encode matches AESHelper.ToUrlSafeBase64: standard base64,
 // then + -> -, / -> _, strip trailing '=' -- which is exactly what Go's
 // URLEncoding-with-no-padding alphabet produces.
-func urlSafeB64Encode(b []byte) string {
+func URLSafeB64Encode(b []byte) string {
 	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b)
 }
 
-func urlSafeB64Decode(s string) ([]byte, error) {
+func URLSafeB64Decode(s string) ([]byte, error) {
 	return base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(s)
 }
 
-// parseRSAPubKeyFromDER parses the base64 DER SubjectPublicKeyInfo delivered
+// ParseRSAPubKeyFromDER parses the base64 DER SubjectPublicKeyInfo delivered
 // in the check-version response's `resMsg` field (no PEM armor from the
 // server — the client adds it before feeding BouncyCastle; Go's
 // x509.ParsePKIXPublicKey takes DER directly).
-func parseRSAPubKeyFromDER(b64Der string) (*rsa.PublicKey, error) {
+func ParseRSAPubKeyFromDER(b64Der string) (*rsa.PublicKey, error) {
 	der, err := base64.StdEncoding.DecodeString(b64Der)
 	if err != nil {
 		return nil, fmt.Errorf("resMsg base64 decode: %w", err)
@@ -67,26 +67,26 @@ func parseRSAPubKeyFromDER(b64Der string) (*rsa.PublicKey, error) {
 	return rsaPub, nil
 }
 
-// md5HexKey reproduces AESHelper.GetMd5Hash: MD5 digest, formatted as a
+// MD5HexKey reproduces AESHelper.GetMd5Hash: MD5 digest, formatted as a
 // lowercase hex STRING, whose ASCII bytes (32 of them) are used directly as
 // the AES-256 key -- NOT the raw 16-byte digest.
-func md5HexKey(s string) []byte {
+func MD5HexKey(s string) []byte {
 	sum := md5.Sum([]byte(s))
 	return []byte(hex.EncodeToString(sum[:]))
 }
 
-// aesECBEncryptPKCS7 / aesECBDecryptPKCS7 implement AES-256-ECB-PKCS7 by
+// AESECBEncryptPKCS7 / AESECBDecryptPKCS7 implement AES-256-ECB-PKCS7 by
 // hand: Go's stdlib deliberately omits cipher.NewECBEncrypter since ECB is
 // unsafe for general use, but this is exactly what GSL uses (confirmed
 // empirically against the decompiled RijndaelManaged call, see dossier §03
 // -- CipherMode 2 is ECB, not CBC).
-func aesECBEncryptPKCS7(plaintext, key []byte) ([]byte, error) {
+func AESECBEncryptPKCS7(plaintext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
 	bs := block.BlockSize()
-	padded := pkcs7Pad(plaintext, bs)
+	padded := PKCS7Pad(plaintext, bs)
 	out := make([]byte, len(padded))
 	for i := 0; i < len(padded); i += bs {
 		block.Encrypt(out[i:i+bs], padded[i:i+bs])
@@ -94,7 +94,7 @@ func aesECBEncryptPKCS7(plaintext, key []byte) ([]byte, error) {
 	return out, nil
 }
 
-func aesECBDecryptPKCS7(ciphertext, key []byte) ([]byte, error) {
+func AESECBDecryptPKCS7(ciphertext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
@@ -107,10 +107,10 @@ func aesECBDecryptPKCS7(ciphertext, key []byte) ([]byte, error) {
 	for i := 0; i < len(ciphertext); i += bs {
 		block.Decrypt(out[i:i+bs], ciphertext[i:i+bs])
 	}
-	return pkcs7Unpad(out, bs)
+	return PKCS7Unpad(out, bs)
 }
 
-func pkcs7Pad(data []byte, blockSize int) []byte {
+func PKCS7Pad(data []byte, blockSize int) []byte {
 	padLen := blockSize - len(data)%blockSize
 	padded := make([]byte, len(data)+padLen)
 	copy(padded, data)
@@ -120,20 +120,20 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 	return padded
 }
 
-func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
+func PKCS7Unpad(data []byte, blockSize int) ([]byte, error) {
 	if len(data) == 0 {
-		return nil, fmt.Errorf("pkcs7Unpad: empty input")
+		return nil, fmt.Errorf("PKCS7Unpad: empty input")
 	}
 	padLen := int(data[len(data)-1])
 	if padLen <= 0 || padLen > len(data) {
-		return nil, fmt.Errorf("pkcs7Unpad: invalid padding byte %d", padLen)
+		return nil, fmt.Errorf("PKCS7Unpad: invalid padding byte %d", padLen)
 	}
 	if padLen > blockSize {
-		return nil, fmt.Errorf("pkcs7Unpad: padding byte %d exceeds block size %d", padLen, blockSize)
+		return nil, fmt.Errorf("PKCS7Unpad: padding byte %d exceeds block size %d", padLen, blockSize)
 	}
 	for _, b := range data[len(data)-padLen:] {
 		if int(b) != padLen {
-			return nil, fmt.Errorf("pkcs7Unpad: invalid padding bytes")
+			return nil, fmt.Errorf("PKCS7Unpad: invalid padding bytes")
 		}
 	}
 	return data[:len(data)-padLen], nil
@@ -167,22 +167,22 @@ func (g *GSLCrypto) EncryptRequest(plainForm string) (uuid string, data string, 
 	if err != nil {
 		return "", "", fmt.Errorf("rsa encrypt salt: %w", err)
 	}
-	uuid = urlSafeB64Encode(ct)
+	uuid = URLSafeB64Encode(ct)
 
 	// data = urlsafe_b64( AES256_ECB_PKCS7( plainForm, key=md5hex(salt) ) )
-	key := md5HexKey(salt)
-	enc, err := aesECBEncryptPKCS7([]byte(plainForm), key)
+	key := MD5HexKey(salt)
+	enc, err := AESECBEncryptPKCS7([]byte(plainForm), key)
 	if err != nil {
 		return "", "", fmt.Errorf("aes encrypt form: %w", err)
 	}
-	data = urlSafeB64Encode(enc)
+	data = URLSafeB64Encode(enc)
 
 	// Only commit the new salt once both encryption steps have actually succeeded and produced a
 	// ciphertext that will be sent to the server (round 26 fix): setting g.salt eagerly right
 	// after randomSalt, as this used to do, left a failed EncryptRequest call (RSA or AES error
 	// below) with g.salt pointing at a salt value that was never sent anywhere. DecryptResponse's
 	// only guard is an empty-string check on g.salt, so that stale-but-non-empty salt would
-	// silently pass the guard on a later call and fail deep inside pkcs7Unpad instead of with the
+	// silently pass the guard on a later call and fail deep inside PKCS7Unpad instead of with the
 	// intended "no salt in scope" error. Not reachable via any current call site (gsl.go's
 	// GetServerList allocates a fresh GSLCrypto per call and returns immediately on error), but a
 	// future retry loop or instance-reuse refactor would walk right into it.
@@ -196,19 +196,19 @@ func (g *GSLCrypto) DecryptResponse(binField string) (string, error) {
 	if g.salt == "" {
 		return "", fmt.Errorf("gslcrypto: no salt in scope (call EncryptRequest first)")
 	}
-	raw, err := urlSafeB64Decode(binField)
+	raw, err := URLSafeB64Decode(binField)
 	if err != nil {
 		return "", fmt.Errorf("bin base64 decode: %w", err)
 	}
-	key := md5HexKey(g.salt)
-	pt, err := aesECBDecryptPKCS7(raw, key)
+	key := MD5HexKey(g.salt)
+	pt, err := AESECBDecryptPKCS7(raw, key)
 	if err != nil {
 		return "", fmt.Errorf("aes decrypt bin: %w", err)
 	}
 	return string(pt), nil
 }
 
-// rsaModulusBitLen is a small helper used only for sanity logging.
-func rsaModulusBitLen(pub *rsa.PublicKey) int {
+// RSAModulusBitLen is a small helper used only for sanity logging.
+func RSAModulusBitLen(pub *rsa.PublicKey) int {
 	return pub.N.BitLen()
 }

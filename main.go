@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"lastwar-client/internal/crypto"
 	"log/slog"
 	"net"
 	"net/http"
@@ -926,7 +927,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 				os.Exit(1)
 			}
 			slog.Warn("check-version failed; proceeding without redirect-refresh capability (a mid-login serverInfo redirect will fall back to reusing the current access token)", "error", err)
-		} else if pub, err := parseRSAPubKeyFromDER(cv.ResMsg.String()); err != nil {
+		} else if pub, err := crypto.ParseRSAPubKeyFromDER(cv.ResMsg.String()); err != nil {
 			if o.rt != "" {
 				slog.Error("parse RSA pubkey failed", "error", err)
 				os.Exit(1)

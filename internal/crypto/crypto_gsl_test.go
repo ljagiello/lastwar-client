@@ -1,4 +1,4 @@
-package main
+package crypto
 
 import (
 	"crypto/ecdsa"
@@ -27,9 +27,9 @@ func TestGSLCryptoRoundTrip(t *testing.T) {
 	}
 	b64Der := base64.StdEncoding.EncodeToString(der)
 
-	pub, err := parseRSAPubKeyFromDER(b64Der)
+	pub, err := ParseRSAPubKeyFromDER(b64Der)
 	if err != nil {
-		t.Fatalf("parseRSAPubKeyFromDER: %v", err)
+		t.Fatalf("ParseRSAPubKeyFromDER: %v", err)
 	}
 
 	gc := NewGSLCrypto(pub)
@@ -41,7 +41,7 @@ func TestGSLCryptoRoundTrip(t *testing.T) {
 
 	// Simulate the server side: decrypt uuidField with the real private key to recover the
 	// salt, exactly as the real GSL server would.
-	saltCT, err := urlSafeB64Decode(uuidField)
+	saltCT, err := URLSafeB64Decode(uuidField)
 	if err != nil {
 		t.Fatalf("decode uuid field: %v", err)
 	}
@@ -50,12 +50,12 @@ func TestGSLCryptoRoundTrip(t *testing.T) {
 		t.Fatalf("rsa decrypt salt: %v", err)
 	}
 
-	recoveredKey := md5HexKey(string(salt))
-	encForm, err := urlSafeB64Decode(dataField)
+	recoveredKey := MD5HexKey(string(salt))
+	encForm, err := URLSafeB64Decode(dataField)
 	if err != nil {
 		t.Fatalf("decode data field: %v", err)
 	}
-	recoveredForm, err := aesECBDecryptPKCS7(encForm, recoveredKey)
+	recoveredForm, err := AESECBDecryptPKCS7(encForm, recoveredKey)
 	if err != nil {
 		t.Fatalf("aes decrypt form: %v", err)
 	}
@@ -67,11 +67,11 @@ func TestGSLCryptoRoundTrip(t *testing.T) {
 	// and DecryptResponse (using the salt already in scope on gc from the EncryptRequest call
 	// above) must recover it.
 	serverReply := `{"code":0,"serverList":[]}`
-	encReply, err := aesECBEncryptPKCS7([]byte(serverReply), recoveredKey)
+	encReply, err := AESECBEncryptPKCS7([]byte(serverReply), recoveredKey)
 	if err != nil {
 		t.Fatalf("aes encrypt reply: %v", err)
 	}
-	binField := urlSafeB64Encode(encReply)
+	binField := URLSafeB64Encode(encReply)
 
 	gotReply, err := gc.DecryptResponse(binField)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestGSLCryptoRoundTrip(t *testing.T) {
 // can still fail, so a failed call left g.salt pointing at a salt value that was never actually
 // sent to the server. DecryptResponse's only guard against operating without a real salt is an
 // empty-string check on g.salt, so that stale-but-unused salt would silently satisfy the guard and
-// blow up later with a confusing pkcs7Unpad error instead of the intended "no salt in scope"
+// blow up later with a confusing PKCS7Unpad error instead of the intended "no salt in scope"
 // message. This drives EncryptRequest's RSA step to fail deterministically -- without needing a
 // malformed key that could panic checkPub -- by using a structurally valid but undersized RSA
 // public key: rsa.EncryptPKCS1v15 computes k = pub.Size() and rejects any message where
@@ -113,7 +113,7 @@ func TestGSLCryptoEncryptRequestFailurePreservesSalt(t *testing.T) {
 	// Case 2: no prior successful call, so g.salt starts empty. A failing EncryptRequest call
 	// must leave it empty, and a subsequent DecryptResponse call must still get the intended
 	// "no salt in scope" error rather than proceeding with a stale, never-sent salt into a
-	// confusing downstream pkcs7Unpad failure.
+	// confusing downstream PKCS7Unpad failure.
 	gc2 := NewGSLCrypto(tinyPub)
 	if _, _, err := gc2.EncryptRequest("uuid=test-device&opt=new"); err == nil {
 		t.Fatalf("EncryptRequest: expected error from undersized RSA key, got nil")
@@ -131,25 +131,25 @@ func TestGSLCryptoEncryptRequestFailurePreservesSalt(t *testing.T) {
 	}
 }
 
-// TestParseRSAPubKeyFromDER is the round-39 regression test covering parseRSAPubKeyFromDER's
+// TestParseRSAPubKeyFromDER is the round-39 regression test covering ParseRSAPubKeyFromDER's
 // three error branches, previously exercised only indirectly (and only on the success path) via
 // TestGSLCryptoRoundTrip above. resMsg is attacker-influenced network input (dossier §02's
 // CheckVersion response), so each of these anomaly shapes is a real, non-theoretical input this
 // function must reject with a distinct, identifiable error rather than panicking.
 func TestParseRSAPubKeyFromDER(t *testing.T) {
 	t.Run("invalid base64", func(t *testing.T) {
-		_, err := parseRSAPubKeyFromDER("not-valid-base64!!!")
+		_, err := ParseRSAPubKeyFromDER("not-valid-base64!!!")
 		if err == nil {
-			t.Fatal("parseRSAPubKeyFromDER: expected error for invalid base64, got nil")
+			t.Fatal("ParseRSAPubKeyFromDER: expected error for invalid base64, got nil")
 		}
 		if !strings.Contains(err.Error(), "base64 decode") {
 			t.Fatalf("got error %q, want it to contain %q", err.Error(), "base64 decode")
 		}
 	})
 	t.Run("valid base64 but invalid DER", func(t *testing.T) {
-		_, err := parseRSAPubKeyFromDER(base64.StdEncoding.EncodeToString([]byte("not a DER-encoded SubjectPublicKeyInfo")))
+		_, err := ParseRSAPubKeyFromDER(base64.StdEncoding.EncodeToString([]byte("not a DER-encoded SubjectPublicKeyInfo")))
 		if err == nil {
-			t.Fatal("parseRSAPubKeyFromDER: expected error for invalid DER, got nil")
+			t.Fatal("ParseRSAPubKeyFromDER: expected error for invalid DER, got nil")
 		}
 		if !strings.Contains(err.Error(), "parse SubjectPublicKeyInfo") {
 			t.Fatalf("got error %q, want it to contain %q", err.Error(), "parse SubjectPublicKeyInfo")
@@ -164,9 +164,9 @@ func TestParseRSAPubKeyFromDER(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal ECDSA public key: %v", err)
 		}
-		_, err = parseRSAPubKeyFromDER(base64.StdEncoding.EncodeToString(der))
+		_, err = ParseRSAPubKeyFromDER(base64.StdEncoding.EncodeToString(der))
 		if err == nil {
-			t.Fatal("parseRSAPubKeyFromDER: expected error for non-RSA key, got nil")
+			t.Fatal("ParseRSAPubKeyFromDER: expected error for non-RSA key, got nil")
 		}
 		if !strings.Contains(err.Error(), "not RSA") {
 			t.Fatalf("got error %q, want it to contain %q", err.Error(), "not RSA")

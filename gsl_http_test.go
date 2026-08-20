@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"lastwar-client/internal/crypto"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -50,7 +51,7 @@ func TestCheckVersionAgainstFakeServer(t *testing.T) {
 // ANY field in this struct fails json.Unmarshal for the WHOLE response (flexString's own doc
 // comment documents live evidence of exactly this endpoint sending a bare-string-typed field,
 // code, as a JSON number instead). Sends msg/downloadurl/hotUpdateMsg as bare JSON numbers
-// alongside a valid string-typed resMsg (the one field genuinely read, by parseRSAPubKeyFromDER)
+// alongside a valid string-typed resMsg (the one field genuinely read, by crypto.ParseRSAPubKeyFromDER)
 // and proves the whole response still decodes successfully, with ResMsg's real value intact.
 func TestCheckVersionResponseFieldsAcceptStringOrNumber(t *testing.T) {
 	pub := testRSAPubKeyDER(t)
@@ -359,7 +360,7 @@ func TestGetServerListSuccessfulEncryptedRoundTrip(t *testing.T) {
 			t.Errorf("parse form: %v", err)
 			return
 		}
-		saltCT, err := urlSafeB64Decode(r.FormValue("uuid"))
+		saltCT, err := crypto.URLSafeB64Decode(r.FormValue("uuid"))
 		if err != nil {
 			t.Errorf("decode uuid field: %v", err)
 			return
@@ -369,7 +370,7 @@ func TestGetServerListSuccessfulEncryptedRoundTrip(t *testing.T) {
 			t.Errorf("rsa decrypt salt: %v", err)
 			return
 		}
-		key := md5HexKey(string(salt))
+		key := crypto.MD5HexKey(string(salt))
 		reply := LoginServerListRespon{
 			Code: "0",
 			ServerList: []LoginServerInfo{
@@ -382,12 +383,12 @@ func TestGetServerListSuccessfulEncryptedRoundTrip(t *testing.T) {
 			t.Errorf("marshal reply: %v", err)
 			return
 		}
-		encReply, err := aesECBEncryptPKCS7(plain, key)
+		encReply, err := crypto.AESECBEncryptPKCS7(plain, key)
 		if err != nil {
 			t.Errorf("aes encrypt reply: %v", err)
 			return
 		}
-		fmt.Fprintf(w, `{"bin":%q}`, urlSafeB64Encode(encReply))
+		fmt.Fprintf(w, `{"bin":%q}`, crypto.URLSafeB64Encode(encReply))
 	}))
 	defer server.Close()
 
@@ -918,7 +919,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 				t.Errorf("parse form: %v", err)
 				return
 			}
-			saltCT, err := urlSafeB64Decode(r.FormValue("uuid"))
+			saltCT, err := crypto.URLSafeB64Decode(r.FormValue("uuid"))
 			if err != nil {
 				t.Errorf("decode uuid field: %v", err)
 				return
@@ -928,7 +929,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 				t.Errorf("rsa decrypt salt: %v", err)
 				return
 			}
-			key := md5HexKey(string(salt))
+			key := crypto.MD5HexKey(string(salt))
 			block, err := aes.NewCipher(key)
 			if err != nil {
 				t.Errorf("aes.NewCipher: %v", err)
@@ -940,7 +941,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 			// PKCS7 padding for this key (last byte looks like a plausible pad length, but the
 			// preceding "padding" bytes don't match it -- see
 			// TestPkcs7UnpadRejectsMismatchedPaddingBytes in selftest_test.go for the same shape
-			// applied directly to pkcs7Unpad).
+			// applied directly to crypto.PKCS7Unpad).
 			plain := make([]byte, bs)
 			copy(plain, fakeToken)
 			plain[bs-4] = 5
@@ -950,7 +951,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 
 			ct := make([]byte, bs)
 			block.Encrypt(ct, plain)
-			fmt.Fprintf(w, `{"bin":%q}`, urlSafeB64Encode(ct))
+			fmt.Fprintf(w, `{"bin":%q}`, crypto.URLSafeB64Encode(ct))
 		}))
 		defer server.Close()
 
@@ -989,7 +990,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 				t.Errorf("parse form: %v", err)
 				return
 			}
-			saltCT, err := urlSafeB64Decode(r.FormValue("uuid"))
+			saltCT, err := crypto.URLSafeB64Decode(r.FormValue("uuid"))
 			if err != nil {
 				t.Errorf("decode uuid field: %v", err)
 				return
@@ -999,14 +1000,14 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 				t.Errorf("rsa decrypt salt: %v", err)
 				return
 			}
-			key := md5HexKey(string(salt))
+			key := crypto.MD5HexKey(string(salt))
 			reply := fmt.Sprintf(`{"code":"0","serverList":[ carries %s`, fakeToken)
-			encReply, err := aesECBEncryptPKCS7([]byte(reply), key)
+			encReply, err := crypto.AESECBEncryptPKCS7([]byte(reply), key)
 			if err != nil {
 				t.Errorf("aes encrypt reply: %v", err)
 				return
 			}
-			fmt.Fprintf(w, `{"bin":%q}`, urlSafeB64Encode(encReply))
+			fmt.Fprintf(w, `{"bin":%q}`, crypto.URLSafeB64Encode(encReply))
 		}))
 		defer server.Close()
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"lastwar-client/internal/crypto"
 	"log/slog"
 	"net"
 	"os"
@@ -248,11 +249,11 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	slog.Info("gate host", "gateHost", gateHost)
 	slog.Info("check-version response", "updateType", cv.UpdateType, "resMsgLen", len(cv.ResMsg))
 
-	pub, err := parseRSAPubKeyFromDER(cv.ResMsg.String())
+	pub, err := crypto.ParseRSAPubKeyFromDER(cv.ResMsg.String())
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("RSA pubkey", "bits", rsaModulusBitLen(pub))
+	slog.Info("RSA pubkey", "bits", crypto.RSAModulusBitLen(pub))
 
 	ident, err := loadOrCreateDeviceIdentity()
 	if err != nil {

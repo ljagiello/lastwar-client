@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"lastwar-client/internal/crypto"
 	"log/slog"
 	"math"
 	"net/http"
@@ -48,7 +49,7 @@ var checkVersionHosts = []string{
 // (flexString's own doc comment already documents live evidence of this endpoint sending a
 // bare-string-typed field, code, as a JSON number instead). ResMsg specifically is genuinely read
 // (login.go's Login, main.go's -cs-rt refresh path both feed it straight into
-// parseRSAPubKeyFromDER), so both call sites now convert via flexString's pre-existing String()
+// crypto.ParseRSAPubKeyFromDER), so both call sites now convert via flexString's pre-existing String()
 // accessor; DownloadURL/HotUpdateMsg are never read anywhere in this codebase, so widening them is
 // behaviorally free, matching AccountServerInfo.WsPort/LoginToken.Time/LoginServerInfo.Uid's own
 // precedent of hardening an unread field purely so it can't take the rest of the struct down.
@@ -635,7 +636,7 @@ func (o GSLOpt) LogValue() slog.Value { return slog.StringValue(o.String()) }
 // GetServerList performs the RSA+AES-wrapped GSL POST and returns the
 // decrypted, parsed response.
 func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey, deviceID string, opt GSLOpt, zone, gameUid string) (*LoginServerListRespon, error) {
-	gc := NewGSLCrypto(pub)
+	gc := crypto.NewGSLCrypto(pub)
 
 	airKey := "lwDid_" + b64OfString(deviceID)
 
