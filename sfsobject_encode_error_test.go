@@ -47,6 +47,34 @@ func TestEncodeObjectOversizedNestedStringReturnsError(t *testing.T) {
 	}
 }
 
+// TestEncodeObjectStringExactlyMaxLenSucceeds is the round-45 regression test for the MINOR
+// finding that writeUtfString's own 65535-byte length-prefix cap (sfsobject.go: `if len(b) >
+// 65535`) had no exact-boundary test -- distinct from int16Count's separate item-COUNT cap
+// (round 44's TestEncodeObjectExactlyMaxArrayLengthSucceeds covers that one, not this one).
+// TestEncodeObjectOversizedStringReturnsError/TestEncodeObjectOversizedNestedStringReturnsError
+// above only prove a 70000-byte string (comfortably over the cap) is rejected, never that exactly
+// 65535 bytes -- the boundary value itself -- still encodes and round-trips through DecodeObject
+// successfully.
+func TestEncodeObjectStringExactlyMaxLenSucceeds(t *testing.T) {
+	want := strings.Repeat("z", 65535)
+
+	o := NewSFSObject()
+	o.PutUtfString("s", want)
+
+	encoded, err := EncodeObject(o)
+	if err != nil {
+		t.Fatalf("EncodeObject() error = %v, want nil for exactly 65535 bytes (the boundary value, not over the cap)", err)
+	}
+
+	decoded, err := DecodeObject(encoded)
+	if err != nil {
+		t.Fatalf("DecodeObject() error = %v, want nil", err)
+	}
+	if got := decoded.GetString("s"); got != want {
+		t.Errorf("decoded string length = %d, want %d", len(got), len(want))
+	}
+}
+
 // TestEncodeObjectTooManyKeysReturnsError proves int16Count's other call site (a too-large
 // collection, not just a too-long string) also returns an error instead of panicking.
 func TestEncodeObjectTooManyKeysReturnsError(t *testing.T) {

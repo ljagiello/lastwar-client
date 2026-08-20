@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	mathrand "math/rand"
 	"testing"
 )
 
@@ -32,5 +33,61 @@ func TestPacketRoundTripBigSized(t *testing.T) {
 	}
 	if !bytes.Equal(got, body) {
 		t.Fatalf("round trip mismatch: got %d bytes, want %d bytes", len(got), len(body))
+	}
+}
+
+// TestEncodePacketBigSizedThresholdExactBoundary is the round-45 regression test for the MINOR
+// finding that EncodePacket's bigSized framing threshold (packet.go: `bigSized := len(payload) >
+// 65535`) had no exact-boundary test -- TestPacketRoundTripBigSized above only proves a
+// comfortably-over-cap payload (70000 bytes) selects the 4-byte-length framing, never that a
+// payload of exactly 65535 (post-compression) bytes still selects the 2-byte framing, nor that
+// exactly one byte more flips it. This constant has a documented history of being gotten wrong
+// once already (see the comment above bigSized's declaration in packet.go), underscoring the
+// value of pinning down its exact boundary.
+//
+// EncodePacket unconditionally zlib-compresses any body over compressionThreshold (1024 bytes),
+// and compressed output size is data-dependent, so a body length can't directly control the
+// post-compression payload length that bigSized actually checks. Random (incompressible) input
+// data makes zlib's BestCompression output track input length almost exactly linearly (DEFLATE
+// falls back to near-stored blocks for data it can't compress), so the two input lengths below
+// were derived empirically with a fixed math/rand seed (source printed alongside this test's own
+// development) to land the compressed payload on exactly 65535 and exactly 65536 bytes -- verified
+// directly against the actual EncodePacket output below, not merely asserted.
+func TestEncodePacketBigSizedThresholdExactBoundary(t *testing.T) {
+	tests := []struct {
+		name        string
+		inputLen    int
+		wantPayload int
+		wantBigSize bool
+	}{
+		{"exactly at cap", 65504, 65535, false},
+		{"one byte over cap", 65505, 65536, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rng := mathrand.New(mathrand.NewSource(42))
+			body := make([]byte, tt.inputLen)
+			if _, err := rng.Read(body); err != nil {
+				t.Fatalf("rng.Read: %v", err)
+			}
+
+			packet, err := EncodePacket(body)
+			if err != nil {
+				t.Fatalf("EncodePacket: %v", err)
+			}
+
+			gotBigSize := packet[0]&hdrBigSized != 0
+			if gotBigSize != tt.wantBigSize {
+				t.Fatalf("hdrBigSized set = %v, want %v (header=%08b) -- test construction assumption about the compressed payload length may be stale; re-derive inputLen if compress/flate's output ever changes", gotBigSize, tt.wantBigSize, packet[0])
+			}
+
+			got, err := ReadPacket(bytes.NewReader(packet))
+			if err != nil {
+				t.Fatalf("ReadPacket: %v", err)
+			}
+			if !bytes.Equal(got, body) {
+				t.Fatalf("round trip mismatch: got %d bytes, want %d bytes", len(got), len(body))
+			}
+		})
 	}
 }

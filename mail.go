@@ -144,6 +144,30 @@ const maxMailRewardTypesPerRun = 300
 // responds, so 300 * 8s bounds the worst case at ~40 minutes instead of up to ~4.4 hours.
 const maxMailBatchesPerLoop = 300
 
+// maxMailUidLen bounds how long a single mail entry's `uid` field may be before ListMail's
+// per-entry loop below skips it (with a Warn) instead of appending it to `all` -- round-45 fix.
+// GetString (sfsobject.go) makes no distinction between the sfsUtfString wire tag (length-capped
+// at 65535 bytes by readUtfString's own 2-byte length prefix) and the sfsText wire tag (bounded
+// only by packet.go's maxFrameSize, via a 4-byte length prefix) -- both decode to a plain Go
+// string, and requireFieldType's sfsFieldKindString check accepts either shape identically. So a
+// uid arriving tagged sfsText (rather than the presumably-expected sfsUtfString) could previously
+// be arbitrarily long, well past the wire format's own 65535-byte string-length limit.
+// batchByCountAndBytes always admits at least one uid per batch even if that uid alone exceeds its
+// own maxUIDsBytes budget (see its own doc comment), so an oversized uid became its own singleton
+// batch and reached writeUtfString (sfsobject.go) when ClaimAllMail re-encoded it into a
+// mail.read.status.betch/mail.reward.batch request's "uids" field -- writeUtfString hard-errors for
+// any string over 65535 bytes, a PURELY LOCAL encode failure with no involvement of the network at
+// all. That local error is wrapped in sendStageError (conn.go), whose Timeout() is hardcoded false
+// by design (see its own doc comment: this is intentional, covering "a local encode error from
+// deeper in SendExtension/SendEnvelope" alongside genuine write failures) -- so ClaimAllMail's own
+// net.Error checks misclassified this single malformed mail entry as a dead connection, aborting
+// the rest of ClaimAllMail, and via CollectAll's identical containsNonTimeoutNetError abort logic
+// (buildings.go), every other -collect action scheduled after it in the same run. Set at exactly
+// the wire format's own hard limit -- any uid this function would otherwise accept is guaranteed
+// re-encodable by writeUtfString later, closing the gap at its source instead of only softening the
+// downstream misclassification.
+const maxMailUidLen = 65535
+
 // ListMail fetches the account's mail via `chat.get.system.mails`,
 // following the real client's own request shape
 // (extracted/lua_decompiled/5018_Net_Msgs_Mail_MailGetMutiMessage.lua:
@@ -242,6 +266,15 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 					}
 					m := Mail{Raw: mo}
 					uid := m.Uid()
+					if len(uid) > maxMailUidLen {
+						// See maxMailUidLen's own doc comment: an oversized uid (e.g. arriving
+						// tagged sfsText instead of sfsUtfString) can never be successfully
+						// re-encoded by ClaimAllMail's batching later, so skip it here instead of
+						// letting that later local encode failure be misclassified as a dead
+						// connection and abort unrelated -collect work.
+						slog.Warn("skipping mail entry with oversized uid field", "page", page, "uidLen", len(uid), "cap", maxMailUidLen)
+						continue
+					}
 					if seenUIDs[uid] {
 						continue
 					}

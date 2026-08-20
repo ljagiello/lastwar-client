@@ -922,7 +922,7 @@ func waitForCmd(conn *GameConn, timeout time.Duration, wantCmds ...string) (*Ext
 }
 
 func readCodeFromStdin(conn *GameConn) string {
-	return readCodeFrom(os.Stdin, conn)
+	return readCodeFrom(os.Stdin, nil, conn)
 }
 
 // readCodeFromPipe opens a FIFO for reading -- this blocks until a writer
@@ -952,7 +952,7 @@ func readCodeFromPipe(path string, conn *GameConn) string {
 		os.Exit(1)
 	}
 	defer f.Close()
-	return readCodeFrom(f, conn)
+	return readCodeFrom(f, f, conn)
 }
 
 // closeConnBeforeExit calls conn.Close() before an imminent os.Exit(1), tolerating a nil conn (the
@@ -983,6 +983,16 @@ const maxCodePipeLineSize = 64 * 1024
 // readCodeFrom reads one non-blank line from r, trimmed of surrounding whitespace, blocking
 // (retrying blank lines) until it gets one or the input closes.
 //
+// closer, if non-nil, is explicitly closed before this function's own os.Exit(1) call below --
+// round-45 fix, closing the same defer-skipped-cleanup gap round 40/41 fixed for conn (see
+// closeConnBeforeExit's own doc comment) but for the FIFO handle itself: readCodeFromPipe's own
+// `defer f.Close()` runs in ITS stack frame, and readCodeFrom executes synchronously inside that
+// same frame (not detached), so os.Exit(1) -- which skips every deferred function in the whole
+// process -- also skipped readCodeFromPipe's deferred f.Close() whenever readCodeFrom reached this
+// branch. readCodeFromStdin passes nil here: os.Stdin must never be closed. Practical impact was
+// always minimal (os.Exit ends the process and the OS reclaims the fd regardless), but this closes
+// the inconsistency with every other explicit-close-before-exit site in this file.
+//
 // Round-38 fix: previously used a bare bufio.Reader.ReadString('\n') with no size bound at all
 // (the unbounded-memory-growth gap above) and, separately, silently discarded ReadString's own
 // error whenever the returned line was non-empty -- indistinguishable, with zero diagnostic, from
@@ -996,12 +1006,15 @@ const maxCodePipeLineSize = 64 * 1024
 // line with no trailing newline (e.g. `printf '123456'` into -code-pipe, or Ctrl+D right after
 // typing the code) -- so this now warns instead, giving an operator debugging a rejection a
 // concrete signal to check for truncation without breaking the legitimate no-trailing-newline case.
-func readCodeFrom(r io.Reader, conn *GameConn) string {
+func readCodeFrom(r io.Reader, closer io.Closer, conn *GameConn) string {
 	reader := bufio.NewReader(io.LimitReader(r, maxCodePipeLineSize))
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && line == "" {
 			slog.Error("input closed without a code", "error", err)
+			if closer != nil {
+				closer.Close()
+			}
 			closeConnBeforeExit(conn)
 			os.Exit(1)
 		}

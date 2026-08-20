@@ -212,7 +212,7 @@ func TestReadCodeFromNewlineTerminatedStaysSilent(t *testing.T) {
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := readCodeFrom(strings.NewReader("123456\n"), nil)
+	got := readCodeFrom(strings.NewReader("123456\n"), nil, nil)
 	slog.SetDefault(orig)
 
 	if got != "123456" {
@@ -237,7 +237,7 @@ func TestReadCodeFromEOFTerminatedWarnsButStillAccepts(t *testing.T) {
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := readCodeFrom(strings.NewReader("123456"), nil) // no trailing newline -- EOF terminates it
+	got := readCodeFrom(strings.NewReader("123456"), nil, nil) // no trailing newline -- EOF terminates it
 	slog.SetDefault(orig)
 
 	if got != "123456" {
@@ -265,7 +265,7 @@ func TestReadCodeFromBoundedBySizeCap(t *testing.T) {
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := readCodeFrom(strings.NewReader(huge), nil)
+	got := readCodeFrom(strings.NewReader(huge), nil, nil)
 	slog.SetDefault(orig)
 
 	if len(got) > maxCodePipeLineSize {
@@ -358,6 +358,57 @@ func TestReadCodeFromPipeStatFailureClosesConnBeforeExit(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "stat code pipe failed") {
 		t.Errorf("subprocess stderr = %s, want it to mention the stat failure", stderr.String())
+	}
+}
+
+// markerCloser is markerCloseConn's sibling for a plain io.Closer (not a full net.Conn) -- its
+// Close() prints a distinct marker line to stdout, the only way to observe from outside a
+// subprocess about to os.Exit(1) whether it actually ran.
+type markerCloser struct{}
+
+func (markerCloser) Close() error {
+	fmt.Println("MARKER_CLOSER_CLOSED")
+	return nil
+}
+
+// TestReadCodeFromClosesExtraCloserBeforeExit is the round-45 regression test for the MINOR
+// finding that readCodeFromPipe's own `defer f.Close()` never ran when readCodeFrom -- executing
+// synchronously inside readCodeFromPipe's own stack frame, not detached -- reached its own
+// os.Exit(1) branch: os.Exit skips every deferred function in the whole process. readCodeFrom now
+// takes an explicit closer parameter (nil from readCodeFromStdin, which must never close os.Stdin),
+// closed before this exact os.Exit(1) call, mirroring closeConnBeforeExit's own established
+// pattern for conn. Drives readCodeFrom directly (not through readCodeFromPipe, so a plain
+// markerCloser stands in for the real FIFO handle) with an input that closes before any code line
+// arrives, forcing the "input closed without a code" os.Exit(1) branch, and confirms the marker
+// closer's Close() ran first.
+func TestReadCodeFromClosesExtraCloserBeforeExit(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		readCodeFrom(strings.NewReader(""), markerCloser{}, nil)
+		// Only reached if readCodeFrom fails to exit -- the outer assertions below will then see a
+		// clean (non-error) subprocess exit and fail with a clear message instead of this silently
+		// passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestReadCodeFromClosesExtraCloserBeforeExit$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stdout=%s, stderr=%s", runErr, stdout.String(), stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "MARKER_CLOSER_CLOSED") {
+		t.Errorf("expected the closer's Close() to have run before os.Exit(1) (marker missing from stdout); stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "input closed without a code") {
+		t.Errorf("subprocess stderr = %s, want it to mention the input-closed failure", stderr.String())
 	}
 }
 

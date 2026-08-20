@@ -199,6 +199,32 @@ func TestReadPacketRejectsZlibBombOutput(t *testing.T) {
 	}
 }
 
+// TestReadPacketZlibInflateExactlyAtCapSucceeds is the round-45 regression test for the MINOR
+// finding that ReadPacket's zlib-inflate output-size guard (packet.go's `len(out) > maxFrameSize`)
+// had no exact-boundary test -- TestReadPacketRejectsZlibBombOutput above only proves a payload
+// comfortably OVER the cap is rejected, never that a payload inflating to EXACTLY maxFrameSize
+// bytes -- the boundary value itself -- is still accepted, unlike the round-43 exact-boundary
+// tests for ReadPacket's other two maxFrameSize guards (declared length, zstd uncompressedLen; see
+// TestReadPacketAcceptsDeclaredLengthExactlyAtCap above and packet_zstd_test.go's
+// TestReadPacketAcceptsZstdUncompressedLengthExactlyAtCap).
+func TestReadPacketZlibInflateExactlyAtCapSucceeds(t *testing.T) {
+	// All-zero: highly compressible, keeps the wire frame small and the test fast.
+	body := make([]byte, maxFrameSize)
+
+	packet, err := EncodePacket(body)
+	if err != nil {
+		t.Fatalf("EncodePacket: %v", err)
+	}
+
+	out, err := ReadPacket(bytes.NewReader(packet))
+	if err != nil {
+		t.Fatalf("ReadPacket() error = %v, want nil for a zlib payload inflating to exactly maxFrameSize bytes (the boundary value, not over the cap)", err)
+	}
+	if len(out) != maxFrameSize {
+		t.Errorf("ReadPacket() returned %d bytes, want exactly %d", len(out), maxFrameSize)
+	}
+}
+
 // Confirms ReadPacket does not misclassify a mid-frame truncation as a clean
 // end-of-stream. Per io.ReadFull's documented contract, a read that consumes
 // zero bytes returns bare io.EOF regardless of whether earlier io.ReadFull

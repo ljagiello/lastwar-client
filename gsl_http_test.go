@@ -445,6 +445,42 @@ func TestGetServerListLoginServerAtRtAcceptEmptyArrayShape(t *testing.T) {
 	}
 }
 
+// TestGetServerListServerListAcceptsObjectShape is the round-45 regression test for the MAJOR
+// finding that LoginServerListRespon.ServerList -- unlike its sibling struct-pointer fields
+// LoginServer/At/Rt, hardened against a non-array/non-object shape mismatch in round 44 -- had no
+// tolerance at all for arriving as a JSON object instead of an array (e.g. PHP's json_encode's
+// common encoding for a non-sequentially-keyed associative array), which used to fail
+// json.Unmarshal for the ENTIRE GetServerList response with no recovery path anywhere (Login()
+// returns the error immediately). Sends a response with serverList as `{}` instead of `[]`/absent,
+// and confirms GetServerList still succeeds, with ServerList degrading to empty (the same "no
+// servers returned" case Login()'s own len(lsr.ServerList)==0 check and applyLoginServerFallback's
+// opt=new synthesis already handle) and Code/LastLoggedServer still intact.
+func TestGetServerListServerListAcceptsObjectShape(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":"0","serverList":{"101":{"id":"101","ip":"1.2.3.4","port":"9000","zone":"APS1","gameUid":"g1"}},"lastLoggedServer":"1"}`)
+	}))
+	defer server.Close()
+
+	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	if err != nil {
+		t.Fatalf("GetServerList() error = %v, want the malformed object-shaped serverList to degrade gracefully, not fail the whole response", err)
+	}
+	if len(lsr.ServerList) != 0 {
+		t.Errorf("ServerList = %+v, want empty for an object-shaped value", lsr.ServerList)
+	}
+	if got := lsr.Code.String(); got != "0" {
+		t.Errorf("Code.String() = %q, want %q", got, "0")
+	}
+	if got := lsr.LastLoggedServer.String(); got != "1" {
+		t.Errorf("LastLoggedServer.String() = %q, want %q", got, "1")
+	}
+}
+
 // TestGetServerListRejectsOversizedResponse exercises maxGSLResponseSize's rejection branch on
 // the GetServerList side (its own io.ReadAll/LimitReader call site, separate from CheckVersion's).
 func TestGetServerListRejectsOversizedResponse(t *testing.T) {
@@ -625,9 +661,17 @@ func TestFlexStringIntRedactsSensitiveKeyValue(t *testing.T) {
 // gsl.go's response-error branches: a real getserverlist.php response legitimately carries a live
 // at/rt session token on success (LoginServerListRespon.At/Rt), so none of these branches may embed
 // the raw body/decrypted plaintext in the returned error. Three subtests force a different one of
-// the three json.Unmarshal calls in GetServerList to fail while a fake token is present in the
+// GetServerList's several json.Unmarshal calls to fail while a fake token is present in the
 // response; a fourth (round 12) covers the sibling HTTP-status-error branch, which round 11 missed.
 // Each asserts the fake token never appears in the resulting error text.
+//
+// The "bin field wrong-typed" subtest below used to type-mismatch LoginServerListRespon.ServerList
+// directly instead -- round 45 made that field JSON-shape-tolerant (degrading gracefully instead of
+// erroring, closing the same gap round 44 closed for its sibling LoginServer/At/Rt fields), so a
+// type-mismatched serverList no longer fails GetServerList at all. The whole LoginServerListRespon
+// struct family is now, by design, effectively immune to type mismatches after 12 rounds of
+// hardening -- this subtest exercises the still-genuinely-fallible "bin" field decode instead, one
+// level up from LoginServerListRespon's own UnmarshalJSON.
 func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 	const fakeToken = "FAKE-LIVE-SESSION-TOKEN-must-not-leak-abc123"
 
@@ -652,15 +696,19 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("plaintext fallback type-mismatched", func(t *testing.T) {
+	t.Run("bin field wrong-typed", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Valid JSON with no "bin" field (so GetServerList falls to the plaintext-fallback
-			// branch), but "serverList" is a string where LoginServerListRespon.ServerList expects
-			// a JSON array -- a genuine type mismatch that still fails json.Unmarshal. (This used
-			// to type-mismatch "code" instead, but Code is now flexString -- see its doc comment --
-			// and flexString.UnmarshalJSON never returns an error, so a string-typed "code" no
-			// longer forces a decode failure here.)
-			fmt.Fprintf(w, `{"code":"0","serverList":"bad-type carries %s"}`, fakeToken)
+			// Valid top-level JSON, but "bin" is present and not a JSON string -- a genuine type
+			// mismatch that still fails json.Unmarshal(binRaw, &binStr) (gsl.go's "decode bin
+			// field" branch), unrelated to LoginServerListRespon's own JSON-shape tolerance
+			// (round 44/45 widened ServerList/LoginServer/At/Rt to degrade gracefully instead of
+			// failing, but "bin" is decoded separately, before LoginServerListRespon's own
+			// UnmarshalJSON is ever reached). This subtest used to type-mismatch "serverList"
+			// directly instead, but round 45 made that field shape-tolerant too (degrading to an
+			// empty ServerList instead of erroring), so it no longer exercises a decode failure at
+			// all -- the whole struct family has, by design, become effectively immune to type
+			// mismatches after 12 rounds of hardening.
+			fmt.Fprintf(w, `{"bin":12345,"note":"carries %s"}`, fakeToken)
 		}))
 		defer server.Close()
 
@@ -766,7 +814,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("decrypted plaintext type-mismatched", func(t *testing.T) {
+	t.Run("decrypted plaintext malformed JSON syntax", func(t *testing.T) {
 		priv, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
 			t.Fatalf("generate RSA key: %v", err)
@@ -775,9 +823,16 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Play the server side of the real GSL crypto envelope (same recipe as
 			// TestGSLCryptoRoundTrip in crypto_gsl_test.go): recover the AES key from the
-			// client's RSA-encrypted uuid field, then encrypt a type-mismatched reply with it so
+			// client's RSA-encrypted uuid field, then encrypt a malformed reply with it so
 			// GetServerList reaches its decrypted-plaintext decode-failure branch instead of the
 			// plaintext-fallback one above.
+			//
+			// Genuinely malformed JSON SYNTAX (an unterminated array), not just a type mismatch --
+			// round 44/45 made every field in LoginServerListRespon (ServerList/LoginServer/At/Rt,
+			// on top of every scalar field already widened to flexString in rounds 33-43)
+			// JSON-shape-tolerant, degrading gracefully instead of failing json.Unmarshal, so a
+			// type-mismatched value (this subtest's original shape) no longer reaches this branch's
+			// decode-failure path at all. Only a genuine syntax error still does.
 			if err := r.ParseForm(); err != nil {
 				t.Errorf("parse form: %v", err)
 				return
@@ -793,11 +848,7 @@ func TestGetServerListDecodeFailuresDoNotLeakRawResponse(t *testing.T) {
 				return
 			}
 			key := md5HexKey(string(salt))
-			// Same "serverList" type mismatch as the plaintext-fallback subtest above (see its
-			// comment for why "code" no longer works for this now that Code is flexString), just
-			// routed through the real AES envelope so this exercises the decrypted-plaintext
-			// decode-failure branch instead.
-			reply := fmt.Sprintf(`{"code":"0","serverList":"bad-type carries %s"}`, fakeToken)
+			reply := fmt.Sprintf(`{"code":"0","serverList":[ carries %s`, fakeToken)
 			encReply, err := aesECBEncryptPKCS7([]byte(reply), key)
 			if err != nil {
 				t.Errorf("aes encrypt reply: %v", err)

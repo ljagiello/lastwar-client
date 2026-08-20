@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -374,5 +376,69 @@ func TestStartHeartbeatSendFailureClosesConn(t *testing.T) {
 		// closed: StartHeartbeat's error branch called c.Close(), which closed this channel.
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for a heartbeat send failure to trigger GameConn.Close()")
+	}
+}
+
+// TestCloseRacesWithLiveHeartbeatGoroutine is the round-45 regression test for the MINOR finding
+// that GameConn.Close()'s own doc comment names "StartHeartbeat's own error-branch c.Close() racing
+// the main goroutine's error-path c.Close()" as the motivating scenario for wrapping BOTH
+// close(c.stopHeartbeat) and c.conn.Close() inside the same closeOnce -- but no existing test
+// combines a LIVE (non-nil stopHeartbeat) heartbeat goroutine with a concurrent EXTERNAL Close()
+// call: TestCloseIsIdempotentConcurrent (conn_test.go) never calls StartHeartbeat at all
+// (stopHeartbeat stays nil, so close(c.stopHeartbeat) never actually executes there), and the two
+// StartHeartbeat tests above each have only a single, sequential Close() caller. Starts a real
+// heartbeat, waits for it to actually begin ticking, then races n concurrent external Close()
+// calls against it -- proving no panic (e.g. a close-of-already-closed-channel from a hypothetical
+// broken guard) and that the heartbeat goroutine genuinely stops once every Close() call returns.
+func TestCloseRacesWithLiveHeartbeatGoroutine(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const interval = 2 * time.Millisecond
+	client.StartHeartbeat(interval, time.Now())
+
+	var pingCount atomic.Int64
+	firstPing := make(chan struct{})
+	var firstPingOnce sync.Once
+	go func() {
+		for {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			if env.Controller == controllerSystem && env.Action == actionPingPong {
+				pingCount.Add(1)
+				firstPingOnce.Do(func() { close(firstPing) })
+			}
+		}
+	}()
+
+	select {
+	case <-firstPing:
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeat never sent an initial ping")
+	}
+
+	const n = 20
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = client.Close()
+		}(i)
+	}
+	wg.Wait() // no panic across n concurrent Close() calls racing the live heartbeat goroutine
+
+	for i, err := range errs {
+		if err != errs[0] {
+			t.Errorf("concurrent Close() call %d = %v, want it to equal call 0's result (%v)", i, err, errs[0])
+		}
+	}
+
+	countAfterClose := pingCount.Load()
+	time.Sleep(interval * 20)
+	if got := pingCount.Load(); got != countAfterClose {
+		t.Errorf("pingCount grew from %d to %d after every Close() call returned; heartbeat goroutine should have stopped", countAfterClose, got)
 	}
 }

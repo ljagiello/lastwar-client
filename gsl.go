@@ -308,25 +308,41 @@ type LoginServerListRespon struct {
 // defense-in-depth already applied to every sibling scalar field in this struct family, just
 // extended to the three fields a simple type-widen can't reach.
 //
+// Round-45 fix: ServerList gets the identical treatment via a new looksLikeJSONArray sibling check
+// -- round 44's own doc comment above claimed this closed the LAST shape-tolerance gap in this
+// struct, but left ServerList itself (a slice, not a struct pointer, but with the exact same
+// "PHP's json_encode can emit an object instead of an array for a non-sequentially-keyed
+// associative array" failure mode) still going through the plain shadow-struct field with zero
+// tolerance. If serverList ever arrives as a JSON object instead of an array, it now degrades to
+// nil (empty) -- exactly what Login()'s own "no servers returned" check and
+// applyLoginServerFallback's opt=new synthesis already treat as the ordinary empty-ServerList
+// case -- instead of failing json.Unmarshal for the entire response.
+//
 // The shadow struct below must be kept in sync with LoginServerListRespon's own field list by
 // hand -- a future field added to one and not the other will compile but silently stop round-
 // tripping through this custom decoder.
 func (l *LoginServerListRespon) UnmarshalJSON(b []byte) error {
 	var raw struct {
-		Code             flexString        `json:"code"`
-		ServerList       []LoginServerInfo `json:"serverList"`
-		LastLoggedServer flexString        `json:"lastLoggedServer"`
-		LoginServer      json.RawMessage   `json:"loginServer"`
-		At               json.RawMessage   `json:"at"`
-		Rt               json.RawMessage   `json:"rt"`
+		Code             flexString      `json:"code"`
+		ServerList       json.RawMessage `json:"serverList"`
+		LastLoggedServer flexString      `json:"lastLoggedServer"`
+		LoginServer      json.RawMessage `json:"loginServer"`
+		At               json.RawMessage `json:"at"`
+		Rt               json.RawMessage `json:"rt"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
 	l.Code = raw.Code
-	l.ServerList = raw.ServerList
 	l.LastLoggedServer = raw.LastLoggedServer
 
+	if looksLikeJSONArray(raw.ServerList) {
+		var v []LoginServerInfo
+		if err := json.Unmarshal(raw.ServerList, &v); err != nil {
+			return fmt.Errorf("serverList: %w", err)
+		}
+		l.ServerList = v
+	}
 	if looksLikeJSONObject(raw.LoginServer) {
 		var v AccountServerInfo
 		if err := json.Unmarshal(raw.LoginServer, &v); err != nil {
@@ -358,6 +374,15 @@ func (l *LoginServerListRespon) UnmarshalJSON(b []byte) error {
 func looksLikeJSONObject(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) > 0 && trimmed[0] == '{'
+}
+
+// looksLikeJSONArray is looksLikeJSONObject's sibling for ServerList -- reports whether raw is a
+// non-empty JSON value whose first non-whitespace byte is '[', distinguishing a genuine array
+// (decode normally) from `null`/absent or an unexpected non-array shape like `{}` (both leave the
+// field nil/empty, no error, rather than failing the whole response).
+func looksLikeJSONArray(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && trimmed[0] == '['
 }
 
 // applyLoginServerFallback synthesizes a single ServerList entry from LoginServer when the

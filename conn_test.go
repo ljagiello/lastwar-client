@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -437,6 +438,115 @@ func TestGameConnSendReceiveRoundTrip(t *testing.T) {
 	}
 	if got := msg.Params.GetString("hello"); got != "world" {
 		t.Errorf("Params.hello = %q, want world", got)
+	}
+}
+
+// splitWriteConn wraps a net.Conn, splitting every Write over some minimum size into two separate
+// underlying writes with a small delay between them -- widening the window during which a
+// concurrent, unsynchronized second Write on the same conn could interleave its own bytes into the
+// stream. Used by TestSendEnvelopeIsSafeForConcurrentUse below to give a hypothetical regression
+// (wmu no longer covering the actual conn.Write call) an actual chance to be observed: a bare
+// net.Pipe's own internal buffering can otherwise mask interleaving that would still corrupt a
+// real TCP connection under the same unsynchronized-concurrent-Write conditions.
+type splitWriteConn struct {
+	net.Conn
+}
+
+func (c *splitWriteConn) Write(b []byte) (int, error) {
+	if len(b) < 8 {
+		return c.Conn.Write(b)
+	}
+	mid := len(b) / 2
+	n1, err := c.Conn.Write(b[:mid])
+	if err != nil {
+		return n1, err
+	}
+	time.Sleep(2 * time.Millisecond)
+	n2, err := c.Conn.Write(b[mid:])
+	return n1 + n2, err
+}
+
+// TestSendEnvelopeIsSafeForConcurrentUse is the round-45 regression test for the MINOR finding
+// that SendEnvelope's documented "safe for concurrent use (heartbeat + main flow)" guarantee
+// (conn.go's wmu, which serializes only the write itself -- SetWriteDeadline/conn.Write/
+// SetWriteDeadline(zero) -- not envelope construction/encoding) had no test driving two truly
+// concurrent SendEnvelope/SendExtension callers against one GameConn. TestGameConnSendReceiveRoundTrip
+// above has exactly one sender; the StartHeartbeat tests (conn_handshake_test.go) have the
+// heartbeat goroutine as the only sender. Spawns n goroutines each sending a distinct extension
+// command concurrently over a splitWriteConn (see its own doc comment for why a bare net.Pipe
+// isn't a strong enough vehicle for this specific mutation) and confirms the server side reads
+// back exactly n well-formed, non-corrupted envelopes with the right cmd/params pairing -- if
+// wmu's scope were ever narrowed to no longer cover the actual conn.Write call, two callers'
+// packets could interleave mid-write and desync the frame stream, which would surface here as a
+// ReadEnvelope decode failure/timeout or a cmd matched to the wrong params.
+func TestSendEnvelopeIsSafeForConcurrentUse(t *testing.T) {
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() { c1.Close(); c2.Close() })
+	client := &GameConn{conn: &splitWriteConn{Conn: c1}, reader: bufio.NewReaderSize(c1, 4096)}
+	server := &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
+
+	const n = 20
+	var wg sync.WaitGroup
+	wg.Add(n)
+	sendErrs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			params := NewSFSObject()
+			params.PutInt("i", int32(i))
+			if err := client.SendExtension(fmt.Sprintf("test.cmd.%d", i), params); err != nil {
+				sendErrs <- err
+			}
+		}(i)
+	}
+
+	gotCmds := make(map[string]int32, n)
+	var mu sync.Mutex
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for i := 0; i < n; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("ReadEnvelope %d: %v", i, err)
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				t.Errorf("envelope %d did not decode as an extension message", i)
+				return
+			}
+			mu.Lock()
+			gotCmds[msg.Cmd] = msg.Params.GetInt("i")
+			mu.Unlock()
+		}
+	}()
+
+	wg.Wait()
+	close(sendErrs)
+	for err := range sendErrs {
+		t.Errorf("SendExtension: %v", err)
+	}
+
+	select {
+	case <-readerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never read all n envelopes -- a corrupted/interleaved concurrent write likely desynced the frame stream")
+	}
+
+	if len(gotCmds) != n {
+		t.Fatalf("server decoded %d distinct, well-formed envelopes, want %d", len(gotCmds), n)
+	}
+	for i := 0; i < n; i++ {
+		cmd := fmt.Sprintf("test.cmd.%d", i)
+		got, ok := gotCmds[cmd]
+		if !ok {
+			t.Errorf("missing envelope for %s", cmd)
+			continue
+		}
+		if got != int32(i) {
+			t.Errorf("envelope %s carried i=%d, want %d -- possible cross-writer corruption", cmd, got, i)
+		}
 	}
 }
 

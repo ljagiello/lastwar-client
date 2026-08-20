@@ -1113,6 +1113,123 @@ func TestListMailWrongTypedUIDIsRejected(t *testing.T) {
 	}
 }
 
+// TestListMailSkipsOversizedUidField is the round-45 regression test for the MAJOR finding that a
+// mail entry's uid field arriving oversized (e.g. tagged sfsText instead of sfsUtfString -- sfsText
+// has no 65535-byte encode-side cap, unlike sfsUtfString) used to pass through ListMail's
+// type-only requireFieldType guard unchanged, then later cause a PURELY LOCAL writeUtfString
+// encode failure when ClaimAllMail re-batched it into a mail.read.status.betch/mail.reward.batch
+// request. sendStageError (conn.go) deliberately, by design, classifies that local encode failure
+// the same as a genuine dead connection, so this single malformed mail entry used to silently
+// abort the rest of ClaimAllMail and, via CollectAll's containsNonTimeoutNetError abort logic
+// (buildings.go), every other -collect action scheduled after it in the same run. Sends one mail
+// entry with a uid one byte over maxMailUidLen (tagged sfsText, constructed via SFSObject.put
+// directly since PutUtfString itself would fail to encode a >65535-byte string) alongside one
+// well-formed mail entry, and proves ListMail skips only the oversized one (with a Warn), keeping
+// the well-formed entry intact -- closing the gap at its source instead of only softening the
+// downstream misclassification.
+func TestListMailSkipsOversizedUidField(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	oversizedUID := strings.Repeat("a", maxMailUidLen+1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		if _, ok := env.AsExtension(); !ok {
+			return
+		}
+		oversized := NewSFSObject()
+		oversized.put("uid", SFSValue{sfsText, oversizedUID})
+		oversized.PutInt("type", 3)
+
+		resp := NewSFSObject()
+		arr := NewSFSArray()
+		arr.AddSFSObject(oversized)
+		arr.AddSFSObject(newTestMailObj("real-uid-1", 3, 0))
+		resp.PutSFSArray("msg", arr)
+		resp.PutBool("more", false)
+		_ = server.SendExtension("push.chat.get.system.mails", resp)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got, err := ListMail(client)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake server never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if len(got) != 1 || got[0].Uid() != "real-uid-1" {
+		t.Fatalf("ListMail() = %v, want exactly 1 entry (uid=real-uid-1) -- the oversized-uid entry must be skipped, not appended", got)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "skipping mail entry with oversized uid field") {
+		t.Errorf("expected an oversized-uid warning, got log:\n%s", logged)
+	}
+}
+
+// TestListMailAcceptsUidExactlyAtLenCap is TestListMailSkipsOversizedUidField's boundary
+// counterpart: a uid of exactly maxMailUidLen bytes must NOT be skipped -- maxMailUidLen matches
+// writeUtfString's own hard limit exactly (a strict `> 65535`, not `>=`), so any uid this check
+// accepts is guaranteed re-encodable later by ClaimAllMail's batching.
+func TestListMailAcceptsUidExactlyAtLenCap(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	exactUID := strings.Repeat("a", maxMailUidLen)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		if _, ok := env.AsExtension(); !ok {
+			return
+		}
+		resp := NewSFSObject()
+		arr := NewSFSArray()
+		arr.AddSFSObject(newTestMailObj(exactUID, 3, 0))
+		resp.PutSFSArray("msg", arr)
+		resp.PutBool("more", false)
+		_ = server.SendExtension("push.chat.get.system.mails", resp)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got, err := ListMail(client)
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake server never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if len(got) != 1 || got[0].Uid() != exactUID {
+		t.Fatalf("ListMail() returned %d entries, want exactly 1 with the exactly-at-cap uid intact (the boundary value, not over the cap)", len(got))
+	}
+	if logged := buf.String(); strings.Contains(logged, "skipping mail entry with oversized uid field") {
+		t.Errorf("expected NO truncation warning for an exactly-at-cap uid, got log:\n%s", logged)
+	}
+}
+
 // TestGroupUnclaimedByTypeWrongTypedTypeFieldIsRejected is the round-28 regression test for
 // requireFieldType (buildings.go), exercised here at groupUnclaimedByType's own type guard: before
 // this round's fix, requirePresentField only checked presence, never that type's concrete decoded
