@@ -282,6 +282,13 @@ func firstHost(pipeList string) string {
 // different one) was silently never detected. The top-level check is
 // kept as a fallback in case a different response shape ever puts it
 // there instead.
+// Round-39 fix: all three levels below used to collapse present-but-wrong-typed into the same
+// silent nil as genuinely-absent, with zero diagnostic signal -- the identical distinction
+// login.go's redirectIP/redirectZone (which read fields off this SAME serverInfo object) already
+// warn on, for the same reason: this object is documented (see getIntFlexible below) as sometimes
+// sending wrong-typed fields in practice. The one case that must stay silent, by the same
+// absence-vs-wrong-type convention, is p.serverInfo being genuinely ABSENT (an ordinary shape for
+// responses that never carry a redirect at all) -- only wrong-typed fields warn here.
 func findServerInfo(content *SFSObject) *SFSObject {
 	if content == nil {
 		return nil
@@ -290,14 +297,19 @@ func findServerInfo(content *SFSObject) *SFSObject {
 		if obj, ok := v.Val.(*SFSObject); ok {
 			return obj
 		}
+		slog.Warn("findServerInfo: top-level serverInfo field is present but not an object", "type", fmt.Sprintf("%T", v.Val))
 	}
 	if pv, ok := content.Get("p"); ok {
-		if pObj, ok := pv.Val.(*SFSObject); ok {
-			if v, ok := pObj.Get("serverInfo"); ok {
-				if obj, ok := v.Val.(*SFSObject); ok {
-					return obj
-				}
+		pObj, ok := pv.Val.(*SFSObject)
+		if !ok {
+			slog.Warn("findServerInfo: p field is present but not an object", "type", fmt.Sprintf("%T", pv.Val))
+			return nil
+		}
+		if v, ok := pObj.Get("serverInfo"); ok {
+			if obj, ok := v.Val.(*SFSObject); ok {
+				return obj
 			}
+			slog.Warn("findServerInfo: p.serverInfo field is present but not an object", "type", fmt.Sprintf("%T", v.Val))
 		}
 	}
 	return nil

@@ -801,9 +801,19 @@ func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
 		params := NewSFSObject()
 		params.PutUtfString("visitor", "not-an-object")
 
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		got := ParseInitVisitors(params)
+		slog.SetDefault(orig)
+
 		if len(got) != 0 {
 			t.Fatalf("got %d visitors, want 0 (wrong-typed visitor field must yield no visitors, not a panic)", len(got))
+		}
+		// Round-39 regression: this used to be silently indistinguishable from a genuinely-absent
+		// visitor field, with zero diagnostic.
+		if logged := buf.String(); !strings.Contains(logged, "visitor field is present but not an object") {
+			t.Errorf("expected a Warn naming the wrong-typed visitor field, got:\n%s", logged)
 		}
 	})
 	t.Run("list field absent from an otherwise well-formed visitor object", func(t *testing.T) {
@@ -812,9 +822,19 @@ func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
 		params := NewSFSObject()
 		params.PutSFSObject("visitor", visitor)
 
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		got := ParseInitVisitors(params)
+		slog.SetDefault(orig)
+
 		if len(got) != 0 {
 			t.Fatalf("got %d visitors, want 0 (absent list field must yield no visitors, not a panic)", len(got))
+		}
+		// A genuinely-absent list is the expected case, distinct from a present-but-wrong-typed
+		// one (covered above) -- must stay silent, not warn.
+		if logged := buf.String(); logged != "" {
+			t.Errorf("expected no log output for a genuinely-absent list field, got:\n%s", logged)
 		}
 	})
 	t.Run("list field present but wrong-typed (not an SFSArray)", func(t *testing.T) {
@@ -823,9 +843,19 @@ func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
 		params := NewSFSObject()
 		params.PutSFSObject("visitor", visitor)
 
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		got := ParseInitVisitors(params)
+		slog.SetDefault(orig)
+
 		if len(got) != 0 {
 			t.Fatalf("got %d visitors, want 0 (wrong-typed list field must yield no visitors, not a panic)", len(got))
+		}
+		// Round-39 regression: this used to be silently indistinguishable from a genuinely-absent
+		// list field, with zero diagnostic.
+		if logged := buf.String(); !strings.Contains(logged, "list field is present but not an array") {
+			t.Errorf("expected a Warn naming the wrong-typed list field, got:\n%s", logged)
 		}
 	})
 	t.Run("list entry present but non-object -- skipped, sibling well-formed entries still kept", func(t *testing.T) {

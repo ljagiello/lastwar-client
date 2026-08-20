@@ -44,6 +44,73 @@ func TestFindServerInfo(t *testing.T) {
 			t.Fatalf("expected nil, got %v", got)
 		}
 	})
+	// The four subtests below are the round-39 regression tests for findServerInfo's
+	// present-but-wrong-typed-vs-genuinely-absent diagnostic gap: three anomaly shapes must now
+	// warn, and the fourth (p.serverInfo genuinely absent) must stay silent, exactly mirroring
+	// login.go's redirectIP/redirectZone convention on the same object.
+	t.Run("top-level serverInfo wrong-typed warns", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		defer slog.SetDefault(orig)
+
+		content := NewSFSObject()
+		content.PutUtfString("serverInfo", "not-an-object")
+		if got := findServerInfo(content); got != nil {
+			t.Fatalf("expected nil, got %v", got)
+		}
+		if logged := buf.String(); !strings.Contains(logged, "top-level serverInfo field is present but not an object") {
+			t.Errorf("expected a warning about the wrong-typed top-level serverInfo field, got log:\n%s", logged)
+		}
+	})
+	t.Run("p wrong-typed warns", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		defer slog.SetDefault(orig)
+
+		content := NewSFSObject()
+		content.PutUtfString("p", "not-an-object")
+		if got := findServerInfo(content); got != nil {
+			t.Fatalf("expected nil, got %v", got)
+		}
+		if logged := buf.String(); !strings.Contains(logged, "p field is present but not an object") {
+			t.Errorf("expected a warning about the wrong-typed p field, got log:\n%s", logged)
+		}
+	})
+	t.Run("p.serverInfo wrong-typed warns", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		defer slog.SetDefault(orig)
+
+		p := NewSFSObject()
+		p.PutUtfString("serverInfo", "not-an-object")
+		content := NewSFSObject()
+		content.PutSFSObject("p", p)
+		if got := findServerInfo(content); got != nil {
+			t.Fatalf("expected nil, got %v", got)
+		}
+		if logged := buf.String(); !strings.Contains(logged, "p.serverInfo field is present but not an object") {
+			t.Errorf("expected a warning about the wrong-typed p.serverInfo field, got log:\n%s", logged)
+		}
+	})
+	t.Run("p.serverInfo absent stays silent", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		defer slog.SetDefault(orig)
+
+		p := NewSFSObject()
+		content := NewSFSObject()
+		content.PutSFSObject("p", p)
+		if got := findServerInfo(content); got != nil {
+			t.Fatalf("expected nil, got %v", got)
+		}
+		if logged := buf.String(); logged != "" {
+			t.Errorf("expected no warning for a genuinely absent p.serverInfo, got log:\n%s", logged)
+		}
+	})
 }
 
 func TestGetIntFlexible(t *testing.T) {

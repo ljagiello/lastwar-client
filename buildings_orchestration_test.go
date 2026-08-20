@@ -658,12 +658,58 @@ func TestFetchBuildingsAggregateBuildingCeilingAcrossManyPushes(t *testing.T) {
 	if len(buildings) >= unaggregatedTotal {
 		t.Fatalf("got %d buildings, want well under the unaggregated potential of %d -- the aggregate ceiling did not stop accumulation across pushes", len(buildings), unaggregatedTotal)
 	}
-	// Bounded generously above maxAggregateBuildingsPerFetch to absorb the single-push overshoot
-	// the per-iteration check allows (one push can add up to buildingsPerPush new entries before
-	// the next iteration's check catches it) -- the real claim is "closer to the cap than to the
-	// unaggregated potential", not an exact count.
-	if maxWant := maxAggregateBuildingsPerFetch + buildingsPerPush; len(buildings) > maxWant {
-		t.Errorf("got %d buildings, want at most %d (maxAggregateBuildingsPerFetch=%d plus at most one push's own overshoot)", len(buildings), maxWant, maxAggregateBuildingsPerFetch)
+	// Round-39 fix: appendBuilding itself now enforces the cap (not just the loop-top check), so
+	// the accumulated count can never exceed maxAggregateBuildingsPerFetch even by one push's
+	// worth -- tightened from the old "generously above" tolerance to an exact bound.
+	if len(buildings) > maxAggregateBuildingsPerFetch {
+		t.Errorf("got %d buildings, want at most %d (maxAggregateBuildingsPerFetch) -- appendBuilding's own per-append cap should make this an exact bound, not just an approximate one", len(buildings), maxAggregateBuildingsPerFetch)
+	}
+}
+
+// TestFetchBuildingsSinglePushNearRawItemCapDoesNotOvershootAggregateCeiling is the round-39
+// regression test for the MAJOR finding that FetchBuildings' aggregate building ceiling could be
+// overshot by up to ~2000 in a SINGLE push, because the old loop-top-only check was re-consulted
+// once per outer-loop iteration (i.e. once per push), while each of the three population sources
+// was bounded per push only by the unrelated, far larger maxRawBuildingItemsPerPush (2000) -- a
+// single hostile push carrying up to 2000 distinct-uuid entries could call appendBuilding up to
+// 2000 times, 6.67x past the documented 300-entry ceiling, before the aggregate check was ever
+// re-consulted. TestFetchBuildingsAggregateBuildingCeilingAcrossManyPushes above only ever sends
+// 10 buildings per push, nowhere near this real worst case. This sends ONE push right at
+// maxRawBuildingItemsPerPush and proves the accumulated count still stops at
+// maxAggregateBuildingsPerFetch, not anywhere near the raw per-push cap.
+func TestFetchBuildingsSinglePushNearRawItemCapDoesNotOvershootAggregateCeiling(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		params := NewSFSObject()
+		arr := NewSFSArray()
+		for i := 0; i < maxRawBuildingItemsPerPush; i++ {
+			arr.AddSFSObject(newTestBuildingSFS(int64(i+1), BuildingFarmland, 1))
+		}
+		params.PutSFSArray("buildings", arr)
+		_ = server.SendExtension("push.add.building", params)
+		// Deliberately does NOT close the connection -- FetchBuildings must give up on its own
+		// via the capped deadline, not because the peer hung up.
+	}()
+
+	buildings, _, err := FetchBuildings(client, 500*time.Millisecond)
+
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("fake server goroutine never finished sending its single oversized push")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil (a plain deadline-elapsed timeout is not itself an error)", err)
+	}
+	if len(buildings) > maxAggregateBuildingsPerFetch {
+		t.Fatalf("got %d buildings from a single %d-item push, want at most %d (maxAggregateBuildingsPerFetch) -- a single push must not be able to overshoot the aggregate ceiling regardless of how many raw items it carries", len(buildings), maxRawBuildingItemsPerPush, maxAggregateBuildingsPerFetch)
+	}
+	if len(buildings) != maxAggregateBuildingsPerFetch {
+		t.Errorf("got %d buildings, want exactly %d (maxAggregateBuildingsPerFetch) -- this push alone comfortably exceeds the cap, so accumulation should stop precisely at the ceiling", len(buildings), maxAggregateBuildingsPerFetch)
 	}
 }
 

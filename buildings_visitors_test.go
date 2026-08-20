@@ -76,6 +76,31 @@ func TestParseInitBuildings(t *testing.T) {
 	})
 }
 
+// TestParseInitBuildingsWrongTypedBuildingNewWarns is the round-39 regression test for the MINOR
+// finding that ParseInitBuildings (and its two buildings.go sibling inline loops, plus
+// visitors.go's ParseInitVisitors and mail.go's ListMail) used to silently treat a present-but-
+// wrong-typed top-level container field identically to a genuinely-absent one, with zero
+// diagnostic -- unlike alliance.go's DonateRecommendedAllianceTech's identical-shape guard on
+// allianceScience, which already warns on this exact anomaly. Proves the new Warn fires for a
+// wrong-typed building_new while a genuinely-absent one (covered above) stays silent.
+func TestParseInitBuildingsWrongTypedBuildingNewWarns(t *testing.T) {
+	params := NewSFSObject()
+	params.PutUtfString("building_new", "not-an-array")
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := ParseInitBuildings(params)
+	slog.SetDefault(orig)
+
+	if len(got) != 0 {
+		t.Fatalf("got %d buildings, want 0", len(got))
+	}
+	if logged := buf.String(); !strings.Contains(logged, "building_new field is present but not an array") {
+		t.Errorf("expected a Warn naming the wrong-typed building_new field, got:\n%s", logged)
+	}
+}
+
 // TestParseInitBuildingsCapsRawItemsExaminedNotJustValidOutput is this round's regression test for
 // ParseInitBuildings' raw-item-scan cap (buildings.go's maxRawBuildingItemsPerPush), the buildings.go
 // analogue of visitors.go's round-26 ParseInitVisitors fix and its own regression test
@@ -661,6 +686,78 @@ func TestFetchBuildingsPushAddBuildingWrongTypedBIdIsRejected(t *testing.T) {
 	if strings.Contains(logged, "skipping push.add.building entry with no bId field") {
 		t.Errorf("wrong-typed bId must log as wrong-typed, not as missing -- got log:\n%s", logged)
 	}
+}
+
+// TestFetchBuildingsWrongTypedTopLevelContainersWarn is the round-39 regression test for the
+// MINOR finding that FetchBuildings' two inline population loops (push.init.build's
+// defaultBuilds, push.add.building's buildings) used to silently treat a present-but-wrong-typed
+// top-level container field identically to a genuinely-absent one, with zero diagnostic --
+// ParseInitBuildings' own sibling case is covered directly by
+// TestParseInitBuildingsWrongTypedBuildingNewWarns above; this covers the two case branches
+// inside FetchBuildings' own push-reading loop.
+func TestFetchBuildingsWrongTypedTopLevelContainersWarn(t *testing.T) {
+	t.Run("push.init.build defaultBuilds wrong-typed", func(t *testing.T) {
+		client, server := newPipeGameConnPair(t)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			params := NewSFSObject()
+			params.PutUtfString("defaultBuilds", "not-an-array")
+			_ = server.SendExtension("push.init.build", params)
+		}()
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		buildings, _, err := FetchBuildings(client, 150*time.Millisecond)
+		slog.SetDefault(orig)
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("fake server goroutine never finished sending push.init.build")
+		}
+		if err != nil {
+			t.Fatalf("FetchBuildings() error = %v, want nil", err)
+		}
+		if len(buildings) != 0 {
+			t.Errorf("got %d buildings, want 0", len(buildings))
+		}
+		if logged := buf.String(); !strings.Contains(logged, "defaultBuilds field is present but not an array") {
+			t.Errorf("expected a Warn naming the wrong-typed defaultBuilds field, got:\n%s", logged)
+		}
+	})
+	t.Run("push.add.building buildings wrong-typed", func(t *testing.T) {
+		client, server := newPipeGameConnPair(t)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			params := NewSFSObject()
+			params.PutUtfString("buildings", "not-an-array")
+			_ = server.SendExtension("push.add.building", params)
+		}()
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		buildings, _, err := FetchBuildings(client, 150*time.Millisecond)
+		slog.SetDefault(orig)
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("fake server goroutine never finished sending push.add.building")
+		}
+		if err != nil {
+			t.Fatalf("FetchBuildings() error = %v, want nil", err)
+		}
+		if len(buildings) != 0 {
+			t.Errorf("got %d buildings, want 0", len(buildings))
+		}
+		if logged := buf.String(); !strings.Contains(logged, "buildings field is present but not an array") {
+			t.Errorf("expected a Warn naming the wrong-typed buildings field, got:\n%s", logged)
+		}
+	})
 }
 
 func TestParseInitVisitors(t *testing.T) {

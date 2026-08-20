@@ -326,6 +326,13 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 	}
 	arr, ok := v.Val.(*SFSArray)
 	if !ok {
+		// Round-39 fix: present-but-wrong-typed used to be silently indistinguishable from
+		// genuinely-absent, unlike alliance.go's DonateRecommendedAllianceTech's identical-shape
+		// guard on allianceScience, which already warns on this exact anomaly. Diagnostic only --
+		// this function still fails safe to an empty result either way -- but a hostile/malformed
+		// -cs-ip peer sending building_new as the wrong type is a decode-desync signal worth
+		// surfacing, not silently discarding.
+		slog.Warn("ParseInitBuildings: building_new field is present but not an array", "type", fmt.Sprintf("%T", v.Val))
 		return out
 	}
 	if len(arr.items) > maxRawBuildingItemsPerPush {
@@ -415,8 +422,21 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 	// same uuid within one fetch window -- e.g. the bootstrap init push and a redundant
 	// push.init.build both describing the same building -- appendBuilding keeps only the first
 	// sighting, so callers like CollectAll never see (and redundantly collect) the same uuid twice.
+	//
+	// Round-39 fix: appendBuilding itself now also enforces maxAggregateBuildingsPerFetch, not
+	// just the loop-top check further below. That loop-top check only re-fires once per outer
+	// iteration (i.e. once per push), but every one of the three population sources here is
+	// bounded PER PUSH only by the unrelated, much larger maxRawBuildingItemsPerPush (2000) --
+	// so a single hostile push carrying up to 2000 distinct-uuid entries used to be able to call
+	// appendBuilding up to 2000 times, 6.67x past the documented 300-entry aggregate ceiling,
+	// entirely within one outer-loop iteration before the loop-top check was ever re-consulted.
+	// Checking the cap here instead means it's enforced at the one place ALL three sources funnel
+	// through, regardless of how many raw items a single push claims to carry.
 	seenBuildingUUIDs := make(map[int64]bool)
 	appendBuilding := func(b Building) {
+		if len(buildings) >= maxAggregateBuildingsPerFetch {
+			return
+		}
 		uuid := b.Uuid()
 		if seenBuildingUUIDs[uuid] {
 			return
@@ -544,6 +564,11 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 							}
 						}
 					}
+				} else {
+					// Round-39 fix: see ParseInitBuildings' identical-shape guard on building_new
+					// for the full rationale -- diagnostic only, this case already fails safe to
+					// "no buildings from this push" either way.
+					slog.Warn("push.init.build: defaultBuilds field is present but not an array", "type", fmt.Sprintf("%T", v.Val))
 				}
 			}
 			slog.Info("push.init.build: buildings loaded", "count", len(buildings))
@@ -587,6 +612,11 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 						}
 						appendBuilding(Building{Raw: bi})
 					}
+				} else {
+					// Round-39 fix: see ParseInitBuildings' identical-shape guard on building_new
+					// for the full rationale -- diagnostic only, this case already fails safe to
+					// "no buildings from this push" either way.
+					slog.Warn("push.add.building: buildings field is present but not an array", "type", fmt.Sprintf("%T", v.Val))
 				}
 			}
 		case "push.queue.add":

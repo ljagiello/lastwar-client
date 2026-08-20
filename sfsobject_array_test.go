@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"log/slog"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -400,6 +402,72 @@ func TestGetIntRejectsOutOfInt32RangeLong(t *testing.T) {
 			t.Errorf("GetInt(%d) = %d, want %d (an in-range Long must still round-trip normally)", v, got, int32(v))
 		}
 	}
+}
+
+// TestGetIntWarnsOnOutOfRangeLong is the round-39 regression test for the MAJOR finding that
+// GetInt's out-of-int32-range Long fallback (added round 29) degraded silently, with zero
+// diagnostic -- unlike its two siblings specifically hardened against this exact anomaly shape
+// (gsl.go's getIntFlexible, round 33; visitors.go's ParseInitVisitors maxNum handling, round 35).
+// A real call site (alliance.go's findRecommendedTech -> DonateRecommendedAllianceTech) reads a
+// corrupted scienceId this way straight into a live al.science.donate network request with no
+// other signal the value was wrong rather than genuinely 0. Also proves the logged value is
+// redacted for a sensitive key, matching getIntFlexible's own isSensitiveSFSKey gating.
+func TestGetIntWarnsOnOutOfRangeLong(t *testing.T) {
+	run := func(t *testing.T, key string, val int64) string {
+		t.Helper()
+		o := NewSFSObject()
+		o.PutLong(key, val)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := o.GetInt(key)
+		slog.SetDefault(orig)
+
+		if got != 0 {
+			t.Errorf("GetInt(%d) = %d, want 0", val, got)
+		}
+		return buf.String()
+	}
+
+	t.Run("out-of-range Long under a non-sensitive key warns with the real value visible", func(t *testing.T) {
+		logged := run(t, "scienceId", math.MaxInt32+12345)
+		if !strings.Contains(logged, "out-of-int32-range") {
+			t.Errorf("expected a Warn mentioning the out-of-range Long, got:\n%s", logged)
+		}
+		if !strings.Contains(logged, "2147495992") { // math.MaxInt32 + 12345
+			t.Errorf("expected the real out-of-range value visible for a non-sensitive key, got:\n%s", logged)
+		}
+	})
+	t.Run("out-of-range Long under a sensitive key is redacted", func(t *testing.T) {
+		logged := run(t, "loginKey", math.MaxInt32+12345)
+		if !strings.Contains(logged, "out-of-int32-range") {
+			t.Errorf("expected a Warn mentioning the out-of-range Long, got:\n%s", logged)
+		}
+		if strings.Contains(logged, "2147495992") {
+			t.Errorf("expected the real out-of-range value to be redacted for a sensitive key, got:\n%s", logged)
+		}
+		if !strings.Contains(logged, "[REDACTED]") {
+			t.Errorf("expected a [REDACTED] placeholder in place of the real value, got:\n%s", logged)
+		}
+	})
+	t.Run("in-range Long stays silent", func(t *testing.T) {
+		o := NewSFSObject()
+		o.PutLong("scienceId", 42)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		got := o.GetInt("scienceId")
+		slog.SetDefault(orig)
+
+		if got != 42 {
+			t.Errorf("GetInt(42) = %d, want 42", got)
+		}
+		if buf.String() != "" {
+			t.Errorf("expected no log output for a legitimate in-range Long, got:\n%s", buf.String())
+		}
+	})
 }
 
 // TestRequireFieldTypeAcceptsOutOfRangeLongButGetIntReturnsZero is the round-30 regression test for

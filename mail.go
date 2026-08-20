@@ -189,6 +189,12 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 					seenUIDs[uid] = true
 					all = append(all, m)
 				}
+			} else {
+				// Round-39 fix: present-but-wrong-typed used to be silently indistinguishable from
+				// genuinely-absent, unlike this same function's own "more" field guard two lines
+				// below, which already warns on the identical anomaly shape. Diagnostic only --
+				// pagination still stops safely either way (via "more" defaulting to false below).
+				slog.Warn("list mail: response's msg field is present but not an array", "page", page, "type", fmt.Sprintf("%T", v.Val))
 			}
 		}
 		more := false

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"unicode/utf8"
@@ -192,6 +193,24 @@ func (o *SFSObject) GetInt(key string) int32 {
 			return int32(n)
 		case int64:
 			if n < math.MinInt32 || n > math.MaxInt32 {
+				// Round-39 fix: this anomaly used to degrade silently, with zero diagnostic --
+				// unlike its two siblings that were specifically hardened against this exact
+				// shape (gsl.go's getIntFlexible, round 33; visitors.go's ParseInitVisitors
+				// maxNum handling, round 35), both of which warn here. A real call site
+				// (alliance.go's findRecommendedTech -> DonateRecommendedAllianceTech) reads a
+				// GetInt("scienceId") result straight into a live al.science.donate network
+				// request with no other signal that the value was corrupted rather than
+				// genuinely 0 -- see this function's own doc comment above for the full
+				// "requireFieldType/sfsFieldKindAccepts is a pure type check, not a value-range
+				// one" reasoning this anomaly falls out of. Value gated on isSensitiveSFSKey
+				// like getIntFlexible's own anomaly logging, since GetInt is called with an
+				// arbitrary caller-supplied key.
+				redactedValue := any(n)
+				if isSensitiveSFSKey(key) {
+					redactedValue = "[REDACTED]"
+				}
+				slog.Warn("GetInt: field present as an out-of-int32-range Long, falling back to 0",
+					"key", key, "value", redactedValue)
 				return 0
 			}
 			return int32(n)

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // LoginResult carries everything a caller needs after a successful login:
@@ -604,12 +605,63 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	return result, nil
 }
 
+// maxRedactRuneScanInput bounds how large an input redact() will fully rune-scan (the []rune(s)
+// conversion below) before switching to a bounded fast path that extracts just the first/last 4
+// runes directly without ever materializing a full copy of the input. Round-39 fix: redact()
+// previously always converted the FULL input to []rune regardless of size -- an ~4x-amplifying
+// allocation for ASCII input (each 1-byte rune becomes a 4-byte int32) -- and sfsobject.go's
+// redactSFSValue calls this on a sensitive field's value with NO format-time budget at all, unlike
+// every other value shape StringRedacted() formats (all bounded by formatBudget/maxFormattedNodes,
+// per formatSFSValueRedacted's own chargeUpTo/truncateAtRuneBoundary handling). A hostile/spoofed
+// server (or crafted -decode-stream capture) can tag a field literally named
+// loginKey/accessToken/airKey as an oversized string (up to maxFrameSize=64MiB), forcing an
+// unbounded ~320MB-peak allocation on every StringRedacted() call that reaches it -- and this
+// fires repeatedly per session (conn.go's logCommandResult on every failed response, buildings.go's
+// push-handling switch on every observed push), not just once. Any input above this threshold is
+// comfortably long enough -- even under a pathological 4-bytes-per-rune input -- to guarantee
+// redact()'s own length-scaling formula (k := n/8, capped at 4) has already saturated at k=4, so
+// the fast path below can skip straight to that shape without computing an exact rune count or
+// allocating a full []rune of the input.
+const maxRedactRuneScanInput = 1024
+
+// firstNRunesPrefix returns the byte-slice prefix of s covering its first n runes (or all of s if
+// it has fewer), without ever converting s to []rune -- Go's built-in `for range` over a string
+// already decodes UTF-8 one rune at a time and lets this stop after n runes instead of continuing
+// through the rest of a potentially huge string.
+func firstNRunesPrefix(s string, n int) string {
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
+
+// lastNRunesSuffix is firstNRunesPrefix's mirror for the tail: walks backward from the end of s,
+// decoding one rune at a time via utf8.DecodeLastRuneInString, stopping after n runes instead of
+// ever scanning forward through the rest of a potentially huge string.
+func lastNRunesSuffix(s string, n int) string {
+	count := 0
+	end := len(s)
+	for end > 0 && count < n {
+		_, size := utf8.DecodeLastRuneInString(s[:end])
+		end -= size
+		count++
+	}
+	return s[end:]
+}
+
 func redact(s string) string {
 	if s == "" {
 		return ""
 	}
 	if len(s) <= 8 {
 		return "***"
+	}
+	if len(s) > maxRedactRuneScanInput {
+		return firstNRunesPrefix(s, 4) + "..." + lastNRunesSuffix(s, 4)
 	}
 	// Slice by rune, not byte, boundary: sensitiveSFSKeys covers fields that can
 	// legitimately carry multi-byte UTF-8 (googleName is a Google account display

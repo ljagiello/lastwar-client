@@ -2251,3 +2251,71 @@ func TestClaimAllMailRewardLoopContinuesAfterTimeout(t *testing.T) {
 		t.Errorf("fake connection saw %d writes, want exactly 4 (list-mail + read-status + both types' reward-claim batches -- a Timeout()==true net.Error on the first type's batch must not abort the second, not-yet-started type)", got)
 	}
 }
+
+// TestListMailWarnsOnWrongTypedMsgField is the regression test for the round-39 fix to ListMail's
+// msg-field handling: a response where msg is present but not an *SFSArray (a server-shape anomaly,
+// distinct from msg being altogether absent) used to be silently treated the same as absent, with
+// no diagnostic signal. It must now log a warning identifying the anomaly, while still completing
+// pagination safely (the page yields zero mail entries, and the wrong-typed more field default
+// applies exactly as it would for an absent msg).
+func TestListMailWarnsOnWrongTypedMsgField(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok {
+			return
+		}
+		if msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("Cmd = %q, want chat.get.system.mails", msg.Cmd)
+		}
+		resp := NewSFSObject()
+		resp.PutUtfString("msg", "not-an-array") // wrong-typed: server-shape anomaly under test
+		resp.PutUtfString("lastUid", "cursor-1")
+		resp.PutLong("lastMailTime", 999)
+		_ = server.SendExtension("push.chat.get.system.mails", resp)
+		// Intentionally does not read a second request -- a correct ListMail treats the missing
+		// (because wrong-typed) more field as more=false and never sends one.
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	var got []Mail
+	var err error
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		got, err = ListMail(client)
+	}()
+
+	select {
+	case <-listDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ListMail never returned -- it should treat the wrong-typed msg field as yielding zero entries and stop")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %v, want zero mail entries -- the wrong-typed msg field must not fabricate entries", got)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "response's msg field is present but not an array") {
+		t.Errorf("expected a warning mentioning the wrong-typed msg field, got log:\n%s", logged)
+	}
+}

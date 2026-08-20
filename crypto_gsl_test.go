@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -127,4 +129,47 @@ func TestGSLCryptoEncryptRequestFailurePreservesSalt(t *testing.T) {
 	if !strings.Contains(err.Error(), "no salt in scope") {
 		t.Fatalf("DecryptResponse after failed EncryptRequest: got error %q, want it to contain %q", err.Error(), "no salt in scope")
 	}
+}
+
+// TestParseRSAPubKeyFromDER is the round-39 regression test covering parseRSAPubKeyFromDER's
+// three error branches, previously exercised only indirectly (and only on the success path) via
+// TestGSLCryptoRoundTrip above. resMsg is attacker-influenced network input (dossier §02's
+// CheckVersion response), so each of these anomaly shapes is a real, non-theoretical input this
+// function must reject with a distinct, identifiable error rather than panicking.
+func TestParseRSAPubKeyFromDER(t *testing.T) {
+	t.Run("invalid base64", func(t *testing.T) {
+		_, err := parseRSAPubKeyFromDER("not-valid-base64!!!")
+		if err == nil {
+			t.Fatal("parseRSAPubKeyFromDER: expected error for invalid base64, got nil")
+		}
+		if !strings.Contains(err.Error(), "base64 decode") {
+			t.Fatalf("got error %q, want it to contain %q", err.Error(), "base64 decode")
+		}
+	})
+	t.Run("valid base64 but invalid DER", func(t *testing.T) {
+		_, err := parseRSAPubKeyFromDER(base64.StdEncoding.EncodeToString([]byte("not a DER-encoded SubjectPublicKeyInfo")))
+		if err == nil {
+			t.Fatal("parseRSAPubKeyFromDER: expected error for invalid DER, got nil")
+		}
+		if !strings.Contains(err.Error(), "parse SubjectPublicKeyInfo") {
+			t.Fatalf("got error %q, want it to contain %q", err.Error(), "parse SubjectPublicKeyInfo")
+		}
+	})
+	t.Run("valid DER but non-RSA key", func(t *testing.T) {
+		ecdsaPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("generate ECDSA key: %v", err)
+		}
+		der, err := x509.MarshalPKIXPublicKey(&ecdsaPriv.PublicKey)
+		if err != nil {
+			t.Fatalf("marshal ECDSA public key: %v", err)
+		}
+		_, err = parseRSAPubKeyFromDER(base64.StdEncoding.EncodeToString(der))
+		if err == nil {
+			t.Fatal("parseRSAPubKeyFromDER: expected error for non-RSA key, got nil")
+		}
+		if !strings.Contains(err.Error(), "not RSA") {
+			t.Fatalf("got error %q, want it to contain %q", err.Error(), "not RSA")
+		}
+	})
 }

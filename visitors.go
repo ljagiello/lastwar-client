@@ -129,14 +129,24 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	}
 	visitorObj, ok := v.Val.(*SFSObject)
 	if !ok {
+		// Round-39 fix: present-but-wrong-typed used to be silently indistinguishable from
+		// genuinely-absent, unlike alliance.go's DonateRecommendedAllianceTech's identical-shape
+		// guard on allianceScience, which already warns on this exact anomaly. Diagnostic only --
+		// this function still fails safe to an empty result either way.
+		slog.Warn("ParseInitVisitors: visitor field is present but not an object", "type", fmt.Sprintf("%T", v.Val))
 		return out
 	}
 	listV, ok := visitorObj.Get("list")
 	if !ok {
+		// A genuinely-absent list is the normal/expected case here (mirrors maxNum's own
+		// presence-checked-separately-from-type reasoning just below) -- not a wrong-type anomaly,
+		// so this stays silent by design.
 		return out
 	}
 	arr, ok := listV.Val.(*SFSArray)
 	if !ok {
+		// See the visitor-field guard's own comment above for the round-39 rationale.
+		slog.Warn("ParseInitVisitors: list field is present but not an array", "type", fmt.Sprintf("%T", listV.Val))
 		return out
 	}
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"log/slog"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -115,6 +116,20 @@ func TestRedact(t *testing.T) {
 			input: "ABCD" + strings.Repeat("x", 32) + "WXYZ",
 			want:  "ABCD...WXYZ",
 		},
+		// Round-39 regression: an input well past maxRedactRuneScanInput (1024 bytes) must take
+		// the bounded fast path (firstNRunesPrefix/lastNRunesSuffix) and still produce the
+		// identical first-4/last-4 shape the full rune-scan path would have, proving the fast
+		// path's output isn't just fast but also correct.
+		{
+			name:  "huge ASCII input (2000 bytes) takes the bounded fast path, same first-4/last-4 shape",
+			input: "ABCD" + strings.Repeat("x", 1992) + "WXYZ",
+			want:  "ABCD...WXYZ",
+		},
+		{
+			name:  "huge multi-byte input (well over the byte-length threshold) takes the bounded fast path with valid UTF-8 boundaries",
+			input: "田中太郎" + strings.Repeat("鈴", 500) + "佐藤次郎",
+			want:  "田中太郎...佐藤次郎",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -144,6 +159,43 @@ func TestRedact(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRedactHugeInputAvoidsFullRuneScanAllocation is the round-39 regression test for the MAJOR
+// finding that redact() (login.go) used to unconditionally convert its ENTIRE input to []rune
+// regardless of size -- an ~4x-amplifying allocation for ASCII input -- with sfsobject.go's
+// redactSFSValue calling this on a sensitive field's value with NO format-time budget at all
+// (unlike every other value shape StringRedacted() formats). A hostile/spoofed server could tag a
+// field literally named loginKey/accessToken as an oversized string (up to maxFrameSize=64MiB),
+// forcing an unbounded ~320MB-peak allocation on every StringRedacted() call that reaches it.
+// TestRedact's own huge-input cases above prove the fast path's OUTPUT is correct; this proves the
+// fast path is actually bounded -- measuring actual BYTES allocated (not allocation event COUNT,
+// which a single big []rune backing array wouldn't distinguish from a handful of tiny ones) via
+// runtime.MemStats, asserting redact() on a 10MB input allocates only a small number of bytes, not
+// bytes proportional to the input size (a full []rune(s) conversion of a 10MB ASCII string alone
+// would allocate a ~40MB backing array -- four bytes per rune -- trivially distinguishable from
+// the handful of small string headers/slices the bounded fast path needs).
+func TestRedactHugeInputAvoidsFullRuneScanAllocation(t *testing.T) {
+	const hugeSize = 10 * 1024 * 1024 // 10MB -- far past maxRedactRuneScanInput (1024 bytes)
+	huge := "ABCD" + strings.Repeat("x", hugeSize) + "WXYZ"
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	got := redact(huge)
+	runtime.ReadMemStats(&after)
+
+	if got != "ABCD...WXYZ" {
+		t.Fatalf("redact(huge 10MB input) = %q, want %q", got, "ABCD...WXYZ")
+	}
+	// A full []rune(huge) conversion alone would allocate roughly 4x hugeSize bytes (~40MB) for
+	// the backing array; the bounded fast path needs only a handful of tiny string
+	// headers/slices. 1MB is generous headroom above what the fast path actually needs, while
+	// remaining utterly incompatible with an allocation pattern proportional to a 10MB input.
+	const maxWantAllocBytes = 1024 * 1024
+	if allocBytes := after.TotalAlloc - before.TotalAlloc; allocBytes > maxWantAllocBytes {
+		t.Errorf("redact(huge 10MB input) allocated %d bytes, want at most %d -- the fast path is not actually bounded, redact() likely still scans/allocates proportional to input size", allocBytes, maxWantAllocBytes)
 	}
 }
 
