@@ -85,6 +85,11 @@ func splitHostPortInt(t *testing.T, addr string) (string, int) {
 	return host, port
 }
 
+// flexPort converts a plain int port into gsl.go's flexString shape, for building test
+// LoginServerInfo/AccountServerInfo fixtures now that Port/WsPort are flexString (round 35 --
+// see flexString.Int's own doc comment in gsl.go for why).
+func flexPort(n int) flexString { return flexString(strconv.Itoa(n)) }
+
 // putRedirectServerInfo builds a system Login response carrying a `serverInfo` redirect to addr
 // (best-effort host/port parsing -- called from background handler goroutines, so it can't use
 // *testing.T; a malformed addr just yields a redirect a real client would itself fail to follow,

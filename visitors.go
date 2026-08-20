@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 )
 
@@ -161,7 +162,20 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	// malformed/hostile-peer signal now worth surfacing like its wrong-typed and too-large
 	// siblings already are.
 	if maxNumV, ok := visitorObj.Get("maxNum"); ok && maxNumV.Val != nil {
-		if !sfsFieldKindAccepts(sfsFieldKindInt, maxNumV.Val) {
+		// Round-35 fix: a present, CORRECTLY-typed int64 Long whose value is out of int32's range
+		// (e.g. maxNum=5000000000) used to pass the sfsFieldKindAccepts type check below (a pure
+		// Go-type check, by design -- see GetInt's own doc comment for why value-range awareness
+		// was deliberately kept out of it), then silently degrade to 0 via GetInt's own int64
+		// range-clamp -- landing in the "not positive" branch below with the real value already
+		// lost, actively MISCHARACTERIZING a huge out-of-range Long as merely non-positive rather
+		// than reporting what it actually was. This is the exact fourth anomaly shape gsl.go's
+		// getIntFlexible was hardened against in round 33 (checking v.Val.(int64) directly against
+		// math.MinInt32/MaxInt32 before ever calling GetInt), backported here. Checked before the
+		// GetInt call below so the real n64 value is still available to log.
+		if n64, isInt64 := maxNumV.Val.(int64); isInt64 && (n64 < math.MinInt32 || n64 > math.MaxInt32) {
+			slog.Warn("visitor.maxNum field is present as an out-of-int32-range Long; falling back to defensive ceiling",
+				"maxNum", n64, "cap", maxVisitorsDefensiveCeiling)
+		} else if !sfsFieldKindAccepts(sfsFieldKindInt, maxNumV.Val) {
 			slog.Warn("visitor.maxNum field is present but wrong-typed; falling back to defensive ceiling",
 				"raw", visitorObj.StringRedacted(), "goType", fmt.Sprintf("%T", maxNumV.Val), "cap", maxVisitorsDefensiveCeiling)
 		} else if maxNum := visitorObj.GetInt("maxNum"); maxNum > 0 {

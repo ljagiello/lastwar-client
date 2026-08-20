@@ -470,7 +470,7 @@ func TestLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: oldHost, Port: oldPort, Zone: "APS1", GameUid: "uid-1"}},
+		ServerList: []LoginServerInfo{{IP: oldHost, Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
 		At:         &LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)
@@ -518,7 +518,7 @@ func TestLoginRedirectRejectsMissingRedirectPort(t *testing.T) {
 
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
 		Code:       "0",
-		ServerList: []LoginServerInfo{{IP: oldHost, Port: oldPort, Zone: "APS1", GameUid: "uid-1"}},
+		ServerList: []LoginServerInfo{{IP: oldHost, Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
 		At:         &LoginToken{Token: "tok-1"},
 	})
 	useFakeGSLServer(t, gsl)

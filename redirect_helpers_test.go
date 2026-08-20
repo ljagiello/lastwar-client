@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"math"
 	"strconv"
@@ -206,6 +207,71 @@ func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
 		logged := run(t, func(o *SFSObject) { o.PutInt("port", 0) })
 		if logged != "" {
 			t.Errorf("expected no log output for a legitimately-zero, correctly-typed field, got:\n%s", logged)
+		}
+	})
+}
+
+// TestGetIntFlexibleRedactsSensitiveKeyValue is the round-35 regression test for the MINOR finding
+// that getIntFlexible logged a decoded field's raw scalar value directly in three of its four
+// anomaly Warn branches, with no isSensitiveSFSKey gate -- unlike every sibling wrong-typed-field
+// guard in this codebase (requireFieldType/warnIfWrongTypedField/redirectIP/redirectZone all log
+// only StringRedacted()/goType, never a field's own raw scalar), and unlike getIntFlexible's own
+// fourth branch (the wrong-Go-type case), which already used the safe pattern. getIntFlexible is a
+// generic, key-parameterized helper -- today's only real call sites hardcode key="port" (never
+// sensitive), but this proves the guard itself works correctly for a key that IS sensitive,
+// independent of what today's callers happen to pass.
+func TestGetIntFlexibleRedactsSensitiveKeyValue(t *testing.T) {
+	run := func(t *testing.T, key string, setup func(o *SFSObject)) string {
+		t.Helper()
+		o := NewSFSObject()
+		setup(o)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		getIntFlexible(o, key)
+		slog.SetDefault(orig)
+
+		return buf.String()
+	}
+
+	t.Run("out-of-range native Long under a sensitive key is redacted", func(t *testing.T) {
+		const secret = int64(math.MaxInt32) + 987654321
+		logged := run(t, "loginKey", func(o *SFSObject) { o.PutLong("loginKey", secret) })
+		if strings.Contains(logged, fmt.Sprintf("%d", secret)) {
+			t.Errorf("expected the real out-of-range value to be redacted, got:\n%s", logged)
+		}
+		if !strings.Contains(logged, "[REDACTED]") {
+			t.Errorf("expected a [REDACTED] placeholder in place of the real value, got:\n%s", logged)
+		}
+	})
+	t.Run("non-numeric string under a sensitive key is redacted", func(t *testing.T) {
+		logged := run(t, "loginKey", func(o *SFSObject) { o.PutUtfString("loginKey", "sk-live-not-a-number-secret") })
+		if strings.Contains(logged, "sk-live-not-a-number-secret") {
+			t.Errorf("expected the real non-numeric string value to be redacted, got:\n%s", logged)
+		}
+		if !strings.Contains(logged, "[REDACTED]") {
+			t.Errorf("expected a [REDACTED] placeholder in place of the real value, got:\n%s", logged)
+		}
+	})
+	t.Run("out-of-range numeric string under a sensitive key is redacted", func(t *testing.T) {
+		logged := run(t, "loginKey", func(o *SFSObject) { o.PutUtfString("loginKey", "4294967301") })
+		if strings.Contains(logged, "4294967301") {
+			t.Errorf("expected the real out-of-range numeric string value to be redacted, got:\n%s", logged)
+		}
+		if !strings.Contains(logged, "[REDACTED]") {
+			t.Errorf("expected a [REDACTED] placeholder in place of the real value, got:\n%s", logged)
+		}
+	})
+	// Sanity check: a non-sensitive key's value must still appear in the log unredacted, proving
+	// redactedValue doesn't over-redact indiscriminately.
+	t.Run("non-sensitive key value stays visible", func(t *testing.T) {
+		logged := run(t, "port", func(o *SFSObject) { o.PutUtfString("port", "not-a-number") })
+		if !strings.Contains(logged, "not-a-number") {
+			t.Errorf("expected the non-sensitive field's real value to remain visible, got:\n%s", logged)
+		}
+		if strings.Contains(logged, "[REDACTED]") {
+			t.Errorf("expected no [REDACTED] placeholder for a non-sensitive key, got:\n%s", logged)
 		}
 	})
 }

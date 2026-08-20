@@ -78,7 +78,7 @@ func TestGetServerListAgainstFakeServer(t *testing.T) {
 		resp := LoginServerListRespon{
 			Code: "0",
 			ServerList: []LoginServerInfo{
-				{ID: 1, Name: "test-server", IP: "1.2.3.4", Port: 17783, Zone: "APS1", GameUid: "g1", Status: "0"},
+				{ID: flexPort(1), Name: "test-server", IP: "1.2.3.4", Port: flexPort(17783), Zone: "APS1", GameUid: "g1", Status: "0"},
 			},
 		}
 		json.NewEncoder(w).Encode(resp)
@@ -116,9 +116,9 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 			ServerList: []LoginServerInfo{},
 			LoginServer: &AccountServerInfo{
 				IP:     "9.9.9.9",
-				Port:   12345,
+				Port:   flexPort(12345),
 				WsIP:   "9.9.9.9",
-				WsPort: 12346,
+				WsPort: flexPort(12346),
 			},
 		}
 		json.NewEncoder(w).Encode(resp)
@@ -133,7 +133,7 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 		t.Fatalf("ServerList = %+v, want a single synthesized entry from LoginServer", lsr.ServerList)
 	}
 	got := lsr.ServerList[0]
-	if got.IP != "9.9.9.9" || got.Port != 12345 || got.WsIP != "9.9.9.9" {
+	if got.IP != "9.9.9.9" || got.Port != flexPort(12345) || got.WsIP != "9.9.9.9" {
 		t.Errorf("synthesized ServerList[0] = %+v, want IP/Port/WsIP from LoginServer", got)
 	}
 
@@ -147,7 +147,7 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 			ServerList: []LoginServerInfo{},
 			LoginServer: &AccountServerInfo{
 				IP:   "9.9.9.9",
-				Port: 12345,
+				Port: flexPort(12345),
 			},
 		}
 		json.NewEncoder(w).Encode(resp)
@@ -474,6 +474,94 @@ func TestGetServerListCodeAcceptsStringOrNumber(t *testing.T) {
 			}
 			if lsr.Code.String() != tt.want {
 				t.Errorf("Code = %q, want %q", lsr.Code.String(), tt.want)
+			}
+		})
+	}
+}
+
+// TestGetServerListPortIDAcceptsStringOrNumber is the round-35 regression test for the MAJOR
+// finding: LoginServerInfo.ID/Port used to be plain int, so a wrong-typed value on either field (a
+// JSON string -- the same shape LoginServerInfo.Status and LoginServerListRespon.Code are already
+// confirmed-live to sometimes arrive as, on this exact endpoint/struct family) failed
+// json.Unmarshal for the ENTIRE GetServerList response -- fatal on the primary login path
+// (login.go's Login) and the standalone -cs-rt refresh command (main.go), neither of which has a
+// fallback for a GetServerList error. Mirrors TestGetServerListCodeAcceptsStringOrNumber's raw-JSON
+// table shape, but for id/port specifically, and additionally proves flexString.Int() recovers the
+// correct integer value (not just that decoding didn't error).
+func TestGetServerListPortIDAcceptsStringOrNumber(t *testing.T) {
+	tests := []struct {
+		name string
+		json string // raw JSON for the "id"/"port" fields, embedded verbatim into the fake response
+	}{
+		{"string id/port", `"17783"`},
+		{"numeric id/port", `17783`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			priv, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"code":"0","serverList":[{"id":%s,"port":%s,"zone":"APS1","gameUid":"g1","status":"0"}]}`, tt.json, tt.json)
+			}))
+			defer server.Close()
+
+			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			if err != nil {
+				t.Fatalf("GetServerList: %v", err)
+			}
+			if len(lsr.ServerList) != 1 {
+				t.Fatalf("ServerList = %+v, want a single entry", lsr.ServerList)
+			}
+			got := lsr.ServerList[0]
+			if got.Port.Int() != 17783 {
+				t.Errorf("Port.Int() = %d, want 17783", got.Port.Int())
+			}
+			if got.ID.Int() != 17783 {
+				t.Errorf("ID.Int() = %d, want 17783", got.ID.Int())
+			}
+		})
+	}
+}
+
+// TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber is
+// TestGetServerListPortIDAcceptsStringOrNumber's sibling for AccountServerInfo.Port/WsPort,
+// exercised through the opt=new applyLoginServerFallback path that actually reads them (see
+// TestGetServerListFallsBackToLoginServerWhenServerListEmpty).
+func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"string port", `"8443"`},
+		{"numeric port", `8443`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			priv, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"code":"0","serverList":[],"loginServer":{"ip":"1.2.3.4","port":%s,"ws_ip":"1.2.3.4","ws_port":%s}}`, tt.json, tt.json)
+			}))
+			defer server.Close()
+
+			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			if err != nil {
+				t.Fatalf("GetServerList: %v", err)
+			}
+			if len(lsr.ServerList) != 1 {
+				t.Fatalf("ServerList = %+v, want a single synthesized entry from LoginServer", lsr.ServerList)
+			}
+			if got := lsr.ServerList[0].Port.Int(); got != 8443 {
+				t.Errorf("synthesized ServerList[0].Port.Int() = %d, want 8443", got)
+			}
+			if got := lsr.LoginServer.WsPort.Int(); got != 8443 {
+				t.Errorf("LoginServer.WsPort.Int() = %d, want 8443", got)
 			}
 		})
 	}

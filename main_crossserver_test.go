@@ -158,7 +158,7 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
 		Code: "0",
 		ServerList: []LoginServerInfo{
-			{IP: gameHost, Port: gamePort, Zone: freshZone, GameUid: freshGameUid},
+			{IP: gameHost, Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
 		},
 		At: &LoginToken{Token: freshAccessTok},
 	})
@@ -453,7 +453,7 @@ func TestRunCrossServerTestServerListOverrideLogging(t *testing.T) {
 		gsl := newFakeGSLServer(t, LoginServerListRespon{
 			Code: "0",
 			ServerList: []LoginServerInfo{
-				{IP: gameHost, Port: gamePort, Zone: freshZone, GameUid: freshGameUid},
+				{IP: gameHost, Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
 			},
 			At: &LoginToken{Token: "fresh-token"},
 		})
@@ -524,7 +524,7 @@ func TestRunCrossServerTestAtWarningAttribution(t *testing.T) {
 			// A non-empty server list keeps refreshHasUsableData true even in the
 			// withFreshToken=false cases below, where At is left nil.
 			ServerList: []LoginServerInfo{
-				{IP: gameHost, Port: gamePort, Zone: freshZone, GameUid: freshGameUid},
+				{IP: gameHost, Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
 			},
 		}
 		if withFreshToken {
@@ -608,7 +608,7 @@ func TestRunCrossServerTestNoAccessTokenAtAllWarning(t *testing.T) {
 			// failing earlier on refreshHasUsableData's own check. The IP/port are placeholders:
 			// DoCrossServerLogin's AccessTok=="" check rejects before ever dialing this address.
 			ServerList: []LoginServerInfo{
-				{IP: "192.0.2.1", Port: 12345, Zone: "APS-REAL", GameUid: "uid-real"},
+				{IP: "192.0.2.1", Port: flexPort(12345), Zone: "APS-REAL", GameUid: "uid-real"},
 			},
 			At: nil,
 		})

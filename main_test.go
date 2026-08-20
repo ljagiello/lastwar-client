@@ -239,6 +239,11 @@ func TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback(t *testing
 		cfgJSON, err := json.Marshal(SessionConfig{
 			IP: "9.9.9.9", Port: 9999, Zone: "APS9999", GameUid: "cfg-gameuid",
 			DeviceID: "cfg-deviceid", ShumeiBoxId: "cfg-shumei", AccessToken: "cfg-at",
+			// IOSMode: true, with -cs-ios never passed below, proves the round-35 fix to the
+			// -cs-ios merge (mergeExplicitOrConfigBool) actually takes effect end to end -- the
+			// flag's own zero-value default is false, so without this merge working, iosMode
+			// would stay false instead of picking up the config's true.
+			IOSMode: true,
 		})
 		if err != nil {
 			t.Fatalf("marshal session config: %v", err)
@@ -295,6 +300,9 @@ func TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback(t *testing
 	}
 	if strings.Contains(out, "-cs-gameuid was explicitly given as empty") {
 		t.Errorf("subprocess stderr unexpectedly warned about -cs-gameuid, which was passed non-empty in this test; stderr=%s", out)
+	}
+	if !strings.Contains(out, `"iosMode":true`) {
+		t.Errorf("subprocess stderr missing iosMode=true -- the config's IOSMode:true should have taken effect since -cs-ios was never passed; stderr=%s", out)
 	}
 }
 
@@ -539,7 +547,7 @@ func TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogic
 
 		gsl := newFakeGSLServer(t, LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+			ServerList: []LoginServerInfo{{IP: host, Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
 			At:         &LoginToken{Token: "tok-1"},
 		})
 		useFakeGSLServer(t, gsl)
@@ -650,7 +658,7 @@ func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t
 
 		gsl := newFakeGSLServer(t, LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+			ServerList: []LoginServerInfo{{IP: host, Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
 			At:         &LoginToken{Token: "tok-1"},
 		})
 		useFakeGSLServer(t, gsl)
@@ -792,7 +800,7 @@ func TestMainZeroBuildingsFallbackPreservesNonEmptyVisitors(t *testing.T) {
 
 		gsl := newFakeGSLServer(t, LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: host, Port: port, Zone: "APS1", GameUid: "uid-1"}},
+			ServerList: []LoginServerInfo{{IP: host, Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
 			At:         &LoginToken{Token: "tok-1"},
 		})
 		useFakeGSLServer(t, gsl)

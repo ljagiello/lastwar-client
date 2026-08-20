@@ -83,6 +83,35 @@ func TestMergeExplicitOrConfigPort(t *testing.T) {
 	}
 }
 
+// TestMergeExplicitOrConfigBool is the round-35 regression test for the MAJOR finding that -cs-ios
+// (main.go), the one field in the SessionConfig merge family left as an inline `if
+// !csIOSSetExplicitly { *csIOS = cfg.IOSMode }` block, had zero test coverage of its merge
+// decision -- confirmed via mutation testing (inverting the condition passed the full suite
+// unchanged). Now extracted into this pure function, mirroring mergeExplicitOrConfigString/Port's
+// own extraction, so the decision itself is directly testable independent of main()'s wiring.
+func TestMergeExplicitOrConfigBool(t *testing.T) {
+	cases := []struct {
+		name     string
+		flagVal  bool
+		explicit bool
+		cfgVal   bool
+		want     bool
+	}{
+		{"never mentioned, flag default false, config true: falls back to config", false, false, true, true},
+		{"never mentioned, flag default false, config false: stays false", false, false, false, false},
+		{"explicitly set to true: kept, config ignored (even if config is false)", true, true, false, true},
+		{"explicitly set to false: kept, config ignored (even if config is true) -- false is a legitimate explicit choice, not an absent one", false, true, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := mergeExplicitOrConfigBool(c.flagVal, c.explicit, c.cfgVal)
+			if got != c.want {
+				t.Errorf("mergeExplicitOrConfigBool(%v, %v, %v) = %v, want %v", c.flagVal, c.explicit, c.cfgVal, got, c.want)
+			}
+		})
+	}
+}
+
 func TestLoadEffectiveConfigExplicitPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.json")

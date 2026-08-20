@@ -67,6 +67,31 @@ func (f *flexString) UnmarshalJSON(b []byte) error {
 }
 func (f flexString) String() string { return string(f) }
 
+// Int parses f as a base-10 integer, returning 0 if it isn't one (empty, or a value that only
+// exists as flexString for JSON-unmarshal robustness but doesn't actually look like a number in
+// practice -- e.g. a corrupted/hostile response). Round-35 fix: LoginServerInfo.ID/Port and
+// AccountServerInfo.Port/WsPort used to be plain `int`, so a server response carrying any one of
+// them as a JSON string (the same shape LoginServerInfo.Status/LoginServerListRespon.Code are
+// already confirmed-live to sometimes arrive as, on this exact endpoint/struct family) failed
+// json.Unmarshal for the ENTIRE GetServerList response with an opaque type-mismatch error --
+// fatal on the primary login path (login.go's Login) and the standalone -cs-rt refresh command
+// (main.go), which have no fallback for a GetServerList error. Now flexString like their
+// siblings, with this accessor doing the int conversion at the handful of call sites that need a
+// real int (dialing, port<=0 validation) -- mirrors sfsobject.go's getIntFlexible: 0 lets the
+// caller's own existing "port <= 0"-style validation produce a clear, already-tested error
+// instead of this function panicking or the caller silently proceeding with a corrupted value.
+func (f flexString) Int() int {
+	if f == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(string(f))
+	if err != nil {
+		slog.Warn("GSL server-list field is present but not a valid integer; falling back to 0", "value", string(f), "error", err)
+		return 0
+	}
+	return n
+}
+
 // CheckVersion tries the known gate hosts in order (NOT concurrently, despite earlier wording --
 // this is a plain sequential fallback: each host gets the full httpClient timeout before moving
 // to the next) and returns the first successful response along with which host answered (that
@@ -133,11 +158,14 @@ type LoginToken struct {
 }
 
 type LoginServerInfo struct {
-	ID      int        `json:"id"`
+	// ID and Port are flexString, not a bare int, for the same reason as Status just below (see
+	// this file's round-35 fix comment on flexString.Int): a wrong-typed value on either field
+	// used to fail json.Unmarshal for the entire GetServerList response.
+	ID      flexString `json:"id"`
 	Name    string     `json:"name"`
 	IP      string     `json:"ip"` // "|"-delimited fallback hostnames, not a single IP
 	WsIP    string     `json:"ws_ip"`
-	Port    int        `json:"port"`
+	Port    flexString `json:"port"`
 	Zone    string     `json:"zone"`
 	GameUid string     `json:"gameUid"`
 	Uid     string     `json:"uid"`
@@ -148,10 +176,14 @@ type LoginServerInfo struct {
 // specific game-state server) -- used for the very first connection when no
 // account/state is associated with this device yet (opt=new).
 type AccountServerInfo struct {
-	IP     string `json:"ip"` // "|"-delimited fallback hostnames
-	Port   int    `json:"port"`
-	WsIP   string `json:"ws_ip"`
-	WsPort int    `json:"ws_port"`
+	IP string `json:"ip"` // "|"-delimited fallback hostnames
+	// Port and WsPort are flexString, not a bare int -- see LoginServerInfo's own doc comment
+	// (round-35 fix) for why. WsPort is never read anywhere in this codebase today (see
+	// applyLoginServerFallback's doc comment below), but a wrong-typed value on it would still
+	// fail json.Unmarshal for the whole response before that unused-ness ever mattered.
+	Port   flexString `json:"port"`
+	WsIP   string     `json:"ws_ip"`
+	WsPort flexString `json:"ws_port"`
 }
 
 type LoginServerListRespon struct {
@@ -306,6 +338,20 @@ func getIntFlexible(o *SFSObject, key string) int32 {
 	if n := o.GetInt(key); n != 0 {
 		return n
 	}
+	// Round-35 fix: redactedValue gates the three raw-scalar "value" log args below on
+	// isSensitiveSFSKey(key), matching every sibling wrong-typed-field guard in this codebase
+	// (requireFieldType/warnIfWrongTypedField/redirectIP/redirectZone all log only
+	// StringRedacted()/goType, never a field's own raw scalar). getIntFlexible is a generic,
+	// key-parameterized helper -- today's only call sites hardcode key="port" (never sensitive),
+	// but a future caller passing a sensitive key would otherwise leak its real value into these
+	// three anomaly-diagnostic Warn calls with no redaction at all, unlike this function's own
+	// fourth branch below, which already used the safe StringRedacted() pattern.
+	redactedValue := func(v any) any {
+		if isSensitiveSFSKey(key) {
+			return "[REDACTED]"
+		}
+		return v
+	}
 	// Round 33 fix: GetInt's own round-29 fix silently degrades a present, correctly-typed, but
 	// out-of-int32-range int64 Long to 0 -- indistinguishable, from the n!=0 check above, from a
 	// genuinely-absent or legitimately-zero field. This is the fourth anomaly shape getIntFlexible
@@ -319,7 +365,7 @@ func getIntFlexible(o *SFSObject, key string) int32 {
 	if v, ok := o.Get(key); ok {
 		if n64, isInt64 := v.Val.(int64); isInt64 && (n64 < math.MinInt32 || n64 > math.MaxInt32) {
 			slog.Warn("serverInfo redirect: field present as an out-of-int32-range Long, falling back to 0",
-				"key", key, "value", n64)
+				"key", key, "value", redactedValue(n64))
 			return 0
 		}
 	}
@@ -327,13 +373,13 @@ func getIntFlexible(o *SFSObject, key string) int32 {
 		if n, err := strconv.Atoi(s); err == nil {
 			if n < math.MinInt32 || n > math.MaxInt32 {
 				slog.Warn("serverInfo redirect: field present as an out-of-int32-range numeric string, falling back to 0",
-					"key", key, "value", s)
+					"key", key, "value", redactedValue(s))
 				return 0
 			}
 			return int32(n)
 		}
 		slog.Warn("serverInfo redirect: field present as a non-numeric string, falling back to 0",
-			"key", key, "value", s)
+			"key", key, "value", redactedValue(s))
 		return 0
 	}
 	// Neither GetInt nor GetString produced anything -- either key is genuinely absent (silent,

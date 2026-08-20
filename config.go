@@ -132,6 +132,21 @@ func mergeExplicitOrConfigPort(flagVal int, explicit bool, cfgVal int) (effectiv
 	return flagVal, false
 }
 
+// mergeExplicitOrConfigBool is -cs-ios's own merge decision (main.go), extracted as a pure
+// function for the same reason mergeExplicitOrConfigString/Port were (round 35 fix, following
+// round 34's audit finding that main()'s own config-merge call site had no test coverage beyond
+// the extracted pure helpers). Unlike its string/int siblings, a bool has no distinct "explicitly
+// given as empty/zero" case worth warning about: false is both flagVal's zero value AND a
+// perfectly legitimate explicit choice (Android mode), so there is nothing anomalous to diagnose
+// here -- this is a plain "explicit flag wins, otherwise fall back to the config" merge with no
+// second return value.
+func mergeExplicitOrConfigBool(flagVal bool, explicit bool, cfgVal bool) bool {
+	if explicit {
+		return flagVal
+	}
+	return cfgVal
+}
+
 // loadEffectiveConfig resolves which session config file (if any) to use:
 // an explicit -config path if given, else the default path. Returns (nil,
 // "") when the resolved path genuinely has no file yet -- not an error,

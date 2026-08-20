@@ -66,6 +66,12 @@ func TestRedact(t *testing.T) {
 		// 16 runes: k = n/8 = 2, so this reveals 2 runes from each end, not the
 		// old flat 4/4 (see the scaling-formula regression cases below for why).
 		{"longer than 8 chars", "abcdefghijklmnop", "ab...op"},
+		// Round-35 regression: n/7 and n/8 diverge only for n in {14,15,21,22,23,28,29,30,31} (n<=8
+		// short-circuits above; n>=32 is capped to k=4 under either divisor) -- every OTHER case in
+		// this table happens to land outside that narrow band, so a regression changing the divisor
+		// constant from 8 to 7 would pass the whole suite unnoticed (confirmed via mutation testing).
+		// 22 runes: k = 22/8 = 2 (not 22/7 = 3), isolating the divisor specifically.
+		{"22 runes isolates the n/8 divisor from n/7 (round-35 mutation-testing gap)", "abcdefghijklmnopqrstuv", "ab...uv"},
 		// Regression for a byte-index-vs-rune-index bug: sensitiveSFSKeys (sfsobject.go)
 		// includes googleName (a Google account display name) and mail (an
 		// internationalized email address), both of which can legitimately carry

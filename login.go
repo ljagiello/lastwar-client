@@ -238,7 +238,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			slog.Warn("failed to persist gameUid", "error", err)
 		}
 	}
-	addr, err := buildBaseZoneLoginAddr(stateSrv.IP, stateSrv.Port)
+	addr, err := buildBaseZoneLoginAddr(stateSrv.IP, stateSrv.Port.Int())
 	if err != nil {
 		return nil, fmt.Errorf("login: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -735,6 +736,55 @@ func TestParseInitVisitorsNegativeMaxNumFallsBackWithWarning(t *testing.T) {
 	logged := buf.String()
 	if !strings.Contains(logged, "visitor.maxNum field is present and correctly-typed but not positive") {
 		t.Errorf("expected a not-positive-maxNum warning, got log:\n%s", logged)
+	}
+}
+
+// TestParseInitVisitorsOutOfRangeLongMaxNumFallsBackWithWarning is the round-35 regression test for
+// the MINOR finding that a present, correctly-typed maxNum Long whose VALUE is out of int32's range
+// (e.g. 5000000000) used to pass the sfsFieldKindAccepts type check (a pure Go-type check, by
+// design), then silently degrade to 0 via GetInt's own int64 range-clamp -- landing in the
+// "not positive" branch and MISCHARACTERIZING the real huge value as merely non-positive, with the
+// real value lost entirely (that branch's own Warn logs the already-zeroed maxNum, not the real
+// one). This is the exact fourth anomaly shape gsl.go's getIntFlexible was hardened against in
+// round 33, backported here. Proves the new branch fires with the REAL out-of-range value in the
+// log, not the post-clamp 0, and that it's distinguishable from the plain negative-maxNum case
+// above.
+func TestParseInitVisitorsOutOfRangeLongMaxNumFallsBackWithWarning(t *testing.T) {
+	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
+	const hugeMaxNum = int64(math.MaxInt32) + 5000000000
+
+	list := NewSFSArray()
+	for i := 0; i < wantListLen; i++ {
+		v := NewSFSObject()
+		v.PutLong("uid", int64(9000+i))
+		v.PutInt("eventId", 3000+int32(i))
+		list.AddSFSObject(v)
+	}
+	visitor := NewSFSObject()
+	visitor.PutLong("maxNum", hugeMaxNum) // correctly-typed Long, but out of int32's range
+	visitor.PutSFSArray("list", list)
+	params := NewSFSObject()
+	params.PutSFSObject("visitor", visitor)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := ParseInitVisitors(params)
+	slog.SetDefault(orig)
+
+	if len(got) != maxVisitorsDefensiveCeiling {
+		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (an out-of-range maxNum Long must fall back to the defensive ceiling)", len(got), maxVisitorsDefensiveCeiling)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "out-of-int32-range") {
+		t.Errorf("expected a Warn mentioning the out-of-range Long, got log:\n%s", logged)
+	}
+	if !strings.Contains(logged, "7147483647") { // hugeMaxNum's real value (math.MaxInt32 + 5000000000)
+		t.Errorf("expected the log to contain the real out-of-range value (5005000000), not a post-clamp 0, got log:\n%s", logged)
+	}
+	if strings.Contains(logged, "not positive") {
+		t.Errorf("expected the out-of-range-Long branch, not the plain not-positive branch, got log:\n%s", logged)
 	}
 }
 

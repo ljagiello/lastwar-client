@@ -297,9 +297,7 @@ func main() {
 		if atExplicitlyEmpty {
 			slog.Warn("-cs-at was explicitly given as empty; not falling back to the session config's access token (pass a non-empty -cs-at, or omit the flag entirely to use the config's value)")
 		}
-		if !csIOSSetExplicitly {
-			*csIOS = cfg.IOSMode
-		}
+		*csIOS = mergeExplicitOrConfigBool(*csIOS, csIOSSetExplicitly, cfg.IOSMode)
 	}
 	warnIfExplicitConfigPathNotFound(cfg, *configPath, *noConfig)
 
@@ -834,7 +832,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		deviceID = o.deviceID
 		airKey = "lwDid_" + b64OfString(deviceID)
 	}
-	slog.Info("using device identity", "deviceIdLen", len(deviceID), "airKeyLen", len(airKey))
+	slog.Info("using device identity", "deviceIdLen", len(deviceID), "airKeyLen", len(airKey), "iosMode", o.iosMode)
 
 	accessTok := o.at
 	ip, port, zone, gameUid := o.ip, o.port, o.zone, o.gameUid
@@ -980,7 +978,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			} else {
 				slog.Info("server selected", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone, "gameUid", srv.GameUid)
 			}
-			ip, port, zone, gameUid = srv.IP, srv.Port, srv.Zone, srv.GameUid
+			ip, port, zone, gameUid = srv.IP, srv.Port.Int(), srv.Zone, srv.GameUid
 		}
 	}
 
