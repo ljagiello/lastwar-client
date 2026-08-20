@@ -531,6 +531,78 @@ func TestFetchBuildingsDeadlineCappedAgainstRepeatedInitPushes(t *testing.T) {
 	}
 }
 
+// TestFetchBuildingsAggregateVisitorCeilingAcrossManyPushes is the round-36 regression test for
+// the MAJOR finding that FetchBuildings' visitor/building accumulation had no ceiling across the
+// WHOLE fetch window -- only each individual push's own parse was capped (ParseInitVisitors at
+// maxVisitorsUpperBound). appendVisitor dedupes only on uid, a field fully controlled by the
+// peer, so a hostile -cs-ip peer sending many small init pushes with distinct fake uids could
+// inflate the visitors slice far past any single push's own cap -- reopening the exact hang
+// GreetVisitors' own doc comment claims is bounded, since it later issues one real sequential
+// network call per accumulated entry with no cap of its own.
+//
+// Sends far more pushes*visitorsPerPush than maxVisitorsUpperBound (well over 2x) and asserts the
+// final accumulated count stays close to the cap, not anywhere near the unaggregated potential --
+// proving the new per-iteration aggregate check (buildings.go) actually stops the accumulation
+// loop instead of only bounding a single push's own parse.
+func TestFetchBuildingsAggregateVisitorCeilingAcrossManyPushes(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const (
+		visitorsPerPush   = 10
+		numPushes         = 60 // 600 potential visitors, well over 2x maxVisitorsUpperBound (300)
+		unaggregatedTotal = visitorsPerPush * numPushes
+	)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for p := 0; p < numPushes; p++ {
+			params := NewSFSObject()
+			visitorList := NewSFSArray()
+			for i := 0; i < visitorsPerPush; i++ {
+				v := NewSFSObject()
+				v.PutLong("uid", int64(p*visitorsPerPush+i+1)) // distinct uid every push -- defeats dedup
+				v.PutInt("eventId", 2000)
+				v.PutInt("visitorId", 6)
+				visitorList.AddSFSObject(v)
+			}
+			visitor := NewSFSObject()
+			visitor.PutSFSArray("list", visitorList)
+			params.PutSFSObject("visitor", visitor)
+			if err := server.SendExtension("init", params); err != nil {
+				return
+			}
+		}
+		// Deliberately does NOT close the connection -- FetchBuildings must stop itself via the
+		// new aggregate ceiling, not because the peer hung up or the whole batch was exhausted.
+	}()
+
+	_, visitors, err := FetchBuildings(client, 3*time.Second)
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		// The sender goroutine is almost certainly still mid-send, blocked on a full pipe buffer,
+		// since FetchBuildings stopped reading early (exactly what this test wants to prove) --
+		// not a failure on its own, just don't hang the test waiting for a send that will never
+		// be read. The goroutine leaks harmlessly until the test binary exits.
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil (a plain deadline-elapsed timeout is not itself an error)", err)
+	}
+	if len(visitors) >= unaggregatedTotal {
+		t.Fatalf("got %d visitors, want well under the unaggregated potential of %d -- the aggregate ceiling did not stop accumulation across pushes", len(visitors), unaggregatedTotal)
+	}
+	// Bounded generously above maxVisitorsUpperBound to absorb the single-push overshoot the
+	// per-iteration check allows (one push can add up to visitorsPerPush new entries before the
+	// next iteration's check catches it) -- the real claim is "closer to the cap than to the
+	// unaggregated potential", not an exact count.
+	if maxWant := maxVisitorsUpperBound + visitorsPerPush; len(visitors) > maxWant {
+		t.Errorf("got %d visitors, want at most %d (maxVisitorsUpperBound=%d plus at most one push's own overshoot)", len(visitors), maxWant, maxVisitorsUpperBound)
+	}
+}
+
 // TestCollectIdleRewardSuccess covers CollectIdleReward's documented two-call sequence -- a peek
 // (action=0) immediately followed by a claim (action=1), both against `lw.pve.idle.reward` (see
 // its doc comment in buildings.go) -- against a fake server that answers both with a plain

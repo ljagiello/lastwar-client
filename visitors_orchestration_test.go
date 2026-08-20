@@ -788,6 +788,67 @@ func TestParseInitVisitorsOutOfRangeLongMaxNumFallsBackWithWarning(t *testing.T)
 	}
 }
 
+// TestParseInitVisitorsMalformedTopLevelShapes is the round-36 regression test for the MINOR
+// finding that ParseInitVisitors' four top-level malformed-shape guards (wrong-typed visitor
+// object, absent list, wrong-typed list array, non-object list entry) had zero direct/isolated
+// test coverage -- each was only ever exercised indirectly, end to end, by happy-path tests that
+// build a valid visitor/list/SFSArray/SFSObject chain. ParseInitVisitors parses the bare `init`
+// bootstrap push, which this codebase's own threat-model comments (e.g.
+// maxVisitorsDefensiveCeiling's doc comment) explicitly treat as attacker-influenceable via a
+// hostile/misbehaving -cs-ip peer, so these four malformed shapes are squarely in scope.
+func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
+	t.Run("visitor field present but wrong-typed (not an SFSObject)", func(t *testing.T) {
+		params := NewSFSObject()
+		params.PutUtfString("visitor", "not-an-object")
+
+		got := ParseInitVisitors(params)
+		if len(got) != 0 {
+			t.Fatalf("got %d visitors, want 0 (wrong-typed visitor field must yield no visitors, not a panic)", len(got))
+		}
+	})
+	t.Run("list field absent from an otherwise well-formed visitor object", func(t *testing.T) {
+		visitor := NewSFSObject()
+		visitor.PutInt("maxNum", 5) // present, but deliberately no "list" field
+		params := NewSFSObject()
+		params.PutSFSObject("visitor", visitor)
+
+		got := ParseInitVisitors(params)
+		if len(got) != 0 {
+			t.Fatalf("got %d visitors, want 0 (absent list field must yield no visitors, not a panic)", len(got))
+		}
+	})
+	t.Run("list field present but wrong-typed (not an SFSArray)", func(t *testing.T) {
+		visitor := NewSFSObject()
+		visitor.PutUtfString("list", "not-an-array")
+		params := NewSFSObject()
+		params.PutSFSObject("visitor", visitor)
+
+		got := ParseInitVisitors(params)
+		if len(got) != 0 {
+			t.Fatalf("got %d visitors, want 0 (wrong-typed list field must yield no visitors, not a panic)", len(got))
+		}
+	})
+	t.Run("list entry present but non-object -- skipped, sibling well-formed entries still kept", func(t *testing.T) {
+		good := NewSFSObject()
+		good.PutLong("uid", 555)
+		list := NewSFSArray()
+		list.AddInt(12345) // a bare non-object entry, not a *SFSObject
+		list.AddSFSObject(good)
+		visitor := NewSFSObject()
+		visitor.PutSFSArray("list", list)
+		params := NewSFSObject()
+		params.PutSFSObject("visitor", visitor)
+
+		got := ParseInitVisitors(params)
+		if len(got) != 1 {
+			t.Fatalf("got %d visitors, want exactly 1 (the non-object entry must be skipped, not panic or corrupt the sibling entry)", len(got))
+		}
+		if got[0].Uid() != 555 {
+			t.Errorf("got uid %d, want 555", got[0].Uid())
+		}
+	})
+}
+
 // eofConnWithWrites is a minimal net.Conn whose every Read returns bare io.EOF -- like
 // conn_wait_test.go's eofConn, simulating a peer's graceful close at the live-connection level -- but
 // unlike eofConn (which embeds a nil net.Conn and would panic if any other method were called), Write

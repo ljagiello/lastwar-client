@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -210,6 +211,63 @@ func TestFlexStringUnmarshalJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFlexStringInt is the round-36 regression test for the MAJOR finding that flexString.Int()
+// (gsl.go) -- the accessor round 35 introduced specifically so a wrong-typed GetServerList field
+// could fall back to 0 instead of fatally failing json.Unmarshal for the whole response -- had its
+// own two non-happy-path branches (the empty-string fast path and the malformed-value fallback)
+// completely uncovered and mutation-blind: every existing .Int() call site in other tests only
+// ever exercises a valid numeric string. Every downstream caller's own "port <= 0"-style
+// validation depends on the malformed/empty cases specifically falling back to 0, not some other
+// value, so this pins that contract down directly.
+func TestFlexStringInt(t *testing.T) {
+	cases := []struct {
+		name string
+		f    flexString
+		want int
+	}{
+		{"empty string", flexString(""), 0},
+		{"valid numeric string", flexString("17783"), 17783},
+		{"negative numeric string", flexString("-1"), -1},
+		{"malformed, non-numeric string", flexString("not-a-number"), 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.f.Int(); got != c.want {
+				t.Errorf("flexString(%q).Int() = %d, want %d", string(c.f), got, c.want)
+			}
+		})
+	}
+}
+
+// TestFlexStringIntWarnsOnMalformedValue proves the malformed (non-numeric, non-empty) case logs
+// a diagnostic -- distinct from the empty-string case, which is the ordinary "field absent"
+// shape and stays silent by design, matching this codebase's established anomaly-diagnostic
+// convention (e.g. getIntFlexible's own absent-vs-malformed distinction).
+func TestFlexStringIntWarnsOnMalformedValue(t *testing.T) {
+	run := func(t *testing.T, f flexString) string {
+		t.Helper()
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		f.Int()
+		slog.SetDefault(orig)
+		return buf.String()
+	}
+
+	t.Run("malformed value warns", func(t *testing.T) {
+		logged := run(t, flexString("not-a-number"))
+		if !strings.Contains(logged, "not-a-number") {
+			t.Errorf("expected a Warn mentioning the malformed value, got:\n%s", logged)
+		}
+	})
+	t.Run("empty value stays silent", func(t *testing.T) {
+		logged := run(t, flexString(""))
+		if logged != "" {
+			t.Errorf("expected no log output for an empty/absent value, got:\n%s", logged)
+		}
+	})
 }
 
 // TestGetServerListDecodeFailuresDoNotLeakRawResponse is the round-11/round-12 regression test for
@@ -562,6 +620,50 @@ func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testin
 			}
 			if got := lsr.LoginServer.WsPort.Int(); got != 8443 {
 				t.Errorf("LoginServer.WsPort.Int() = %d, want 8443", got)
+			}
+		})
+	}
+}
+
+// TestGetServerListLoginTokenTimeAcceptsStringOrNumber is the round-36 regression test for the
+// MAJOR finding that LoginToken.Time was the one field round 35's GetServerList JSON
+// type-safety sweep missed -- a wrong-typed "time" value on either "at" or "rt" used to fail
+// json.Unmarshal for the ENTIRE GetServerList response (fatal on the primary login path and the
+// standalone -cs-rt refresh command, same failure mode as the already-fixed
+// LoginServerInfo.ID/Port and AccountServerInfo.Port/WsPort). Mirrors
+// TestGetServerListPortIDAcceptsStringOrNumber's raw-JSON table shape, exercised through "at".
+func TestGetServerListLoginTokenTimeAcceptsStringOrNumber(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"string time", `"1699999999999"`},
+		{"numeric time", `1699999999999`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			priv, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"code":"0","serverList":[],"at":{"token":"abc","time":%s}}`, tt.json)
+			}))
+			defer server.Close()
+
+			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			if err != nil {
+				t.Fatalf("GetServerList: %v", err)
+			}
+			if lsr.At == nil {
+				t.Fatal("lsr.At is nil, want a decoded LoginToken")
+			}
+			if lsr.At.Token != "abc" {
+				t.Errorf("lsr.At.Token = %q, want %q", lsr.At.Token, "abc")
+			}
+			if got := lsr.At.Time.String(); got != "1699999999999" {
+				t.Errorf("lsr.At.Time.String() = %q, want %q", got, "1699999999999")
 			}
 		})
 	}

@@ -152,9 +152,17 @@ func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error
 }
 
 // LoginToken mirrors the {token,time} shape seen for `at`/`rt`.
+//
+// Time is flexString, not a bare int64 -- round-36 fix, the one field round 35's GetServerList
+// JSON type-safety sweep missed. Reached via LoginServerListRespon.At/.Rt *LoginToken, so a
+// wrong-typed "time" value used to fail json.Unmarshal for the ENTIRE GetServerList response,
+// same fatal-whole-response failure mode round 35 fixed for LoginServerInfo.ID/Port and
+// AccountServerInfo.Port/WsPort. Time itself is never read anywhere in this codebase (only
+// Token is), so this widening is behaviorally free -- matching AccountServerInfo.WsPort's own
+// precedent of hardening an unread field purely so it can't take the rest of the struct down.
 type LoginToken struct {
-	Token string `json:"token"`
-	Time  int64  `json:"time"`
+	Token string     `json:"token"`
+	Time  flexString `json:"time"`
 }
 
 type LoginServerInfo struct {

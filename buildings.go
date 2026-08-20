@@ -445,6 +445,29 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 	}
 
 	for {
+		// Round-36 fix: ParseInitVisitors/ParseInitBuildings and the two inline defaultBuilds/
+		// buildings loops above are each capped PER PUSH (maxVisitorsUpperBound=300,
+		// maxRawBuildingItemsPerPush=2000), but nothing previously bounded how many qualifying
+		// pushes this loop accumulates across the whole wait window -- appendBuilding/appendVisitor
+		// dedupe only on uuid/uid, fields fully controlled by the peer, so a hostile -cs-ip peer
+		// sending many small pushes with distinct fake uids could inflate buildings/visitors far
+		// past any single push's own cap. For visitors specifically this reopens the exact hang
+		// GreetVisitors' own doc comment claims is bounded: a peer that stops answering
+		// visitor.operate (while still answering everything else, so the connection never reads as
+		// dead) forces every accumulated entry to independently burn up to defaultCmdTimeout before
+		// GreetVisitors moves on. Checked once per loop iteration (before waiting for the next
+		// envelope) so it naturally stops READING further pushes too, not just appending past the
+		// cap -- an attacker gains nothing by sending more once this fires.
+		if len(visitors) >= maxVisitorsUpperBound {
+			slog.Warn("aggregate visitor count across this fetch window reached the upper bound; stopping early",
+				"visitorCount", len(visitors), "cap", maxVisitorsUpperBound)
+			break
+		}
+		if len(buildings) >= maxCollectibleBuildingsPerRun {
+			slog.Warn("aggregate building count across this fetch window reached the collectible-per-run cap; stopping early",
+				"buildingCount", len(buildings), "cap", maxCollectibleBuildingsPerRun)
+			break
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			break
