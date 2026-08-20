@@ -2274,6 +2274,191 @@ func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
 	}
 }
 
+// TestClaimAllMailReadStatusLoopCapsBatchCount is the round-44 regression test for the MAJOR
+// finding that batchByCountAndBytes' batches, unlike maxAggregateMailPerFetch (total mail item
+// count) and maxMailRewardTypesPerRun (distinct type count), had no cap on the NUMBER of batches
+// -- since batchByCountAndBytes always admits at least one uid per batch even if that uid alone
+// exceeds maxUIDsBytes, a peer returning mail with maximal-length uids can force every batch down
+// to a single item, turning maxAggregateMailPerFetch(2000) items into up to 2000 sequential
+// mail.read.status.betch round trips instead of the ~20 batches (2000/readBatchSize=100) normal
+// pagination produces. Sends maxMailBatchesPerLoop+1 (301) mail entries, each with an oversized
+// (30001-byte, comfortably over maxUIDsBytes/2=30000) uid forcing singleton batching, and proves
+// the fake server sees only maxMailBatchesPerLoop mail.read.status.betch requests, not 301 -- if
+// ClaimAllMail tried to send a 301st, the fake server (which only answers that many) would hang
+// the test instead of passing it. All mail is already-claimed (rewardStatus=1) so the reward-claim
+// loop is entirely out of scope for this test.
+func TestClaimAllMailReadStatusLoopCapsBatchCount(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const totalMails = maxMailBatchesPerLoop + 1 // 301 mail entries, each forcing its own batch
+	const oversizedUIDLen = 30001                // > maxUIDsBytes/2, forces singleton batches
+
+	mails := make([]*SFSObject, totalMails)
+	for i := 0; i < totalMails; i++ {
+		uid := fmt.Sprintf("%0*d", oversizedUIDLen, i) // unique, fixed-length oversized uid
+		mails[i] = newTestMailObj(uid, 0, 1)           // rewardStatus=1: already claimed
+	}
+
+	var readBatchCount int
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read list-mail request: %v", err)
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
+			return
+		}
+		listResp := NewSFSObject()
+		arr := NewSFSArray()
+		for _, mo := range mails {
+			arr.AddSFSObject(mo)
+		}
+		listResp.PutSFSArray("msg", arr)
+		listResp.PutBool("more", false)
+		if err := server.SendExtension("push.chat.get.system.mails", listResp); err != nil {
+			return
+		}
+
+		// Exactly maxMailBatchesPerLoop expected -- the 301st batch must never even be sent, since
+		// truncation happens client-side before the loop starts, not as an early-abort mid-loop.
+		for i := 0; i < maxMailBatchesPerLoop; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("read read-status request %d: %v", i, err)
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok || msg.Cmd != "mail.read.status.betch" {
+				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
+				return
+			}
+			readBatchCount++
+			readResp := NewSFSObject()
+			readResp.PutBool("success", true)
+			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
+				return
+			}
+		}
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	err := ClaimAllMail(client)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake server never finished all expected requests -- ClaimAllMail likely tried to send more than maxMailBatchesPerLoop read-status batches")
+	}
+
+	if err != nil {
+		t.Fatalf("ClaimAllMail() = %v, want nil", err)
+	}
+	if readBatchCount != maxMailBatchesPerLoop {
+		t.Errorf("server saw %d mail.read.status.betch requests, want exactly %d (maxMailBatchesPerLoop)", readBatchCount, maxMailBatchesPerLoop)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "mail batch count exceeds sanity ceiling") {
+		t.Errorf("expected a warning about truncating the batch loop, got log:\n%s", logged)
+	}
+}
+
+// TestClaimAllMailReadStatusLoopBatchCountExactlyAtCapDoesNotTruncate is
+// TestClaimAllMailReadStatusLoopCapsBatchCount's boundary counterpart: sends exactly
+// maxMailBatchesPerLoop oversized-uid mail entries (each still forcing its own singleton batch)
+// and proves ALL of them get a read-status batch, with no truncation warning logged -- closing the
+// same off-by-one gap round 42's sibling boundary tests closed for maxRedirects/
+// maxRedirectHops/maxMailRewardTypesPerRun/maxCollectibleBuildingsPerRun/maxVisitorsUpperBound.
+func TestClaimAllMailReadStatusLoopBatchCountExactlyAtCapDoesNotTruncate(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const totalMails = maxMailBatchesPerLoop // exactly at the cap -- must NOT be truncated
+	const oversizedUIDLen = 30001
+
+	mails := make([]*SFSObject, totalMails)
+	for i := 0; i < totalMails; i++ {
+		uid := fmt.Sprintf("%0*d", oversizedUIDLen, i)
+		mails[i] = newTestMailObj(uid, 0, 1)
+	}
+
+	var readBatchCount int
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read list-mail request: %v", err)
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
+			return
+		}
+		listResp := NewSFSObject()
+		arr := NewSFSArray()
+		for _, mo := range mails {
+			arr.AddSFSObject(mo)
+		}
+		listResp.PutSFSArray("msg", arr)
+		listResp.PutBool("more", false)
+		if err := server.SendExtension("push.chat.get.system.mails", listResp); err != nil {
+			return
+		}
+
+		for i := 0; i < totalMails; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("read read-status request %d: %v", i, err)
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok || msg.Cmd != "mail.read.status.betch" {
+				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
+				return
+			}
+			readBatchCount++
+			readResp := NewSFSObject()
+			readResp.PutBool("success", true)
+			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
+				return
+			}
+		}
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	err := ClaimAllMail(client)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake server never finished all expected requests -- ClaimAllMail likely truncated below maxMailBatchesPerLoop")
+	}
+
+	if err != nil {
+		t.Fatalf("ClaimAllMail() = %v, want nil", err)
+	}
+	if readBatchCount != totalMails {
+		t.Errorf("server saw %d mail.read.status.betch requests, want exactly %d (maxMailBatchesPerLoop, the boundary value)", readBatchCount, totalMails)
+	}
+	if logged := buf.String(); strings.Contains(logged, "mail batch count exceeds sanity ceiling") {
+		t.Errorf("expected NO truncation warning for exactly-at-cap input, got log:\n%s", logged)
+	}
+}
+
 // TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError proves the reward-claim loop's
 // existing no-short-circuit-on-business-errors behavior (an ordinary decoded errorCode failure gets
 // appended to errs with no break, unlike this round's new net.Error break -- see mail.go's

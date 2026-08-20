@@ -151,6 +151,32 @@ func TestReadPacketRejectsOversizedZstdUncompressedLength(t *testing.T) {
 	}
 }
 
+// TestReadPacketAcceptsDeclaredLengthExactlyAtCap is the round-44 regression test for the MINOR
+// finding that TestReadPacketRejectsOversizedDeclaredLength above only proves packet.go's
+// `length > maxFrameSize` guard rejects at maxFrameSize+1 -- it never exercises the boundary
+// itself, so an off-by-one `>=` tightening would silently reject a legitimate maxFrameSize-sized
+// frame with zero test signal (the identical gap round 43 closed for maxGSLResponseSize/
+// maxNestDepth elsewhere in this codebase; see packet_zstd_test.go's
+// TestReadPacketAcceptsZstdUncompressedLengthExactlyAtCap for this guard's zstd-flagged sibling).
+// Sends an uncompressed frame declaring exactly maxFrameSize bytes of body and proves ReadPacket
+// accepts it and returns exactly that many bytes.
+func TestReadPacketAcceptsDeclaredLengthExactlyAtCap(t *testing.T) {
+	var hdr bytes.Buffer
+	hdr.WriteByte(hdrBinary | hdrBigSized)
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], maxFrameSize)
+	hdr.Write(lb[:])
+	hdr.Write(make([]byte, maxFrameSize))
+
+	out, err := ReadPacket(&hdr)
+	if err != nil {
+		t.Fatalf("ReadPacket() error = %v, want nil for a declared length of exactly maxFrameSize (the boundary value, not over the cap)", err)
+	}
+	if len(out) != maxFrameSize {
+		t.Errorf("ReadPacket() returned %d bytes, want exactly %d", len(out), maxFrameSize)
+	}
+}
+
 // Confirms ReadPacket's zlib branch bounds the ACTUAL post-inflate size, not
 // just the on-wire (compressed) length -- a classic zip-bomb shape where a
 // small compressed frame expands into something far past maxFrameSize.

@@ -128,6 +128,22 @@ const maxAggregateMailPerFetch = 2000
 // exactly.
 const maxMailRewardTypesPerRun = 300
 
+// maxMailBatchesPerLoop is a defensive, non-protocol-guessing sanity ceiling on how many
+// mail.read.status.betch/mail.reward.batch round trips ClaimAllMail's two batch loops below will
+// each issue -- round-44 fix, closing a gap on a distinct axis from maxAggregateMailPerFetch (total
+// mail ITEM count) and maxMailRewardTypesPerRun (distinct TYPE count): neither bounds the number of
+// BATCHES batchByCountAndBytes produces. batchByCountAndBytes always admits at least one uid per
+// batch even if that uid alone exceeds maxUIDsBytes (see its own doc comment), and a mail uid is a
+// server-supplied string bounded only by the wire format's 65535-byte string-length limit -- well
+// over maxUIDsBytes(60000) -- so a peer returning mail entries with maximal-length uids can force
+// every batch down to a single item, turning maxAggregateMailPerFetch(2000) items into up to 2000
+// sequential round trips instead of the ~20 batches (2000/readBatchSize=100) normal pagination
+// produces. Same category of ceiling, and the same value/rationale, as maxMailRewardTypesPerRun
+// above and buildings.go's maxCollectibleBuildingsPerRun/visitors.go's maxVisitorsUpperBound: each
+// iteration can cost up to a full defaultCmdTimeout (8s, conn.go) against a peer that simply never
+// responds, so 300 * 8s bounds the worst case at ~40 minutes instead of up to ~4.4 hours.
+const maxMailBatchesPerLoop = 300
+
 // ListMail fetches the account's mail via `chat.get.system.mails`,
 // following the real client's own request shape
 // (extracted/lua_decompiled/5018_Net_Msgs_Mail_MailGetMutiMessage.lua:
@@ -438,7 +454,7 @@ func ClaimAllMail(conn *GameConn) error {
 	// it against an already-dead connection would just burn one more defaultCmdTimeout per
 	// remaining batch for no benefit.
 	readAbortedByNetErr := false
-	for _, batch := range batchByCountAndBytes(allUIDs, readBatchSize, maxUIDsBytes) {
+	for _, batch := range truncateMailBatches(batchByCountAndBytes(allUIDs, readBatchSize, maxUIDsBytes), "read-status") {
 		readParams := NewSFSObject()
 		readParams.PutUtfString("uids", strings.Join(batch, ","))
 		_, err := sendAndWait(conn, fmt.Sprintf("mail read-status (batch %d, size %d)", offset, len(batch)), "mail.read.status.betch", readParams)
@@ -506,7 +522,7 @@ rewardLoop:
 		uids := byType[mailType]
 		slog.Info("claiming mail reward", "type", mailType, "count", len(uids))
 		offset := 0
-		for _, batch := range batchByCountAndBytes(uids, readBatchSize, maxUIDsBytes) {
+		for _, batch := range truncateMailBatches(batchByCountAndBytes(uids, readBatchSize, maxUIDsBytes), fmt.Sprintf("reward-claim type=%d", mailType)) {
 			rewardParams := NewSFSObject()
 			rewardParams.PutUtfString("uids", strings.Join(batch, ","))
 			rewardParams.PutInt("type", mailType)
@@ -530,6 +546,18 @@ rewardLoop:
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// truncateMailBatches caps batches at maxMailBatchesPerLoop, warning and dropping the remainder
+// when it's exceeded -- see that constant's own doc comment for the full rationale. label
+// distinguishes the read-status loop from a specific mail type's reward-claim loop in the
+// resulting Warn, since both of ClaimAllMail's batch loops share this same truncation.
+func truncateMailBatches(batches [][]string, label string) [][]string {
+	if len(batches) > maxMailBatchesPerLoop {
+		slog.Warn("mail batch count exceeds sanity ceiling; truncating", "loop", label, "batchCount", len(batches), "cap", maxMailBatchesPerLoop)
+		batches = batches[:maxMailBatchesPerLoop]
+	}
+	return batches
 }
 
 // batchByCountAndBytes splits uids into consecutive batches, each capped at maxCount items and

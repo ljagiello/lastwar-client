@@ -404,6 +404,47 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 	}
 }
 
+// TestGetServerListLoginServerAtRtAcceptEmptyArrayShape is the round-44 regression test for the
+// MINOR finding that LoginServerListRespon.LoginServer/At/Rt (unlike every scalar field in the
+// same struct family) had no tolerance for a non-object JSON shape -- e.g. PHP's json_encode's
+// common `[]` encoding for an empty associative array -- which used to fail json.Unmarshal for the
+// ENTIRE GetServerList response. Sends a response with loginServer/at/rt all as `[]` instead of
+// `{}`/absent, and confirms GetServerList still succeeds, with ServerList/Code/LastLoggedServer
+// intact and LoginServer/At/Rt all nil -- the same "absent" behavior every consumer already
+// expects (applyLoginServerFallback's `lsr.LoginServer == nil` check, login.go's/crossserver.go's/
+// main.go's `lsr.At != nil` checks).
+func TestGetServerListLoginServerAtRtAcceptEmptyArrayShape(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":"0","serverList":[{"id":"1","ip":"1.2.3.4","port":"9000","zone":"APS1","gameUid":"g1"}],"lastLoggedServer":"1","loginServer":[],"at":[],"rt":[]}`)
+	}))
+	defer server.Close()
+
+	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	if err != nil {
+		t.Fatalf("GetServerList() error = %v, want the malformed loginServer/at/rt shape to degrade gracefully, not fail the whole response", err)
+	}
+	if len(lsr.ServerList) != 1 {
+		t.Fatalf("ServerList = %+v, want the single, well-formed entry to still decode", lsr.ServerList)
+	}
+	if lsr.LoginServer != nil {
+		t.Errorf("LoginServer = %+v, want nil for a non-object []-shaped value", lsr.LoginServer)
+	}
+	if lsr.At != nil {
+		t.Errorf("At = %+v, want nil for a non-object []-shaped value", lsr.At)
+	}
+	if lsr.Rt != nil {
+		t.Errorf("Rt = %+v, want nil for a non-object []-shaped value", lsr.Rt)
+	}
+	if got := lsr.LastLoggedServer.String(); got != "1" {
+		t.Errorf("LastLoggedServer.String() = %q, want %q", got, "1")
+	}
+}
+
 // TestGetServerListRejectsOversizedResponse exercises maxGSLResponseSize's rejection branch on
 // the GetServerList side (its own io.ReadAll/LimitReader call site, separate from CheckVersion's).
 func TestGetServerListRejectsOversizedResponse(t *testing.T) {

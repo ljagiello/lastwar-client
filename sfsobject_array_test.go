@@ -577,6 +577,49 @@ func TestDecodedNodeCountRejected(t *testing.T) {
 	}
 }
 
+// TestDecodedNodeCountExactlyAtCapSucceeds is the round-44 regression test for the MINOR finding
+// that maxDecodedNodes' strict greater-than boundary (r.nodes > maxDecodedNodes, checked in both
+// readValuePayload and chargeNodes) had no exact-boundary test -- TestDecodedNodeCountRejected
+// above only proves a payload comfortably OVER the 300,000-node cap is rejected, never that a
+// payload landing on EXACTLY 300,000 total decoded nodes -- the boundary value itself -- is still
+// accepted, which would catch an off-by-one `>=` mutation that rejected the last legitimate node.
+// Mirrors TestDecodedNodeCountRejected's outer-array-of-inner-arrays-of-sfsNull shape, sized to
+// land on exactly maxDecodedNodes: 1 (the outer array's own node, charged by the direct
+// readValuePayload(sfsArrayType) call below) + outerCount (each inner array's own node) + the sum
+// of each inner array's leaf count. Group sizes are uneven (9 groups of 30,000 plus one of 29,989)
+// purely to hit the exact total without needing an evenly-divisible count -- each individual count
+// still stays comfortably under the int16 per-level array-count limit (32767).
+func TestDecodedNodeCountExactlyAtCapSucceeds(t *testing.T) {
+	const outerCount = 10
+	innerCounts := [outerCount]int{30000, 30000, 30000, 30000, 30000, 30000, 30000, 30000, 30000, 29989}
+
+	total := 1 + outerCount
+	for _, c := range innerCounts {
+		total += c
+	}
+	if total != maxDecodedNodes {
+		t.Fatalf("test construction bug: total nodes = %d, want exactly %d", total, maxDecodedNodes)
+	}
+
+	var buf []byte
+	buf = binary.BigEndian.AppendUint16(buf, outerCount)
+	for _, innerCount := range innerCounts {
+		buf = append(buf, sfsArrayType)
+		buf = binary.BigEndian.AppendUint16(buf, uint16(innerCount))
+		for j := 0; j < innerCount; j++ {
+			buf = append(buf, sfsNull)
+		}
+	}
+
+	r := &sfsReader{data: buf}
+	if _, err := r.readValuePayload(sfsArrayType); err != nil {
+		t.Errorf("readValuePayload() error = %v, want nil for a payload decoding to exactly %d total nodes (the boundary value, not over the cap)", err, maxDecodedNodes)
+	}
+	if r.nodes != maxDecodedNodes {
+		t.Errorf("r.nodes = %d, want exactly %d (test construction should land precisely on the boundary)", r.nodes, maxDecodedNodes)
+	}
+}
+
 // TestDecodedNodeCountRejectedForPrimitiveArrays is the round-13 regression test for the
 // maxDecodedNodes undercount the round-13 audit found: the 8 primitive-array decode cases
 // (sfsBoolArray..sfsUtfStringArray) each only charged 1 node regardless of how many elements they

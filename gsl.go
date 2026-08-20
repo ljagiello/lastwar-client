@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
@@ -292,6 +293,71 @@ type LoginServerListRespon struct {
 	LastLoggedServer flexString         `json:"lastLoggedServer"`
 	At               *LoginToken        `json:"at"`
 	Rt               *LoginToken        `json:"rt"`
+}
+
+// UnmarshalJSON tolerates LoginServer/At/Rt arriving as a non-object JSON shape (e.g. `[]`, PHP's
+// json_encode's common encoding for an empty associative array) instead of `{}`/`null` -- round-44
+// fix, closing the last remaining JSON-shape-tolerance gap in this response family after rounds
+// 33-43 widened every scalar field to flexString. Unlike a scalar field, a struct-pointer field
+// can't simply be widened to flexString, so this instead pre-inspects each of the three raw values
+// via looksLikeJSONObject and only decodes into the real struct type when it actually looks like a
+// JSON object -- any other shape leaves the field nil, the same "absent" behavior every consumer
+// already expects (applyLoginServerFallback's `lsr.LoginServer == nil` check below, login.go's/
+// crossserver.go's/main.go's `lsr.At != nil` checks), instead of failing json.Unmarshal for the
+// ENTIRE GetServerList response. This has never been observed live -- it's the same speculative
+// defense-in-depth already applied to every sibling scalar field in this struct family, just
+// extended to the three fields a simple type-widen can't reach.
+//
+// The shadow struct below must be kept in sync with LoginServerListRespon's own field list by
+// hand -- a future field added to one and not the other will compile but silently stop round-
+// tripping through this custom decoder.
+func (l *LoginServerListRespon) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Code             flexString        `json:"code"`
+		ServerList       []LoginServerInfo `json:"serverList"`
+		LastLoggedServer flexString        `json:"lastLoggedServer"`
+		LoginServer      json.RawMessage   `json:"loginServer"`
+		At               json.RawMessage   `json:"at"`
+		Rt               json.RawMessage   `json:"rt"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	l.Code = raw.Code
+	l.ServerList = raw.ServerList
+	l.LastLoggedServer = raw.LastLoggedServer
+
+	if looksLikeJSONObject(raw.LoginServer) {
+		var v AccountServerInfo
+		if err := json.Unmarshal(raw.LoginServer, &v); err != nil {
+			return fmt.Errorf("loginServer: %w", err)
+		}
+		l.LoginServer = &v
+	}
+	if looksLikeJSONObject(raw.At) {
+		var v LoginToken
+		if err := json.Unmarshal(raw.At, &v); err != nil {
+			return fmt.Errorf("at: %w", err)
+		}
+		l.At = &v
+	}
+	if looksLikeJSONObject(raw.Rt) {
+		var v LoginToken
+		if err := json.Unmarshal(raw.Rt, &v); err != nil {
+			return fmt.Errorf("rt: %w", err)
+		}
+		l.Rt = &v
+	}
+	return nil
+}
+
+// looksLikeJSONObject reports whether raw is a non-empty JSON value whose first non-whitespace
+// byte is '{' -- used by LoginServerListRespon's UnmarshalJSON above to distinguish a genuine
+// object (decode normally) from `null`/absent (leave nil, no error) or an unexpected non-object
+// shape like `[]` (also leave nil, no error, rather than failing the whole response).
+func looksLikeJSONObject(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 // applyLoginServerFallback synthesizes a single ServerList entry from LoginServer when the

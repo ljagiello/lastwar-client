@@ -101,3 +101,45 @@ func TestReadPacketRejectsZstdBombOutput(t *testing.T) {
 		t.Fatal("expected ReadPacket to reject a zstd payload whose decoded size exceeds maxFrameSize, got nil error")
 	}
 }
+
+// TestReadPacketAcceptsZstdUncompressedLengthExactlyAtCap is the round-44 regression test for the
+// MINOR finding that packet_oom_test.go's TestReadPacketRejectsOversizedZstdUncompressedLength only
+// proves packet.go's `uncompressedLen > maxFrameSize` guard rejects at maxFrameSize+1 -- it never
+// exercises the boundary itself, so an off-by-one `>=` tightening would silently reject a
+// legitimate frame declaring exactly maxFrameSize with zero test signal (the identical gap round 43
+// closed for maxGSLResponseSize/maxNestDepth elsewhere in this codebase). The guard only inspects
+// the DECLARED uncompressedLen header field, not the real decompressed size, so this cheaply proves
+// the boundary accepts using a small actual zstd payload (mirroring TestReadPacketZstdBranch above)
+// with the header's uncompressedLen field set to exactly maxFrameSize instead of the payload's real
+// length -- no 64MiB of real data needs to change hands to exercise this specific guard.
+func TestReadPacketAcceptsZstdUncompressedLengthExactlyAtCap(t *testing.T) {
+	original := []byte(`{"c":"test.cmd","p":{"hello":"world","n":12345}}`)
+
+	enc, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatalf("zstd writer: %v", err)
+	}
+	compressed := enc.EncodeAll(original, nil)
+	enc.Close()
+
+	encrypted := xorCrypt(compressed)
+
+	var buf bytes.Buffer
+	buf.WriteByte(hdrBinary | hdrEncrypted | hdrCompressed | hdrUseLZ4)
+	var lb [2]byte
+	binary.BigEndian.PutUint16(lb[:], uint16(len(encrypted)))
+	buf.Write(lb[:])
+	var ub [4]byte
+	// Exactly at the cap, not the real decompressed length -- the boundary value itself.
+	binary.BigEndian.PutUint32(ub[:], maxFrameSize)
+	buf.Write(ub[:])
+	buf.Write(encrypted)
+
+	got, err := ReadPacket(&buf)
+	if err != nil {
+		t.Fatalf("ReadPacket() error = %v, want nil for uncompressedLen declared as exactly maxFrameSize (the boundary value, not over the cap)", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("ReadPacket() = %q, want %q", got, original)
+	}
+}

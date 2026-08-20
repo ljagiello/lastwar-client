@@ -68,3 +68,41 @@ func TestEncodeObjectTooManyKeysReturnsError(t *testing.T) {
 		t.Fatal("expected an error for an over-32767-item array, got nil")
 	}
 }
+
+// TestEncodeObjectExactlyMaxArrayLengthSucceeds is the round-44 regression test for the MINOR
+// finding that int16Count's strict greater-than boundary (n > 32767, sfsobject.go) had no
+// exact-boundary test -- TestEncodeObjectTooManyKeysReturnsError above only proves an array one
+// item OVER the cap (32768) is rejected, never that exactly 32767 items -- the boundary value
+// itself, shared by all 10 of int16Count's call sites (EncodeObject's key count and the 7
+// primitive-array element counts, plus nested object/array key/item counts) -- still encodes (and
+// round-trips through DecodeObject) successfully, which would catch an off-by-one `>=` mutation
+// that rejected the last legitimate item.
+func TestEncodeObjectExactlyMaxArrayLengthSucceeds(t *testing.T) {
+	arr := NewSFSArray()
+	for i := 0; i < 32767; i++ {
+		arr.AddInt(int32(i))
+	}
+	o := NewSFSObject()
+	o.PutSFSArray("bigArr", arr)
+
+	encoded, err := EncodeObject(o)
+	if err != nil {
+		t.Fatalf("EncodeObject() error = %v, want nil for exactly 32767 items (the boundary value, not over the cap)", err)
+	}
+
+	decoded, err := DecodeObject(encoded)
+	if err != nil {
+		t.Fatalf("DecodeObject() error = %v, want nil", err)
+	}
+	v, ok := decoded.Get("bigArr")
+	if !ok {
+		t.Fatal("decoded object missing bigArr field")
+	}
+	gotArr, ok := v.Val.(*SFSArray)
+	if !ok {
+		t.Fatalf("bigArr decoded as %T, want *SFSArray", v.Val)
+	}
+	if len(gotArr.items) != 32767 {
+		t.Errorf("decoded array length = %d, want 32767", len(gotArr.items))
+	}
+}
