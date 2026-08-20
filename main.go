@@ -394,6 +394,14 @@ func main() {
 			// silently discard an explicit -interactive request -- the exact same bug class
 			// round 25 closed for CollectAll's two call sites, applied here too (round 26).
 			if shouldAbortBeforeInteractive(fbErr, *interactive != "") {
+				// Round-40 fix: os.Exit does not run deferred functions, so the `defer
+				// conn.Close()` registered above never ran on this exit path (nor the sibling
+				// one below) -- a textbook os.Exit-skips-defers gap, harmless today only because
+				// GameConn.Close() happens to do nothing a process exit doesn't already
+				// accomplish, but latent: it would silently stop applying the moment Close()
+				// gains any real cleanup (a flush, a graceful FIN, a notification). Close
+				// explicitly before exiting instead of relying on the now-unreachable defer.
+				conn.Close()
 				os.Exit(1)
 			}
 		}
@@ -409,6 +417,8 @@ func main() {
 		if err := CollectAll(conn, buildings, visitors); err != nil {
 			slog.Error("collect run had failures", "error", err)
 			if shouldAbortBeforeInteractive(err, *interactive != "") {
+				// See the identical round-40 fix's doc comment on the sibling os.Exit(1) above.
+				conn.Close()
 				os.Exit(1)
 			}
 		}
@@ -991,7 +1001,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			} else {
 				slog.Info("server selected", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone, "gameUid", srv.GameUid)
 			}
-			ip, port, zone, gameUid = srv.IP, srv.Port.Int(), srv.Zone, srv.GameUid
+			ip, port, zone, gameUid = srv.IP, srv.Port.Int(), srv.Zone, srv.GameUid.String()
 		}
 	}
 
@@ -1138,6 +1148,10 @@ func runCrossServerTest(o crossServerTestOpts) {
 		// not wrapped in a net.Error) must not silently discard an explicit -interactive request
 		// (round 26).
 		if shouldAbortBeforeInteractive(err, o.interactive != "") {
+			// See main()'s identical round-40 fix doc comment: os.Exit skips this function's own
+			// `defer conn.Close()` above, so close explicitly before exiting instead of relying
+			// on the now-unreachable defer.
+			conn.Close()
 			os.Exit(1)
 		}
 	}
@@ -1150,6 +1164,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 		if err := CollectAll(conn, buildings, visitors); err != nil {
 			slog.Error("collect run had failures", "error", err)
 			if shouldAbortBeforeInteractive(err, o.interactive != "") {
+				// See the identical round-40 fix's doc comment on the sibling os.Exit(1) above.
+				conn.Close()
 				os.Exit(1)
 			}
 		}

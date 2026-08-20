@@ -279,7 +279,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 					// "clear the uid" instruction, and clobbering a known-good value with
 					// "" is not a safe default to guess at.
 					if len(freshLsr.ServerList) > 0 {
-						if newGameUid := freshLsr.ServerList[0].GameUid; newGameUid != "" && newGameUid != p.GameUid {
+						if newGameUid := freshLsr.ServerList[0].GameUid.String(); newGameUid != "" && newGameUid != p.GameUid {
 							slog.Info("serverInfo redirect: gameUid changed on GSL refresh", "oldGameUid", p.GameUid, "newGameUid", newGameUid)
 							p.GameUid = newGameUid
 						}

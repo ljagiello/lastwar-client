@@ -8,9 +8,37 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// TestOsExitAfterDeferredConnCloseCallsCloseExplicitlyFirst is the round-40 regression test for
+// the MINOR finding that main() and runCrossServerTest() each register `defer conn.Close()` right
+// after a successful login, then later call os.Exit(1) on four separate error paths reached AFTER
+// that registration -- os.Exit does not run deferred functions, so the defer never ran on any of
+// those four paths, a textbook os.Exit-skips-defers gap. This is currently harmless in effect only
+// because GameConn.Close() does nothing a process exit doesn't already accomplish (no flush/
+// notify/graceful-FIN logic), which is exactly why no black-box/subprocess test can observe a
+// behavioral difference here today -- from a network peer's perspective, killing the process also
+// closes the socket either way. Source-scanning is the honest way to pin down the fix (mirroring
+// this codebase's own established convention, e.g. TestFetchBuildingsAggregateCeilingUsesDedicatedConstant/
+// TestCrossServerFlagNamesMatchesDeclarations): every os.Exit(1) call site reached after `defer
+// conn.Close()` must now be immediately preceded by an explicit conn.Close() call, so the fix
+// stays correct even once/if Close() ever gains real cleanup logic of its own.
+func TestOsExitAfterDeferredConnCloseCallsCloseExplicitlyFirst(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+
+	re := regexp.MustCompile(`conn\.Close\(\)\s*\n\s*os\.Exit\(1\)`)
+	matches := re.FindAll(src, -1)
+	const want = 4 // main()'s two post-defer os.Exit(1) sites + runCrossServerTest()'s two
+	if len(matches) != want {
+		t.Errorf("found %d conn.Close()-immediately-before-os.Exit(1) sites in main.go, want %d -- every os.Exit(1) reached after `defer conn.Close()` registers must call conn.Close() explicitly first, since os.Exit skips deferred functions", len(matches), want)
+	}
+}
 
 func TestParseLogLevel(t *testing.T) {
 	cases := []struct {

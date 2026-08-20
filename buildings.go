@@ -454,8 +454,20 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 	// doubled visitor list here means a doubled real network call per uid -- and per conn.go's
 	// benignErrorCodes only covering visitor_err_coming for that call family, the second (redundant)
 	// call risks a genuine, non-benign failure rather than a harmless no-op.
+	//
+	// Round-40 fix: appendVisitor itself now also enforces maxVisitorsUpperBound, mirroring
+	// appendBuilding's own round-39 fix above -- this was appendBuilding's one remaining
+	// structural sibling still missing the per-append guard. The loop-top check further below only
+	// re-fires once per outer iteration (once per push), but a single `init` push can carry up to
+	// maxVisitorsUpperBound (300) visitors on its own (ParseInitVisitors' own per-push clamp), so
+	// two near-cap consecutive pushes within one fetch window could inflate visitors to ~2x the
+	// documented ceiling before the loop-top check ever re-fired -- the same single-push/
+	// multi-push overshoot shape round 39 closed for buildings, left open on its own named twin.
 	seenVisitorUUIDs := make(map[int64]bool)
 	appendVisitor := func(v Visitor) {
+		if len(visitors) >= maxVisitorsUpperBound {
+			return
+		}
 		uid := v.Uid()
 		if seenVisitorUUIDs[uid] {
 			return
@@ -561,6 +573,15 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 									continue
 								}
 								appendBuilding(Building{Raw: bi})
+							} else {
+								// Round-40 fix: this nested buildInfo field used to silently drop a
+								// present-but-wrong-typed entry with zero diagnostic, unlike the
+								// enclosing defaultBuilds array-type check three lines above (round-39
+								// fix) and the uuid/bId guards two lines below it -- the identical
+								// present-but-wrong-typed-vs-absent distinction this codebase applies
+								// everywhere else. Diagnostic only -- this entry already fails safe to
+								// "not appended" either way.
+								slog.Warn("push.init.build: buildInfo field is present but not an object", "type", fmt.Sprintf("%T", biv.Val))
 							}
 						}
 					}

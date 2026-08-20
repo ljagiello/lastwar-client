@@ -2,8 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
+	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +52,125 @@ func TestAsExtension(t *testing.T) {
 			t.Fatalf("expected ok=true and non-nil Params, got ok=%v params=%v", ok, msg.Params)
 		}
 	})
+	// TestAsExtension/wrong-typed p warns is the round-40 regression subtest for the MINOR
+	// finding that AsExtension's inner "p" field-read had no wrong-typed diagnostic, unlike every
+	// other field-read guard this codebase has added elsewhere.
+	t.Run("wrong-typed p warns", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		defer slog.SetDefault(orig)
+
+		content := NewSFSObject()
+		content.PutUtfString("c", "test.cmd")
+		content.PutUtfString("p", "not-an-object")
+		env := &Envelope{Controller: controllerExtension, Content: content}
+		msg, ok := env.AsExtension()
+		if !ok || msg.Params == nil {
+			t.Fatalf("expected ok=true and non-nil (defaulted) Params, got ok=%v params=%v", ok, msg.Params)
+		}
+		if logged := buf.String(); !strings.Contains(logged, "p field is present but not an object") {
+			t.Errorf("expected a warning about the wrong-typed p field, got log:\n%s", logged)
+		}
+	})
+}
+
+// TestReadEnvelopeWrongTypedFieldsWarn is the round-40 regression test for the MAJOR finding that
+// ReadEnvelope silently coerced a present-but-wrong-typed "c"/"a"/"p" field to its Go zero value
+// with zero diagnostic, unlike every other field-read site in this codebase (gsl.go's
+// findServerInfo, buildings.go's requireFieldType, etc.). This mattered in a real way: a
+// wrong-typed "c"/"a" used to be silently indistinguishable from a genuine
+// controllerSystem/actionHandshake envelope, since both zero-value to exactly those constants.
+func TestReadEnvelopeWrongTypedFieldsWarn(t *testing.T) {
+	tests := []struct {
+		name       string
+		build      func(o *SFSObject)
+		wantMsg    string
+		wantCtrl   byte
+		wantAction int16
+	}{
+		{
+			name: "c wrong-typed",
+			build: func(o *SFSObject) {
+				o.PutInt("c", 5)
+				o.PutShort("a", actionHandshake)
+				o.PutSFSObject("p", NewSFSObject())
+			},
+			wantMsg:    "c field is present but not a byte",
+			wantCtrl:   0, // zero value -- collides with controllerSystem, exactly the risk this fix documents
+			wantAction: actionHandshake,
+		},
+		{
+			name: "a wrong-typed",
+			build: func(o *SFSObject) {
+				o.PutByte("c", controllerSystem)
+				o.PutUtfString("a", "bad")
+				o.PutSFSObject("p", NewSFSObject())
+			},
+			wantMsg:    "a field is present but not an int16",
+			wantCtrl:   controllerSystem,
+			wantAction: 0, // zero value -- collides with actionHandshake
+		},
+		{
+			name: "p wrong-typed",
+			build: func(o *SFSObject) {
+				o.PutByte("c", controllerSystem)
+				o.PutShort("a", actionHandshake)
+				o.PutUtfString("p", "bad")
+			},
+			wantMsg:    "p field is present but not an object",
+			wantCtrl:   controllerSystem,
+			wantAction: actionHandshake,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c1, c2 := net.Pipe()
+			defer c1.Close()
+			defer c2.Close()
+
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(orig)
+
+			outer := NewSFSObject()
+			tt.build(outer)
+			body, err := EncodeObject(outer)
+			if err != nil {
+				t.Fatalf("EncodeObject: %v", err)
+			}
+			packet, err := EncodePacket(body)
+			if err != nil {
+				t.Fatalf("EncodePacket: %v", err)
+			}
+
+			writeDone := make(chan error, 1)
+			go func() {
+				_, werr := c1.Write(packet)
+				writeDone <- werr
+			}()
+
+			server := &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
+			c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+			env, err := server.ReadEnvelope()
+			if werr := <-writeDone; werr != nil {
+				t.Fatalf("write: %v", werr)
+			}
+			if err != nil {
+				t.Fatalf("ReadEnvelope: %v", err)
+			}
+			if env.Controller != tt.wantCtrl {
+				t.Errorf("Controller = %d, want %d", env.Controller, tt.wantCtrl)
+			}
+			if env.Action != tt.wantAction {
+				t.Errorf("Action = %d, want %d", env.Action, tt.wantAction)
+			}
+			if logged := buf.String(); !strings.Contains(logged, tt.wantMsg) {
+				t.Errorf("expected a warning containing %q, got log:\n%s", tt.wantMsg, logged)
+			}
+		})
+	}
 }
 
 func newTestExtMsg(cmd string, errorCode any) *ExtensionMessage {

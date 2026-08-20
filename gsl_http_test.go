@@ -96,6 +96,59 @@ func TestCheckVersionRejectsOversizedResponse(t *testing.T) {
 	}
 }
 
+// TestCheckVersionRejectsNon200Status is the round-40 regression test for the MINOR finding that
+// CheckVersion's non-200 HTTP status branch (`resp.StatusCode != http.StatusOK`) had zero test
+// coverage, unlike its size-limit and server-error-code sibling branches above. Confirms a bare
+// HTTP 500 (no server-error-code JSON body at all) makes CheckVersion return an error naming both
+// the status code and the response body, not silently proceed to decode a body that was never
+// meant to be read as a success response.
+func TestCheckVersionRejectsNon200Status(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "internal server error")
+	}))
+	defer server.Close()
+
+	origHosts := checkVersionHosts
+	checkVersionHosts = []string{server.URL}
+	defer func() { checkVersionHosts = origHosts }()
+
+	_, _, err := CheckVersion(defaultHTTPClient())
+	if err == nil {
+		t.Fatal("CheckVersion: expected an error for a non-200 HTTP status, got nil")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("CheckVersion error = %q, want it to mention the HTTP status code 500", err.Error())
+	}
+	if !strings.Contains(err.Error(), "internal server error") {
+		t.Errorf("CheckVersion error = %q, want it to mention the response body", err.Error())
+	}
+}
+
+// TestCheckVersionRejectsMalformedJSON is the round-40 regression test for the MINOR finding that
+// CheckVersion's json.Unmarshal error branch had zero test coverage, unlike its size-limit,
+// server-error-code, and (see TestCheckVersionRejectsNon200Status above) non-200-status sibling
+// branches. Confirms an HTTP-200 response whose body isn't valid JSON at all makes CheckVersion
+// return a clear decode error instead of a corrupted/zero-valued CheckVersionResponse.
+func TestCheckVersionRejectsMalformedJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "not valid json{{{")
+	}))
+	defer server.Close()
+
+	origHosts := checkVersionHosts
+	checkVersionHosts = []string{server.URL}
+	defer func() { checkVersionHosts = origHosts }()
+
+	_, _, err := CheckVersion(defaultHTTPClient())
+	if err == nil {
+		t.Fatal("CheckVersion: expected an error for a malformed JSON body, got nil")
+	}
+	if !strings.Contains(err.Error(), "decode JSON") {
+		t.Errorf("CheckVersion error = %q, want it to mention the JSON decode failure", err.Error())
+	}
+}
+
 func TestGetServerListAgainstFakeServer(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -649,6 +702,47 @@ func TestGetServerListUidAcceptsStringOrNumber(t *testing.T) {
 			}
 			if got := lsr.ServerList[0].Uid.String(); got != "12345" {
 				t.Errorf("Uid.String() = %q, want %q", got, "12345")
+			}
+		})
+	}
+}
+
+// TestGetServerListGameUidAcceptsStringOrNumber is the round-40 regression test for the MAJOR
+// finding that LoginServerInfo.GameUid was still a plain string, not flexString, while its
+// siblings ID/Port/Uid/Status on the same struct were already hardened in rounds 33-37 -- a
+// bare-numeric "gameUid" on any serverList entry used to fail json.Unmarshal for the ENTIRE
+// GetServerList response, fatal on the primary login path (login.go's Login). Unlike Uid,
+// GameUid is genuinely read (login.go/crossserver.go/main.go all consume it), so this also
+// proves the value survives all the way through GetServerList's caller-facing accessor intact.
+func TestGetServerListGameUidAcceptsStringOrNumber(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"string gameUid", `"2931530835002297"`},
+		{"numeric gameUid", `2931530835002297`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			priv, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"code":"0","serverList":[{"id":"1","port":"9000","zone":"APS1","gameUid":%s,"uid":"1","status":"0"}]}`, tt.json)
+			}))
+			defer server.Close()
+
+			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			if err != nil {
+				t.Fatalf("GetServerList: %v", err)
+			}
+			if len(lsr.ServerList) != 1 {
+				t.Fatalf("ServerList = %+v, want a single entry", lsr.ServerList)
+			}
+			if got := lsr.ServerList[0].GameUid.String(); got != "2931530835002297" {
+				t.Errorf("GameUid.String() = %q, want %q", got, "2931530835002297")
 			}
 		})
 	}

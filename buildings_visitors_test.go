@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -14,6 +15,59 @@ func TestBuildingNameOf(t *testing.T) {
 	}
 	if got := BuildingNameOf(999999999); got != "(unknown type 999999999)" {
 		t.Errorf("BuildingNameOf(unknown) = %q, want the unknown-type fallback", got)
+	}
+}
+
+// TestPrintBuildings is the round-40 regression test for the MINOR finding that PrintBuildings'
+// entire per-building rendering logic (type grouping, sort comparator, per-instance printf) was
+// exercised only with an empty buildings slice across the whole suite -- 50% statement coverage
+// and zero mutation protection for ordering/field-mapping bugs. Captures real stdout output
+// (PrintBuildings writes directly via fmt.Printf, not an injectable io.Writer -- see decode_test.go's
+// captureStdout, reused here) and asserts both the summary line and each type/instance line's
+// exact field values and ordering.
+func TestPrintBuildings(t *testing.T) {
+	if BuildingFarmland >= BuildingSmelter {
+		t.Fatalf("test precondition violated: BuildingFarmland (%d) must be < BuildingSmelter (%d) for the ordering assertion below to be meaningful", BuildingFarmland, BuildingSmelter)
+	}
+
+	// Deliberately listed out of numeric bId order -- PrintBuildings must sort by bId regardless
+	// of input order (buildings.go's own sort.Slice call over the collected map keys).
+	buildings := []Building{
+		newTestBuilding(300, BuildingSmelter, 3),
+		newTestBuilding(100, BuildingFarmland, 1),
+		newTestBuilding(200, BuildingFarmland, 2),
+	}
+
+	out := captureStdout(t, func() { PrintBuildings(buildings) })
+
+	wantSummary := "building summary: distinctTypes=2 totalInstances=3\n"
+	if !strings.Contains(out, wantSummary) {
+		t.Errorf("output missing summary line %q, got:\n%s", wantSummary, out)
+	}
+
+	farmlandIdx := strings.Index(out, fmt.Sprintf("bId=%d", BuildingFarmland))
+	smelterIdx := strings.Index(out, fmt.Sprintf("bId=%d", BuildingSmelter))
+	if farmlandIdx == -1 || smelterIdx == -1 || farmlandIdx > smelterIdx {
+		t.Errorf("expected Farmland's type line (lower bId) to print before Smelter's (higher bId) regardless of input slice order, got:\n%s", out)
+	}
+
+	wantFarmlandType := fmt.Sprintf("building type: bId=%d name=%s instances=2\n", BuildingFarmland, BuildingNameOf(BuildingFarmland))
+	if !strings.Contains(out, wantFarmlandType) {
+		t.Errorf("output missing Farmland type line %q, got:\n%s", wantFarmlandType, out)
+	}
+	wantSmelterType := fmt.Sprintf("building type: bId=%d name=%s instances=1\n", BuildingSmelter, BuildingNameOf(BuildingSmelter))
+	if !strings.Contains(out, wantSmelterType) {
+		t.Errorf("output missing Smelter type line %q, got:\n%s", wantSmelterType, out)
+	}
+
+	for _, want := range []string{
+		"building instance: uuid=300 buildingLevel=3 pointId=0 raw=",
+		"building instance: uuid=100 buildingLevel=1 pointId=0 raw=",
+		"building instance: uuid=200 buildingLevel=2 pointId=0 raw=",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing instance line prefix %q, got:\n%s", want, out)
+		}
 	}
 }
 
@@ -756,6 +810,45 @@ func TestFetchBuildingsWrongTypedTopLevelContainersWarn(t *testing.T) {
 		}
 		if logged := buf.String(); !strings.Contains(logged, "buildings field is present but not an array") {
 			t.Errorf("expected a Warn naming the wrong-typed buildings field, got:\n%s", logged)
+		}
+	})
+	// TestFetchBuildingsWrongTypedTopLevelContainersWarn/push.init.build nested buildInfo
+	// wrong-typed is the round-40 regression subtest for the MINOR finding that this nested
+	// field, one scope IN from defaultBuilds (already Warn-guarded above), had no wrong-typed
+	// diagnostic of its own -- an inconsistency with the array-level check right next to it.
+	t.Run("push.init.build nested buildInfo wrong-typed", func(t *testing.T) {
+		client, server := newPipeGameConnPair(t)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			wrapper := NewSFSObject()
+			wrapper.PutUtfString("buildInfo", "not-an-object")
+			defaultBuilds := NewSFSArray()
+			defaultBuilds.AddSFSObject(wrapper)
+			params := NewSFSObject()
+			params.PutSFSArray("defaultBuilds", defaultBuilds)
+			_ = server.SendExtension("push.init.build", params)
+		}()
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		buildings, _, err := FetchBuildings(client, 150*time.Millisecond)
+		slog.SetDefault(orig)
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("fake server goroutine never finished sending push.init.build")
+		}
+		if err != nil {
+			t.Fatalf("FetchBuildings() error = %v, want nil", err)
+		}
+		if len(buildings) != 0 {
+			t.Errorf("got %d buildings, want 0", len(buildings))
+		}
+		if logged := buf.String(); !strings.Contains(logged, "buildInfo field is present but not an object") {
+			t.Errorf("expected a Warn naming the wrong-typed buildInfo field, got:\n%s", logged)
 		}
 	})
 }

@@ -513,6 +513,37 @@ func TestHandleInteractiveLineWaitForCmdRealGracefulCloseExits(t *testing.T) {
 	}
 }
 
+// TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorDoesNotExitDuringShutdown is the round-40
+// regression test for the MINOR finding that RunInteractive's signal-handling goroutine (Ctrl-C/
+// SIGTERM) raced handleInteractiveLine's own os.Exit(1) call: conn.Close() unblocks a pending
+// waitForCmd with the identical non-timeout net.Error shape
+// TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits above proves is normally fatal --
+// which used to make handleInteractiveLine call os.Exit(1) with a misleading "connection appears
+// dead" log, racing (with no happens-before ordering) the signal goroutine's own os.Exit(0). Now
+// that path checks interactiveShuttingDown first: with it set (simulating "the signal handler
+// already began shutdown"), the exact same fakeNetErrConn failure that exits with code 1 above
+// must instead return quietly -- proven here by running IN-PROCESS (unlike the subprocess re-exec
+// idiom the exit-triggering tests above need) and simply completing without os.Exit ever firing.
+func TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorDoesNotExitDuringShutdown(t *testing.T) {
+	interactiveShuttingDown.Store(true)
+	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
+
+	fake := &fakeNetErrConn{}
+	conn := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleInteractiveLine(conn, `some.command`)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleInteractiveLine never returned -- it should return quietly during a shutdown instead of exiting or hanging")
+	}
+}
+
 // TestStatControlPipeWithRetryRecoversFromTransientMissingFile is this round's regression test for
 // the MAJOR finding that RunInteractive's per-iteration os.Stat call on the control FIFO used to
 // treat ANY failure as immediately fatal (os.Exit(1)), even though the failure at the instant of

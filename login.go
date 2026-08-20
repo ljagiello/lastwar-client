@@ -233,7 +233,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 
 	stateSrv := lsr.ServerList[0]
 	zone := stateSrv.Zone
-	gameUid := stateSrv.GameUid
+	gameUid := stateSrv.GameUid.String()
 	if gameUid != "" && gameUid != ident.GameUid {
 		if err := ident.SaveGameUid(gameUid); err != nil {
 			slog.Warn("failed to persist gameUid", "error", err)
@@ -425,7 +425,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 				// DoCrossServerLogin's matching redirect path in crossserver.go,
 				// which had this same gap.
 				if len(freshLsr.ServerList) > 0 {
-					if newGameUid := freshLsr.ServerList[0].GameUid; newGameUid != "" && newGameUid != gameUid {
+					if newGameUid := freshLsr.ServerList[0].GameUid.String(); newGameUid != "" && newGameUid != gameUid {
 						slog.Info("serverInfo redirect: gameUid changed on GSL refresh", "oldGameUid", gameUid, "newGameUid", newGameUid)
 						gameUid = newGameUid
 						if err := ident.SaveGameUid(gameUid); err != nil {

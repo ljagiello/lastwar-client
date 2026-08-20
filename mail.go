@@ -101,6 +101,23 @@ func (m Mail) HasUnclaimedReward() bool {
 // only reader).
 const mailListRawItemCap = 1000
 
+// maxAggregateMailPerFetch bounds the TOTAL number of Mail entries ListMail's pagination loop
+// below will accumulate into `all` across ALL pages, independent of mailListRawItemCap (which
+// only bounds a single page's raw-item SCAN cost) and maxPages/mailListPageSize (which only bound
+// round-trip COUNT, not aggregate size). Round-40 fix: before this existed, a hostile -cs-ip peer
+// could answer each of up to maxPages(20) page requests with mailListRawItemCap(1000) valid-shaped
+// mail entries and always report more=true with a valid, distinct lastUid/lastMailTime to keep
+// pagination advancing -- accumulating up to 20*1000=20,000 retained *SFSObject-backed Mail
+// entries with zero aggregate cap anywhere in this function, the same "aggregate ceiling missing"
+// gap buildings.go (maxAggregateBuildingsPerFetch) and visitors.go (maxVisitorsUpperBound) both
+// already close for their own accumulators. ClaimAllMail then walks the full uncapped result,
+// forcing a correspondingly unbounded number of mail.read.status.betch/mail.reward.batch round
+// trips (batchByCountAndBytes' readBatchSize=100). Set to maxPages(20)*mailListPageSize(100) --
+// the legitimate/intended maximum under normal well-behaved pagination -- generously large enough
+// that no real inbox should ever hit it, in the same spirit as maxAggregateBuildingsPerFetch/
+// maxVisitorsUpperBound's own sizing rationale.
+const maxAggregateMailPerFetch = 2000
+
 // ListMail fetches the account's mail via `chat.get.system.mails`,
 // following the real client's own request shape
 // (extracted/lua_decompiled/5018_Net_Msgs_Mail_MailGetMutiMessage.lua:
@@ -151,6 +168,13 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 	truncated := false
 
 	for page := 0; page < maxPages; page++ {
+		// Round-40 fix: stop pagination entirely once the aggregate ceiling is reached, instead
+		// of continuing to request (and immediately discard) further pages -- see
+		// maxAggregateMailPerFetch's own doc comment for the full threat this closes.
+		if len(all) >= maxAggregateMailPerFetch {
+			slog.Warn("list mail: aggregate mail count across this fetch reached the upper bound; stopping early", "mailCount", len(all), "cap", maxAggregateMailPerFetch)
+			break
+		}
 		truncated = false
 		params := NewSFSObject()
 		params.PutUtfString("clientseq", clientseq)
@@ -172,6 +196,15 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 				}
 				for i, item := range arr.items {
 					if i >= mailListRawItemCap {
+						break
+					}
+					// Round-40 fix: also enforce the aggregate ceiling PER APPEND, not just at the
+					// outer loop's top -- mirrors buildings.go's appendBuilding/appendVisitor round-
+					// 39/40 fix for the identical single-page-overshoot shape: without this, one page
+					// carrying up to mailListRawItemCap(1000) valid-shaped entries could append all
+					// 1000 in a single iteration before the loop-top check (above) was ever
+					// re-consulted, overshooting maxAggregateMailPerFetch(2000) by up to that much.
+					if len(all) >= maxAggregateMailPerFetch {
 						break
 					}
 					mo, ok := item.Val.(*SFSObject)

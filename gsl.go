@@ -169,13 +169,21 @@ type LoginServerInfo struct {
 	// ID and Port are flexString, not a bare int, for the same reason as Status just below (see
 	// this file's round-35 fix comment on flexString.Int): a wrong-typed value on either field
 	// used to fail json.Unmarshal for the entire GetServerList response.
-	ID      flexString `json:"id"`
-	Name    string     `json:"name"`
-	IP      string     `json:"ip"` // "|"-delimited fallback hostnames, not a single IP
-	WsIP    string     `json:"ws_ip"`
-	Port    flexString `json:"port"`
-	Zone    string     `json:"zone"`
-	GameUid string     `json:"gameUid"`
+	ID   flexString `json:"id"`
+	Name string     `json:"name"`
+	IP   string     `json:"ip"` // "|"-delimited fallback hostnames, not a single IP
+	WsIP string     `json:"ws_ip"`
+	Port flexString `json:"port"`
+	Zone string     `json:"zone"`
+	// GameUid is flexString, not a bare string -- round-40 fix, the same JSON type-safety gap as
+	// ID/Port/Uid above, closed for this field too. UNLIKE Uid, GameUid IS actively read at
+	// several call sites -- login.go's Login/waitForInitPush redirect handling, crossserver.go's
+	// DoCrossServerLogin redirect handling, and main.go's -cs-rt refresh path all read it off a
+	// *LoginServerInfo and feed it into ident.SaveGameUid/p.GameUid/the ip-port-zone-gameUid
+	// tuple (all plain `string`), the SecurityCode HMAC, and the login payload -- so every read
+	// site now calls the pre-existing .String() accessor (already used elsewhere for other
+	// flexString fields) to convert back to a plain string at the point of use.
+	GameUid flexString `json:"gameUid"`
 	// Uid is flexString, not a bare string -- round-37 fix, the same JSON type-safety gap as
 	// ID/Port above, closed for this field too. Uid is never read anywhere in this codebase
 	// (unlike GameUid), so this widening is behaviorally free -- matching AccountServerInfo.WsPort's

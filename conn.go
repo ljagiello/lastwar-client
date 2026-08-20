@@ -136,19 +136,33 @@ func (c *GameConn) ReadEnvelope() (*Envelope, error) {
 		return nil, fmt.Errorf("decode envelope: %w", err)
 	}
 	env := &Envelope{}
+	// Round-40 fix: all three fields below used to silently coerce a present-but-wrong-typed
+	// value to its Go zero value with zero diagnostic, unlike every other field-read site in this
+	// codebase (gsl.go's findServerInfo, buildings.go's requireFieldType, etc.). This mattered in
+	// a real, not just theoretical, way: Controller's zero value (0) is controllerSystem, and
+	// Action's zero value (0) is actionHandshake -- so a wrong-typed "c"/"a" used to be
+	// indistinguishable from a genuine system/Handshake envelope, spuriously satisfying
+	// DoHandshake's success check below. A genuinely-absent field stays silent by the same
+	// convention this codebase applies everywhere else -- only wrong-typed values warn here.
 	if v, ok := obj.Get("c"); ok {
 		if b, ok := v.Val.(byte); ok {
 			env.Controller = b
+		} else {
+			slog.Warn("ReadEnvelope: c field is present but not a byte", "type", fmt.Sprintf("%T", v.Val))
 		}
 	}
 	if v, ok := obj.Get("a"); ok {
 		if s, ok := v.Val.(int16); ok {
 			env.Action = s
+		} else {
+			slog.Warn("ReadEnvelope: a field is present but not an int16", "type", fmt.Sprintf("%T", v.Val))
 		}
 	}
 	if v, ok := obj.Get("p"); ok {
 		if p, ok := v.Val.(*SFSObject); ok {
 			env.Content = p
+		} else {
+			slog.Warn("ReadEnvelope: p field is present but not an object", "type", fmt.Sprintf("%T", v.Val))
 		}
 	}
 	return env, nil
@@ -171,6 +185,8 @@ func (e *Envelope) AsExtension() (*ExtensionMessage, bool) {
 	if v, ok := e.Content.Get("p"); ok {
 		if p, ok := v.Val.(*SFSObject); ok {
 			params = p
+		} else {
+			slog.Warn("AsExtension: p field is present but not an object", "cmd", cmd, "type", fmt.Sprintf("%T", v.Val))
 		}
 	}
 	if params == nil {

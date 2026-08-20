@@ -633,6 +633,99 @@ func TestListMailWarnsOnMaxPagesTruncation(t *testing.T) {
 	}
 }
 
+// TestListMailAggregateCeilingStopsAcrossPages is the round-40 regression test for the MAJOR
+// finding that ListMail's pagination loop had no aggregate ceiling on the total number of Mail
+// entries accumulated across ALL pages: mailListRawItemCap only bounds a single page's raw-item
+// SCAN cost, and maxPages/mailListPageSize only bound round-trip COUNT, not aggregate size. Before
+// this fix, a hostile peer answering every page with mailListRawItemCap(1000) valid-shaped entries
+// and always more=true could inflate `all` to up to maxPages*mailListRawItemCap=20,000 entries.
+//
+// The fake server here answers each page with exactly mailListRawItemCap distinct-uid entries and
+// always more=true -- maxAggregateMailPerFetch(2000) / mailListRawItemCap(1000) = exactly 2 pages
+// are needed to reach the cap, so a correctly-fixed ListMail must stop requesting further pages
+// right there: the fake server only reads and answers 2 requests (deliberately does not offer a
+// 3rd), proving the loop stops itself BEFORE sending a page that would only be discarded, not just
+// that the final output happens to be truncated.
+func TestListMailAggregateCeilingStopsAcrossPages(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	pagesNeeded := maxAggregateMailPerFetch / mailListRawItemCap // exactly 2, by construction
+
+	var reqCount int
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for page := 0; page < pagesNeeded; page++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				return
+			}
+			if msg.Cmd != "chat.get.system.mails" {
+				t.Errorf("page %d Cmd = %q, want chat.get.system.mails", page, msg.Cmd)
+			}
+			reqCount++
+			resp := NewSFSObject()
+			arr := NewSFSArray()
+			for i := 0; i < mailListRawItemCap; i++ {
+				arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-p%d-%d", page, i), 3, 0))
+			}
+			resp.PutSFSArray("msg", arr)
+			resp.PutBool("more", true) // always more -- the aggregate cap, not the server, must stop this
+			resp.PutUtfString("lastUid", fmt.Sprintf("cursor-%d", page))
+			resp.PutLong("lastMailTime", int64(page))
+			if err := server.SendExtension("push.chat.get.system.mails", resp); err != nil {
+				return
+			}
+		}
+		// Intentionally does not read a (pagesNeeded+1)th request -- the point of this test is that
+		// a correctly-fixed ListMail never sends one, having already reached the aggregate cap.
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	var got []Mail
+	var err error
+	listDone := make(chan struct{})
+	go func() {
+		defer close(listDone)
+		got, err = ListMail(client)
+	}()
+
+	select {
+	case <-listDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("ListMail never returned -- it should stop once the aggregate ceiling is reached")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if reqCount != pagesNeeded {
+		t.Fatalf("fake server saw %d requests, want exactly %d -- ListMail must stop BEFORE requesting a page it would only discard", reqCount, pagesNeeded)
+	}
+	if len(got) != maxAggregateMailPerFetch {
+		t.Fatalf("got %d mail entries, want exactly %d (maxAggregateMailPerFetch)", len(got), maxAggregateMailPerFetch)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "aggregate mail count across this fetch reached the upper bound") {
+		t.Errorf("expected a warning identifying the aggregate ceiling as the stop reason, got log:\n%s", logged)
+	}
+}
+
 // TestListMailDedupesUIDAcrossPages is the regression test for ListMail's seenUIDs guard (mail.go):
 // ListMail's own doc comment already flags real uncertainty about the pagination cursor's true
 // semantics, so if the server's cursor ever repeats the same mail uid across two pages, ListMail

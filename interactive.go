@@ -10,9 +10,30 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+// interactiveShuttingDown is set by RunInteractive's signal-handling goroutine (below) before it
+// calls conn.Close(), and checked by handleInteractiveLine's own os.Exit(1) paths.
+//
+// Round-40 fix: SIGINT/SIGTERM during -interactive mode used to race two independent goroutines
+// into calling os.Exit with contradictory codes. The signal handler calls conn.Close() then
+// os.Exit(0); if the main goroutine happens to be blocked in handleInteractiveLine's
+// SendExtension/waitForCmd calls at that moment, conn.Close() unblocks it with a genuine, non-
+// timeout net.Error (confirmed live shape: conn_wait_test.go's
+// TestReadEnvelopeGracefulCloseIsNonTimeoutNetError) -- which handleInteractiveLine's own
+// Timeout()-gated branch treats as "connection appears dead", logging a misleading message and
+// calling os.Exit(1) from the main goroutine with no happens-before ordering against the signal
+// goroutine's os.Exit(0). Whichever os.Exit call actually runs first is nondeterministic across
+// otherwise-identical Ctrl-C events. Now the main goroutine checks this flag before treating a
+// SendExtension/waitForCmd failure as a genuine dead-connection discovery: if a deliberate
+// shutdown is already in progress, the failure is an expected side effect of that shutdown, not
+// new information, so it returns quietly instead of racing to call its own os.Exit(1) -- the
+// signal handler's os.Exit(0) is then the only exit call that ever happens, making the exit code
+// deterministic on every Ctrl-C/SIGTERM.
+var interactiveShuttingDown atomic.Bool
 
 // controlPipeRetries/controlPipeRetryDelay bound how many times RunInteractive's per-iteration
 // os.Stat/os.Open calls on the control FIFO (see statControlPipeWithRetry/openControlPipeWithRetry
@@ -73,6 +94,7 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 	go func() {
 		sig := <-sigCh
 		slog.Info("shutting down", "signal", sig.String())
+		interactiveShuttingDown.Store(true)
 		conn.Close()
 		os.Exit(0)
 	}()
@@ -267,6 +289,13 @@ func handleInteractiveLine(conn *GameConn, line string) {
 	// (see sfsobject.go) instead of dumping everything raw.
 	slog.Info("sending command", "cmd", cmd, "params", params.StringRedacted())
 	if err := conn.SendExtension(cmd, params); err != nil {
+		// See interactiveShuttingDown's own doc comment: a send failure caused by RunInteractive's
+		// own signal-handling goroutine already closing this connection is an expected side effect
+		// of that shutdown, not a new dead-connection discovery -- return quietly instead of racing
+		// that goroutine's os.Exit(0) with a second, contradictory os.Exit(1) call.
+		if interactiveShuttingDown.Load() {
+			return
+		}
 		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", err)
 		os.Exit(1)
 	}
@@ -289,6 +318,12 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			slog.Error("no matching response within "+defaultCmdTimeout.String(), "error", err)
+			return
+		}
+		// See interactiveShuttingDown's own doc comment above -- same reasoning as the adjacent
+		// SendExtension guard: a non-timeout net.Error here is the expected shape of conn.Close()
+		// unblocking this wait mid-shutdown, not a new dead-connection discovery.
+		if interactiveShuttingDown.Load() {
 			return
 		}
 		slog.Error("response wait failed -- connection appears dead, exiting interactive mode", "error", err)

@@ -596,12 +596,70 @@ func TestFetchBuildingsAggregateVisitorCeilingAcrossManyPushes(t *testing.T) {
 	if len(visitors) >= unaggregatedTotal {
 		t.Fatalf("got %d visitors, want well under the unaggregated potential of %d -- the aggregate ceiling did not stop accumulation across pushes", len(visitors), unaggregatedTotal)
 	}
-	// Bounded generously above maxVisitorsUpperBound to absorb the single-push overshoot the
-	// per-iteration check allows (one push can add up to visitorsPerPush new entries before the
-	// next iteration's check catches it) -- the real claim is "closer to the cap than to the
-	// unaggregated potential", not an exact count.
-	if maxWant := maxVisitorsUpperBound + visitorsPerPush; len(visitors) > maxWant {
-		t.Errorf("got %d visitors, want at most %d (maxVisitorsUpperBound=%d plus at most one push's own overshoot)", len(visitors), maxWant, maxVisitorsUpperBound)
+	// Round-40 fix: appendVisitor itself now enforces the cap (not just the loop-top check), so
+	// the accumulated count can never exceed maxVisitorsUpperBound even by one push's worth --
+	// tightened from the old "generously above" tolerance to an exact bound, mirroring
+	// appendBuilding's identical round-39 tightening in TestFetchBuildingsAggregateBuildingCeilingAcrossManyPushes.
+	if len(visitors) > maxVisitorsUpperBound {
+		t.Errorf("got %d visitors, want at most %d (maxVisitorsUpperBound) -- appendVisitor's own per-append cap should make this an exact bound, not just an approximate one", len(visitors), maxVisitorsUpperBound)
+	}
+}
+
+// TestFetchBuildingsSinglePushNearCapVisitorsDoesNotOvershootAggregateCeiling is the round-40
+// regression test for the MAJOR finding that FetchBuildings' aggregate visitor ceiling could be
+// overshot by up to ~2x across just TWO pushes, because the old loop-top-only check was
+// re-consulted once per outer-loop iteration (i.e. once per push), while a single `init` push can
+// carry up to maxVisitorsUpperBound (300) visitors on its own via ParseInitVisitors' own
+// maxNum-clamping (visitors.go) -- mirroring buildings.go's appendBuilding/appendVisitor twin gap
+// TestFetchBuildingsSinglePushNearRawItemCapDoesNotOvershootAggregateCeiling already covers for
+// buildings. Sends two consecutive near-cap pushes (299 then 300 distinct uids) and proves the
+// accumulated count stops at maxVisitorsUpperBound, not ~599.
+func TestFetchBuildingsSinglePushNearCapVisitorsDoesNotOvershootAggregateCeiling(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sendInitVisitorsPush := func(count int, uidOffset int) error {
+			params := NewSFSObject()
+			visitorList := NewSFSArray()
+			for i := 0; i < count; i++ {
+				v := NewSFSObject()
+				v.PutLong("uid", int64(uidOffset+i+1)) // distinct uid across both pushes -- defeats dedup
+				v.PutInt("eventId", 2000)
+				v.PutInt("visitorId", 6)
+				visitorList.AddSFSObject(v)
+			}
+			visitor := NewSFSObject()
+			visitor.PutInt("maxNum", 99999) // clamped to maxVisitorsUpperBound by ParseInitVisitors
+			visitor.PutSFSArray("list", visitorList)
+			params.PutSFSObject("visitor", visitor)
+			return server.SendExtension("init", params)
+		}
+		if err := sendInitVisitorsPush(maxVisitorsUpperBound-1, 0); err != nil {
+			return
+		}
+		if err := sendInitVisitorsPush(maxVisitorsUpperBound, maxVisitorsUpperBound); err != nil {
+			return
+		}
+		// Deliberately does NOT close the connection -- FetchBuildings must stop itself via the
+		// aggregate ceiling, not because the peer hung up.
+	}()
+
+	_, visitors, err := FetchBuildings(client, 3*time.Second)
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		// The sender goroutine may still be mid-send if FetchBuildings stopped reading early --
+		// not a failure on its own. The goroutine leaks harmlessly until the test binary exits.
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil (a plain deadline-elapsed timeout is not itself an error)", err)
+	}
+	if len(visitors) != maxVisitorsUpperBound {
+		t.Errorf("got %d visitors, want exactly %d (maxVisitorsUpperBound) -- appendVisitor's per-append cap should stop accumulation there, not at ~%d", len(visitors), maxVisitorsUpperBound, 2*maxVisitorsUpperBound-1)
 	}
 }
 
