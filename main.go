@@ -451,12 +451,20 @@ func main() {
 // requests one collect run issues, is not a rare edge case.
 //
 // Round 26 found the identical bug class one function up, at both FetchBuildings call sites: a
-// plain decode/parse error (e.g. packet.go's "frame body too large", never wrapped in a
+// plain decode/parse error (e.g. packet.go's "zlib inflated output exceeds", never wrapped in a
 // net.Error) on one bad frame, over an otherwise still-healthy connection, used to unconditionally
 // os.Exit(1) there too -- discarding an explicit -interactive request even though RunInteractive
 // only needs the conn (not buildings/visitors) to proceed. Reusing this same function, rather than
 // inventing a second, near-identical one, keeps both pairs of call sites' notion of "genuinely
 // fatal" identical.
+//
+// Round 43 note: packet.go's "frame body too large"/"uncompressed length too large" guards (the
+// original round-26 example here) are NO LONGER an example of this non-fatal case -- they're now
+// wrapped in deadConnError (a genuine net.Error with Timeout()==false), since round 43 found they
+// fire before the declared body bytes are drained, leaving the reader desynced if a peer actually
+// sends them. containsNonTimeoutNetError now correctly treats that case as fatal below. The zlib
+// decompressed-size guard remains the accurate example: it fires only after the full declared body
+// has already been consumed, so the stream stays synchronized regardless of the error.
 //
 // containsNonTimeoutNetError(err) (buildings.go) is CollectAll's own internal test for "genuinely
 // fatal": a real net.Error with Timeout()==false anywhere in err's tree, as opposed to an ordinary
@@ -954,7 +962,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 				// warning fires for that case.
 				slog.Warn("ignoring -cs-at because -cs-rt is set (the GSL refresh response's access token replaces it)")
 			}
-			accessTok = lsr.At.Token
+			accessTok = lsr.At.Token.String()
 			slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
 		} else if o.at != "" {
 			// Symmetric to the "ignoring -cs-at" warning just above: the refresh call succeeded

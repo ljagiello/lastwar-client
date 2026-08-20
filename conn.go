@@ -180,7 +180,23 @@ func (e *Envelope) AsExtension() (*ExtensionMessage, bool) {
 	if e.Controller != controllerExtension || e.Content == nil {
 		return nil, false
 	}
-	cmd := e.Content.GetString("c")
+	// Round-43 fix: cmd used to come from a plain GetString("c"), which silently coerces a
+	// present-but-wrong-typed "c" to "" with zero diagnostic -- unlike the "p" field two lines
+	// below (already hardened) and unlike ReadEnvelope's own identical c/a/p triple one level up
+	// (round-40 fix, whose own doc comment describes this exact bug class). A coerced cmd=""
+	// matches none of the real dispatch keys every caller of AsExtension checks against
+	// (waitForInitPush's "init", waitForCmd's wantCmds, FetchBuildings' switch), so a genuinely-
+	// arrived, well-formed response with a wrong-typed "c" field was silently treated as an
+	// unrecognized push and logged only at Debug -- indistinguishable from an ordinary timeout,
+	// with no signal that a response actually arrived but was misclassified.
+	var cmd string
+	if v, ok := e.Content.Get("c"); ok {
+		if s, ok := v.Val.(string); ok {
+			cmd = s
+		} else {
+			slog.Warn("AsExtension: c field is present but not a string", "type", fmt.Sprintf("%T", v.Val))
+		}
+	}
 	var params *SFSObject
 	if v, ok := e.Content.Get("p"); ok {
 		if p, ok := v.Val.(*SFSObject); ok {

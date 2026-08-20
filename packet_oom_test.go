@@ -80,6 +80,21 @@ func (r *failReader) Read(p []byte) (int, error) {
 // bytes are read or a length-sized buffer is allocated. Without this guard,
 // a hostile or corrupted peer could declare an arbitrary multi-GB length and
 // force an unbounded allocation (see the maxFrameSize doc comment).
+//
+// Also the round-43 regression test for this guard's error now being wrapped
+// in deadConnError: this guard fires strictly after the length field has
+// already been consumed from the reader, and returns WITHOUT ever
+// reading/draining those declared body bytes -- so if a peer actually
+// follows an oversized length header with real trailing body bytes (the
+// natural way to send an oversized frame, and exactly the threat
+// maxFrameSize exists to catch), those bytes are left unconsumed on the
+// wire, and the next ReadPacket call on the same reader would misinterpret
+// the first leftover byte as a fresh header, permanently desyncing
+// frame-boundary interpretation. A bare, unwrapped error previously left
+// this indistinguishable from an ordinary Timeout()==true net.Error to
+// containsNonTimeoutNetError-style callers (it isn't even a net.Error at
+// all without the wrap), so a caller like buildings.go's CollectAll would
+// not abort and would keep issuing requests over the now-desynced reader.
 func TestReadPacketRejectsOversizedDeclaredLength(t *testing.T) {
 	var hdr bytes.Buffer
 	hdr.WriteByte(hdrBinary | hdrEncrypted | hdrBigSized)
@@ -88,8 +103,16 @@ func TestReadPacketRejectsOversizedDeclaredLength(t *testing.T) {
 	hdr.Write(lb[:])
 
 	r := &failReader{t: t, data: hdr.Bytes()}
-	if _, err := ReadPacket(r); err == nil {
+	_, err := ReadPacket(r)
+	if err == nil {
 		t.Fatal("expected ReadPacket to reject a declared length over maxFrameSize, got nil error")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("ReadPacket error = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- the length field is already consumed and its declared body bytes are left undrained, so this must be indistinguishable in severity from a genuine dead connection, not a benign retryable timeout")
 	}
 }
 
@@ -99,6 +122,11 @@ func TestReadPacketRejectsOversizedDeclaredLength(t *testing.T) {
 // zstd.DecodeAll is handed this value as a preallocation hint, so an
 // unchecked value here is the same multi-GB OOM vector as the declared
 // length guard, just one level deeper.
+//
+// Also the round-43 regression test proving this guard's error is likewise
+// now wrapped in deadConnError, for the same reason as
+// TestReadPacketRejectsOversizedDeclaredLength above: this guard also fires
+// before the declared (compressed) body bytes are ever read/drained.
 func TestReadPacketRejectsOversizedZstdUncompressedLength(t *testing.T) {
 	var hdr bytes.Buffer
 	hdr.WriteByte(hdrBinary | hdrEncrypted | hdrCompressed | hdrUseLZ4)
@@ -110,8 +138,16 @@ func TestReadPacketRejectsOversizedZstdUncompressedLength(t *testing.T) {
 	hdr.Write(ub[:])
 
 	r := &failReader{t: t, data: hdr.Bytes()}
-	if _, err := ReadPacket(r); err == nil {
+	_, err := ReadPacket(r)
+	if err == nil {
 		t.Fatal("expected ReadPacket to reject a declared zstd uncompressed length over maxFrameSize, got nil error")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("ReadPacket error = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- the compressed body bytes declared by the (small, valid) length field are left undrained, so this must be indistinguishable in severity from a genuine dead connection, not a benign retryable timeout")
 	}
 }
 

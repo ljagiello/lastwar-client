@@ -1072,12 +1072,14 @@ func TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive(t *testing
 }
 
 // crossServerFetchBuildingsFailureServer answers the Login request normally, then writes a single
-// malformed oversized frame directly on the raw connection (writeMalformedOversizedFrame,
-// main_test.go): a declared body length over maxFrameSize (packet.go's own "frame body too large"
-// guard). DoCrossServerLogin only ever reads the Login response itself before returning, so
-// runCrossServerTest's own FetchBuildings call is the very first read this malformed frame can
-// reach -- it errors immediately with a plain, non-net.Error decode failure instead of burning
-// FetchBuildings' own 15s timeout.
+// malformed zlib-bomb frame directly on the raw connection (writeMalformedZlibBombFrame,
+// main_test.go -- round-43 swap from writeMalformedOversizedFrame, whose "frame body too large"
+// error packet.go's round-43 fix now wraps in a genuine net.Error, which would make
+// shouldAbortBeforeInteractive abort unconditionally and defeat this test's premise). DoCrossServerLogin
+// only ever reads the Login response itself before returning, so runCrossServerTest's own
+// FetchBuildings call is the very first read this malformed frame can reach -- it errors
+// immediately with a plain, non-net.Error decode failure instead of burning FetchBuildings' own
+// 15s timeout.
 func crossServerFetchBuildingsFailureServer() func(*GameConn) {
 	return func(server *GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
@@ -1088,7 +1090,7 @@ func crossServerFetchBuildingsFailureServer() func(*GameConn) {
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		writeMalformedOversizedFrame(server)
+		writeMalformedZlibBombFrame(server)
 	}
 }
 
@@ -1105,6 +1107,11 @@ func crossServerFetchBuildingsFailureServer() func(*GameConn) {
 // pointed at a path that can never become a real FIFO so RunInteractive's own startup log proves
 // this call site was reached before it fails fast on its os.Stat check), but targets the
 // FetchBuildings call site instead of CollectAll's.
+//
+// Round-43 note: crossServerFetchBuildingsFailureServer now triggers this via
+// writeMalformedZlibBombFrame, not writeMalformedOversizedFrame -- see that function's own doc
+// comment (main_test.go) for why the oversized-declared-length error no longer fits this test's
+// non-fatal-branch premise after packet.go's round-43 fix.
 func TestRunCrossServerTestFetchBuildingsFailureWithInteractiveReachesRunInteractive(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
@@ -1143,7 +1150,7 @@ func TestRunCrossServerTestFetchBuildingsFailureWithInteractiveReachesRunInterac
 	if !strings.Contains(log, "fetch buildings failed") {
 		t.Errorf("subprocess stderr = %s\nwant it to log FetchBuildings' failure", log)
 	}
-	if !strings.Contains(log, "frame body too large") {
+	if !strings.Contains(log, "zlib inflated output exceeds") {
 		t.Errorf("subprocess stderr = %s\nwant the logged error to be the plain decode failure (not a net.Error timeout) -- otherwise this test isn't actually exercising the non-net-error path shouldAbortBeforeInteractive exists for", log)
 	}
 	if !strings.Contains(log, "interactive mode: reading commands") {

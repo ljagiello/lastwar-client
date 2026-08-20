@@ -243,7 +243,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	accessTok := ""
 	if lsr.At != nil {
-		accessTok = lsr.At.Token
+		accessTok = lsr.At.Token.String()
 		slog.Info("access token acquired", "tokenLen", len(accessTok))
 	}
 
@@ -426,7 +426,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 				slog.Error("GSL refresh failed; following redirect with stale token anyway", "error", err)
 			} else {
 				if freshLsr.At != nil {
-					accessTok = freshLsr.At.Token
+					accessTok = freshLsr.At.Token.String()
 					slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
 				}
 				// The same refresh response also carries the account's current

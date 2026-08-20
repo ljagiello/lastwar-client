@@ -46,6 +46,38 @@ func TestOsExitInInteractiveCallsConnCloseExplicitlyFirst(t *testing.T) {
 	}
 }
 
+// TestRunInteractiveOwnExitSitesCheckShuttingDownFirst is the round-43 regression test for the
+// MAJOR finding that RunInteractive's own 4 fatal exit sites (stat/non-FIFO/open failures,
+// persistent scan-error give-up) never checked interactiveShuttingDown before calling os.Exit(1),
+// unlike handleInteractiveLine's two sites -- so they could race the signal-handling goroutine's
+// own conn.Close();os.Exit(0) into a nondeterministic 0-vs-1 exit code. Three of the four sites
+// have dedicated behavioral coverage (interactive_orchestration_test.go's
+// TestRunInteractiveStatFailureDoesNotExitDuringShutdown/
+// TestRunInteractiveNotAFIFODoesNotExitDuringShutdown/
+// TestRunInteractivePersistentScanErrorDoesNotExitDuringShutdown), but the open-failure site has no
+// reliable, non-flaky way to force os.Open to fail on a real FIFO without either racing a delete
+// against the preceding stat call or depending on not running as root -- so, like
+// TestOsExitInInteractiveCallsConnCloseExplicitlyFirst just above (whose own doc comment explains
+// why source-scanning is the honest approach here: killing the process closes the socket either
+// way, so no black-box test can observe a dropped guard), this pins down all 6 total
+// interactiveShuttingDown.Load() guards (RunInteractive's 4 + handleInteractiveLine's
+// pre-existing 2) by scanning the source directly, so a future refactor that silently drops the
+// open-failure site's guard specifically is still caught even though it can't be exercised
+// end-to-end.
+func TestRunInteractiveOwnExitSitesCheckShuttingDownFirst(t *testing.T) {
+	src, err := os.ReadFile("interactive.go")
+	if err != nil {
+		t.Fatalf("read interactive.go: %v", err)
+	}
+
+	re := regexp.MustCompile(`interactiveShuttingDown\.Load\(\)`)
+	matches := re.FindAll(src, -1)
+	const want = 6 // RunInteractive's 4 sites + handleInteractiveLine's 2
+	if len(matches) != want {
+		t.Errorf("found %d interactiveShuttingDown.Load() guards in interactive.go, want %d -- every os.Exit(1) site reached while a deliberate shutdown could be in progress must check this flag first, since a dropped guard reintroduces the nondeterministic 0-vs-1 exit-code race round 40/43 fixed", len(matches), want)
+	}
+}
+
 func TestPutJSONValue(t *testing.T) {
 	cases := []struct {
 		name   string

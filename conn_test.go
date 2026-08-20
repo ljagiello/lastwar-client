@@ -73,6 +73,32 @@ func TestAsExtension(t *testing.T) {
 			t.Errorf("expected a warning about the wrong-typed p field, got log:\n%s", logged)
 		}
 	})
+	// TestAsExtension/wrong-typed c warns is the round-43 regression subtest for the MAJOR finding
+	// that AsExtension's "c" (cmd) field-read had no wrong-typed diagnostic at all -- unlike its own
+	// sibling "p" field just above (round-40 fix) and unlike ReadEnvelope's identical c/a/p triple
+	// one level up (also round-40). A wrong-typed "c" silently coerced to cmd="", matching none of
+	// the real dispatch keys callers check msg.Cmd against, so a genuinely-arrived response was
+	// misclassified as an unrecognized push with zero signal at Warn level.
+	t.Run("wrong-typed c warns", func(t *testing.T) {
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		defer slog.SetDefault(orig)
+
+		content := NewSFSObject()
+		content.PutInt("c", 5)
+		env := &Envelope{Controller: controllerExtension, Content: content}
+		msg, ok := env.AsExtension()
+		if !ok {
+			t.Fatal("expected ok=true")
+		}
+		if msg.Cmd != "" {
+			t.Errorf("Cmd = %q, want \"\" (the zero-value fallback for a wrong-typed field)", msg.Cmd)
+		}
+		if logged := buf.String(); !strings.Contains(logged, "c field is present but not a string") {
+			t.Errorf("expected a warning about the wrong-typed c field, got log:\n%s", logged)
+		}
+	})
 }
 
 // TestReadEnvelopeWrongTypedFieldsWarn is the round-40 regression test for the MAJOR finding that

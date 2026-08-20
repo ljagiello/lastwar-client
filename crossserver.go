@@ -264,7 +264,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 					slog.Error("GSL refresh failed; following redirect with stale access token anyway", "error", err)
 				} else {
 					if freshLsr.At != nil {
-						p.AccessTok = freshLsr.At.Token
+						p.AccessTok = freshLsr.At.Token.String()
 						slog.Info("fresh access token acquired", "tokenLen", len(p.AccessTok))
 					}
 					// The same refresh response also carries the account's current

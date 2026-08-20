@@ -808,3 +808,105 @@ func TestRunInteractivePersistentScanErrorGivesUpBounded(t *testing.T) {
 		t.Errorf("subprocess stderr = %s\nwant a \"giving up\" log line once the consecutive-scan-error budget is exhausted", log)
 	}
 }
+
+// TestRunInteractiveStatFailureDoesNotExitDuringShutdown is the round-43 regression test for the
+// MAJOR finding that RunInteractive's own 4 fatal exit sites -- unlike handleInteractiveLine's two
+// (see TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorDoesNotExitDuringShutdown/
+// TestHandleInteractiveLineSendExtensionFailureDoesNotExitDuringShutdown above) -- never checked
+// interactiveShuttingDown before calling os.Exit(1), so they could race the signal-handling
+// goroutine's own conn.Close();os.Exit(0) into a nondeterministic 0-vs-1 exit code: e.g. the
+// control pipe becoming inaccessible at the exact moment SIGTERM arrives during operator-initiated
+// teardown. This exercises the stat-failure site specifically (path never created, so
+// statControlPipeWithRetry exhausts its retry budget and fails). Unlike
+// TestRunInteractivePersistentScanErrorGivesUpBounded above, this drives RunInteractive directly
+// in-process rather than via subprocess re-exec: since the fixed code now returns quietly instead
+// of exiting, it can run safely without killing the test binary.
+func TestRunInteractiveStatFailureDoesNotExitDuringShutdown(t *testing.T) {
+	interactiveShuttingDown.Store(true)
+	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
+
+	client, _ := newPipeGameConnPair(t)
+	path := t.TempDir() + "/never-created"
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunInteractive(client, path)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunInteractive never returned -- it should return quietly during a shutdown instead of exiting or hanging")
+	}
+}
+
+// TestRunInteractiveNotAFIFODoesNotExitDuringShutdown is
+// TestRunInteractiveStatFailureDoesNotExitDuringShutdown's sibling for RunInteractive's
+// not-a-FIFO site: controlPipe points at a plain regular file, which stats successfully but fails
+// the os.ModeNamedPipe check.
+func TestRunInteractiveNotAFIFODoesNotExitDuringShutdown(t *testing.T) {
+	interactiveShuttingDown.Store(true)
+	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
+
+	client, _ := newPipeGameConnPair(t)
+	path := t.TempDir() + "/not-a-fifo"
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunInteractive(client, path)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunInteractive never returned -- it should return quietly during a shutdown instead of exiting or hanging")
+	}
+}
+
+// TestRunInteractivePersistentScanErrorDoesNotExitDuringShutdown is
+// TestRunInteractiveStatFailureDoesNotExitDuringShutdown's sibling for RunInteractive's
+// persistent-scan-error give-up site, reusing TestRunInteractivePersistentScanErrorGivesUpBounded's
+// own oversized-line-with-no-newline writer to force a genuine, persistent bufio.ErrTooLong on
+// every iteration until the consecutive-scan-error budget is exhausted.
+func TestRunInteractivePersistentScanErrorDoesNotExitDuringShutdown(t *testing.T) {
+	interactiveShuttingDown.Store(true)
+	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
+
+	client, _ := newPipeGameConnPair(t)
+	dir := t.TempDir()
+	path := dir + "/control.pipe"
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("Mkfifo: %v", err)
+	}
+
+	go func() {
+		oversized := bytes.Repeat([]byte("a"), maxControlPipeLineSize+4096)
+		for {
+			f, err := os.OpenFile(path, os.O_WRONLY, 0)
+			if err != nil {
+				return
+			}
+			_, _ = f.Write(oversized)
+			f.Close()
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunInteractive(client, path)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunInteractive never returned -- it should return quietly during a shutdown instead of exiting or hanging")
+	}
+	// The writer goroutine exits on its next failed OpenFile once path's directory is gone
+	// (t.TempDir()'s own cleanup); no explicit signal needed here.
+}

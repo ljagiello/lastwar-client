@@ -251,7 +251,21 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 		length = uint32(binary.BigEndian.Uint16(lb[:]))
 	}
 	if length > maxFrameSize {
-		return nil, fmt.Errorf("frame body too large: %d bytes (max %d)", length, maxFrameSize)
+		// deadConnError (not a bare fmt.Errorf): the length field has already been
+		// consumed from the shared, session-long reader, and -- unlike the body-size
+		// guard below at line ~304, which fires only after readFrameField has already
+		// consumed the full body -- this guard returns WITHOUT ever reading/draining
+		// those `length` declared body bytes. If the peer actually follows an oversized
+		// length header with real trailing body bytes (the natural way to send an
+		// oversized frame, and exactly the threat maxFrameSize exists to catch), those
+		// bytes are left unconsumed on the wire and the next ReadPacket call
+		// misinterprets the first leftover byte as a fresh header, permanently
+		// desyncing frame-boundary interpretation -- the same class of bug readFrameField
+		// was hardened against above. A bare, unwrapped error here would also fail
+		// containsNonTimeoutNetError's type switch (no Unwrap), so callers like
+		// buildings.go's CollectAll would not abort on it and keep issuing requests over
+		// the now-desynced reader.
+		return nil, deadConnError{err: fmt.Errorf("frame body too large: %d bytes (max %d)", length, maxFrameSize)}
 	}
 
 	var uncompressedLen uint32
@@ -263,7 +277,11 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 		}
 		uncompressedLen = binary.BigEndian.Uint32(lb[:])
 		if uncompressedLen > maxFrameSize {
-			return nil, fmt.Errorf("uncompressed length too large: %d bytes (max %d)", uncompressedLen, maxFrameSize)
+			// deadConnError -- same rationale as the `length` guard above: the
+			// uncompressed-length field has already been consumed, and this guard
+			// returns before the `length` declared body bytes (still pending on the
+			// wire) are ever read, leaving the reader mid-frame if the peer sends them.
+			return nil, deadConnError{err: fmt.Errorf("uncompressed length too large: %d bytes (max %d)", uncompressedLen, maxFrameSize)}
 		}
 	}
 

@@ -16,7 +16,8 @@ import (
 )
 
 // interactiveShuttingDown is set by RunInteractive's signal-handling goroutine (below) before it
-// calls conn.Close(), and checked by handleInteractiveLine's own os.Exit(1) paths.
+// calls conn.Close(), and checked by handleInteractiveLine's os.Exit(1) paths as well as
+// RunInteractive's own 4 (round-43 fix, see below).
 //
 // Round-40 fix: SIGINT/SIGTERM during -interactive mode used to race two independent goroutines
 // into calling os.Exit with contradictory codes. The signal handler calls conn.Close() then
@@ -33,6 +34,15 @@ import (
 // new information, so it returns quietly instead of racing to call its own os.Exit(1) -- the
 // signal handler's os.Exit(0) is then the only exit call that ever happens, making the exit code
 // deterministic on every Ctrl-C/SIGTERM.
+//
+// Round-43 fix: RunInteractive's own 4 fatal exit sites (control-pipe stat/non-FIFO/open failures,
+// persistent scan-error give-up) had the identical unguarded-race gap this flag was built to
+// prevent -- e.g. the control pipe being deleted/becoming inaccessible at the exact moment
+// SIGTERM arrives during operator-initiated teardown. Each now checks this flag first and, if a
+// shutdown is already in progress, returns from RunInteractive quietly instead of exiting: since
+// RunInteractive's own for-loop never returns except via os.Exit, this lets the caller's normal
+// exit-0 return path (or the signal goroutine's own imminent os.Exit(0)) be the only way the
+// process actually terminates.
 var interactiveShuttingDown atomic.Bool
 
 // controlPipeRetries/controlPipeRetryDelay bound how many times RunInteractive's per-iteration
@@ -110,6 +120,18 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 	for {
 		fi, statErr := statControlPipeWithRetry(controlPipe)
 		if statErr != nil {
+			// Round-43 fix: see interactiveShuttingDown's own doc comment -- this function's own 4
+			// fatal exit sites (this one plus the not-a-FIFO, open-failure, and persistent-scan-error
+			// sites below) never checked this flag, unlike handleInteractiveLine's two sites, so they
+			// could still race the signal-handling goroutine's conn.Close();os.Exit(0) into a
+			// nondeterministic 0-vs-1 exit code -- e.g. the control pipe being deleted/becoming
+			// inaccessible at the exact moment SIGTERM arrives during operator-initiated teardown.
+			// Returning quietly here (instead of exiting) lets the signal goroutine's os.Exit(0) be
+			// the only exit call: this function then falls through to its caller's normal, exit-0
+			// return path if that goroutine hasn't already terminated the process outright.
+			if interactiveShuttingDown.Load() {
+				return
+			}
 			slog.Error("stat control pipe failed", "controlPipe", controlPipe, "error", statErr, "retries", controlPipeRetries)
 			// Round-41 fix: see the identical round-40 fix in main.go -- os.Exit does not run
 			// deferred functions, so main()'s/runCrossServerTest()'s `defer conn.Close()`
@@ -125,12 +147,22 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 			// a FIFO is a permanent misconfiguration (-interactive pointed at a plain file, or
 			// mkfifo was simply never run), not a transient condition that resolves itself if we
 			// just wait and look again.
+			// See the round-43 fix comment on the stat-failure branch above -- same
+			// interactiveShuttingDown guard, same reasoning.
+			if interactiveShuttingDown.Load() {
+				return
+			}
 			slog.Error("controlPipe exists but is not a FIFO -- did you forget mkfifo?", "controlPipe", controlPipe)
 			conn.Close()
 			os.Exit(1)
 		}
 		f, err := openControlPipeWithRetry(controlPipe)
 		if err != nil {
+			// See the round-43 fix comment on the stat-failure branch above -- same
+			// interactiveShuttingDown guard, same reasoning.
+			if interactiveShuttingDown.Load() {
+				return
+			}
 			slog.Error("open control pipe failed", "controlPipe", controlPipe, "error", err, "retries", controlPipeRetries)
 			conn.Close()
 			os.Exit(1)
@@ -162,6 +194,13 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 				// back-to-back reopen attempts, with no delay between them, is exactly the
 				// unbounded open-error-close spin this fix exists to prevent: treat it as
 				// genuinely fatal instead of looping forever.
+				// See the round-43 fix comment on the stat-failure branch above -- same
+				// interactiveShuttingDown guard, same reasoning: a persistent scan error caused by
+				// the signal goroutine's own conn.Close()/FIFO teardown mid-shutdown is an expected
+				// side effect, not a new fatal discovery.
+				if interactiveShuttingDown.Load() {
+					return
+				}
 				slog.Error("control pipe scan error persisted too many times in a row, giving up", "controlPipe", controlPipe, "consecutiveScanErrors", consecutiveScanErrors)
 				conn.Close()
 				os.Exit(1)

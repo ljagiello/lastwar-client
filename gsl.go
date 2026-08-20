@@ -200,8 +200,15 @@ func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error
 // AccountServerInfo.Port/WsPort. Time itself is never read anywhere in this codebase (only
 // Token is), so this widening is behaviorally free -- matching AccountServerInfo.WsPort's own
 // precedent of hardening an unread field purely so it can't take the rest of the struct down.
+//
+// Token is flexString, not a bare string -- round-43 fix, closing the LAST remaining bare-typed
+// field in this entire GetServerList/CheckVersion response family (LoginServerInfo,
+// AccountServerInfo, LoginServerListRespon, and now LoginToken have all had every field widened
+// across rounds 33-43). Token is actively read at 4 call sites (login.go's primary Login path and
+// its mid-redirect GSL refresh, crossserver.go's DoCrossServerLogin redirect refresh, and main.go's
+// standalone -cs-rt command), all now converted to the pre-existing flexString.String() accessor.
 type LoginToken struct {
-	Token string     `json:"token"`
+	Token flexString `json:"token"`
 	Time  flexString `json:"time"`
 }
 

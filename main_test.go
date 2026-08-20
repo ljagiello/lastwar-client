@@ -732,12 +732,17 @@ func TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogic
 // connection: a declared body length over maxFrameSize (packet.go's own "frame body too large"
 // guard, mirroring packet_oom_test.go's TestReadPacketRejectsOversizedDeclaredLength). ReadPacket
 // rejects this using only the header's length field, before ever attempting to read (let alone
-// allocate) a length-sized body -- so no body bytes are actually consumed here, and the
-// underlying byte stream stays synchronized for whatever request/response traffic follows this
-// call. The resulting client-side error is a plain fmt.Errorf ("frame body too large: ..."), not
-// wrapped in packet.go's net.Error-satisfying deadConnError (that type is reserved for genuine
-// connection death, io.EOF/io.ErrUnexpectedEOF) -- exactly the "still-healthy connection hitting
-// one bad frame" shape round 26's FetchBuildings-call-site fix targets.
+// allocate) a length-sized body.
+//
+// Round-43 fix: the resulting client-side error is now wrapped in packet.go's net.Error-satisfying
+// deadConnError, NOT a plain fmt.Errorf -- this guard fires after the length field is already
+// consumed and returns without draining the declared body, so a peer that actually follows an
+// oversized header with real trailing bytes (unlike this helper, which sends only the 5-byte
+// header and nothing else) would leave the reader desynced. Since this helper's own trailing
+// silence is what makes ReadPacket's guard trip on JUST the header, it remains useful for testing
+// that the guard rejects using only the header fields (see the packet_oom_test.go tests above), but
+// is NO LONGER suitable for a test that needs a genuinely non-fatal, non-net.Error decode failure
+// -- use writeMalformedZlibBombFrame below for that instead.
 //
 // Takes no *testing.T deliberately, matching serveFakeGameServer's own established pattern
 // (crossserver_test.go): the fake server handlers that call this run in a background goroutine
@@ -752,14 +757,34 @@ func writeMalformedOversizedFrame(server *GameConn) {
 	_, _ = server.conn.Write(hdr.Bytes())
 }
 
+// writeMalformedZlibBombFrame writes a single legitimately-framed, zlib-compressed packet whose
+// declared (compressed) length is small but whose DECOMPRESSED output exceeds maxFrameSize --
+// packet.go's "zlib inflated output exceeds" guard. Unlike writeMalformedOversizedFrame's guard,
+// this one fires only AFTER readFrameField has already consumed the full declared (compressed)
+// body from the reader, so the underlying byte stream stays synchronized afterward regardless of
+// this error -- a genuine "plain decode error over an otherwise still-healthy connection". The
+// resulting client-side error remains a plain, unwrapped fmt.Errorf, not packet.go's
+// net.Error-satisfying deadConnError, so this is the round-43 replacement for
+// writeMalformedOversizedFrame at any call site that specifically needs shouldAbortBeforeInteractive
+// to take its non-fatal branch.
+func writeMalformedZlibBombFrame(server *GameConn) {
+	plain := bytes.Repeat([]byte{0}, maxFrameSize+4096)
+	packet, err := EncodePacket(plain)
+	if err != nil {
+		return
+	}
+	_, _ = server.conn.Write(packet)
+}
+
 // mainFetchBuildingsFailureFakeGameServer answers the base zone Login normally, then sends an
 // `init` push with an empty building_new (0 buildings, satisfying Login()'s own waitForInitPush
 // fast -- gotInit=true, buildings=nil -- instead of waiting out the full 45s initPushTimeout for a
 // genuine silence timeout), which is what actually reaches main()'s zero-buildings FetchBuildings
-// fallback call site. It then writes a single malformed oversized frame directly on the
-// connection (writeMalformedOversizedFrame above): FetchBuildings' fallback call reads this as
-// its very first envelope and returns a plain, non-net.Error decode failure immediately, instead
-// of burning the fallback's own 12s timeout.
+// fallback call site. It then writes a single malformed zlib-bomb frame directly on the connection
+// (writeMalformedZlibBombFrame -- round-43 swap from writeMalformedOversizedFrame, whose error is
+// now fatal per packet.go's round-43 fix): FetchBuildings' fallback call reads this as its very
+// first envelope and returns a plain, non-net.Error decode failure immediately, instead of burning
+// the fallback's own 12s timeout.
 func mainFetchBuildingsFailureFakeGameServer() func(*GameConn) {
 	return func(server *GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
@@ -773,7 +798,7 @@ func mainFetchBuildingsFailureFakeGameServer() func(*GameConn) {
 		if err := server.SendExtension("init", NewSFSObject()); err != nil {
 			return
 		}
-		writeMalformedOversizedFrame(server)
+		writeMalformedZlibBombFrame(server)
 	}
 }
 
@@ -791,6 +816,13 @@ func mainFetchBuildingsFailureFakeGameServer() func(*GameConn) {
 // pointed at a path that can never become a real FIFO so RunInteractive's own startup log proves
 // this call site was reached before it fails fast on its os.Stat check), but targets the sibling
 // FetchBuildings call site instead of CollectAll's.
+//
+// Round-43 note: mainFetchBuildingsFailureFakeGameServer's fake server now triggers this via
+// writeMalformedZlibBombFrame, not writeMalformedOversizedFrame -- packet.go's round-43 fix wraps
+// the oversized-declared-length error in deadConnError (a genuine net.Error), which would now make
+// shouldAbortBeforeInteractive abort unconditionally, defeating this test's whole premise. The
+// zlib-bomb decode failure remains a plain, non-net.Error error over an otherwise-synchronized
+// stream, so it's still the right trigger for exercising the non-fatal branch this test targets.
 func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
@@ -831,7 +863,7 @@ func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t
 	if !strings.Contains(log, "fetch buildings failed") {
 		t.Errorf("subprocess stderr = %s\nwant it to log FetchBuildings' fallback failure", log)
 	}
-	if !strings.Contains(log, "frame body too large") {
+	if !strings.Contains(log, "zlib inflated output exceeds") {
 		t.Errorf("subprocess stderr = %s\nwant the logged error to be the plain decode failure (not a net.Error timeout) -- otherwise this test isn't actually exercising the non-net-error path shouldAbortBeforeInteractive exists for", log)
 	}
 	if !strings.Contains(log, "interactive mode: reading commands") {
@@ -846,11 +878,13 @@ func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t
 // carrying a malformed/empty building_new (0 buildings) alongside a normal, non-empty
 // visitor.list (one visitor, uid 777) -- both parsed from the very same init push (see
 // ParseInitBuildings/ParseInitVisitors), so this is a real reachable state, not a contrived one.
-// It then writes a single malformed oversized frame (writeMalformedOversizedFrame above): main()'s
-// zero-buildings FetchBuildings fallback call reads this as its very first envelope and returns
-// immediately with 0 buildings AND 0 visitors of its own -- the exact shape round 26's Fix 4
-// targets, where an unconditional visitors overwrite would silently discard the real, already-known
-// visitor list obtained above. Finally it answers CollectAll's fixed request sequence generically
+// It then writes a single malformed zlib-bomb frame (writeMalformedZlibBombFrame -- round-43 swap
+// from writeMalformedOversizedFrame, whose error is now fatal per packet.go's round-43 fix, which
+// would abort before CollectAll ever ran): main()'s zero-buildings FetchBuildings fallback call
+// reads this as its very first envelope and returns immediately with 0 buildings AND 0 visitors of
+// its own -- the exact shape round 26's Fix 4 targets, where an unconditional visitors overwrite
+// would silently discard the real, already-known visitor list obtained above. Finally it answers
+// CollectAll's fixed request sequence generically
 // (mirroring mainCollectInteractiveFakeGameServer's own pattern), recording the uid any
 // "visitor.operate" request carries into gotVisitorUID so the test can confirm GreetVisitors
 // actually ran against the ORIGINAL visitor list, not the fallback's empty one.
@@ -878,7 +912,7 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*GameCon
 			return
 		}
 
-		writeMalformedOversizedFrame(server)
+		writeMalformedZlibBombFrame(server)
 
 		// CollectAll's 8 fixed sub-actions issue 9 requests total when buildings/visitors are both
 		// empty (see mainCollectInteractiveFakeGameServer's own doc comment for the per-action
@@ -886,14 +920,20 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*GameCon
 		// one more here for GreetVisitors' single visitor.operate call, since this test's whole
 		// point is that the ORIGINAL non-empty visitors slice from Login() survives into CollectAll
 		// despite the fallback FetchBuildings call above returning 0 visitors of its own.
+		// Round-43 note: reads via readNextExtension (login_integration_test.go), not a bare
+		// ReadEnvelope+AsExtension pair that treats any non-extension envelope as reason to give
+		// up -- writeMalformedZlibBombFrame's compression step (the round-43 replacement for
+		// writeMalformedOversizedFrame) is genuinely CPU-heavy (several seconds under -race),
+		// long enough to span the client's own 4s heartbeat interval (Login() already started it
+		// via StartHeartbeat). Without skipping non-extension envelopes here, a heartbeat
+		// PingPong that lands on the wire during that stall gets misread as this loop's first
+		// expected request, AsExtension() returns ok=false for it, and the handler gives up --
+		// leaving the connection to eventually read as a genuine EOF/dead-connection failure to
+		// the client's next real request instead of the benign push this actually was.
 		const wantRequests = 10
 		for i := 0; i < wantRequests; i++ {
-			env, err := server.ReadEnvelope()
+			msg, err := readNextExtension(server)
 			if err != nil {
-				return
-			}
-			msg, ok := env.AsExtension()
-			if !ok {
 				return
 			}
 			resp := NewSFSObject()

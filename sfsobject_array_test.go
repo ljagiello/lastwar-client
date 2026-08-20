@@ -283,6 +283,28 @@ func TestNestingDepthRejected(t *testing.T) {
 	}
 }
 
+// TestNestingDepthExactlyAtCapSucceeds is the round-43 regression test for the MINOR finding that
+// maxNestDepth's strict greater-than boundary (r.depth > maxNestDepth, sfsobject.go) had no
+// exact-boundary test -- TestNestingDepthRejected above only proves 200 levels (comfortably OVER
+// the 64-level cap) is rejected, never that exactly 64 levels -- the boundary value itself -- is
+// still accepted, which would catch an off-by-one `>=` mutation that rejected one level early.
+// Mirrors this round's sibling boundary tests (TestCollectAllExactlyAtCapDoesNotTruncate,
+// TestParseInitVisitorsMaxNumExactlyAtUpperBoundDoesNotClamp, etc.) applied to this decode-time cap.
+func TestNestingDepthExactlyAtCapSucceeds(t *testing.T) {
+	const levels = maxNestDepth
+	var buf []byte
+	buf = append(buf, 0, 1) // outermost array's count = 1 (tag passed as a parameter, not read from the stream)
+	for i := 0; i < levels-1; i++ {
+		buf = append(buf, sfsArrayType, 0, 1) // one more nested array: tag byte + count=1
+	}
+	buf = append(buf, sfsBool, 1) // innermost leaf value: tag=bool, value=true
+
+	r := &sfsReader{data: buf}
+	if _, err := r.readValuePayload(sfsArrayType); err != nil {
+		t.Errorf("readValuePayload() error = %v, want nil for exactly %d levels of nesting (the boundary value itself, not over the cap)", err, levels)
+	}
+}
+
 func TestByteArrayRejectsNegativeCount(t *testing.T) {
 	negOne := int32(-1)
 	var buf []byte

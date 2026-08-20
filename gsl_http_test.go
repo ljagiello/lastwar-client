@@ -214,6 +214,45 @@ func TestCheckVersionRejectsOversizedResponse(t *testing.T) {
 	}
 }
 
+// TestCheckVersionAcceptsExactlyMaxSizeResponse is the round-43 regression test for the MINOR
+// finding that maxGSLResponseSize's strict greater-than boundary (len(body) > maxGSLResponseSize,
+// gsl.go) was only tested on the rejection side (TestCheckVersionRejectsOversizedResponse above,
+// maxGSLResponseSize+1 bytes) -- no test proved a response of EXACTLY maxGSLResponseSize bytes is
+// accepted by the size gate, which would catch an off-by-one `>=` mutation that rejected the
+// boundary value itself. Builds a real, minimal, successfully-decodable CheckVersionResponse
+// padded via its own resMsg field to land at exactly maxGSLResponseSize bytes, so a passing test
+// proves the size gate accepted it AND the response still decoded correctly -- not just that some
+// later, unrelated failure happened to also return a non-"byte limit" error.
+func TestCheckVersionAcceptsExactlyMaxSizeResponse(t *testing.T) {
+	const prefix = `{"code":"","resMsg":"`
+	const suffix = `"}`
+	padLen := maxGSLResponseSize - len(prefix) - len(suffix)
+	body := prefix + strings.Repeat("a", padLen) + suffix
+	if len(body) != maxGSLResponseSize {
+		t.Fatalf("constructed test body is %d bytes, want exactly %d", len(body), maxGSLResponseSize)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	origHosts := checkVersionHosts
+	checkVersionHosts = []string{server.URL}
+	defer func() { checkVersionHosts = origHosts }()
+
+	cv, host, err := CheckVersion(defaultHTTPClient())
+	if err != nil {
+		t.Fatalf("CheckVersion() error = %v, want nil for a response body of exactly maxGSLResponseSize bytes (the boundary value, not over the cap)", err)
+	}
+	if host != server.URL {
+		t.Errorf("host = %q, want %q", host, server.URL)
+	}
+	if got := len(cv.ResMsg); got != padLen {
+		t.Errorf("len(ResMsg) = %d, want %d -- the response should have decoded correctly, not just avoided the size-limit error", got, padLen)
+	}
+}
+
 // TestCheckVersionRejectsNon200Status is the round-40 regression test for the MINOR finding that
 // CheckVersion's non-200 HTTP status branch (`resp.StatusCode != http.StatusOK`) had zero test
 // coverage, unlike its size-limit and server-error-code sibling branches above. Confirms a bare
@@ -384,6 +423,40 @@ func TestGetServerListRejectsOversizedResponse(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exceeds") || !strings.Contains(err.Error(), "byte limit") {
 		t.Errorf("GetServerList error = %q, want it to mention the size limit", err)
+	}
+}
+
+// TestGetServerListAcceptsExactlyMaxSizeResponse is
+// TestCheckVersionAcceptsExactlyMaxSizeResponse's sibling for GetServerList's own
+// io.ReadAll/LimitReader call site -- round-43 regression test for the MINOR finding that
+// maxGSLResponseSize's strict greater-than boundary was only tested on the rejection side here
+// too. Builds a real, minimal, plaintext (no "bin" field) LoginServerListRespon padded via its own
+// lastLoggedServer field to land at exactly maxGSLResponseSize bytes.
+func TestGetServerListAcceptsExactlyMaxSizeResponse(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	const prefix = `{"code":"0","serverList":[],"lastLoggedServer":"`
+	const suffix = `"}`
+	padLen := maxGSLResponseSize - len(prefix) - len(suffix)
+	body := prefix + strings.Repeat("a", padLen) + suffix
+	if len(body) != maxGSLResponseSize {
+		t.Fatalf("constructed test body is %d bytes, want exactly %d", len(body), maxGSLResponseSize)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	if err != nil {
+		t.Fatalf("GetServerList() error = %v, want nil for a response body of exactly maxGSLResponseSize bytes (the boundary value, not over the cap)", err)
+	}
+	if got := len(lsr.LastLoggedServer); got != padLen {
+		t.Errorf("len(LastLoggedServer) = %d, want %d -- the response should have decoded correctly, not just avoided the size-limit error", got, padLen)
 	}
 }
 
@@ -1073,11 +1146,55 @@ func TestGetServerListLoginTokenTimeAcceptsStringOrNumber(t *testing.T) {
 			if lsr.At == nil {
 				t.Fatal("lsr.At is nil, want a decoded LoginToken")
 			}
-			if lsr.At.Token != "abc" {
-				t.Errorf("lsr.At.Token = %q, want %q", lsr.At.Token, "abc")
+			if got := lsr.At.Token.String(); got != "abc" {
+				t.Errorf("lsr.At.Token.String() = %q, want %q", got, "abc")
 			}
 			if got := lsr.At.Time.String(); got != "1699999999999" {
 				t.Errorf("lsr.At.Time.String() = %q, want %q", got, "1699999999999")
+			}
+		})
+	}
+}
+
+// TestGetServerListLoginTokenTokenAcceptsStringOrNumber is the round-43 regression test for the
+// MAJOR finding that LoginToken.Token -- the one field actually READ (unlike its sibling Time,
+// widened round-36 purely so it couldn't take the rest of the struct down) -- was the LAST bare
+// string field left in the entire GetServerList/CheckVersion response family after rounds 33-42
+// widened every other field. A wrong-typed "token" value used to fail json.Unmarshal for the
+// ENTIRE GetServerList response, fatal on the primary Login() path (which has no fallback) and
+// main.go's standalone -cs-rt command (which os.Exit(1)s on decode failure). Mirrors
+// TestGetServerListLoginTokenTimeAcceptsStringOrNumber's table shape, exercised through "token"
+// instead of "time".
+func TestGetServerListLoginTokenTokenAcceptsStringOrNumber(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"string token", `"tok-abc"`},
+		{"numeric token", `301`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			priv, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"code":"0","serverList":[],"at":{"token":%s,"time":"1699999999999"}}`, tt.json)
+			}))
+			defer server.Close()
+
+			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			if err != nil {
+				t.Fatalf("GetServerList: %v", err)
+			}
+			if lsr.At == nil {
+				t.Fatal("lsr.At is nil, want a decoded LoginToken")
+			}
+			want := strings.Trim(tt.json, `"`)
+			if got := lsr.At.Token.String(); got != want {
+				t.Errorf("lsr.At.Token.String() = %q, want %q", got, want)
 			}
 		})
 	}
