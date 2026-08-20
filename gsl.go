@@ -41,13 +41,23 @@ var checkVersionHosts = []string{
 	"https://lastwar-serverlist-us-gcp-ali.lastwargame.com",
 }
 
+// Msg/DownloadURL/ResMsg/HotUpdateMsg are flexString, not bare string -- round-41 fix, the same
+// JSON type-safety gap as their siblings Code/UpdateType, closed for this struct's four remaining
+// fields too: a wrong-typed value on ANY field here fails json.Unmarshal for the WHOLE response
+// (flexString's own doc comment already documents live evidence of this endpoint sending a
+// bare-string-typed field, code, as a JSON number instead). ResMsg specifically is genuinely read
+// (login.go's Login, main.go's -cs-rt refresh path both feed it straight into
+// parseRSAPubKeyFromDER), so both call sites now convert via flexString's pre-existing String()
+// accessor; DownloadURL/HotUpdateMsg are never read anywhere in this codebase, so widening them is
+// behaviorally free, matching AccountServerInfo.WsPort/LoginToken.Time/LoginServerInfo.Uid's own
+// precedent of hardening an unread field purely so it can't take the rest of the struct down.
 type CheckVersionResponse struct {
 	Code         flexString `json:"code"`
-	Msg          string     `json:"msg"`
+	Msg          flexString `json:"msg"`
 	UpdateType   flexString `json:"updateType"`
-	DownloadURL  string     `json:"downloadurl"`
-	ResMsg       string     `json:"resMsg"`
-	HotUpdateMsg string     `json:"hotUpdateMsg"`
+	DownloadURL  flexString `json:"downloadurl"`
+	ResMsg       flexString `json:"resMsg"`
+	HotUpdateMsg flexString `json:"hotUpdateMsg"`
 }
 
 // flexString accepts a JSON field that the server sometimes encodes as a
@@ -366,7 +376,17 @@ func findServerInfo(content *SFSObject) *SFSObject {
 // degrades this to 0, but silently) was still indistinguishable from a merely-absent field, since
 // neither the string-fallback path nor the final wrong-Go-type check (both below) can see a
 // same-value-range problem on an already-int64-typed field. Checked directly against the raw
-// decoded value now, immediately after the initial GetInt() call.
+// decoded value, immediately after the initial GetInt() call.
+//
+// Round 41 fix: that round-33 check was REMOVED, not kept, once GetInt itself (sfsobject.go)
+// gained its own out-of-int32-range-Long Warn in round 39, closing the exact "GetInt's own fix
+// degrades this to 0, but silently" gap this comment describes. From round 39 onward, the initial
+// `o.GetInt(key)` call above already warns and returns 0 for this anomaly before this function's
+// own duplicate check could ever run, so the round-33 block had become dead weight: every
+// triggering input produced two separate Warn log lines (GetInt's own, then this function's
+// identical-in-substance one) for a single anomaly, confirmed by direct reproduction. Removed
+// rather than left in place, since GetInt's diagnostic already carries the same key/redacted-value
+// information this function's own would have.
 func getIntFlexible(o *SFSObject, key string) int32 {
 	if n := o.GetInt(key); n != 0 {
 		return n
@@ -384,23 +404,6 @@ func getIntFlexible(o *SFSObject, key string) int32 {
 			return "[REDACTED]"
 		}
 		return v
-	}
-	// Round 33 fix: GetInt's own round-29 fix silently degrades a present, correctly-typed, but
-	// out-of-int32-range int64 Long to 0 -- indistinguishable, from the n!=0 check above, from a
-	// genuinely-absent or legitimately-zero field. This is the fourth anomaly shape getIntFlexible
-	// can encounter (after wrong-Go-type, non-numeric string, and out-of-range string, all
-	// diagnosed by rounds 31-32) and, unlike those three, is checked for here directly against the
-	// raw decoded value rather than through GetString/sfsFieldKindAccepts, neither of which can
-	// see it: GetString returns "" (wrong Go type, not a string), and sfsFieldKindAccepts(
-	// sfsFieldKindInt, ...) accepts ANY int64 regardless of its value (a pure Go-type-family
-	// check, by design -- see GetInt's own doc comment for why a value-range check was
-	// deliberately kept out of that shared function).
-	if v, ok := o.Get(key); ok {
-		if n64, isInt64 := v.Val.(int64); isInt64 && (n64 < math.MinInt32 || n64 > math.MaxInt32) {
-			slog.Warn("serverInfo redirect: field present as an out-of-int32-range Long, falling back to 0",
-				"key", key, "value", redactedValue(n64))
-			return 0
-		}
 	}
 	if s := o.GetString(key); s != "" {
 		if n, err := strconv.Atoi(s); err == nil {

@@ -726,6 +726,79 @@ func TestListMailAggregateCeilingStopsAcrossPages(t *testing.T) {
 	}
 }
 
+// TestListMailAggregateCeilingSinglePageOvershootDoesNotExceedCap is the round-41 regression test
+// for the MINOR finding that TestListMailAggregateCeilingStopsAcrossPages above only exercises
+// page-aligned chunks landing exactly on maxAggregateMailPerFetch's boundary (2 pages of exactly
+// mailListRawItemCap=1000 each, summing to exactly 2000) -- confirmed via mutation testing that
+// the per-append guard inside ListMail's inner item loop (mail.go) can be deleted entirely without
+// this test (or the full suite) catching it, since for that specific page-aligned construction the
+// outer loop-top check alone produces identical observable behavior. This sends a DELIBERATELY
+// misaligned split instead: each page is individually capped at mailListRawItemCap=1000 by its own
+// unrelated raw-item-scan guard, so getting a genuine MID-PAGE overshoot requires at least one page
+// under 1000 positioned before the boundary-crossing page -- 500, then 1000, then 1000 (500+1000=
+// 1500, still under the cap; the third page's own 1000 items would push the running total to 2500
+// without the per-append guard) -- so only that guard, not the loop-top check alone, can stop
+// accumulation mid-page-3 at exactly 2000, not 2500.
+func TestListMailAggregateCeilingSinglePageOvershootDoesNotExceedCap(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	// Each entry must be <= mailListRawItemCap (1000) -- a page's own raw-item-scan cap would
+	// otherwise silently truncate it first, defeating this test's deliberate misalignment.
+	pageSizes := []int{500, 1000, 1000} // running totals: 500, 1500, then 2500 without the fix
+
+	var reqCount int
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for page, size := range pageSizes {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				return
+			}
+			if msg.Cmd != "chat.get.system.mails" {
+				t.Errorf("page %d Cmd = %q, want chat.get.system.mails", page, msg.Cmd)
+			}
+			reqCount++
+			resp := NewSFSObject()
+			arr := NewSFSArray()
+			for i := 0; i < size; i++ {
+				arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-p%d-%d", page, i), 3, 0))
+			}
+			resp.PutSFSArray("msg", arr)
+			resp.PutBool("more", true) // always more -- the aggregate cap, not the server, must stop this
+			resp.PutUtfString("lastUid", fmt.Sprintf("cursor-%d", page))
+			resp.PutLong("lastMailTime", int64(page))
+			if err := server.SendExtension("push.chat.get.system.mails", resp); err != nil {
+				return
+			}
+		}
+		// Intentionally does not read a 3rd request -- a correctly-fixed ListMail must stop
+		// requesting further pages once the aggregate cap is reached mid-page-1.
+	}()
+
+	got, err := ListMail(client)
+
+	select {
+	case <-serverDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("ListMail() = %v, want nil", err)
+	}
+	if reqCount != len(pageSizes) {
+		t.Fatalf("fake server saw %d requests, want exactly %d -- ListMail must stop BEFORE requesting a 3rd page it would only discard", reqCount, len(pageSizes))
+	}
+	if len(got) != maxAggregateMailPerFetch {
+		t.Errorf("got %d mail entries, want exactly %d (maxAggregateMailPerFetch) -- the per-append guard must stop accumulation mid-page, not just at page boundaries", len(got), maxAggregateMailPerFetch)
+	}
+}
+
 // TestListMailDedupesUIDAcrossPages is the regression test for ListMail's seenUIDs guard (mail.go):
 // ListMail's own doc comment already flags real uncertainty about the pagination cursor's true
 // semantics, so if the server's cursor ever repeats the same mail uid across two pages, ListMail
@@ -1978,6 +2051,118 @@ func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
 				t.Errorf("type %d uids[%d] = %q, want %q", mailType, i, gotUids[i], uid)
 			}
 		}
+	}
+}
+
+// TestClaimAllMailRewardLoopCapsDistinctTypes is the round-41 regression test for the MAJOR
+// finding that ClaimAllMail's reward-claim loop had no cap on the number of distinct mail `type`
+// buckets it would issue sequential mail.reward.batch requests for -- unlike buildings.go's
+// CollectAll (maxCollectibleBuildingsPerRun=300) and visitors.go's GreetVisitors
+// (maxVisitorsUpperBound=300), both explicitly sized to bound worst-case wall-clock to ~40 minutes
+// against a peer that never responds. Sends maxMailRewardTypesPerRun+1 (301) distinct-type mail
+// entries, each with a single unclaimed reward, and proves the reward-claim loop only issues
+// exactly maxMailRewardTypesPerRun (300) mail.reward.batch requests, not 301 -- the fake server
+// only reads and answers that many, so if the client tried to send a 301st, the whole exchange
+// would hang and this test would time out rather than pass.
+func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const totalTypes = maxMailRewardTypesPerRun + 1 // 301 distinct types, one unclaimed mail each
+	const readBatchSize = 100                       // must match ClaimAllMail's own unexported readBatchSize constant
+
+	mails := make([]*SFSObject, totalTypes)
+	for i := 0; i < totalTypes; i++ {
+		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), int32(i), 0)
+	}
+
+	var rewardBatchCount int
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read list-mail request: %v", err)
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
+			return
+		}
+		listResp := NewSFSObject()
+		arr := NewSFSArray()
+		for _, mo := range mails {
+			arr.AddSFSObject(mo)
+		}
+		listResp.PutSFSArray("msg", arr)
+		listResp.PutBool("more", false)
+		if err := server.SendExtension("push.chat.get.system.mails", listResp); err != nil {
+			return
+		}
+
+		numReadBatches := (totalTypes + readBatchSize - 1) / readBatchSize
+		for i := 0; i < numReadBatches; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("read read-status request %d: %v", i, err)
+				return
+			}
+			if msg, ok = env.AsExtension(); !ok || msg.Cmd != "mail.read.status.betch" {
+				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
+				return
+			}
+			readResp := NewSFSObject()
+			readResp.PutBool("success", true)
+			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
+				return
+			}
+		}
+
+		// Exactly maxMailRewardTypesPerRun expected -- the 301st type must never even be sent,
+		// since truncation happens client-side before the loop starts, not as an early-abort
+		// mid-loop.
+		for i := 0; i < maxMailRewardTypesPerRun; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("read mail.reward.batch request %d: %v", i, err)
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok || msg.Cmd != "mail.reward.batch" {
+				t.Errorf("mail.reward.batch request %d malformed: %+v ok=%v", i, msg, ok)
+				return
+			}
+			rewardBatchCount++
+			resp := NewSFSObject()
+			resp.PutBool("success", true)
+			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	err := ClaimAllMail(client)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fake server never finished all expected requests -- ClaimAllMail likely tried to send more than maxMailRewardTypesPerRun reward-claim batches")
+	}
+
+	if err != nil {
+		t.Fatalf("ClaimAllMail() = %v, want nil", err)
+	}
+	if rewardBatchCount != maxMailRewardTypesPerRun {
+		t.Errorf("server saw %d mail.reward.batch requests, want exactly %d (maxMailRewardTypesPerRun)", rewardBatchCount, maxMailRewardTypesPerRun)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "distinct unclaimed mail reward types exceeds sanity ceiling") {
+		t.Errorf("expected a warning about truncating the reward-claim loop, got log:\n%s", logged)
 	}
 }
 

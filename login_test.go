@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"log/slog"
 	"runtime"
@@ -206,7 +207,7 @@ func TestReadCodeFromNewlineTerminatedStaysSilent(t *testing.T) {
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := readCodeFrom(strings.NewReader("123456\n"))
+	got := readCodeFrom(strings.NewReader("123456\n"), nil)
 	slog.SetDefault(orig)
 
 	if got != "123456" {
@@ -231,7 +232,7 @@ func TestReadCodeFromEOFTerminatedWarnsButStillAccepts(t *testing.T) {
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := readCodeFrom(strings.NewReader("123456")) // no trailing newline -- EOF terminates it
+	got := readCodeFrom(strings.NewReader("123456"), nil) // no trailing newline -- EOF terminates it
 	slog.SetDefault(orig)
 
 	if got != "123456" {
@@ -259,7 +260,7 @@ func TestReadCodeFromBoundedBySizeCap(t *testing.T) {
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := readCodeFrom(strings.NewReader(huge))
+	got := readCodeFrom(strings.NewReader(huge), nil)
 	slog.SetDefault(orig)
 
 	if len(got) > maxCodePipeLineSize {
@@ -272,4 +273,30 @@ func TestReadCodeFromBoundedBySizeCap(t *testing.T) {
 	if !strings.Contains(logged, "trailing newline") {
 		t.Errorf("expected a Warn mentioning the missing trailing newline (the size cap was hit before any newline), got:\n%s", logged)
 	}
+}
+
+// TestCloseConnBeforeExitClosesNonNilConnExactlyOnce is the round-41 regression test for the
+// MINOR finding that readCodeFromPipe/readCodeFrom's os.Exit(1) paths used to fire with zero conn
+// awareness, even though Login() has a live, already-dialed, heartbeating GameConn in scope at
+// their one call site and otherwise closes it explicitly on every other return path in the same
+// function -- the identical defer-skipped-cleanup gap round 40 fixed in main.go/interactive.go.
+// closeConnBeforeExit itself never calls os.Exit, so (unlike readCodeFrom's own os.Exit(1) branch)
+// this can be tested directly in-process without a subprocess re-exec. Proves both halves: a
+// non-nil conn's underlying net.Conn.Close() is invoked exactly once, and a nil conn (the shape
+// readCodeFrom's own direct unit tests above use, since none of them ever reach an os.Exit(1)
+// branch) doesn't panic.
+func TestCloseConnBeforeExitClosesNonNilConnExactlyOnce(t *testing.T) {
+	t.Run("non-nil conn closes exactly once", func(t *testing.T) {
+		underlying := &countingCloseConn{}
+		conn := &GameConn{conn: underlying, reader: bufio.NewReaderSize(underlying, 4096)}
+
+		closeConnBeforeExit(conn)
+
+		if got := underlying.callCount(); got != 1 {
+			t.Errorf("underlying net.Conn.Close() called %d times, want exactly 1", got)
+		}
+	})
+	t.Run("nil conn does not panic", func(t *testing.T) {
+		closeConnBeforeExit(nil)
+	})
 }

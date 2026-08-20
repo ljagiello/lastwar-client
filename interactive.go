@@ -111,6 +111,13 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 		fi, statErr := statControlPipeWithRetry(controlPipe)
 		if statErr != nil {
 			slog.Error("stat control pipe failed", "controlPipe", controlPipe, "error", statErr, "retries", controlPipeRetries)
+			// Round-41 fix: see the identical round-40 fix in main.go -- os.Exit does not run
+			// deferred functions, so main()'s/runCrossServerTest()'s `defer conn.Close()`
+			// (registered before RunInteractive is called, which blocks until it exits the
+			// process) never ran on any of this function's or handleInteractiveLine's os.Exit(1)
+			// paths. Close explicitly before exiting instead of relying on that now-unreachable
+			// defer.
+			conn.Close()
 			os.Exit(1)
 		}
 		if fi.Mode()&os.ModeNamedPipe == 0 {
@@ -119,11 +126,13 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 			// mkfifo was simply never run), not a transient condition that resolves itself if we
 			// just wait and look again.
 			slog.Error("controlPipe exists but is not a FIFO -- did you forget mkfifo?", "controlPipe", controlPipe)
+			conn.Close()
 			os.Exit(1)
 		}
 		f, err := openControlPipeWithRetry(controlPipe)
 		if err != nil {
 			slog.Error("open control pipe failed", "controlPipe", controlPipe, "error", err, "retries", controlPipeRetries)
+			conn.Close()
 			os.Exit(1)
 		}
 		scanner := bufio.NewScanner(f)
@@ -154,6 +163,7 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 				// unbounded open-error-close spin this fix exists to prevent: treat it as
 				// genuinely fatal instead of looping forever.
 				slog.Error("control pipe scan error persisted too many times in a row, giving up", "controlPipe", controlPipe, "consecutiveScanErrors", consecutiveScanErrors)
+				conn.Close()
 				os.Exit(1)
 			}
 			// A writer still connected and producing bad input (e.g. one that keeps reopening the
@@ -297,6 +307,9 @@ func handleInteractiveLine(conn *GameConn, line string) {
 			return
 		}
 		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", err)
+		// See RunInteractive's own round-41 fix doc comment: os.Exit skips the caller's `defer
+		// conn.Close()`, so close explicitly before exiting instead of relying on it.
+		conn.Close()
 		os.Exit(1)
 	}
 
@@ -327,6 +340,8 @@ func handleInteractiveLine(conn *GameConn, line string) {
 			return
 		}
 		slog.Error("response wait failed -- connection appears dead, exiting interactive mode", "error", err)
+		// See the identical round-41 fix's doc comment on the sibling os.Exit(1) above.
+		conn.Close()
 		os.Exit(1)
 	}
 	// Not msg.Params.String() -- same reasoning as the "sending command" log above.
@@ -345,7 +360,20 @@ func putJSONValue(o *SFSObject, key string, v any) bool {
 		} else if f, err := val.Float64(); err == nil {
 			o.PutDouble(key, f)
 		} else {
-			slog.Error("unparseable JSON number", "key", key, "value", val.String())
+			// Round-41 fix: this used to log val.String() unconditionally, bypassing every
+			// redaction layer this file otherwise enforces for operator-typed FIFO input --
+			// contradicting the neighboring JSON decode-error/trailing-data branches, which
+			// explicitly avoid echoing raw operator text specifically because "the glued-on JSON
+			// could contain a credential value the operator meant to pass as params" (see
+			// handleInteractiveLine's own doc comments). An out-of-both-int64-and-float64-range
+			// JSON number literal (e.g. 1e400) under a sensitive key name (loginKey, accessToken,
+			// etc.) used to reach this branch and log its raw value in cleartext, unlike a
+			// successfully-parsed value, which only ever reaches the wire via params.StringRedacted().
+			logVal := val.String()
+			if isSensitiveSFSKey(key) {
+				logVal = "[REDACTED]"
+			}
+			slog.Error("unparseable JSON number", "key", key, "value", logVal)
 			return false
 		}
 	default:

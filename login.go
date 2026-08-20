@@ -195,7 +195,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	slog.Info("gate host", "gateHost", gateHost)
 	slog.Info("check-version response", "updateType", cv.UpdateType, "resMsgLen", len(cv.ResMsg))
 
-	pub, err := parseRSAPubKeyFromDER(cv.ResMsg)
+	pub, err := parseRSAPubKeyFromDER(cv.ResMsg.String())
 	if err != nil {
 		return nil, err
 	}
@@ -522,10 +522,10 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	var code string
 	if opts.CodePipe != "" {
 		slog.Info("waiting for a writer on code pipe", "codePipe", opts.CodePipe)
-		code = readCodeFromPipe(opts.CodePipe)
+		code = readCodeFromPipe(opts.CodePipe, conn)
 	} else {
 		slog.Info("feed the 6-digit code on stdin")
-		code = readCodeFromStdin()
+		code = readCodeFromStdin(conn)
 	}
 	slog.Info("got code", "codeLen", len(code))
 
@@ -905,31 +905,54 @@ func waitForCmd(conn *GameConn, timeout time.Duration, wantCmds ...string) (*Ext
 	return msg, nil
 }
 
-func readCodeFromStdin() string {
-	return readCodeFrom(os.Stdin)
+func readCodeFromStdin(conn *GameConn) string {
+	return readCodeFrom(os.Stdin, conn)
 }
 
 // readCodeFromPipe opens a FIFO for reading -- this blocks until a writer
 // opens the other end, which is exactly what we want: the process can sit
 // here idle (heartbeat still running in the background) until the code is
 // written to the pipe from a separate shell command.
-func readCodeFromPipe(path string) string {
+//
+// conn is the live, already-dialed GameConn Login() has open at this point (step 7, waiting on the
+// verification code) -- see closeConnBeforeExit's own doc comment for why every os.Exit(1) site
+// below now closes it first.
+func readCodeFromPipe(path string, conn *GameConn) string {
 	fi, statErr := os.Stat(path)
 	if statErr != nil {
 		slog.Error("stat code pipe failed", "codePipe", path, "error", statErr)
+		closeConnBeforeExit(conn)
 		os.Exit(1)
 	}
 	if fi.Mode()&os.ModeNamedPipe == 0 {
 		slog.Error("codePipe exists but is not a FIFO -- did you forget mkfifo?", "codePipe", path)
+		closeConnBeforeExit(conn)
 		os.Exit(1)
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		slog.Error("open code pipe", "path", path, "error", err)
+		closeConnBeforeExit(conn)
 		os.Exit(1)
 	}
 	defer f.Close()
-	return readCodeFrom(f)
+	return readCodeFrom(f, conn)
+}
+
+// closeConnBeforeExit calls conn.Close() before an imminent os.Exit(1), tolerating a nil conn (the
+// shape readCodeFrom's own direct unit tests use, since they never actually reach an os.Exit(1)
+// branch -- see login_test.go).
+//
+// Round-41 fix: readCodeFromPipe/readCodeFrom's os.Exit(1) calls used to fire with no conn
+// awareness at all, even though Login() has a live, already-dialed, heartbeating GameConn in
+// scope at their one call site (step 7) and otherwise closes it explicitly on every other return
+// path in the same function (17+ separate conn.Close() call sites) -- the identical defer-skipped-
+// cleanup gap round 40 fixed in main.go/interactive.go, here reached through several stack frames
+// instead of directly at the exit site.
+func closeConnBeforeExit(conn *GameConn) {
+	if conn != nil {
+		conn.Close()
+	}
 }
 
 // maxCodePipeLineSize bounds how much readCodeFrom will ever read from stdin/-code-pipe,
@@ -957,12 +980,13 @@ const maxCodePipeLineSize = 64 * 1024
 // line with no trailing newline (e.g. `printf '123456'` into -code-pipe, or Ctrl+D right after
 // typing the code) -- so this now warns instead, giving an operator debugging a rejection a
 // concrete signal to check for truncation without breaking the legitimate no-trailing-newline case.
-func readCodeFrom(r io.Reader) string {
+func readCodeFrom(r io.Reader, conn *GameConn) string {
 	reader := bufio.NewReader(io.LimitReader(r, maxCodePipeLineSize))
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && line == "" {
 			slog.Error("input closed without a code", "error", err)
+			closeConnBeforeExit(conn)
 			os.Exit(1)
 		}
 		code := strings.TrimSpace(line)

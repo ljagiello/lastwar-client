@@ -118,6 +118,16 @@ const mailListRawItemCap = 1000
 // maxVisitorsUpperBound's own sizing rationale.
 const maxAggregateMailPerFetch = 2000
 
+// maxMailRewardTypesPerRun is a defensive, non-protocol-guessing sanity ceiling on how many
+// distinct mail `type` buckets ClaimAllMail's reward-claim loop below will issue
+// mail.reward.batch requests for in one run -- the same category of ceiling as buildings.go's
+// maxCollectibleBuildingsPerRun and visitors.go's maxVisitorsUpperBound, applied to this loop's
+// item COUNT for the identical reason: each iteration can cost up to a full defaultCmdTimeout
+// (8s, conn.go) against a peer that simply never responds, so 300 * 8s bounds the worst case at
+// ~40 minutes instead of an unbounded hang, matching those two constants' own value and rationale
+// exactly.
+const maxMailRewardTypesPerRun = 300
+
 // ListMail fetches the account's mail via `chat.get.system.mails`,
 // following the real client's own request shape
 // (extracted/lua_decompiled/5018_Net_Msgs_Mail_MailGetMutiMessage.lua:
@@ -476,6 +486,21 @@ func ClaimAllMail(conn *GameConn) error {
 		mailTypes = append(mailTypes, mailType)
 	}
 	sort.Slice(mailTypes, func(i, j int) bool { return mailTypes[i] < mailTypes[j] })
+	// Round-41 fix: mailTypes was previously unbounded, unlike every sibling sequential
+	// network-call loop in this codebase (buildings.go's CollectAll, capped at
+	// maxCollectibleBuildingsPerRun=300; visitors.go's GreetVisitors, capped at
+	// maxVisitorsUpperBound=300) -- both explicitly sized so a peer that simply never responds
+	// bounds the loop's worst-case wall-clock to ~40 minutes (300 * defaultCmdTimeout=8s) instead
+	// of hanging indefinitely. groupUnclaimedByType buckets purely by server-controlled `type`
+	// values with no cap of its own, and ListMail's own maxAggregateMailPerFetch=2000 total-entry
+	// ceiling is over 6x this loop's 300-iteration sanity margin -- a hostile peer answering with
+	// up to 2000 unclaimed-reward mail entries, each a distinct type, could previously force up
+	// to ~4.4 hours of sequential mail.reward.batch timeouts from a single crafted response.
+	if len(mailTypes) > maxMailRewardTypesPerRun {
+		slog.Warn("distinct unclaimed mail reward types exceeds sanity ceiling; truncating reward-claim loop",
+			"count", len(mailTypes), "cap", maxMailRewardTypesPerRun)
+		mailTypes = mailTypes[:maxMailRewardTypesPerRun]
+	}
 rewardLoop:
 	for _, mailType := range mailTypes {
 		uids := byType[mailType]

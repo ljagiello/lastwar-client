@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -530,6 +532,76 @@ func TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorDoesNotExitDuringShutd
 
 	fake := &fakeNetErrConn{}
 	conn := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleInteractiveLine(conn, `some.command`)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handleInteractiveLine never returned -- it should return quietly during a shutdown instead of exiting or hanging")
+	}
+}
+
+// TestHandleInteractiveLineSendExtensionFailureExits is the round-41 regression test for the
+// MAJOR finding that this branch -- including the interactiveShuttingDown.Load() shutdown-race
+// guard round 40 added right above the fatal os.Exit(1) -- had zero test coverage at all: if that
+// guard were ever deleted, reintroducing the exact SIGINT/SIGTERM exit-code race round 40 fixed,
+// no test would have failed. Uses conn_wait_test.go's writeFailConn (already established for
+// TestSendAndWaitWriteStageFailureIsNonTimeoutNetError) to force conn.SendExtension itself to fail
+// before any read is ever attempted -- unlike the waitForCmd-failure tests above, which only
+// exercise a failure on the READ side. Same subprocess re-exec idiom as those tests:
+// handleInteractiveLine calls os.Exit(1) directly on this path, so it can't be driven to
+// completion in-process without also killing this test binary.
+func TestHandleInteractiveLineSendExtensionFailureExits(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		c1, c2 := net.Pipe()
+		defer c2.Close()
+		failConn := &writeFailConn{Conn: c1, err: errors.New("simulated write failure")}
+		conn := &GameConn{conn: failConn, reader: bufio.NewReaderSize(failConn, 4096)}
+		handleInteractiveLine(conn, `some.command`)
+		// Only reached if handleInteractiveLine fails to exit -- the outer assertions below will
+		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
+		// this silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHandleInteractiveLineSendExtensionFailureExits$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	const wantMsg = "send failed -- connection appears dead"
+	if !strings.Contains(stderr.String(), wantMsg) {
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q", stderr.String(), wantMsg)
+	}
+}
+
+// TestHandleInteractiveLineSendExtensionFailureDoesNotExitDuringShutdown is
+// TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorDoesNotExitDuringShutdown's sibling for the
+// SendExtension branch: with interactiveShuttingDown set (simulating "the signal handler already
+// began shutdown"), the exact same writeFailConn failure that exits with code 1 above must instead
+// return quietly, proven here by running IN-PROCESS and simply completing without os.Exit firing.
+func TestHandleInteractiveLineSendExtensionFailureDoesNotExitDuringShutdown(t *testing.T) {
+	interactiveShuttingDown.Store(true)
+	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+	failConn := &writeFailConn{Conn: c1, err: errors.New("simulated write failure")}
+	conn := &GameConn{conn: failConn, reader: bufio.NewReaderSize(failConn, 4096)}
 
 	done := make(chan struct{})
 	go func() {

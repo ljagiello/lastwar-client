@@ -103,6 +103,37 @@ func TestPkcs7UnpadRejectsPadLenAboveBlockSize(t *testing.T) {
 	}
 }
 
+// TestPkcs7UnpadRejectsZeroPadLen is the round-41 regression test for the MINOR finding that
+// pkcs7Unpad's `padLen <= 0` half of its guard (`if padLen <= 0 || padLen > len(data)`) had zero
+// test coverage -- confirmed via mutation testing (weakening the guard to only check
+// `padLen > len(data)` still passed the entire suite). A decrypted plaintext whose last byte
+// happens to be 0x00 (padLen=0) would then slice `data[len(data)-0:]` -- the empty tail -- so the
+// byte-by-byte padding-match loop iterates zero times and vacuously "passes", returning the data
+// completely unstripped instead of erroring on what is, per RFC 5652, invalid padding (a valid
+// PKCS7 pad length is always >= 1). Encrypts a crafted plaintext directly (bypassing pkcs7Pad, the
+// same technique TestPkcs7UnpadRejectsPadLenAboveBlockSize/TestPkcs7UnpadRejectsMismatchedPaddingBytes
+// use) whose last byte is 0x00, and proves aesECBDecryptPKCS7 rejects it instead of silently
+// returning the unstripped plaintext.
+func TestPkcs7UnpadRejectsZeroPadLen(t *testing.T) {
+	key := md5HexKey("test-salt-value-1234")
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	bs := block.BlockSize()
+
+	plain := make([]byte, bs)
+	copy(plain, []byte("zero pad len byt"))
+	plain[bs-1] = 0 // claimed pad length 0 -- invalid per RFC 5652, but not > len(data) either
+
+	ct := make([]byte, bs)
+	block.Encrypt(ct, plain)
+
+	if _, err := aesECBDecryptPKCS7(ct, key); err == nil {
+		t.Fatalf("expected error for a zero pad length, got nil (the padding-match loop over an empty tail vacuously passes, silently returning the unstripped plaintext)")
+	}
+}
+
 // TestPkcs7UnpadRejectsMismatchedPaddingBytes covers pkcs7Unpad's byte-by-byte padding-match
 // validation loop (the `for _, b := range data[len(data)-padLen:]` check in crypto.go), which
 // TestPkcs7UnpadRejectsPadLenAboveBlockSize above does not exercise: that test only forces a

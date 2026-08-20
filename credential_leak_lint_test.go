@@ -106,7 +106,6 @@ func TestNoRawSFSObjectDumpInLogsOrErrors(t *testing.T) {
 		`conn.go:slog.Warn(label+" no-op (expected)", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.String())`: "same reasoning as the conn.go entry above",
 		`conn.go:slog.Warn(label+" no-op (status=0, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.String())`:      "same reasoning as the conn.go entry above",
 		`interactive.go:slog.Info("shutting down", "signal", sig.String())`:                                                "sig is an os.Signal, not an SFSObject -- String() here is the standard library's, unrelated to this bug class",
-		`interactive.go:slog.Error("unparseable JSON number", "key", key, "value", val.String())`:                          "val is a json.Number, not an SFSObject -- String() here is encoding/json's, unrelated to this bug class",
 		`interactive.go:slog.Error("no matching response within "+defaultCmdTimeout.String(), "error", err)`:               "defaultCmdTimeout is a time.Duration (const defaultCmdTimeout = 8 * time.Second, conn.go) -- String() here is the standard library's Duration.String(), unrelated to this bug class, same as the sig/val entries immediately above",
 	}
 

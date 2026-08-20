@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
+	"os"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +21,31 @@ import (
 // when the number can't be represented as one. We check the *type tag*
 // SFSObject actually stored, not just the value, since a wrong-but-close
 // float64 would otherwise pass a value-only comparison.
+// TestOsExitInInteractiveCallsConnCloseExplicitlyFirst is the round-41 regression test for the
+// MINOR finding that RunInteractive's four os.Exit(1) sites (control-pipe stat/non-FIFO/open
+// failures, persistent scan-error give-up) and handleInteractiveLine's two (SendExtension
+// failure, non-timeout waitForCmd failure) never called conn.Close() first -- the identical
+// defer-skipped-cleanup gap round 40's TestOsExitAfterDeferredConnCloseCallsCloseExplicitlyFirst
+// (main_test.go) closed for main.go's own 4 sites, left unaddressed here even though main() and
+// runCrossServerTest() both register `defer conn.Close()` before calling RunInteractive (which
+// blocks until the process exits), so os.Exit from inside it skips that defer identically.
+// Source-scanning is the honest way to pin this down (see that test's own doc comment for why: no
+// black-box test can observe a behavioral difference, since killing the process also closes the
+// socket either way).
+func TestOsExitInInteractiveCallsConnCloseExplicitlyFirst(t *testing.T) {
+	src, err := os.ReadFile("interactive.go")
+	if err != nil {
+		t.Fatalf("read interactive.go: %v", err)
+	}
+
+	re := regexp.MustCompile(`conn\.Close\(\)\s*\n\s*os\.Exit\(1\)`)
+	matches := re.FindAll(src, -1)
+	const want = 6 // RunInteractive's 4 sites + handleInteractiveLine's 2
+	if len(matches) != want {
+		t.Errorf("found %d conn.Close()-immediately-before-os.Exit(1) sites in interactive.go, want %d -- every os.Exit(1) reached while conn is in scope must call conn.Close() explicitly first, since os.Exit skips the caller's deferred conn.Close()", len(matches), want)
+	}
+}
+
 func TestPutJSONValue(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -143,6 +173,55 @@ func TestPutJSONValue(t *testing.T) {
 			}
 			if c.check != nil {
 				c.check(t, o)
+			}
+		})
+	}
+}
+
+// TestPutJSONValueRedactsSensitiveKeyOnUnparseableNumber is the round-41 regression test for the
+// MAJOR finding that putJSONValue's json.Number error branch logged the raw operator-typed value
+// unconditionally, bypassing every redaction layer this file otherwise enforces for exactly this
+// scenario (see handleInteractiveLine's own JSON-decode-error/trailing-data branches, which
+// explicitly avoid echoing raw operator text for the identical reason: it could carry a credential
+// the operator meant to pass as params). An out-of-both-int64-and-float64-range JSON number
+// literal (e.g. 1e400, which strconv.ParseFloat documents as returning +Inf with a non-nil range
+// error) under a sensitive key name must now redact the logged value; a non-sensitive key must
+// keep logging the real value, matching every other wrong-typed-field Warn/Error in this codebase.
+func TestPutJSONValueRedactsSensitiveKeyOnUnparseableNumber(t *testing.T) {
+	tests := []struct {
+		name      string
+		key       string
+		wantValue string // "" means the raw value must NOT appear in the log at all
+	}{
+		{name: "sensitive key redacts", key: "loginKey", wantValue: ""},
+		{name: "non-sensitive key stays visible", key: "someField", wantValue: "1e400"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(orig)
+
+			o := NewSFSObject()
+			got := putJSONValue(o, tt.key, json.Number("1e400"))
+			if got {
+				t.Fatalf("putJSONValue() = true, want false for an out-of-range number")
+			}
+
+			logged := buf.String()
+			if !strings.Contains(logged, "unparseable JSON number") {
+				t.Fatalf("expected a Warn/Error mentioning the unparseable number, got log:\n%s", logged)
+			}
+			if tt.wantValue == "" {
+				if strings.Contains(logged, "1e400") {
+					t.Errorf("expected the raw value to be redacted for sensitive key %q, got log:\n%s", tt.key, logged)
+				}
+				if !strings.Contains(logged, "[REDACTED]") {
+					t.Errorf("expected [REDACTED] in the log for sensitive key %q, got log:\n%s", tt.key, logged)
+				}
+			} else if !strings.Contains(logged, tt.wantValue) {
+				t.Errorf("expected the real value %q to stay visible for non-sensitive key %q, got log:\n%s", tt.wantValue, tt.key, logged)
 			}
 		})
 	}

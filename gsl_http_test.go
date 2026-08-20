@@ -23,7 +23,7 @@ import (
 func TestCheckVersionAgainstFakeServer(t *testing.T) {
 	pub := testRSAPubKeyDER(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := CheckVersionResponse{ResMsg: pub}
+		resp := CheckVersionResponse{ResMsg: flexString(pub)}
 		json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
@@ -39,7 +39,78 @@ func TestCheckVersionAgainstFakeServer(t *testing.T) {
 	if host != server.URL {
 		t.Errorf("host = %q, want %q", host, server.URL)
 	}
-	if cv.ResMsg != pub {
+	if cv.ResMsg.String() != pub {
+		t.Errorf("ResMsg mismatch: got %q, want %q", cv.ResMsg, pub)
+	}
+}
+
+// TestCheckVersionResponseFieldsAcceptStringOrNumber is the round-41 regression test for the MAJOR
+// finding that CheckVersionResponse.Msg/DownloadURL/ResMsg/HotUpdateMsg were still bare `string`
+// fields while their siblings Code/UpdateType were already flexString -- a wrong-typed value on
+// ANY field in this struct fails json.Unmarshal for the WHOLE response (flexString's own doc
+// comment documents live evidence of exactly this endpoint sending a bare-string-typed field,
+// code, as a JSON number instead). Sends msg/downloadurl/hotUpdateMsg as bare JSON numbers
+// alongside a valid string-typed resMsg (the one field genuinely read, by parseRSAPubKeyFromDER)
+// and proves the whole response still decodes successfully, with ResMsg's real value intact.
+func TestCheckVersionResponseFieldsAcceptStringOrNumber(t *testing.T) {
+	pub := testRSAPubKeyDER(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"msg":12345,"downloadurl":67890,"resMsg":%q,"hotUpdateMsg":11111}`, pub)
+	}))
+	defer server.Close()
+
+	origHosts := checkVersionHosts
+	checkVersionHosts = []string{server.URL}
+	defer func() { checkVersionHosts = origHosts }()
+
+	cv, _, err := CheckVersion(defaultHTTPClient())
+	if err != nil {
+		t.Fatalf("CheckVersion: %v", err)
+	}
+	if cv.ResMsg.String() != pub {
+		t.Errorf("ResMsg mismatch: got %q, want %q", cv.ResMsg, pub)
+	}
+	if cv.Msg.String() != "12345" {
+		t.Errorf("Msg.String() = %q, want %q", cv.Msg.String(), "12345")
+	}
+	if cv.DownloadURL.String() != "67890" {
+		t.Errorf("DownloadURL.String() = %q, want %q", cv.DownloadURL.String(), "67890")
+	}
+	if cv.HotUpdateMsg.String() != "11111" {
+		t.Errorf("HotUpdateMsg.String() = %q, want %q", cv.HotUpdateMsg.String(), "11111")
+	}
+}
+
+// TestCheckVersionFallsBackToNextHostOnConnectionFailure is the round-41 regression test for the
+// MINOR finding that every existing CheckVersion test overrides checkVersionHosts to a single-URL
+// slice, so the multi-host fallback loop's continue branches (http.NewRequest error, httpClient.Do
+// network error, io.ReadAll error) were never exercised with more than one host -- confirmed via
+// mutation testing: short-circuiting the httpClient.Do-error branch from `continue` to an early
+// `return nil, "", err` (abandoning the fallback loop on the very first host's failure) still
+// passed the entire suite. The first host here is an address nothing listens on (127.0.0.1:1,
+// a well-known privileged port real servers don't bind), so httpClient.Do fails immediately with
+// a real connection-refused error -- not a synthetic stand-in -- and CheckVersion must still fall
+// through to the second, working host and succeed.
+func TestCheckVersionFallsBackToNextHostOnConnectionFailure(t *testing.T) {
+	pub := testRSAPubKeyDER(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := CheckVersionResponse{ResMsg: flexString(pub)}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	origHosts := checkVersionHosts
+	checkVersionHosts = []string{"http://127.0.0.1:1", server.URL}
+	defer func() { checkVersionHosts = origHosts }()
+
+	cv, host, err := CheckVersion(defaultHTTPClient())
+	if err != nil {
+		t.Fatalf("CheckVersion: %v, want it to fall back to the second, working host", err)
+	}
+	if host != server.URL {
+		t.Errorf("host = %q, want %q (the second host, since the first must have failed)", host, server.URL)
+	}
+	if cv.ResMsg.String() != pub {
 		t.Errorf("ResMsg mismatch: got %q, want %q", cv.ResMsg, pub)
 	}
 }

@@ -45,7 +45,7 @@ func newFakeGSLServer(t *testing.T, gslResponses ...LoginServerListRespon) *http
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "getlsu3dversion.php"):
-			_ = json.NewEncoder(w).Encode(CheckVersionResponse{ResMsg: pub})
+			_ = json.NewEncoder(w).Encode(CheckVersionResponse{ResMsg: flexString(pub)})
 		case strings.HasSuffix(r.URL.Path, "getserverlist.php"):
 			mu.Lock()
 			idx := call

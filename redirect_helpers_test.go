@@ -252,10 +252,16 @@ func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
 	// round 31/32 added the Warn for) -- here the field is a native Long on the wire, not a
 	// string, so GetString never even sees it, and sfsFieldKindAccepts(sfsFieldKindInt, ...)
 	// accepts any int64 by design (a pure type check, not a value-range check).
-	t.Run("out-of-range native Long warns", func(t *testing.T) {
+	// Round-41 regression: getIntFlexible's own out-of-range-Long check (added round 33) became
+	// redundant once GetInt itself (sfsobject.go) gained the identical diagnostic in round 39 --
+	// getIntFlexible's first line already calls o.GetInt(key), so from round 39 onward this exact
+	// anomaly produced TWO separate Warn log lines for one input until the redundant check was
+	// removed. Asserts exactly one occurrence, not just "contains", so a reintroduced duplicate
+	// would fail this test instead of passing it unnoticed the way a bare Contains check would.
+	t.Run("out-of-range native Long warns exactly once, not twice", func(t *testing.T) {
 		logged := run(t, func(o *SFSObject) { o.PutLong("port", int64(math.MaxInt32)+12345) })
-		if !strings.Contains(logged, "out-of-int32-range") {
-			t.Errorf("expected a Warn mentioning the out-of-range Long, got:\n%s", logged)
+		if got := strings.Count(logged, "out-of-int32-range"); got != 1 {
+			t.Errorf("got %d Warn line(s) mentioning out-of-int32-range, want exactly 1 (GetInt's own diagnostic, not a redundant second one from getIntFlexible itself):\n%s", got, logged)
 		}
 	})
 	t.Run("wrong Go type warns", func(t *testing.T) {
