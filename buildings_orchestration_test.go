@@ -603,6 +603,68 @@ func TestFetchBuildingsAggregateVisitorCeilingAcrossManyPushes(t *testing.T) {
 	}
 }
 
+// TestFetchBuildingsAggregateBuildingCeilingAcrossManyPushes is
+// TestFetchBuildingsAggregateVisitorCeilingAcrossManyPushes' building-side counterpart -- the
+// round-37 regression test for the MAJOR finding that the building half of round 36's aggregate
+// ceiling fix had zero test coverage (and, separately, originally reused the wrong, semantically
+// mismatched maxCollectibleBuildingsPerRun constant -- see maxAggregateBuildingsPerFetch's own doc
+// comment in buildings.go for that fix). Sends far more push.add.building pushes*buildingsPerPush
+// than maxAggregateBuildingsPerFetch (well over 2x) and asserts the final accumulated count stays
+// close to the cap, not anywhere near the unaggregated potential.
+func TestFetchBuildingsAggregateBuildingCeilingAcrossManyPushes(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const (
+		buildingsPerPush  = 10
+		numPushes         = 60 // 600 potential buildings, well over 2x maxAggregateBuildingsPerFetch (300)
+		unaggregatedTotal = buildingsPerPush * numPushes
+	)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for p := 0; p < numPushes; p++ {
+			params := NewSFSObject()
+			arr := NewSFSArray()
+			for i := 0; i < buildingsPerPush; i++ {
+				uuid := int64(p*buildingsPerPush + i + 1) // distinct uuid every push -- defeats dedup
+				arr.AddSFSObject(newTestBuildingSFS(uuid, BuildingFarmland, 1))
+			}
+			params.PutSFSArray("buildings", arr)
+			if err := server.SendExtension("push.add.building", params); err != nil {
+				return
+			}
+		}
+		// Deliberately does NOT close the connection -- FetchBuildings must stop itself via the
+		// aggregate ceiling, not because the peer hung up or the whole batch was exhausted.
+	}()
+
+	buildings, _, err := FetchBuildings(client, 3*time.Second)
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		// The sender goroutine is almost certainly still mid-send, blocked on a full pipe buffer,
+		// since FetchBuildings stopped reading early (exactly what this test wants to prove) --
+		// not a failure on its own, just don't hang the test waiting for a send that will never
+		// be read. The goroutine leaks harmlessly until the test binary exits.
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil (a plain deadline-elapsed timeout is not itself an error)", err)
+	}
+	if len(buildings) >= unaggregatedTotal {
+		t.Fatalf("got %d buildings, want well under the unaggregated potential of %d -- the aggregate ceiling did not stop accumulation across pushes", len(buildings), unaggregatedTotal)
+	}
+	// Bounded generously above maxAggregateBuildingsPerFetch to absorb the single-push overshoot
+	// the per-iteration check allows (one push can add up to buildingsPerPush new entries before
+	// the next iteration's check catches it) -- the real claim is "closer to the cap than to the
+	// unaggregated potential", not an exact count.
+	if maxWant := maxAggregateBuildingsPerFetch + buildingsPerPush; len(buildings) > maxWant {
+		t.Errorf("got %d buildings, want at most %d (maxAggregateBuildingsPerFetch=%d plus at most one push's own overshoot)", len(buildings), maxWant, maxAggregateBuildingsPerFetch)
+	}
+}
+
 // TestCollectIdleRewardSuccess covers CollectIdleReward's documented two-call sequence -- a peek
 // (action=0) immediately followed by a claim (action=1), both against `lw.pve.idle.reward` (see
 // its doc comment in buildings.go) -- against a fake server that answers both with a plain

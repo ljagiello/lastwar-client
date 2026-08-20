@@ -584,6 +584,46 @@ func TestGetServerListPortIDAcceptsStringOrNumber(t *testing.T) {
 	}
 }
 
+// TestGetServerListUidAcceptsStringOrNumber is the round-37 regression test for the MAJOR finding
+// that LoginServerInfo.Uid was still a plain string, not flexString, while every other
+// numeric-looking sibling field on the same struct (ID/Port/Status) was already hardened in
+// rounds 33-36 -- a bare-numeric "uid" on any serverList entry used to fail json.Unmarshal for
+// the ENTIRE GetServerList response. Mirrors TestGetServerListPortIDAcceptsStringOrNumber's
+// raw-JSON table shape.
+func TestGetServerListUidAcceptsStringOrNumber(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"string uid", `"12345"`},
+		{"numeric uid", `12345`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			priv, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"code":"0","serverList":[{"id":"1","port":"9000","zone":"APS1","gameUid":"g1","uid":%s,"status":"0"}]}`, tt.json)
+			}))
+			defer server.Close()
+
+			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			if err != nil {
+				t.Fatalf("GetServerList: %v", err)
+			}
+			if len(lsr.ServerList) != 1 {
+				t.Fatalf("ServerList = %+v, want a single entry", lsr.ServerList)
+			}
+			if got := lsr.ServerList[0].Uid.String(); got != "12345" {
+				t.Errorf("Uid.String() = %q, want %q", got, "12345")
+			}
+		})
+	}
+}
+
 // TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber is
 // TestGetServerListPortIDAcceptsStringOrNumber's sibling for AccountServerInfo.Port/WsPort,
 // exercised through the opt=new applyLoginServerFallback path that actually reads them (see

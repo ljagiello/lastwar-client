@@ -120,8 +120,21 @@ func main() {
 	// (elsewhere in this file, reachable at this same point in main()'s execution) already uses
 	// slog.Error correctly for a fatal flag-parsing-time error -- this now matches that precedent
 	// instead of the stale fmt.Fprintf-to-stderr convention parseLogLevel no longer follows either.
+	//
+	// Round 37 fix: unlike detectSwallowedFlagValue's own "value" log field (which by construction
+	// can only ever equal another registered flag's NAME, never arbitrary content), fs.Args() here
+	// is completely unconstrained -- it's whatever token(s) happened to land after the first
+	// non-'-'-prefixed one. The common case really is an innocuous typo'd flag name (e.g. "collect"
+	// missing its dash), but a cron-wrapper script that drops a "-cs-at"/"-cs-shumei"/
+	// "-cs-deviceid"/"-email" flag NAME while still passing its VALUE would land that value here
+	// too -- and this was the one remaining sink in this file logging a possibly-sensitive value in
+	// cleartext instead of length-only, breaking the length-only convention every other
+	// secret-adjacent log call in this file already follows (deviceIdLen/airKeyLen/emailLen/
+	// usernameLen/tokenLen). Logs only the count and total joined length now, never the content.
 	if fs.NArg() > 0 {
-		slog.Error("unexpected argument(s) (missing a leading '-' on a flag? see -help)", "args", strings.Join(fs.Args(), " "))
+		args := fs.Args()
+		slog.Error("unexpected argument(s) (missing a leading '-' on a flag? see -help)",
+			"count", len(args), "totalLen", len(strings.Join(args, " ")))
 		os.Exit(1)
 	}
 

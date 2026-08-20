@@ -201,6 +201,54 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 	}
 }
 
+// TestMainStrayPositionalArgumentDoesNotLeakContent is the round-37 regression test for the MAJOR
+// finding that the stray-positional-argument diagnostic (main.go, right after fs.Parse succeeds)
+// used to log the raw joined argument content via "args", strings.Join(fs.Args(), " ") --
+// completely unconstrained content, unlike detectSwallowedFlagValue's own "value" field (which by
+// construction can only ever equal a registered flag's name). A cron-wrapper script that drops a
+// -cs-at/-cs-shumei/-cs-deviceid/-email flag NAME while still passing its VALUE would land that
+// secret value directly in this log line, in cleartext. Drives a real main() invocation (like
+// TestMainFlagParseExitCodes) with a secret-looking trailing positional argument and asserts it
+// never appears in stderr, only a count/length.
+func TestMainStrayPositionalArgumentDoesNotLeakContent(t *testing.T) {
+	const secretLookingArg = "sk-live-totally-secret-token-abc123xyz789"
+
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_STRAY_ARG") == "1" {
+		os.Args = []string{"lastwar-client", secretLookingArg}
+		main()
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMainStrayPositionalArgumentDoesNotLeakContent$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS_STRAY_ARG=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	gotCode := 0
+	if runErr != nil {
+		exitErr, ok := runErr.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("subprocess did not run/exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+		}
+		gotCode = exitErr.ExitCode()
+	}
+	if gotCode != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", gotCode, stderr.String())
+	}
+
+	out := stderr.String()
+	if strings.Contains(out, secretLookingArg) {
+		t.Errorf("subprocess stderr leaks the raw positional argument content, want only a count/length; stderr=%s", out)
+	}
+	if !strings.Contains(out, "unexpected argument(s)") {
+		t.Errorf("subprocess stderr missing the expected diagnostic message; stderr=%s", out)
+	}
+	if !strings.Contains(out, `"count":1`) {
+		t.Errorf("subprocess stderr missing a count field for the stray argument(s); stderr=%s", out)
+	}
+}
+
 // TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback is the round-34 regression test
 // for the MAJOR finding that round 33's explicit-vs-config merge fix (mergeExplicitOrConfigString/
 // mergeExplicitOrConfigPort, config.go) was applied only to -cs-ip/-cs-port/-cs-gameuid inside

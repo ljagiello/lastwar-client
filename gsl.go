@@ -176,8 +176,13 @@ type LoginServerInfo struct {
 	Port    flexString `json:"port"`
 	Zone    string     `json:"zone"`
 	GameUid string     `json:"gameUid"`
-	Uid     string     `json:"uid"`
-	Status  flexString `json:"status"` // observed as a JSON string, e.g. "0"
+	// Uid is flexString, not a bare string -- round-37 fix, the same JSON type-safety gap as
+	// ID/Port above, closed for this field too. Uid is never read anywhere in this codebase
+	// (unlike GameUid), so this widening is behaviorally free -- matching AccountServerInfo.WsPort's
+	// and LoginToken.Time's own precedent of hardening an unread field purely so it can't take
+	// the rest of the struct down.
+	Uid    flexString `json:"uid"`
+	Status flexString `json:"status"` // observed as a JSON string, e.g. "0"
 }
 
 // AccountServerInfo is the account/login-service endpoint (distinct from a
