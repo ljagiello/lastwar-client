@@ -180,6 +180,16 @@ func warnIfWrongTypedField(o *SFSObject, field, context string, kind sfsFieldKin
 	}
 }
 
+// maxServerListLogEntries bounds how many lsr.ServerList entries the per-entry "state server" Info
+// log below will emit. GetServerList's response is server-controlled and, like buildings.go's
+// maxRawBuildingItemsPerPush, mail.go's mailListRawItemCap, and visitors.go's maxVisitorsUpperBound,
+// is not itself bounded by the SFS2X/HTTP protocol -- a malicious or buggy gate host returning an
+// enormous ServerList would otherwise make Login() emit one slog.Info call per entry with no
+// ceiling, burning CPU/log-volume proportional to an attacker-controlled response size. Set well
+// above any real deployment's server count (a handful of state servers per zone bucket) so normal
+// operation never truncates.
+const maxServerListLogEntries = 500
+
 // Login runs the full bootstrap: HTTP check-version, GSL getserverlist,
 // SFS2X TCP connect, base zone login, and -- unless a persisted loginKey
 // lets GSL resolve the account directly -- the email verification-code
@@ -222,7 +232,13 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	if len(lsr.ServerList) == 0 {
 		return nil, fmt.Errorf("no servers returned")
 	}
-	for _, s := range lsr.ServerList {
+	serverListLogCount := len(lsr.ServerList)
+	if serverListLogCount > maxServerListLogEntries {
+		slog.Warn("state server list longer than log cap; truncating per-entry logging",
+			"serverListLen", serverListLogCount, "cap", maxServerListLogEntries)
+		serverListLogCount = maxServerListLogEntries
+	}
+	for _, s := range lsr.ServerList[:serverListLogCount] {
 		slog.Info("state server", "id", s.ID, "name", s.Name, "ip", s.IP, "port", s.Port, "zone", s.Zone, "gameUid", s.GameUid, "status", s.Status)
 	}
 	accessTok := ""
@@ -232,14 +248,14 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 
 	stateSrv := lsr.ServerList[0]
-	zone := stateSrv.Zone
+	zone := stateSrv.Zone.String()
 	gameUid := stateSrv.GameUid.String()
 	if gameUid != "" && gameUid != ident.GameUid {
 		if err := ident.SaveGameUid(gameUid); err != nil {
 			slog.Warn("failed to persist gameUid", "error", err)
 		}
 	}
-	addr, err := buildBaseZoneLoginAddr(stateSrv.IP, stateSrv.Port.Int())
+	addr, err := buildBaseZoneLoginAddr(stateSrv.IP.String(), stateSrv.Port.Int("port"))
 	if err != nil {
 		return nil, fmt.Errorf("login: %w", err)
 	}

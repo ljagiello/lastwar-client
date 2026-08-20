@@ -158,7 +158,7 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 	gsl := newFakeGSLServer(t, LoginServerListRespon{
 		Code: "0",
 		ServerList: []LoginServerInfo{
-			{IP: gameHost, Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
+			{IP: flexString(gameHost), Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
 		},
 		At: &LoginToken{Token: freshAccessTok},
 	})
@@ -453,7 +453,7 @@ func TestRunCrossServerTestServerListOverrideLogging(t *testing.T) {
 		gsl := newFakeGSLServer(t, LoginServerListRespon{
 			Code: "0",
 			ServerList: []LoginServerInfo{
-				{IP: gameHost, Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
+				{IP: flexString(gameHost), Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
 			},
 			At: &LoginToken{Token: "fresh-token"},
 		})
@@ -524,7 +524,7 @@ func TestRunCrossServerTestAtWarningAttribution(t *testing.T) {
 			// A non-empty server list keeps refreshHasUsableData true even in the
 			// withFreshToken=false cases below, where At is left nil.
 			ServerList: []LoginServerInfo{
-				{IP: gameHost, Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
+				{IP: flexString(gameHost), Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
 			},
 		}
 		if withFreshToken {

@@ -1075,6 +1075,86 @@ func TestCollectAllCapsCollectibleBuildingsAndLogsWarning(t *testing.T) {
 	}
 }
 
+// TestCollectAllExactlyAtCapDoesNotTruncate is the round-42 regression test for the MINOR finding
+// that TestCollectAllCapsCollectibleBuildingsAndLogsWarning above only proves the cap fires at
+// maxCollectibleBuildingsPerRun+50 -- it never exercises the boundary itself, so a regression
+// tightening buildings.go's `len(toCollect) > maxCollectibleBuildingsPerRun` to an off-by-one
+// `>=` would silently drop the 300th legitimate collectible building with zero test signal.
+// Confirmed via mutation testing: that exact `>=` tightening passed
+// TestCollectAllCapsCollectibleBuildingsAndLogsWarning unchanged (350 trips both the correct and
+// mutant check identically, despite that test's own doc comment claiming "mutation check"
+// coverage). Sends exactly maxCollectibleBuildingsPerRun collectible buildings and proves ALL of
+// them get collected, with no truncation warning logged.
+func TestCollectAllExactlyAtCapDoesNotTruncate(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const numBuildings = maxCollectibleBuildingsPerRun // exactly at the cap -- must NOT be truncated
+	buildings := make([]Building, 0, numBuildings)
+	for i := 0; i < numBuildings; i++ {
+		buildings = append(buildings, newTestBuilding(int64(10000+i), BuildingFarmland, 1))
+	}
+
+	const fixedSubActionRequests = 9
+	const wantRequests = fixedSubActionRequests + numBuildings
+
+	var collectedUUIDs []int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < wantRequests; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("request %d: ReadEnvelope: %v", i, err)
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok {
+				t.Errorf("request %d: not a well-formed extension message", i)
+				return
+			}
+
+			resp := NewSFSObject()
+			replyCmd := msg.Cmd
+			switch msg.Cmd {
+			case "chat.get.system.mails":
+				replyCmd = "push.chat.get.system.mails"
+			case "science.data.refresh":
+			case "building.production.collect":
+				collectedUUIDs = append(collectedUUIDs, msg.Params.GetLong("uuid"))
+				resp.PutBool("success", true)
+			default:
+				resp.PutBool("success", true)
+			}
+			_ = server.SendExtension(replyCmd, resp)
+		}
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	err := CollectAll(client, buildings, nil)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fake server never finished reading all expected requests -- CollectAll likely truncated below maxCollectibleBuildingsPerRun")
+	}
+
+	if err != nil {
+		t.Fatalf("CollectAll() = %v, want nil", err)
+	}
+	if len(collectedUUIDs) != numBuildings {
+		t.Fatalf("fake server received %d building.production.collect requests, want exactly %d (the boundary value, all of which must be collected)", len(collectedUUIDs), numBuildings)
+	}
+
+	logged := buf.String()
+	if strings.Contains(logged, "collectible building count exceeds sanity cap") {
+		t.Errorf("expected NO truncation warning for exactly-at-cap input, got:\n%s", logged)
+	}
+}
+
 // fakeNetErrConn is a minimal net.Conn whose every Read fails with a fakeNetError. By default
 // (timeout: false, the zero value -- what every bare fakeNetErrConn{} literal across this package's
 // other _test.go files gets) that's a genuine connection-level failure (Timeout()==false), standing

@@ -115,6 +115,53 @@ func TestCheckVersionFallsBackToNextHostOnConnectionFailure(t *testing.T) {
 	}
 }
 
+// TestCheckVersionLogsEachHostFailureBeforeFallingBackToNext is the round-42 regression test for
+// the MINOR finding that CheckVersion's multi-host fallback loop discarded every host's failure
+// reason except the last: none of the loop's seven `continue` branches logged anything, so a
+// caller only ever saw the LAST-tried host's error, even when an EARLIER host failed for a
+// distinct, actionable reason (e.g. "API shape changed" vs. a later host's plain timeout). This
+// specifically proves the earlier host's failure survives in the log even when the overall call
+// SUCCEEDS via a later host -- the case where it's easiest to assume nothing worth logging
+// happened at all, since the caller never sees an error.
+func TestCheckVersionLogsEachHostFailureBeforeFallingBackToNext(t *testing.T) {
+	badServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "not valid json{{{")
+	}))
+	defer badServer.Close()
+
+	pub := testRSAPubKeyDER(t)
+	goodServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := CheckVersionResponse{ResMsg: flexString(pub)}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer goodServer.Close()
+
+	origHosts := checkVersionHosts
+	checkVersionHosts = []string{badServer.URL, goodServer.URL}
+	defer func() { checkVersionHosts = origHosts }()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	cv, host, err := CheckVersion(defaultHTTPClient())
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("CheckVersion: %v, want it to succeed via the second host", err)
+	}
+	if host != goodServer.URL {
+		t.Errorf("host = %q, want %q", host, goodServer.URL)
+	}
+	if cv.ResMsg.String() != pub {
+		t.Errorf("ResMsg mismatch: got %q, want %q", cv.ResMsg, pub)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, badServer.URL) || !strings.Contains(logged, "decode JSON") {
+		t.Errorf("expected the first (failing) host's distinct decode-JSON failure to be logged even though the overall call succeeded via the second host, got log:\n%s", logged)
+	}
+}
+
 // TestCheckVersionRejectsServerErrorCode is the round-38 regression test for the MAJOR finding
 // that CheckVersion's server-rejection check (cv.Code != "") had zero test coverage -- confirmed
 // via mutation testing (disabling the check entirely still passed the full suite). This is a
@@ -388,7 +435,7 @@ func TestFlexStringInt(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := c.f.Int(); got != c.want {
+			if got := c.f.Int("port"); got != c.want {
 				t.Errorf("flexString(%q).Int() = %d, want %d", string(c.f), got, c.want)
 			}
 		})
@@ -400,26 +447,62 @@ func TestFlexStringInt(t *testing.T) {
 // shape and stays silent by design, matching this codebase's established anomaly-diagnostic
 // convention (e.g. getIntFlexible's own absent-vs-malformed distinction).
 func TestFlexStringIntWarnsOnMalformedValue(t *testing.T) {
-	run := func(t *testing.T, f flexString) string {
+	run := func(t *testing.T, key string, f flexString) string {
 		t.Helper()
 		var buf bytes.Buffer
 		orig := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-		f.Int()
+		f.Int(key)
 		slog.SetDefault(orig)
 		return buf.String()
 	}
 
 	t.Run("malformed value warns", func(t *testing.T) {
-		logged := run(t, flexString("not-a-number"))
+		logged := run(t, "port", flexString("not-a-number"))
 		if !strings.Contains(logged, "not-a-number") {
 			t.Errorf("expected a Warn mentioning the malformed value, got:\n%s", logged)
 		}
 	})
 	t.Run("empty value stays silent", func(t *testing.T) {
-		logged := run(t, flexString(""))
+		logged := run(t, "port", flexString(""))
 		if logged != "" {
 			t.Errorf("expected no log output for an empty/absent value, got:\n%s", logged)
+		}
+	})
+}
+
+// TestFlexStringIntRedactsSensitiveKeyValue is the round-42 regression test for the MINOR finding
+// that flexString.Int()'s malformed-value Warn logged both the raw value AND (via strconv's own
+// error text, which embeds the value a second time) the value again, with no isSensitiveSFSKey
+// gate at all -- unlike this function's structural sibling getIntFlexible (same file), which
+// received exactly this hardening in round 35. Both real call sites today (login.go/main.go's
+// "port") are non-sensitive, so this wasn't exploitable in practice, but a future caller passing
+// a sensitive key would otherwise leak its raw malformed value in cleartext, in both places it
+// appears in the log line.
+func TestFlexStringIntRedactsSensitiveKeyValue(t *testing.T) {
+	run := func(t *testing.T, key string) string {
+		t.Helper()
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		flexString("not-a-number-secret-value").Int(key)
+		slog.SetDefault(orig)
+		return buf.String()
+	}
+
+	t.Run("sensitive key redacts", func(t *testing.T) {
+		logged := run(t, "loginKey")
+		if strings.Contains(logged, "not-a-number-secret-value") {
+			t.Errorf("expected the malformed value to be redacted for a sensitive key, got:\n%s", logged)
+		}
+		if !strings.Contains(logged, "[REDACTED]") {
+			t.Errorf("expected [REDACTED] in the log for a sensitive key, got:\n%s", logged)
+		}
+	})
+	t.Run("non-sensitive key stays visible", func(t *testing.T) {
+		logged := run(t, "port")
+		if !strings.Contains(logged, "not-a-number-secret-value") {
+			t.Errorf("expected the malformed value to stay visible for a non-sensitive key, got:\n%s", logged)
 		}
 	})
 }
@@ -728,11 +811,11 @@ func TestGetServerListPortIDAcceptsStringOrNumber(t *testing.T) {
 				t.Fatalf("ServerList = %+v, want a single entry", lsr.ServerList)
 			}
 			got := lsr.ServerList[0]
-			if got.Port.Int() != 17783 {
-				t.Errorf("Port.Int() = %d, want 17783", got.Port.Int())
+			if got.Port.Int("port") != 17783 {
+				t.Errorf("Port.Int() = %d, want 17783", got.Port.Int("port"))
 			}
-			if got.ID.Int() != 17783 {
-				t.Errorf("ID.Int() = %d, want 17783", got.ID.Int())
+			if got.ID.Int("id") != 17783 {
+				t.Errorf("ID.Int() = %d, want 17783", got.ID.Int("id"))
 			}
 		})
 	}
@@ -819,6 +902,58 @@ func TestGetServerListGameUidAcceptsStringOrNumber(t *testing.T) {
 	}
 }
 
+// TestGetServerListNameIPWsIPZoneAcceptsStringOrNumber is the round-42 regression test for the
+// MAJOR finding that LoginServerInfo.Name/IP/WsIP/Zone were still bare string fields while every
+// other field on the same struct (ID/Port/GameUid/Uid/Status) was already hardened across rounds
+// 33-41 -- a bare-numeric value on ANY of these four fields used to fail json.Unmarshal for the
+// ENTIRE GetServerList response, fatal on the primary login path. Zone is genuinely read (Login
+// reads it as the redial zone and resends it as the wire "zn" field), so this also proves the
+// value survives intact through GetServerList's caller-facing accessor via flexString.String().
+func TestGetServerListNameIPWsIPZoneAcceptsStringOrNumber(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"string values", `"1001"`},
+		{"numeric values", `1001`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			priv, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"code":"0","serverList":[{"id":"1","name":%s,"ip":%s,"ws_ip":%s,"port":"9000","zone":%s,"gameUid":"g1","uid":"1","status":"0"}]}`,
+					tt.json, tt.json, tt.json, tt.json)
+			}))
+			defer server.Close()
+
+			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			if err != nil {
+				t.Fatalf("GetServerList: %v", err)
+			}
+			if len(lsr.ServerList) != 1 {
+				t.Fatalf("ServerList = %+v, want a single entry", lsr.ServerList)
+			}
+			got := lsr.ServerList[0]
+			if got.Name.String() != "1001" {
+				t.Errorf("Name.String() = %q, want %q", got.Name.String(), "1001")
+			}
+			if got.IP.String() != "1001" {
+				t.Errorf("IP.String() = %q, want %q", got.IP.String(), "1001")
+			}
+			if got.WsIP.String() != "1001" {
+				t.Errorf("WsIP.String() = %q, want %q", got.WsIP.String(), "1001")
+			}
+			if got.Zone.String() != "1001" {
+				t.Errorf("Zone.String() = %q, want %q", got.Zone.String(), "1001")
+			}
+		})
+	}
+}
+
 // TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber is
 // TestGetServerListPortIDAcceptsStringOrNumber's sibling for AccountServerInfo.Port/WsPort,
 // exercised through the opt=new applyLoginServerFallback path that actually reads them (see
@@ -850,11 +985,55 @@ func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testin
 			if len(lsr.ServerList) != 1 {
 				t.Fatalf("ServerList = %+v, want a single synthesized entry from LoginServer", lsr.ServerList)
 			}
-			if got := lsr.ServerList[0].Port.Int(); got != 8443 {
+			if got := lsr.ServerList[0].Port.Int("port"); got != 8443 {
 				t.Errorf("synthesized ServerList[0].Port.Int() = %d, want 8443", got)
 			}
-			if got := lsr.LoginServer.WsPort.Int(); got != 8443 {
+			if got := lsr.LoginServer.WsPort.Int("ws_port"); got != 8443 {
 				t.Errorf("LoginServer.WsPort.Int() = %d, want 8443", got)
+			}
+		})
+	}
+}
+
+// TestGetServerListAccountServerInfoIPWsIPAcceptsStringOrNumber is
+// TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber's sibling for
+// AccountServerInfo.IP/WsIP -- round-42 regression test for the MAJOR finding that these two
+// fields were still bare string while Port/WsPort on the same struct were already flexString.
+// applyLoginServerFallback copies AccountServerInfo.IP directly into the synthesized
+// LoginServerInfo.IP (also flexString as of this round), so this proves the value round-trips
+// intact through both structs with no conversion loss.
+func TestGetServerListAccountServerInfoIPWsIPAcceptsStringOrNumber(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"string ip", `"1001"`},
+		{"numeric ip", `1001`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			priv, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("generate RSA key: %v", err)
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"code":"0","serverList":[],"loginServer":{"ip":%s,"port":"9000","ws_ip":%s,"ws_port":"9000"}}`, tt.json, tt.json)
+			}))
+			defer server.Close()
+
+			lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+			if err != nil {
+				t.Fatalf("GetServerList: %v", err)
+			}
+			if len(lsr.ServerList) != 1 {
+				t.Fatalf("ServerList = %+v, want a single synthesized entry from LoginServer", lsr.ServerList)
+			}
+			if got := lsr.ServerList[0].IP.String(); got != "1001" {
+				t.Errorf("synthesized ServerList[0].IP.String() = %q, want %q", got, "1001")
+			}
+			if got := lsr.LoginServer.WsIP.String(); got != "1001" {
+				t.Errorf("LoginServer.WsIP.String() = %q, want %q", got, "1001")
 			}
 		})
 	}

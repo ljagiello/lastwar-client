@@ -90,13 +90,27 @@ func (f flexString) String() string { return string(f) }
 // real int (dialing, port<=0 validation) -- mirrors sfsobject.go's getIntFlexible: 0 lets the
 // caller's own existing "port <= 0"-style validation produce a clear, already-tested error
 // instead of this function panicking or the caller silently proceeding with a corrupted value.
-func (f flexString) Int() int {
+//
+// key names the field this value came from, purely for the malformed-value Warn's own
+// isSensitiveSFSKey(key) redaction gate below -- round-42 fix, closing an asymmetry with this
+// function's structural sibling getIntFlexible (same file), which received exactly this
+// hardening in round 35. Both call sites today (login.go, main.go) pass the non-sensitive "port",
+// so this was not exploitable in practice, but a future caller passing a sensitive key would
+// otherwise leak its raw value (both directly, and a second time via strconv's own error text)
+// into this Warn with no redaction at all.
+func (f flexString) Int(key string) int {
 	if f == "" {
 		return 0
 	}
 	n, err := strconv.Atoi(string(f))
 	if err != nil {
-		slog.Warn("GSL server-list field is present but not a valid integer; falling back to 0", "value", string(f), "error", err)
+		redactedValue := any(string(f))
+		redactedErr := any(err)
+		if isSensitiveSFSKey(key) {
+			redactedValue = "[REDACTED]"
+			redactedErr = "[REDACTED]"
+		}
+		slog.Warn("GSL server-list field is present but not a valid integer; falling back to 0", "key", key, "value", redactedValue, "error", redactedErr)
 		return 0
 	}
 	return n
@@ -120,40 +134,56 @@ func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error
 	q.Set("returnJson", "1")
 	q.Set("unityVersion", unityVer)
 
+	// Round-42 fix: every continue branch below now also logs its own host+error at Warn before
+	// moving to the next host, closing a real diagnostic gap -- previously only `lastErr` (the
+	// LAST-tried host's failure) survived to the final combined error, silently discarding every
+	// earlier host's distinct failure reason with zero operator-visible trace. Concretely: host1
+	// returning a 200 with a body that fails json.Unmarshal (an actionable "API shape changed"
+	// signal) followed by host2 timing out and host3 refusing the connection used to surface only
+	// host3's least-diagnostic error to the operator. The final `fmt.Errorf` below is unchanged
+	// (still names only the last-tried host's error, for backward-compatible brevity) -- this Warn
+	// trail is the mechanism for recovering the earlier hosts' reasons, not a replacement for it.
 	var lastErr error
 	for _, host := range checkVersionHosts {
 		u := host + "/gameservice/getlsu3dversion.php?" + q.Encode()
 		req, err := http.NewRequest(http.MethodGet, u, nil)
 		if err != nil {
 			lastErr = err
+			slog.Warn("check-version: host failed, trying next", "host", host, "error", err)
 			continue
 		}
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			lastErr = err
+			slog.Warn("check-version: host failed, trying next", "host", host, "error", err)
 			continue
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxGSLResponseSize+1))
 		resp.Body.Close()
 		if err != nil {
 			lastErr = err
+			slog.Warn("check-version: host failed, trying next", "host", host, "error", err)
 			continue
 		}
 		if len(body) > maxGSLResponseSize {
 			lastErr = fmt.Errorf("%s: response body exceeds %d byte limit", host, maxGSLResponseSize)
+			slog.Warn("check-version: host failed, trying next", "host", host, "error", lastErr)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("%s: HTTP %d: %s", host, resp.StatusCode, string(body))
+			slog.Warn("check-version: host failed, trying next", "host", host, "error", lastErr)
 			continue
 		}
 		var cv CheckVersionResponse
 		if err := json.Unmarshal(body, &cv); err != nil {
 			lastErr = fmt.Errorf("%s: decode JSON: %w (body=%s)", host, err, string(body))
+			slog.Warn("check-version: host failed, trying next", "host", host, "error", lastErr)
 			continue
 		}
 		if cv.Code != "" {
 			lastErr = fmt.Errorf("%s: server returned code=%s msg=%s", host, cv.Code, cv.Msg)
+			slog.Warn("check-version: host failed, trying next", "host", host, "error", lastErr)
 			continue
 		}
 		return &cv, host, nil
@@ -179,12 +209,20 @@ type LoginServerInfo struct {
 	// ID and Port are flexString, not a bare int, for the same reason as Status just below (see
 	// this file's round-35 fix comment on flexString.Int): a wrong-typed value on either field
 	// used to fail json.Unmarshal for the entire GetServerList response.
-	ID   flexString `json:"id"`
-	Name string     `json:"name"`
-	IP   string     `json:"ip"` // "|"-delimited fallback hostnames, not a single IP
-	WsIP string     `json:"ws_ip"`
+	ID flexString `json:"id"`
+	// Name/IP/WsIP/Zone are flexString, not bare string -- round-42 fix, the same JSON
+	// type-safety gap as ID/Port/GameUid/Uid/Status above, closed for this struct's four
+	// remaining fields too: a wrong-typed value on ANY field here fails json.Unmarshal for the
+	// WHOLE GetServerList response. Zone is genuinely read (login.go's Login reads it as the
+	// redial zone and resends it as the wire "zn" field on every subsequent Login), so its one
+	// read site now calls the pre-existing flexString.String() accessor; Name/IP/WsIP are only
+	// ever logged (flexString formats fine directly, matching ID/Port's own existing precedent)
+	// -- IP specifically is ALSO read via buildBaseZoneLoginAddr(stateSrv.IP.String(), ...).
+	Name flexString `json:"name"`
+	IP   flexString `json:"ip"` // "|"-delimited fallback hostnames, not a single IP
+	WsIP flexString `json:"ws_ip"`
 	Port flexString `json:"port"`
-	Zone string     `json:"zone"`
+	Zone flexString `json:"zone"`
 	// GameUid is flexString, not a bare string -- round-40 fix, the same JSON type-safety gap as
 	// ID/Port/Uid above, closed for this field too. UNLIKE Uid, GameUid IS actively read at
 	// several call sites -- login.go's Login/waitForInitPush redirect handling, crossserver.go's
@@ -207,13 +245,18 @@ type LoginServerInfo struct {
 // specific game-state server) -- used for the very first connection when no
 // account/state is associated with this device yet (opt=new).
 type AccountServerInfo struct {
-	IP string `json:"ip"` // "|"-delimited fallback hostnames
+	// IP/WsIP are flexString, not bare string -- round-42 fix, the same reason as
+	// LoginServerInfo's own Name/IP/WsIP/Zone fix just above: a wrong-typed value on ANY field
+	// here fails json.Unmarshal for the whole response. Also lets applyLoginServerFallback below
+	// assign these straight into LoginServerInfo.IP/WsIP (also flexString as of the same fix)
+	// with no conversion needed.
+	IP flexString `json:"ip"` // "|"-delimited fallback hostnames
 	// Port and WsPort are flexString, not a bare int -- see LoginServerInfo's own doc comment
 	// (round-35 fix) for why. WsPort is never read anywhere in this codebase today (see
 	// applyLoginServerFallback's doc comment below), but a wrong-typed value on it would still
 	// fail json.Unmarshal for the whole response before that unused-ness ever mattered.
 	Port   flexString `json:"port"`
-	WsIP   string     `json:"ws_ip"`
+	WsIP   flexString `json:"ws_ip"`
 	WsPort flexString `json:"ws_port"`
 }
 

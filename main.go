@@ -1001,7 +1001,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			} else {
 				slog.Info("server selected", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone, "gameUid", srv.GameUid)
 			}
-			ip, port, zone, gameUid = srv.IP, srv.Port.Int(), srv.Zone, srv.GameUid.String()
+			ip, port, zone, gameUid = srv.IP.String(), srv.Port.Int("port"), srv.Zone.String(), srv.GameUid.String()
 		}
 	}
 

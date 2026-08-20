@@ -2166,6 +2166,114 @@ func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
 	}
 }
 
+// TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate is the round-42 regression test for the
+// MINOR finding that TestClaimAllMailRewardLoopCapsDistinctTypes above only proves the cap fires
+// at maxMailRewardTypesPerRun+1 -- it never exercises the boundary itself, so a regression
+// tightening mail.go's `len(mailTypes) > maxMailRewardTypesPerRun` to an off-by-one `>=` would
+// silently drop the 300th legitimate distinct mail-reward type with zero test signal. Confirmed
+// via mutation testing: that exact `>=` tightening passed TestClaimAllMailRewardLoopCapsDistinctTypes
+// unchanged (301 trips both the correct and mutant check identically). Sends exactly
+// maxMailRewardTypesPerRun distinct types and proves ALL of them get a reward-claim batch, with
+// no truncation warning logged.
+func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	const totalTypes = maxMailRewardTypesPerRun // exactly at the cap -- must NOT be truncated
+	const readBatchSize = 100                   // must match ClaimAllMail's own unexported readBatchSize constant
+
+	mails := make([]*SFSObject, totalTypes)
+	for i := 0; i < totalTypes; i++ {
+		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), int32(i), 0)
+	}
+
+	var rewardBatchCount int
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			t.Errorf("read list-mail request: %v", err)
+			return
+		}
+		msg, ok := env.AsExtension()
+		if !ok || msg.Cmd != "chat.get.system.mails" {
+			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
+			return
+		}
+		listResp := NewSFSObject()
+		arr := NewSFSArray()
+		for _, mo := range mails {
+			arr.AddSFSObject(mo)
+		}
+		listResp.PutSFSArray("msg", arr)
+		listResp.PutBool("more", false)
+		if err := server.SendExtension("push.chat.get.system.mails", listResp); err != nil {
+			return
+		}
+
+		numReadBatches := (totalTypes + readBatchSize - 1) / readBatchSize
+		for i := 0; i < numReadBatches; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("read read-status request %d: %v", i, err)
+				return
+			}
+			if msg, ok = env.AsExtension(); !ok || msg.Cmd != "mail.read.status.betch" {
+				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
+				return
+			}
+			readResp := NewSFSObject()
+			readResp.PutBool("success", true)
+			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
+				return
+			}
+		}
+
+		for i := 0; i < totalTypes; i++ {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				t.Errorf("read mail.reward.batch request %d: %v", i, err)
+				return
+			}
+			msg, ok := env.AsExtension()
+			if !ok || msg.Cmd != "mail.reward.batch" {
+				t.Errorf("mail.reward.batch request %d malformed: %+v ok=%v", i, msg, ok)
+				return
+			}
+			rewardBatchCount++
+			resp := NewSFSObject()
+			resp.PutBool("success", true)
+			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
+				return
+			}
+		}
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+
+	err := ClaimAllMail(client)
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fake server never finished all expected requests -- ClaimAllMail likely truncated below maxMailRewardTypesPerRun")
+	}
+
+	if err != nil {
+		t.Fatalf("ClaimAllMail() = %v, want nil", err)
+	}
+	if rewardBatchCount != totalTypes {
+		t.Errorf("server saw %d mail.reward.batch requests, want exactly %d (maxMailRewardTypesPerRun, the boundary value)", rewardBatchCount, totalTypes)
+	}
+	if logged := buf.String(); strings.Contains(logged, "distinct unclaimed mail reward types exceeds sanity ceiling") {
+		t.Errorf("expected NO truncation warning for exactly-at-cap input, got log:\n%s", logged)
+	}
+}
+
 // TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError proves the reward-claim loop's
 // existing no-short-circuit-on-business-errors behavior (an ordinary decoded errorCode failure gets
 // appended to errs with no break, unlike this round's new net.Error break -- see mail.go's

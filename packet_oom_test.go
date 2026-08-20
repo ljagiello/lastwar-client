@@ -5,8 +5,55 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"testing"
 )
+
+// midFrameTimeoutReader serves exactly one header byte successfully, then fails every subsequent
+// Read with a genuine (non-EOF-shaped) timeout net.Error -- simulating a read deadline that
+// expires mid-frame, after the header byte has already been consumed but before the next field
+// (e.g. the length field) arrives. This is exactly the shape login.go's waitForInitPush produces
+// when it deliberately shortens conn.conn's read deadline to the halfway point to poll for its
+// active-pull fallback: a totally ordinary, otherwise-successful read gets interrupted partway
+// through a frame by that artificially-shortened deadline.
+type midFrameTimeoutReader struct {
+	calls int
+}
+
+func (r *midFrameTimeoutReader) Read(p []byte) (int, error) {
+	r.calls++
+	if r.calls == 1 {
+		p[0] = 0x00 // header byte: no forward/bigSized/compressed/encrypted flags set
+		return 1, nil
+	}
+	return 0, fakeTimeoutNetError{msg: "simulated mid-frame deadline exceeded"}
+}
+
+// TestReadFrameFieldMidFrameTimeoutIsNonTimeoutNetError is the round-42 regression test for the
+// MAJOR finding that a read-deadline timeout expiring mid-frame (after the header byte was
+// already consumed, but before a later field like the length field arrived) used to be reported
+// as an ORDINARY Timeout()==true net.Error, identical to the genuinely-safe-to-retry case of the
+// timeout landing on the very first (header) byte, where nothing has been consumed yet. A caller
+// that retries on Timeout()==true (e.g. login.go's waitForInitPush, which does exactly this for
+// its own deliberately-shortened halfway-poll deadline) would then read whatever partial frame
+// content arrives next as if it were a fresh header byte, permanently desyncing frame-boundary
+// interpretation on the shared, session-long GameConn.reader for the rest of the session -- with
+// no resync mechanism anywhere in this codebase. Proves ReadPacket now returns an error that is a
+// net.Error with Timeout()==false for this exact scenario, indistinguishable in severity from a
+// genuine dead connection, not a benign retryable timeout.
+func TestReadFrameFieldMidFrameTimeoutIsNonTimeoutNetError(t *testing.T) {
+	_, err := ReadPacket(&midFrameTimeoutReader{})
+	if err == nil {
+		t.Fatal("ReadPacket: expected an error for a timeout expiring mid-frame, got nil")
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("ReadPacket error = %v (%T), want it to satisfy net.Error", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false -- a timeout expiring mid-frame (after the header byte was already consumed) must be indistinguishable in severity from a genuine dead connection, not treated as a benign, safely-retryable timeout the way a timeout on the still-untouched leading header byte would be")
+	}
+}
 
 // failReader serves a fixed byte sequence and fails the test the instant
 // anything asks for more than that. It exists to prove ReadPacket's size

@@ -3,7 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"log/slog"
+	"net"
+	"os"
+	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -299,4 +304,82 @@ func TestCloseConnBeforeExitClosesNonNilConnExactlyOnce(t *testing.T) {
 	t.Run("nil conn does not panic", func(t *testing.T) {
 		closeConnBeforeExit(nil)
 	})
+}
+
+// markerCloseConn's Close() prints a fixed marker line to stdout before returning -- the only way
+// to observe, from OUTSIDE a subprocess that's about to os.Exit(1), whether conn.Close() actually
+// ran: the process image (and any in-memory call-counter, e.g. countingCloseConn) disappears with
+// it, but anything written to stdout/stderr before that exit survives for the parent to read.
+type markerCloseConn struct {
+	net.Conn
+}
+
+func (c *markerCloseConn) Close() error {
+	fmt.Println("MARKER_CONN_CLOSED")
+	return nil
+}
+
+// TestReadCodeFromPipeStatFailureClosesConnBeforeExit is the round-42 regression test for the
+// MAJOR finding that closeConnBeforeExit's 4 call sites inside readCodeFromPipe/readCodeFrom had
+// no regression test exercising them through the real call path -- only closeConnBeforeExit
+// itself was unit-tested in isolation (TestCloseConnBeforeExitClosesNonNilConnExactlyOnce above).
+// Confirmed via mutation testing: deleting all 4 closeConnBeforeExit(conn) call sites in login.go
+// still passed the full suite. readCodeFromPipe calls os.Exit(1) directly on a stat failure, so
+// (like the analogous tests in interactive_orchestration_test.go) this can't be driven to
+// completion in-process without also killing this test binary -- same subprocess re-exec idiom,
+// using markerCloseConn above to make conn.Close() having actually run observable from outside
+// the subprocess.
+func TestReadCodeFromPipeStatFailureClosesConnBeforeExit(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		conn := &GameConn{conn: &markerCloseConn{}}
+		readCodeFromPipe("/nonexistent/path/for/round-42/test", conn)
+		// Only reached if readCodeFromPipe fails to exit -- the outer assertions below will then
+		// see a clean (non-error) subprocess exit and fail with a clear message instead of this
+		// silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestReadCodeFromPipeStatFailureClosesConnBeforeExit$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stdout=%s, stderr=%s", runErr, stdout.String(), stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "MARKER_CONN_CLOSED") {
+		t.Errorf("expected conn.Close() to have run before os.Exit(1) (marker missing from stdout); stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stat code pipe failed") {
+		t.Errorf("subprocess stderr = %s, want it to mention the stat failure", stderr.String())
+	}
+}
+
+// TestOsExitInReadCodeFromCallsCloseConnBeforeExitFirst is
+// TestReadCodeFromPipeStatFailureClosesConnBeforeExit's source-scanning sibling, covering the
+// other 3 of readCodeFromPipe/readCodeFrom's 4 closeConnBeforeExit(conn)-then-os.Exit(1) sites
+// (the non-FIFO check and the os.Open failure in readCodeFromPipe, plus readCodeFrom's own
+// input-closed-without-a-code site) that a single behavioral subprocess test per site would be
+// expensive to exercise individually. Mirrors main_test.go's
+// TestOsExitAfterDeferredConnCloseCallsCloseExplicitlyFirst and interactive_test.go's
+// TestOsExitInInteractiveCallsConnCloseExplicitlyFirst -- login.go had no such scan at all before
+// this round, unlike those two files.
+func TestOsExitInReadCodeFromCallsCloseConnBeforeExitFirst(t *testing.T) {
+	src, err := os.ReadFile("login.go")
+	if err != nil {
+		t.Fatalf("read login.go: %v", err)
+	}
+
+	re := regexp.MustCompile(`closeConnBeforeExit\(conn\)\s*\n\s*os\.Exit\(1\)`)
+	matches := re.FindAll(src, -1)
+	const want = 4 // readCodeFromPipe's 3 sites (stat/non-FIFO/open) + readCodeFrom's 1
+	if len(matches) != want {
+		t.Errorf("found %d closeConnBeforeExit(conn)-immediately-before-os.Exit(1) sites in login.go, want %d -- every os.Exit(1) reached while conn is in scope in readCodeFromPipe/readCodeFrom must call closeConnBeforeExit(conn) explicitly first", len(matches), want)
+	}
 }

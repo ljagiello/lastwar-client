@@ -482,6 +482,33 @@ func TestParseInitVisitorsClampsInflatedMaxNumToUpperBound(t *testing.T) {
 	}
 }
 
+// TestParseInitVisitorsMaxNumExactlyAtUpperBoundDoesNotClamp is the round-42 regression test for
+// the MINOR finding that TestParseInitVisitorsClampsInflatedMaxNumToUpperBound above only proves
+// the clamp fires at maxNum=50000, far above the 300 boundary -- it never exercises the boundary
+// itself, so a regression tightening visitors.go's `limit > maxVisitorsUpperBound` to an off-by-one
+// `>=` would incorrectly clamp (and warn on) a maxNum that is exactly, legitimately
+// maxVisitorsUpperBound, with zero test signal. Confirmed via mutation testing: that exact `>=`
+// tightening passed TestParseInitVisitorsClampsInflatedMaxNumToUpperBound unchanged. Sends
+// maxNum == maxVisitorsUpperBound (the boundary value itself, not inflated) and proves ParseInitVisitors
+// returns exactly maxVisitorsUpperBound visitors with NO clamp warning -- distinguishing "this is
+// the legitimate boundary" from "this needed clamping."
+func TestParseInitVisitorsMaxNumExactlyAtUpperBoundDoesNotClamp(t *testing.T) {
+	params := newVisitorInitParams(true, maxVisitorsUpperBound, maxVisitorsUpperBound)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	out := ParseInitVisitors(params)
+	slog.SetDefault(orig)
+
+	if len(out) != maxVisitorsUpperBound {
+		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (the boundary value, none of which should be dropped)", len(out), maxVisitorsUpperBound)
+	}
+	if logged := buf.String(); strings.Contains(logged, "visitor.maxNum exceeds upper sanity bound; clamping") {
+		t.Errorf("expected NO clamp warning for maxNum exactly at the upper bound, got:\n%s", logged)
+	}
+}
+
 // TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput is the round-26 regression test for
 // ParseInitVisitors' iteration-count fix (visitors.go): the round-24/25 cap (maxVisitorsDefensiveCeiling
 // / maxVisitorsUpperBound) only ever bounded the number of VALID entries appended to the returned

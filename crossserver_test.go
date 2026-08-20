@@ -519,6 +519,67 @@ func TestDoCrossServerLoginTooManyRedirects(t *testing.T) {
 	}
 }
 
+// TestDoCrossServerLoginExactlyMaxRedirectsSucceeds is the round-42 regression test for the MINOR
+// finding that TestDoCrossServerLoginTooManyRedirects above only proves the guard trips on
+// maxRedirects+1 redirects -- it never exercises the boundary itself, so a regression tightening
+// crossserver.go's `hop > maxRedirects` to an off-by-one `hop >= maxRedirects` would reject a
+// legitimate maxRedirects-hop chain (the exact live APS783->APS8092 case this file's own doc
+// comment cites) with zero test signal. Confirmed via mutation testing: that exact `>=` tightening
+// passed TestDoCrossServerLoginTooManyRedirects unchanged. Chains exactly maxRedirects consecutive
+// redirects, the last of which completes a normal, non-redirect login success -- proving the
+// guard's own boundary value is itself still followable, not just "somewhere past it errors."
+func TestDoCrossServerLoginExactlyMaxRedirectsSucceeds(t *testing.T) {
+	const maxRedirects = 3              // must match crossserver.go's unexported maxRedirects const
+	const numServers = maxRedirects + 1 // servers 0..2 redirect; server 3 (the maxRedirects-th hop) succeeds
+
+	lns := make([]net.Listener, numServers)
+	addrs := make([]string, numServers)
+	for i := range lns {
+		ln, addr := newFakeGameListener(t)
+		lns[i] = ln
+		addrs[i] = addr
+	}
+	for i, ln := range lns {
+		i := i
+		serveFakeGameServer(ln, func(server *GameConn) {
+			if _, err := server.ReadEnvelope(); err != nil {
+				return
+			}
+			if i+1 < numServers {
+				zone := fmt.Sprintf("APS%d", i+1)
+				_ = server.SendEnvelope(controllerSystem, actionLogin, putRedirectServerInfo(addrs[i+1], zone))
+				return
+			}
+			// The last server in the chain (hop == maxRedirects) completes a normal login
+			// instead of redirecting again -- this is the boundary value itself, which must
+			// still be reachable, not rejected.
+			resp := NewSFSObject()
+			resp.PutBool("success", true)
+			_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+		})
+	}
+
+	host, port := splitHostPortInt(t, addrs[0])
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS0",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+	result, err := DoCrossServerLogin(p)
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v, want it to succeed after exactly %d redirects (the boundary value)", err, maxRedirects)
+	}
+	defer result.Conn.Close()
+
+	if result.Addr != addrs[numServers-1] {
+		t.Errorf("Addr = %q, want %q (the final, maxRedirects-th server in the chain)", result.Addr, addrs[numServers-1])
+	}
+}
+
 // TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP is the round-18 regression test for
 // DoCrossServerLogin's serverInfo redirect branch: it built the redialed address via a raw
 // fmt.Sprintf("%s:%d", firstHost(siObj.GetString("ip")), ...) guarded only by

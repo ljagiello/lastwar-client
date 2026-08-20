@@ -689,7 +689,7 @@ func TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogic
 
 		gsl := newFakeGSLServer(t, LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: host, Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+			ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
 			At:         &LoginToken{Token: "tok-1"},
 		})
 		useFakeGSLServer(t, gsl)
@@ -800,7 +800,7 @@ func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t
 
 		gsl := newFakeGSLServer(t, LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: host, Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+			ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
 			At:         &LoginToken{Token: "tok-1"},
 		})
 		useFakeGSLServer(t, gsl)
@@ -942,7 +942,7 @@ func TestMainZeroBuildingsFallbackPreservesNonEmptyVisitors(t *testing.T) {
 
 		gsl := newFakeGSLServer(t, LoginServerListRespon{
 			Code:       "0",
-			ServerList: []LoginServerInfo{{IP: host, Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+			ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
 			At:         &LoginToken{Token: "tok-1"},
 		})
 		useFakeGSLServer(t, gsl)

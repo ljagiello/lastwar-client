@@ -153,6 +153,11 @@ func (deadConnError) Temporary() bool { return false }
 // network failure such as a connection reset, which arrives as a genuine
 // *net.OpError rather than a bare io.EOF/io.ErrUnexpectedEOF) passes through
 // unchanged. A nil err passes through unchanged too.
+//
+// Only used at ReadPacket's leading header-byte read below -- readFrameField
+// (round-42 fix) now unconditionally wraps every one of its own errors in
+// deadConnError directly, since unlike the header-byte read, ANY failure
+// there is fatal to frame-boundary sync, not just an EOF-shaped one.
 func wrapIfClosed(err error) error {
 	if err == nil {
 		return nil
@@ -176,20 +181,34 @@ func wrapIfClosed(err error) error {
 // a genuine stream-start EOF (the header read, which does NOT use this
 // helper) as clean, while any mid-frame truncation surfaces as a real error.
 //
-// The (possibly just-converted) error is then run through wrapIfClosed: a
-// closed/exhausted reader at this point -- whether a genuine clean end (bare
-// io.EOF further up the call chain, before any field of THIS frame was
-// touched) or a mid-frame truncation (io.ErrUnexpectedEOF, from either the
-// conversion above or a real partial io.ReadFull) -- means the connection is
-// definitively dead, so the result must satisfy net.Error with
-// Timeout()==false by the time it reaches a live network caller such as
-// GameConn.ReadEnvelope.
+// Round-42 fix: EVERY error from this function -- not just an EOF-shaped one
+// -- is now unconditionally wrapped in deadConnError, forcing
+// Timeout()==false, instead of only the EOF-shaped subset going through
+// wrapIfClosed while any other error (most concretely, a read DEADLINE
+// expiring mid-field, e.g. login.go's waitForInitPush deliberately shortening
+// its read deadline to poll for the halfway active-pull check) passed through
+// unchanged as an ordinary net.Error with Timeout()==true. That used to be
+// genuinely dangerous: readFrameField is, by this doc comment's own first
+// sentence, ONLY ever called after the packet's header byte has already been
+// consumed from the shared, session-long GameConn.reader -- so ANY failure
+// here, for ANY reason, means real wire bytes were already irrevocably
+// consumed and discarded this call, leaving the reader positioned mid-frame.
+// A caller that treats a Timeout()==true result as safely retryable (the
+// standard assumption throughout this codebase for the FIRST, header-byte
+// read, which genuinely IS safe since it consumes nothing on failure) would
+// instead read whatever partial frame content arrives next as if it were a
+// fresh header byte -- permanently desyncing frame-boundary interpretation
+// for every subsequent read on that connection, for the rest of the session,
+// with no resync mechanism anywhere in this codebase to recover from it. Only
+// the leading header-byte read in ReadPacket below (which does NOT go through
+// this helper) can safely report Timeout()==true; every field read past it
+// must be unconditionally fatal.
 func readFrameField(r io.Reader, buf []byte) error {
 	if _, err := io.ReadFull(r, buf); err != nil {
 		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF
 		}
-		return wrapIfClosed(err)
+		return deadConnError{err: err}
 	}
 	return nil
 }
