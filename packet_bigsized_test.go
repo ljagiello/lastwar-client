@@ -91,3 +91,47 @@ func TestEncodePacketBigSizedThresholdExactBoundary(t *testing.T) {
 		})
 	}
 }
+
+// TestEncodePacketCompressionThresholdExactBoundary is the round-46 regression test for the MINOR
+// finding that EncodePacket's compression threshold (packet.go: `if len(body) > compressionThreshold`,
+// compressionThreshold == 1024) had no exact-boundary test. Unlike bigSized above (which checks the
+// POST-compression payload length, requiring empirical derivation of an input that lands on a
+// specific compressed size), this guard checks the body's PRE-compression length directly, so the
+// boundary is pinned by construction: a 1024-byte body must stay uncompressed (hdrCompressed clear,
+// payload passed through verbatim) and a 1025-byte body must be compressed (hdrCompressed set).
+func TestEncodePacketCompressionThresholdExactBoundary(t *testing.T) {
+	tests := []struct {
+		name           string
+		bodyLen        int
+		wantCompressed bool
+	}{
+		{"exactly at threshold: uncompressed", compressionThreshold, false},
+		{"one byte over threshold: compressed", compressionThreshold + 1, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := make([]byte, tt.bodyLen)
+			if _, err := rand.Read(body); err != nil {
+				t.Fatalf("rand.Read: %v", err)
+			}
+
+			packet, err := EncodePacket(body)
+			if err != nil {
+				t.Fatalf("EncodePacket: %v", err)
+			}
+
+			gotCompressed := packet[0]&hdrCompressed != 0
+			if gotCompressed != tt.wantCompressed {
+				t.Fatalf("hdrCompressed set = %v, want %v (header=%08b) for a %d-byte body", gotCompressed, tt.wantCompressed, packet[0], tt.bodyLen)
+			}
+
+			got, err := ReadPacket(bytes.NewReader(packet))
+			if err != nil {
+				t.Fatalf("ReadPacket: %v", err)
+			}
+			if !bytes.Equal(got, body) {
+				t.Fatalf("round trip mismatch: got %d bytes, want %d bytes", len(got), len(body))
+			}
+		})
+	}
+}

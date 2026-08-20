@@ -336,6 +336,139 @@ func TestFetchBuildingsPushInitBuildCapsRawItemsExamined(t *testing.T) {
 	}
 }
 
+// TestFetchBuildingsPushInitBuildCapBoundary is the round-46 regression test for the MINOR finding
+// that push.init.build's inline defaultBuilds loop (buildings.go) -- one of the three sibling
+// loops sharing maxRawBuildingItemsPerPush -- had no exact-boundary (cap vs cap+1) test proving
+// its own truncation-WARNING condition doesn't fire one item early/late, unlike its sibling
+// ParseInitBuildings (TestParseInitBuildingsRawItemCapBoundary above). The existing
+// TestFetchBuildingsPushInitBuildCapsRawItemsExamined test above only proves a raw-item-SCAN count
+// via malformed (missing-uuid) entries far over the cap (cap+500); it never pins the exact
+// boundary. This reuses the same malformed-entry technique (well-formed entries can't isolate this
+// specific boundary: maxRawBuildingItemsPerPush(2000) is larger than the UNRELATED
+// maxAggregateBuildingsPerFetch(300) ceiling appendBuilding enforces on every successful append, so
+// well-formed input hits that smaller, different cap first and never exercises this one) tuned to
+// exactly cap and cap+1 raw items instead of cap+500.
+func TestFetchBuildingsPushInitBuildCapBoundary(t *testing.T) {
+	sendPush := func(t *testing.T, n int) (warnCount int, truncationWarned bool) {
+		client, server := newPipeGameConnPair(t)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			params := NewSFSObject()
+			arr := NewSFSArray()
+			for i := 0; i < n; i++ {
+				bad := NewSFSObject()
+				bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
+				wrapper := NewSFSObject()
+				wrapper.PutSFSObject("buildInfo", bad)
+				arr.AddSFSObject(wrapper)
+			}
+			params.PutSFSArray("defaultBuilds", arr)
+			_ = server.SendExtension("push.init.build", params)
+		}()
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		_, _, err := FetchBuildings(client, 150*time.Millisecond)
+		slog.SetDefault(orig)
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("fake server goroutine never finished sending push.init.build")
+		}
+		if err != nil {
+			t.Fatalf("FetchBuildings() error = %v, want nil (a plain timeout after partial data is not itself an error)", err)
+		}
+		logged := buf.String()
+		return strings.Count(logged, "skipping push.init.build entry with no uuid field"),
+			strings.Contains(logged, "push.init.build defaultBuilds longer than raw-item scan cap; truncating")
+	}
+
+	t.Run("exactly cap items: all examined, no truncation warning", func(t *testing.T) {
+		warnCount, truncated := sendPush(t, maxRawBuildingItemsPerPush)
+		if warnCount != maxRawBuildingItemsPerPush {
+			t.Errorf("logged %d \"missing uuid\" warnings, want exactly %d (every item examined, none truncated)", warnCount, maxRawBuildingItemsPerPush)
+		}
+		if truncated {
+			t.Error("unexpected truncation warning at exactly-cap boundary")
+		}
+	})
+
+	t.Run("cap+1 items: truncation warning fires, only cap examined", func(t *testing.T) {
+		warnCount, truncated := sendPush(t, maxRawBuildingItemsPerPush+1)
+		if warnCount != maxRawBuildingItemsPerPush {
+			t.Errorf("logged %d \"missing uuid\" warnings, want exactly %d (cap+1 input must still stop scanning at the cap)", warnCount, maxRawBuildingItemsPerPush)
+		}
+		if !truncated {
+			t.Error("expected a truncation warning at cap+1")
+		}
+	})
+}
+
+// TestFetchBuildingsPushAddBuildingCapBoundary is TestFetchBuildingsPushInitBuildCapBoundary's
+// sibling for push.add.building's inline buildings loop -- the third of the three sibling loops
+// sharing maxRawBuildingItemsPerPush, and the other one (besides push.init.build above) whose
+// existing coverage (TestFetchBuildingsPushAddBuildingCapsRawItemsExamined above) only proves a
+// raw-item-SCAN count far over the cap, never the exact boundary.
+func TestFetchBuildingsPushAddBuildingCapBoundary(t *testing.T) {
+	sendPush := func(t *testing.T, n int) (warnCount int, truncationWarned bool) {
+		client, server := newPipeGameConnPair(t)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			params := NewSFSObject()
+			arr := NewSFSArray()
+			for i := 0; i < n; i++ {
+				bad := NewSFSObject()
+				bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
+				arr.AddSFSObject(bad)
+			}
+			params.PutSFSArray("buildings", arr)
+			_ = server.SendExtension("push.add.building", params)
+		}()
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		_, _, err := FetchBuildings(client, 150*time.Millisecond)
+		slog.SetDefault(orig)
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("fake server goroutine never finished sending push.add.building")
+		}
+		if err != nil {
+			t.Fatalf("FetchBuildings() error = %v, want nil (a plain timeout after partial data is not itself an error)", err)
+		}
+		logged := buf.String()
+		return strings.Count(logged, "skipping push.add.building entry with no uuid field"),
+			strings.Contains(logged, "push.add.building buildings longer than raw-item scan cap; truncating")
+	}
+
+	t.Run("exactly cap items: all examined, no truncation warning", func(t *testing.T) {
+		warnCount, truncated := sendPush(t, maxRawBuildingItemsPerPush)
+		if warnCount != maxRawBuildingItemsPerPush {
+			t.Errorf("logged %d \"missing uuid\" warnings, want exactly %d (every item examined, none truncated)", warnCount, maxRawBuildingItemsPerPush)
+		}
+		if truncated {
+			t.Error("unexpected truncation warning at exactly-cap boundary")
+		}
+	})
+
+	t.Run("cap+1 items: truncation warning fires, only cap examined", func(t *testing.T) {
+		warnCount, truncated := sendPush(t, maxRawBuildingItemsPerPush+1)
+		if warnCount != maxRawBuildingItemsPerPush {
+			t.Errorf("logged %d \"missing uuid\" warnings, want exactly %d (cap+1 input must still stop scanning at the cap)", warnCount, maxRawBuildingItemsPerPush)
+		}
+		if !truncated {
+			t.Error("expected a truncation warning at cap+1")
+		}
+	})
+}
+
 // TestFetchBuildingsPushInitBuildWrongTypedUUIDIsRejected is the round-31 regression test closing
 // the last of buildings.go's three sibling uuid/bId-guarded inline loops still missing wrong-typed
 // coverage: ParseInitBuildings (building_new) and push.add.building both already had

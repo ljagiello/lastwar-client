@@ -117,6 +117,56 @@ func TestSaveLoginKeyTightensExistingFilePermissions(t *testing.T) {
 	}
 }
 
+// TestSaveIdentityFieldRejectsOversizedValue is the round-46 regression test for the MAJOR finding
+// that SaveLoginKey/SaveGameUid/SaveUsername persisted a server-supplied value with no length cap
+// at all -- the same wire-tag-equivalence gap round 45 closed for mail.go's uid field: GetString
+// (sfsobject.go) can't distinguish the 65535-byte-capped sfsUtfString wire tag from the far larger
+// sfsText tag, both of which decode to the same Go string, so a server response tagging
+// loginKey/gameUid/un/gameUserName as sfsText could previously smuggle an oversized value straight
+// into the in-memory identity AND onto disk -- and since BuildLoginParams/DoCrossServerLogin
+// unconditionally re-embed these persisted values into every future login request via
+// PutUtfString (hard-capped at 65535 bytes by writeUtfString), an oversized value would then
+// permanently break every subsequent login attempt until an operator manually intervened. Proves
+// all three Save* methods reject a one-byte-over-cap value with an error, leaving BOTH the
+// in-memory field and the on-disk state file untouched (still holding whatever value, if any, was
+// there before) rather than corrupting either.
+func TestSaveIdentityFieldRejectsOversizedValue(t *testing.T) {
+	oversized := strings.Repeat("a", maxIdentityFieldLen+1)
+
+	cases := []struct {
+		name   string
+		save   func(d *deviceIdentity, v string) error
+		get    func(d *deviceIdentity) string
+		path   func() string
+		preset string
+	}{
+		{"loginKey", (*deviceIdentity).SaveLoginKey, func(d *deviceIdentity) string { return d.LoginKey }, loginKeyStatePath, "previous-good-key"},
+		{"gameUid", (*deviceIdentity).SaveGameUid, func(d *deviceIdentity) string { return d.GameUid }, gameUidStatePath, "previous-good-uid"},
+		{"username", (*deviceIdentity).SaveUsername, func(d *deviceIdentity) string { return d.Username }, usernameStatePath, "previous-good-name"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("HOME", dir)
+
+			d := &deviceIdentity{LoginKey: tt.preset, GameUid: tt.preset, Username: tt.preset}
+
+			err := tt.save(d, oversized)
+			if err == nil {
+				t.Fatal("expected an error for a value one byte over maxIdentityFieldLen, got nil")
+			}
+
+			if got := tt.get(d); got != tt.preset {
+				t.Errorf("in-memory field = %q (len %d), want it to stay at the previous value %q -- an oversized value must not corrupt the in-memory identity", got, len(got), tt.preset)
+			}
+			if _, statErr := os.Stat(tt.path()); !os.IsNotExist(statErr) {
+				t.Errorf("state file exists at %s, want no file written for a rejected oversized value", tt.path())
+			}
+		})
+	}
+}
+
 // TestLoadOrCreateDeviceIdentityWarnsOnLoosePermissions mirrors config_test.go's
 // TestLoadSessionConfigWarnsOnLoosePermissions -- the persisted loginKey is at least as sensitive
 // as the session config (see warnIfLoosePermissions' doc comment), so loading the device identity

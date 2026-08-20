@@ -398,12 +398,37 @@ func saveStateFile(path, data string) error {
 	return atomicWriteStateFile(path, data)
 }
 
+// maxIdentityFieldLen bounds how long a value SaveLoginKey/SaveGameUid/SaveUsername will accept --
+// round-46 fix, the same wire-tag-equivalence gap round 45 closed for mail.go's uid field:
+// GetString (sfsobject.go) can't distinguish the 65535-byte-capped sfsUtfString wire tag from the
+// ~64MiB-capped sfsText tag, both of which decode to the same Go string, so a server response
+// tagging loginKey/gameUid/un/gameUserName as sfsText could previously smuggle an arbitrarily large
+// value straight into d.LoginKey/d.GameUid/d.Username and onto disk. Two concrete harms: an
+// unbounded-size write to a credential state file (saveStateFile below has no size check of its
+// own), and -- more seriously -- BuildLoginParams/DoCrossServerLogin unconditionally re-embed
+// these persisted values into every future login/cross-server-login request via PutUtfString,
+// whose underlying writeUtfString (sfsobject.go) hard-rejects any string over 65535 bytes at
+// encode time -- so an oversized persisted value would permanently break every subsequent login
+// attempt using that identity, in-memory for the rest of the current session and on disk for every
+// future run, until an operator manually intervened. Rejecting before either the in-memory field
+// assignment or the disk write (keeping the previous, presumably-valid value) closes both harms at
+// once, exactly mirroring mail.go's "skip a malformed/hostile field, don't let it corrupt state"
+// discipline. Set at the wire format's own hard limit, matching maxMailUidLen's own rationale: any
+// value this accepts is guaranteed re-encodable later.
+const maxIdentityFieldLen = 65535
+
 func (d *deviceIdentity) SaveLoginKey(key string) error {
+	if len(key) > maxIdentityFieldLen {
+		return fmt.Errorf("identity: loginKey too long to persist (%d bytes, max %d)", len(key), maxIdentityFieldLen)
+	}
 	d.LoginKey = key
 	return saveStateFile(loginKeyStatePath(), key)
 }
 
 func (d *deviceIdentity) SaveGameUid(uid string) error {
+	if len(uid) > maxIdentityFieldLen {
+		return fmt.Errorf("identity: gameUid too long to persist (%d bytes, max %d)", len(uid), maxIdentityFieldLen)
+	}
 	d.GameUid = uid
 	return saveStateFile(gameUidStatePath(), uid)
 }
@@ -411,6 +436,9 @@ func (d *deviceIdentity) SaveGameUid(uid string) error {
 // SaveUsername persists the SFS login response's `un` field so the next run
 // can present it instead of an empty username.
 func (d *deviceIdentity) SaveUsername(un string) error {
+	if len(un) > maxIdentityFieldLen {
+		return fmt.Errorf("identity: username too long to persist (%d bytes, max %d)", len(un), maxIdentityFieldLen)
+	}
 	d.Username = un
 	return saveStateFile(usernameStatePath(), un)
 }

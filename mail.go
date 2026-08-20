@@ -144,6 +144,22 @@ const maxMailRewardTypesPerRun = 300
 // responds, so 300 * 8s bounds the worst case at ~40 minutes instead of up to ~4.4 hours.
 const maxMailBatchesPerLoop = 300
 
+// maxMailRewardBatchesPerRun bounds the TOTAL number of mail.reward.batch round trips
+// ClaimAllMail's reward-claim loop will issue, SUMMED ACROSS ALL distinct mail types in one run --
+// round-46 fix, closing a gap on a third axis distinct from maxMailRewardTypesPerRun (distinct
+// TYPE count) and maxMailBatchesPerLoop (batches PER TYPE, reset fresh for every type): neither of
+// those two caps bounds the sum across the whole outer loop. A hostile peer can spread up to
+// maxAggregateMailPerFetch(2000) unclaimed-reward mail entries across up to
+// maxMailRewardTypesPerRun(300) distinct types (~6-7 entries per type) each with a uid long
+// enough (up to maxMailUidLen=65535, still well over maxUIDsBytes=60000) to force
+// batchByCountAndBytes into one uid per batch -- with only ~6-7 batches per type, no single type
+// ever reaches maxMailBatchesPerLoop's own 300-batch truncation, but the SUM across 300 types
+// still reaches roughly 2000 mail.reward.batch round trips, each able to cost up to a full
+// defaultCmdTimeout (8s, conn.go) against a peer that simply stalls -- ~4.4 hours, exactly the
+// threat maxMailBatchesPerLoop's own doc comment above claims is bounded to "~40 minutes instead
+// of up to ~4.4 hours", a claim that only holds per type. Same value/rationale as its siblings.
+const maxMailRewardBatchesPerRun = 300
+
 // maxMailUidLen bounds how long a single mail entry's `uid` field may be before ListMail's
 // per-entry loop below skips it (with a Warn) instead of appending it to `all` -- round-45 fix.
 // GetString (sfsobject.go) makes no distinction between the sfsUtfString wire tag (length-capped
@@ -309,6 +325,21 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		lastUid := msg.Params.GetString("lastUid")
 		if lastUid == "" {
 			slog.Warn("list mail: response reported more=true but lastUid is missing/empty, stopping pagination instead of looping on a stale cursor", "page", page, "collectedSoFar", len(all))
+			break
+		}
+		// Round-46 fix: lastUid gets re-sent verbatim as the next page's clientseq via
+		// PutUtfString (writeUtfString's own 65535-byte hard cap), but GetString can't
+		// distinguish the 65535-byte-capped sfsUtfString wire tag from the far larger sfsText
+		// tag -- the identical wire-tag-equivalence gap round 45 closed for the per-entry mail
+		// uid field (maxMailUidLen, above). Left unguarded here, an oversized lastUid would
+		// cause a purely local encode failure on the NEXT page request that sendStageError
+		// (conn.go) deliberately classifies the same as a genuine dead connection, aborting the
+		// rest of ClaimAllMail and, via CollectAll's containsNonTimeoutNetError abort, every
+		// other -collect action scheduled after it -- even though the connection itself is
+		// healthy. Treated the same as a missing/empty lastUid: stop pagination with whatever
+		// was already collected, rather than sending an unencodable cursor.
+		if len(lastUid) > maxMailUidLen {
+			slog.Warn("list mail: response's lastUid exceeds the mail uid length cap, stopping pagination instead of re-sending an unencodable cursor", "page", page, "lastUidLen", len(lastUid), "cap", maxMailUidLen, "collectedSoFar", len(all))
 			break
 		}
 		clientseq = lastUid
@@ -550,12 +581,24 @@ func ClaimAllMail(conn *GameConn) error {
 			"count", len(mailTypes), "cap", maxMailRewardTypesPerRun)
 		mailTypes = mailTypes[:maxMailRewardTypesPerRun]
 	}
+	// Round-46 fix: totalRewardBatches counts mail.reward.batch round trips SUMMED across every
+	// distinct type in mailTypes, checked before each one is sent -- see
+	// maxMailRewardBatchesPerRun's own doc comment for why maxMailRewardTypesPerRun (type count)
+	// and maxMailBatchesPerLoop (batches per type, reset fresh each iteration) don't bound this on
+	// their own.
+	totalRewardBatches := 0
 rewardLoop:
 	for _, mailType := range mailTypes {
 		uids := byType[mailType]
 		slog.Info("claiming mail reward", "type", mailType, "count", len(uids))
 		offset := 0
 		for _, batch := range truncateMailBatches(batchByCountAndBytes(uids, readBatchSize, maxUIDsBytes), fmt.Sprintf("reward-claim type=%d", mailType)) {
+			if totalRewardBatches >= maxMailRewardBatchesPerRun {
+				slog.Warn("total mail.reward.batch round trips across all types exceeds sanity ceiling; stopping reward-claim loop",
+					"totalBatches", totalRewardBatches, "cap", maxMailRewardBatchesPerRun)
+				break rewardLoop
+			}
+			totalRewardBatches++
 			rewardParams := NewSFSObject()
 			rewardParams.PutUtfString("uids", strings.Join(batch, ","))
 			rewardParams.PutInt("type", mailType)

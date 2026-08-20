@@ -103,6 +103,58 @@ func TestPkcs7UnpadRejectsPadLenAboveBlockSize(t *testing.T) {
 	}
 }
 
+// TestPkcs7UnpadPadLenEqualsBlockSizeBoundary is the round-46 regression test for the MINOR
+// finding that pkcs7Unpad's `padLen > blockSize` guard (crypto.go) had no exact-boundary test:
+// TestPkcs7UnpadRejectsPadLenAboveBlockSize above only proves rejection at padLen=200, far past
+// the 16-byte block size, leaving the guard's own strict `>` (not `>=`) unverified at padLen=16
+// (must be ACCEPTED -- it's the pad length pkcs7Pad itself produces whenever the plaintext is
+// already block-aligned, i.e. a full block of pure padding) versus padLen=17 (must be REJECTED,
+// one byte past the block size).
+func TestPkcs7UnpadPadLenEqualsBlockSizeBoundary(t *testing.T) {
+	key := md5HexKey("test-salt-value-1234")
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	bs := block.BlockSize()
+
+	t.Run("padLen exactly blockSize: accepted, a full block of padding is stripped", func(t *testing.T) {
+		// A plaintext whose length is already a multiple of bs forces pkcs7Pad to append an
+		// entire extra block of padLen=bs bytes (crypto.go: padLen := blockSize -
+		// len(data)%blockSize, and len(data)%blockSize == 0 here), the natural way padLen==bs
+		// arises from this codebase's own encoder -- so this goes through the real
+		// aesECBEncryptPKCS7/pkcs7Pad path rather than being hand-crafted.
+		plain := []byte("exactly-one-block")[:bs]
+		ct, err := aesECBEncryptPKCS7(plain, key)
+		if err != nil {
+			t.Fatalf("encrypt: %v", err)
+		}
+		pt, err := aesECBDecryptPKCS7(ct, key)
+		if err != nil {
+			t.Fatalf("expected padLen==blockSize(%d) to be accepted, got error: %v", bs, err)
+		}
+		if !bytes.Equal(pt, plain) {
+			t.Errorf("round trip mismatch: got %q want %q", pt, plain)
+		}
+	})
+
+	t.Run("padLen one past blockSize: rejected", func(t *testing.T) {
+		// Two full blocks so len(data) >= padLen(17) and the earlier `padLen > len(data)` guard
+		// can't also explain a rejection -- isolates the `padLen > blockSize` check specifically.
+		plain := make([]byte, bs*2)
+		plain[len(plain)-1] = byte(bs + 1)
+
+		ct := make([]byte, len(plain))
+		for i := 0; i < len(plain); i += bs {
+			block.Encrypt(ct[i:i+bs], plain[i:i+bs])
+		}
+
+		if _, err := aesECBDecryptPKCS7(ct, key); err == nil {
+			t.Fatalf("expected error for pad length %d (blockSize+1), got nil", bs+1)
+		}
+	})
+}
+
 // TestPkcs7UnpadRejectsZeroPadLen is the round-41 regression test for the MINOR finding that
 // pkcs7Unpad's `padLen <= 0` half of its guard (`if padLen <= 0 || padLen > len(data)`) had zero
 // test coverage -- confirmed via mutation testing (weakening the guard to only check
