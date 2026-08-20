@@ -38,6 +38,59 @@ func newTestBuilding(uuid int64, bId, lv int32) Building {
 	return Building{Raw: newTestBuildingSFS(uuid, bId, lv)}
 }
 
+// TestFetchBuildingsSurvivesCorruptPush is the round-49 regression test for the MAJOR finding that
+// FetchBuildings' read loop used an inverted-polarity net.Error check (only Timeout()==true was
+// treated as benign), so a plain, non-net.Error DecodeObject parse failure on one malformed/
+// unrelated push was misclassified identically to a genuine dead connection and aborted the whole
+// building/visitor accumulation early -- the same class of bug login.go's waitForInitPush/waitFor
+// had before their own round-48/49 fixes. The fake server here writes one well-framed-but-
+// undecodable packet (mustEncodeCorruptPacket, decode_test.go) directly to the connection, then
+// sends a normal `init` push. A short overall FetchBuildings timeout keeps the test fast: since the
+// post-init deadline reset is capped by the original deadline (capDeadline), the whole call
+// completes via a benign per-read timeout shortly after the init push is processed, without
+// needing to wait out the full 3-second post-init window.
+func TestFetchBuildingsSurvivesCorruptPush(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
+			return
+		}
+		params := NewSFSObject()
+		arr := NewSFSArray()
+		arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
+		params.PutSFSArray("building_new", arr)
+		_ = server.SendExtension("init", params)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	buildings, _, err := FetchBuildings(client, 300*time.Millisecond)
+
+	slog.SetDefault(orig)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake server goroutine never finished")
+	}
+
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil (a single corrupt/undecodable push must not abort the fetch -- the stream stays in sync and the following valid init push must still be read)", err)
+	}
+	if len(buildings) != 1 || buildings[0].Uuid() != 111 {
+		t.Fatalf("buildings = %+v, want exactly one building with uuid 111 (parsed from the init push after surviving the corrupt one)", buildings)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "failed to read/decode an envelope") {
+		t.Errorf("expected a Warn about the corrupt push, got:\n%s", logged)
+	}
+}
+
 // TestFetchBuildingsInitPushParsesBuildingsAndVisitors covers FetchBuildings' main documented
 // path: a bare `init` bootstrap push carrying `building_new` and `visitor` -- ParseInitBuildings'
 // doc comment explains this, not push.init.build/defaultBuilds, is the field that actually

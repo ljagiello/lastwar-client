@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -757,6 +758,32 @@ func writeMalformedOversizedFrame(server *GameConn) {
 	_, _ = server.conn.Write(hdr.Bytes())
 }
 
+// malformedZlibBombPacket lazily builds and caches writeMalformedZlibBombFrame's packet bytes --
+// round-49 fix: encoding a 64MB+4KB all-zero plaintext (even though it compresses down to a tiny
+// wire size) is genuinely CPU-heavy under -race (confirmed several seconds by
+// mainZeroBuildingsFallbackFakeGameServer's own pre-existing doc comment below), and computing it
+// freshly INSIDE a fake server's connection-handling goroutine -- as this file previously did --
+// burns a chunk of the client's own read deadline before the frame is even sent, tightening race
+// windows the caller's test timing wasn't written to tolerate. sync.Once computes it exactly once,
+// on first use, so every caller after the first pays no compression cost at all -- eliminating the
+// CPU-bound delay from ever landing inside a timing-critical connection window.
+var (
+	malformedZlibBombPacketOnce  sync.Once
+	malformedZlibBombPacketBytes []byte
+)
+
+func malformedZlibBombPacket() []byte {
+	malformedZlibBombPacketOnce.Do(func() {
+		plain := bytes.Repeat([]byte{0}, maxFrameSize+4096)
+		packet, err := EncodePacket(plain)
+		if err != nil {
+			return
+		}
+		malformedZlibBombPacketBytes = packet
+	})
+	return malformedZlibBombPacketBytes
+}
+
 // writeMalformedZlibBombFrame writes a single legitimately-framed, zlib-compressed packet whose
 // declared (compressed) length is small but whose DECOMPRESSED output exceeds maxFrameSize --
 // packet.go's "zlib inflated output exceeds" guard. Unlike writeMalformedOversizedFrame's guard,
@@ -768,9 +795,8 @@ func writeMalformedOversizedFrame(server *GameConn) {
 // writeMalformedOversizedFrame at any call site that specifically needs shouldAbortBeforeInteractive
 // to take its non-fatal branch.
 func writeMalformedZlibBombFrame(server *GameConn) {
-	plain := bytes.Repeat([]byte{0}, maxFrameSize+4096)
-	packet, err := EncodePacket(plain)
-	if err != nil {
+	packet := malformedZlibBombPacket()
+	if packet == nil {
 		return
 	}
 	_, _ = server.conn.Write(packet)
@@ -799,6 +825,29 @@ func mainFetchBuildingsFailureFakeGameServer() func(*GameConn) {
 			return
 		}
 		writeMalformedZlibBombFrame(server)
+		// Round-49 fix: buildings.go's FetchBuildings now survives a single malformed/
+		// undecodable push instead of returning it as a fatal error (mirroring login.go's
+		// waitForInitPush's own round-48 fix), so the malformed frame above is no longer
+		// enough to make FetchBuildings' fallback call return at all -- and its own read
+		// loop uses a fresh 12s deadline (this fallback isn't preceded by a real `init`
+		// push here, that's the whole reason this fallback fires: Login()'s own
+		// waitForInitPush already collected 0 buildings from the `init` push sent above).
+		// Keep reading (and discarding) instead of blocking on just ONE more read: an
+		// abandoned/unreferenced connection has been observed to produce a spurious EOF
+		// instead of the clean per-read timeout FetchBuildings' benign "waited long enough"
+		// completion path expects, and a SINGLE blocking read isn't enough to prevent that
+		// either -- Login()'s own background heartbeat (conn.go's StartHeartbeat, started
+		// once login succeeds) sends a PingPong roughly every 4s, which completes a single
+		// blocked ReadEnvelope call here and lets this goroutine return anyway (the scenario
+		// that made this flaky specifically under -race, whose slower scheduling pushes the
+		// client's own completion past the 4s heartbeat mark often enough to matter). Looping
+		// keeps discarding every heartbeat indefinitely so the connection stays genuinely
+		// open until the 12s deadline elapses and FetchBuildings returns normally.
+		for {
+			if _, err := server.ReadEnvelope(); err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -823,6 +872,15 @@ func mainFetchBuildingsFailureFakeGameServer() func(*GameConn) {
 // shouldAbortBeforeInteractive abort unconditionally, defeating this test's whole premise. The
 // zlib-bomb decode failure remains a plain, non-net.Error error over an otherwise-synchronized
 // stream, so it's still the right trigger for exercising the non-fatal branch this test targets.
+//
+// Round-49 note: buildings.go's FetchBuildings now survives a single malformed/undecodable push
+// instead of returning it as a fatal error (mirroring login.go's waitForInitPush's own round-48
+// fix), so writeMalformedZlibBombFrame's error no longer propagates out of FetchBuildings' fallback
+// call at all -- this test's assertions were updated to match: it now proves the malformed push is
+// survived (a Warn logged, no fatal error) and interactive is reached because nothing failed at
+// all, rather than proving a non-fatal error was tolerated. Runs the fallback's full 12s deadline
+// (no further push arrives for FetchBuildings' own read loop to shortcut on), so this test is
+// necessarily slow.
 func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
@@ -860,11 +918,11 @@ func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t
 	}
 
 	log := stderr.String()
-	if !strings.Contains(log, "fetch buildings failed") {
-		t.Errorf("subprocess stderr = %s\nwant it to log FetchBuildings' fallback failure", log)
+	if strings.Contains(log, "fetch buildings failed") {
+		t.Errorf("subprocess stderr = %s\nwant NO FetchBuildings fallback failure logged -- round 49's fix means a single malformed push is survived, not fatal, so the fallback should complete successfully once its 12s deadline elapses", log)
 	}
 	if !strings.Contains(log, "zlib inflated output exceeds") {
-		t.Errorf("subprocess stderr = %s\nwant the logged error to be the plain decode failure (not a net.Error timeout) -- otherwise this test isn't actually exercising the non-net-error path shouldAbortBeforeInteractive exists for", log)
+		t.Errorf("subprocess stderr = %s\nwant the malformed push's decode failure to still be logged (as a Warn, not a fatal error) -- otherwise this test isn't actually exercising the malformed-push-survival path", log)
 	}
 	if !strings.Contains(log, "interactive mode: reading commands") {
 		t.Errorf("subprocess stderr = %s\nwant it to contain RunInteractive's startup log -- proof main()'s FetchBuildings fallback call site actually reached RunInteractive instead of unconditionally aborting on the fetch failure", log)

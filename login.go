@@ -32,6 +32,19 @@ type LoginOptions struct {
 	Handshake bool   // experimental: send the vanilla SFS2X pre-Login Handshake (see conn.go:DoHandshake)
 }
 
+// String/GoString are the round-49 regression fix for the MINOR finding that LoginOptions --
+// whose Email field carries the operator's real account email, a value sfsobject.go's
+// sensitiveSFSKeys map already classifies as sensitive under the "mail" key -- had no
+// String()/GoString() redaction-by-construction, the same class of gap round 47/48 closed for
+// LoginToken/deviceIdentity/SessionConfig/GSLOpt/LoginParamsInput. opts is held live across
+// Login()'s entire body; every current call site that logs anything about the email logs only
+// len(opts.Email) (the emailLen convention), never opts itself, so this is defense-in-depth for a
+// future diagnostic line that would otherwise print the operator's real email address in clear
+// text via Go's default struct formatter. Rated minor (like GSLOpt/LoginParamsInput) rather than
+// major, since Email is PII rather than a live bearer credential.
+func (o LoginOptions) String() string   { return "[REDACTED LoginOptions]" }
+func (o LoginOptions) GoString() string { return o.String() }
+
 // gslOptFor picks the GSL getserverlist opt for a device identity, per
 // dossier §02.2's opt table, refined empirically:
 //
@@ -963,7 +976,32 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 		conn.conn.SetReadDeadline(time.Now().Add(remaining))
 		env, err := conn.ReadEnvelope()
 		if err != nil {
-			return nil, err
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				// A genuine per-read timeout -- return it immediately, unchanged from this
+				// function's original behavior. Do NOT merely `continue` here: a caller-
+				// injected timeout net.Error (e.g. a test double simulating a read timeout)
+				// may not actually consume real wall-clock time the way a genuine socket
+				// deadline would, so looping back to the top-of-loop remaining<=0 check
+				// could busy-spin for the rest of the window instead of returning promptly.
+				return nil, err
+			}
+			if containsNonTimeoutNetError(err) {
+				return nil, err
+			}
+			// Round-49 fix: a plain, non-net.Error ReadEnvelope failure (e.g. a
+			// DecodeObject parse failure on one malformed/unrelated push) means
+			// ReadPacket already fully consumed that frame's bytes off the wire
+			// before DecodeObject ever ran -- the stream stays in sync, so this is
+			// not evidence the connection is dead, mirroring waitForInitPush's
+			// identical round-48 fix. Previously ANY such error aborted the caller's
+			// single, non-retried wait outright -- login.go's Login and
+			// crossserver.go's DoCrossServerLogin's raw login-response waits, and
+			// every sendAndWait/waitForCmd caller across mail.go/alliance.go/
+			// visitors.go/buildings.go/interactive.go -- even though the genuinely
+			// awaited response/push might arrive on the very next read.
+			slog.Warn("waitFor: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err)
+			continue
 		}
 		if pred(env) {
 			return env, nil

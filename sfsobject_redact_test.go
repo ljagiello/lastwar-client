@@ -1408,6 +1408,46 @@ func TestStringRedactedFormatBudgetBoundary(t *testing.T) {
 	})
 }
 
+// TestChargeUpToAlreadyExhaustedBudget is the round-49 regression test for the MINOR finding that
+// chargeUpTo's already-exhausted-budget branch (`if fb.remaining <= 0 { return 0, true }`) had zero
+// test coverage of any kind, confirmed via go tool cover (execution count 0). This branch is only
+// reached when a PRIOR key/field in the same object has already fully exhausted the shared
+// formatBudget via charge() before a later bare-string/primitive-array field reaches chargeUpTo --
+// every existing StringRedacted()-level budget test either never calls chargeUpTo after exhaustion
+// (int-only fields exhaust via charge(), which breaks the enclosing loop before reaching a later
+// field) or calls chargeUpTo while remaining is still positive. Calls chargeUpTo directly on a
+// formatBudget already driven to remaining==0, rather than relying on a specific StringRedacted()
+// field ordering to reach it indirectly.
+func TestChargeUpToAlreadyExhaustedBudget(t *testing.T) {
+	fb := newFormatBudget()
+	fb.remaining = 0
+
+	allowed, ranOut := fb.chargeUpTo(5)
+
+	if allowed != 0 {
+		t.Errorf("allowed = %d, want 0 (an already-exhausted budget must not charge anything)", allowed)
+	}
+	if !ranOut {
+		t.Error("ranOut = false, want true (an already-exhausted budget must report ranOut)")
+	}
+}
+
+// TestStringRedactedBudgetedNilReceiver is the round-49 regression test for the MINOR finding that
+// stringRedactedBudgeted's own `if o == nil` guard is currently unreachable dead code and has zero
+// test coverage, confirmed via go tool cover (execution count 0). Both of its call sites --
+// SFSObject.StringRedacted() and formatSFSValueRedacted's *SFSObject case -- already nil-check and
+// return "<nil>" before ever calling stringRedactedBudgeted, so nesting a nil object inside an
+// SFSValue/SFSArray (the existing TestNilNestedValueDoesNotPanic's technique) never reaches this
+// guard either -- formatSFSValueRedacted's own nil check intercepts first. Calls the unexported
+// method directly on a nil receiver to actually exercise it.
+func TestStringRedactedBudgetedNilReceiver(t *testing.T) {
+	var o *SFSObject
+	got := o.stringRedactedBudgeted(newFormatBudget())
+	if got != "<nil>" {
+		t.Errorf("stringRedactedBudgeted on a nil receiver = %q, want %q", got, "<nil>")
+	}
+}
+
 // TestStringRedactedTruncatesLargeStringAtRuneBoundary is the round-32 regression test for the
 // MINOR finding that formatSFSValueRedacted's bare-string truncation path (round 29's proportional-
 // budget-charging fix) sliced at a raw byte offset with no UTF-8 rune-boundary awareness, so a

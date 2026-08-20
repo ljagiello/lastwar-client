@@ -55,6 +55,25 @@ func TestGslOptFor(t *testing.T) {
 	}
 }
 
+// TestLoginOptionsStringGoStringRedact is the round-49 regression test for the MINOR finding that
+// LoginOptions -- whose Email field carries the operator's real account email -- had no
+// String()/GoString() redaction, the same class of gap rounds 47-48 closed for every other
+// credential/PII-carrying struct in this codebase.
+func TestLoginOptionsStringGoStringRedact(t *testing.T) {
+	const liveEmail = "fake-live-email-must-not-leak@example.com"
+	o := LoginOptions{Email: liveEmail}
+
+	if s := o.String(); strings.Contains(s, liveEmail) {
+		t.Errorf("String() = %q, must not contain the live email", s)
+	}
+	if s := o.GoString(); strings.Contains(s, liveEmail) {
+		t.Errorf("GoString() = %q, must not contain the live email", s)
+	}
+	if s := fmt.Sprintf("%+v", struct{ O LoginOptions }{O: o}); strings.Contains(s, liveEmail) {
+		t.Errorf("fmt.Sprintf(%%+v, wrapper) = %q, must not contain the live email nested in .O", s)
+	}
+}
+
 // TestCapOversizedIdentityFieldExactBoundary is the round-47 regression test for
 // capOversizedIdentityField (login.go), the shared guard closing the MAJOR finding that
 // zone/gameUid/accessTok -- unlike loginKey/gameUid/username, which route through

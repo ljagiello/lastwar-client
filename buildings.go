@@ -518,7 +518,19 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				break // expected: waited long enough for this window, move on with what we have
 			}
-			return buildings, visitors, fmt.Errorf("read building list: %w", err)
+			if containsNonTimeoutNetError(err) {
+				return buildings, visitors, fmt.Errorf("read building list: %w", err)
+			}
+			// Round-49 fix: a plain, non-net.Error ReadEnvelope failure (e.g. a DecodeObject
+			// parse failure on one malformed/unrelated push) means ReadPacket already fully
+			// consumed that frame's bytes off the wire before DecodeObject ever ran -- the
+			// stream stays in sync, so this is not evidence the connection is dead, mirroring
+			// login.go's identical round-48/49 fixes (waitForInitPush, waitFor). Previously
+			// this loop returned immediately on ANY such error, silently truncating the
+			// buildings/visitors accumulation for this whole fetch window instead of simply
+			// skipping the one malformed push and continuing to read.
+			slog.Warn("read building list: failed to read/decode an envelope; continuing to wait, not treating this as a dead connection", "error", err)
+			continue
 		}
 		msg, ok := env.AsExtension()
 		if !ok {

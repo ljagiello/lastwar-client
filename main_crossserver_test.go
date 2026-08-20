@@ -1091,6 +1091,35 @@ func crossServerFetchBuildingsFailureServer() func(*GameConn) {
 			return
 		}
 		writeMalformedZlibBombFrame(server)
+		// Round-49 fix: FetchBuildings' read loop now survives a single malformed/undecodable
+		// push (buildings.go's own round-49 fix, mirroring login.go's waitForInitPush) instead
+		// of returning it as a fatal error -- so the malformed frame above is no longer enough
+		// to make FetchBuildings return at all; without a follow-up push, the connection would
+		// just sit here until FetchBuildings' own 15s deadline elapses (a slow, non-error
+		// timeout). Sending a normal empty `init` push here lets FetchBuildings complete
+		// quickly and successfully instead, which is exactly the round-49 fix's real value: the
+		// malformed push no longer derails an otherwise-healthy fetch.
+		_ = server.SendExtension("init", NewSFSObject())
+		// Keep reading (and discarding) instead of letting this goroutine return or blocking on
+		// just ONE more read: FetchBuildings' capDeadline shrinks its remaining wait to 3s after
+		// the init push above (buildings.go), during which it keeps this connection open waiting
+		// for trailing push.init.build-style pushes. If this goroutine simply returned here, the
+		// connection would become otherwise unreferenced with the test's own server-side handling
+		// done, and the client's read during that 3s window has been observed to see a genuine
+		// EOF rather than a clean per-read timeout -- turning FetchBuildings' benign "waited long
+		// enough" completion path into a spurious fatal one. A SINGLE blocking read isn't enough
+		// either: the client's own background heartbeat (conn.go's StartHeartbeat, started once
+		// Login/DoCrossServerLogin succeeds) sends a PingPong roughly every 4s, which completes a
+		// single blocked ReadEnvelope call here and lets this goroutine return anyway -- exactly
+		// the scenario that made this flaky specifically under -race (whose slower scheduling
+		// pushes the client's own 3s completion past the 4s heartbeat mark often enough to matter).
+		// Looping keeps discarding every heartbeat (and anything else) indefinitely, so the
+		// connection stays genuinely referenced and open until the test process itself exits.
+		for {
+			if _, err := server.ReadEnvelope(); err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -1112,6 +1141,15 @@ func crossServerFetchBuildingsFailureServer() func(*GameConn) {
 // writeMalformedZlibBombFrame, not writeMalformedOversizedFrame -- see that function's own doc
 // comment (main_test.go) for why the oversized-declared-length error no longer fits this test's
 // non-fatal-branch premise after packet.go's round-43 fix.
+//
+// Round-49 note: buildings.go's FetchBuildings now survives a single malformed/undecodable push
+// instead of returning it as a fatal error (mirroring login.go's waitForInitPush's own round-48
+// fix), so writeMalformedZlibBombFrame's error no longer propagates out of FetchBuildings at all
+// -- crossServerFetchBuildingsFailureServer now follows it with a normal empty `init` push so
+// FetchBuildings still completes (successfully) instead of burning its full 15s deadline. This
+// test's assertions were updated to match: it now proves the malformed push is survived (a Warn
+// logged, no fatal error) and interactive is reached because nothing failed at all, rather than
+// proving a non-fatal error was tolerated.
 func TestRunCrossServerTestFetchBuildingsFailureWithInteractiveReachesRunInteractive(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
@@ -1147,16 +1185,35 @@ func TestRunCrossServerTestFetchBuildingsFailureWithInteractiveReachesRunInterac
 	}
 
 	log := stderr.String()
-	if !strings.Contains(log, "fetch buildings failed") {
-		t.Errorf("subprocess stderr = %s\nwant it to log FetchBuildings' failure", log)
+	if strings.Contains(log, "fetch buildings failed") {
+		t.Errorf("subprocess stderr = %s\nwant NO FetchBuildings failure logged -- round 49's fix means a single malformed push is survived, not fatal, so the subsequent valid init push should let FetchBuildings complete successfully", log)
 	}
 	if !strings.Contains(log, "zlib inflated output exceeds") {
-		t.Errorf("subprocess stderr = %s\nwant the logged error to be the plain decode failure (not a net.Error timeout) -- otherwise this test isn't actually exercising the non-net-error path shouldAbortBeforeInteractive exists for", log)
+		t.Errorf("subprocess stderr = %s\nwant the malformed push's decode failure to still be logged (as a Warn, not a fatal error) -- otherwise this test isn't actually exercising the malformed-push-survival path", log)
 	}
 	if !strings.Contains(log, "interactive mode: reading commands") {
-		t.Errorf("subprocess stderr = %s\nwant it to contain %q -- this is the actual regression this test targets: before this round's fix, FetchBuildings' error triggered os.Exit(1) before RunInteractive was ever reached, so this line would never appear", log, "interactive mode: reading commands")
+		t.Errorf("subprocess stderr = %s\nwant it to contain %q -- this is the actual regression this test targets: before round 26's fix, FetchBuildings' error triggered os.Exit(1) before RunInteractive was ever reached, so this line would never appear", log, "interactive mode: reading commands")
 	}
 	if !strings.Contains(log, "stat control pipe failed") {
 		t.Errorf("subprocess stderr = %s\nwant RunInteractive's own bogus-control-pipe failure -- confirms the exit code 1 came from there, not from some earlier, different failure", log)
+	}
+}
+
+// TestCrossServerTestOptsStringGoStringRedact is the round-49 regression test for the MAJOR
+// finding that crossServerTestOpts -- which carries live credential-shaped fields rt/at/
+// shumeiBoxId/deviceID -- had no String()/GoString() redaction, the same class of gap rounds
+// 47-48 closed for every other credential-carrying struct in this codebase.
+func TestCrossServerTestOptsStringGoStringRedact(t *testing.T) {
+	const liveRefreshToken = "FAKE-LIVE-REFRESH-TOKEN-must-not-leak-jkl012"
+	o := crossServerTestOpts{ip: "203.0.113.9", rt: liveRefreshToken, at: "tok-1", shumeiBoxId: "smid-1", deviceID: "dev-1"}
+
+	if s := o.String(); strings.Contains(s, liveRefreshToken) {
+		t.Errorf("String() = %q, must not contain the live refresh token", s)
+	}
+	if s := o.GoString(); strings.Contains(s, liveRefreshToken) {
+		t.Errorf("GoString() = %q, must not contain the live refresh token", s)
+	}
+	if s := fmt.Sprintf("%+v", struct{ O crossServerTestOpts }{O: o}); strings.Contains(s, liveRefreshToken) {
+		t.Errorf("fmt.Sprintf(%%+v, wrapper) = %q, must not contain the live refresh token nested in .O", s)
 	}
 }

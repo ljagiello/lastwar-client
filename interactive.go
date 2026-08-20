@@ -218,6 +218,18 @@ func RunInteractive(conn *GameConn, controlPipe string) {
 	}
 }
 
+// statControlPipe/openControlPipeFile indirect os.Stat/os.Open through package vars, mirroring
+// login.go's dialGame seam -- so a test can substitute a counting wrapper to prove
+// statControlPipeWithRetry/openControlPipeWithRetry make EXACTLY controlPipeRetries+1 attempts
+// before giving up (round 49 regression test for the MINOR finding that only a generous
+// wall-clock upper bound was ever asserted, not the exact attempt count -- a future edit changing
+// either loop's `attempt <= controlPipeRetries`/`attempt < controlPipeRetries` to a `<`/`<=`
+// off-by-one would silently give up one attempt early and go undetected, since the ~50ms
+// difference is invisible against a multi-second wall-clock bound). Production code always
+// resolves these to the real os.Stat/os.Open; only tests ever reassign them.
+var statControlPipe = os.Stat
+var openControlPipeFile = os.Open
+
 // statControlPipeWithRetry stats controlPipe, retrying up to controlPipeRetries times (with a
 // controlPipeRetryDelay pause between attempts) before giving up -- see controlPipeRetries' own
 // doc comment for why a single os.Stat failure here must not be immediately fatal the way it used
@@ -226,7 +238,7 @@ func statControlPipeWithRetry(controlPipe string) (os.FileInfo, error) {
 	var fi os.FileInfo
 	var err error
 	for attempt := 0; attempt <= controlPipeRetries; attempt++ {
-		fi, err = os.Stat(controlPipe)
+		fi, err = statControlPipe(controlPipe)
 		if err == nil {
 			return fi, nil
 		}
@@ -245,7 +257,7 @@ func openControlPipeWithRetry(controlPipe string) (*os.File, error) {
 	var f *os.File
 	var err error
 	for attempt := 0; attempt <= controlPipeRetries; attempt++ {
-		f, err = os.Open(controlPipe)
+		f, err = openControlPipeFile(controlPipe)
 		if err == nil {
 			return f, nil
 		}

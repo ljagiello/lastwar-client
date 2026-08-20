@@ -333,6 +333,51 @@ func TestWaitForCmdSkipsUnmatchedPushes(t *testing.T) {
 	}
 }
 
+// TestWaitForSurvivesCorruptEnvelope is the round-49 regression test for the MAJOR finding that
+// waitFor (login.go) -- the shared read-loop primitive underlying every sendAndWait/waitForCmd
+// call plus the raw login-response waits in login.go's Login and crossserver.go's
+// DoCrossServerLogin -- used to return ANY ReadEnvelope error immediately with zero net.Error
+// classification at all: `if err != nil { return nil, err }`. A plain DecodeObject parse failure
+// on one malformed/unrecognized push (never itself a net.Error, since ReadPacket has already
+// fully consumed that frame's bytes before DecodeObject ever runs, so the stream stays in sync)
+// used to abort the caller's single, non-retried wait outright, even though the genuinely awaited
+// response/push might arrive on the very next read -- the same class of bug login.go's
+// waitForInitPush had before its own round-48 fix. The fake server here writes one
+// well-framed-but-undecodable packet (mustEncodeCorruptPacket, decode_test.go) directly to the raw
+// connection, then sends a normal matching envelope. waitFor must survive the corrupt packet (a
+// Warn logged, not an abort) and still return the following matching envelope.
+func TestWaitForSurvivesCorruptEnvelope(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	go func() {
+		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendExtension("wanted.cmd", resp)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	msg, err := waitForCmd(client, 2*time.Second, "wanted.cmd")
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("waitForCmd: %v (a single corrupt/undecodable envelope must not abort the wait -- the stream stays in sync and a subsequent matching envelope must still be read)", err)
+	}
+	if msg.Cmd != "wanted.cmd" {
+		t.Errorf("Cmd = %q, want wanted.cmd", msg.Cmd)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "failed to read/decode an envelope while waiting") {
+		t.Errorf("expected a Warn about the corrupt envelope, got:\n%s", logged)
+	}
+}
+
 // TestWaitForCmdSkipRedactsCredentialFields is the round-11 regression test for waitFor's generic
 // "skipped push while waiting" Debug logger (login.go:513-515): if push.account.login.new --
 // which carries a live loginKey in cleartext -- arrives while a caller is waiting for a different

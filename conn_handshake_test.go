@@ -255,6 +255,51 @@ func TestDoHandshakeReadEnvelopeFailure(t *testing.T) {
 	}
 }
 
+// TestDoHandshakeSurvivesCorruptEnvelope is the round-49 regression test for the MINOR finding
+// that DoHandshake's own independent read loop -- reachable only via the disabled-by-default,
+// explicitly experimental -handshake flag -- used to return ANY ReadEnvelope error immediately
+// with zero net.Error classification at all, the same root-cause gap as login.go's waitFor. A
+// plain DecodeObject parse failure on one malformed/unrelated push (never itself a net.Error,
+// since ReadPacket has already fully consumed that frame's bytes before DecodeObject ever runs, so
+// the stream stays in sync) used to abort the handshake outright. The fake server here writes one
+// well-framed-but-undecodable packet (mustEncodeCorruptPacket, decode_test.go) directly to the
+// connection, then sends a normal handshake response. DoHandshake must survive the corrupt packet
+// (a Warn logged, not an abort) and still return the following response.
+func TestDoHandshakeSurvivesCorruptEnvelope(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	go func() {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutUtfString("sess", "abc123")
+		_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	got, err := client.DoHandshake(2 * time.Second)
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("DoHandshake: %v (a single corrupt/undecodable envelope must not abort the handshake -- the stream stays in sync and the following valid response must still be read)", err)
+	}
+	if got.GetString("sess") != "abc123" {
+		t.Errorf("response sess = %q, want %q", got.GetString("sess"), "abc123")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "failed to read/decode an envelope while waiting") {
+		t.Errorf("expected a Warn about the corrupt envelope, got:\n%s", logged)
+	}
+}
+
 // TestDoHandshakeSendFailureIsNonTimeoutNetError is the round-29 regression test for the MAJOR
 // finding that DoHandshake's own send-stage branch (its c.SendEnvelope call) used a bare
 // fmt.Errorf("send handshake: %w", err) instead of sendStageError -- the exact write-vs-read-

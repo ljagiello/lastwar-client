@@ -423,6 +423,54 @@ func TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit(t *testing.T) {
 	}
 }
 
+// TestHandleInteractiveLineSurvivesCorruptPushWhileWaitingForResponse is the round-49 regression
+// test for the MAJOR finding that handleInteractiveLine's waitForCmd (via waitFor, login.go) used
+// to abort the entire -interactive session (os.Exit(1)) over a single, well-framed-but-undecodable
+// push arriving while an operator command's response was awaited -- the identical class of bug
+// login.go's waitForInitPush had before its round-48 fix, closed at the shared waitFor root cause
+// in round 49. A corrupt push is not a genuine net.Error (ReadPacket already fully consumed its
+// bytes off the wire before DecodeObject ever ran, so the stream stays in sync), yet the pre-fix
+// code treated it identically to a dead connection. Uses a real net.Pipe connection (unlike
+// TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit's synthetic fakeNetErrConn) since the
+// corruption must survive actual packet framing/decoding to reproduce the bug.
+func TestHandleInteractiveLineSurvivesCorruptPushWhileWaitingForResponse(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	go func() {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendExtension("some.command", resp)
+	}()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleInteractiveLine(client, `some.command`)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleInteractiveLine did not return promptly -- a single corrupt/undecodable push must not abort the wait, and the following valid response must still be read")
+	}
+
+	logged := buf.String()
+	if strings.Contains(logged, "connection appears dead") {
+		t.Errorf("a corrupt/undecodable push must not be logged/treated as a dead connection:\n%s", logged)
+	}
+}
+
 // TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits is the fatal-path counterpart to
 // TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit above: a net.Error from waitForCmd whose
 // Timeout() is false means the underlying game connection is actually gone (connection reset,
@@ -719,6 +767,59 @@ func TestOpenControlPipeWithRetryGivesUpOnPersistentFailure(t *testing.T) {
 	}
 	if want := 3 * time.Second; elapsed > want {
 		t.Errorf("openControlPipeWithRetry() took %v to give up, want well under %v (bounded, not retrying forever)", elapsed, want)
+	}
+}
+
+// TestStatControlPipeWithRetryMakesExactlyRetriesPlusOneAttempts and
+// TestOpenControlPipeWithRetryMakesExactlyRetriesPlusOneAttempts are the round-49 regression tests
+// for the MINOR finding that TestStatControlPipeWithRetryGivesUpOnPersistentFailure/
+// TestOpenControlPipeWithRetryGivesUpOnPersistentFailure above only assert a generous wall-clock
+// upper bound (elapsed < 3s), not the EXACT number of attempts made -- a future edit changing
+// either retry loop's `attempt <= controlPipeRetries` to `attempt < controlPipeRetries` (or the
+// inner `attempt < controlPipeRetries` sleep-gate to `<=`) would silently give up one attempt
+// early (or sleep one extra time), and the resulting ~50ms difference is invisible against a
+// bound 60x larger, so the existing tests would keep passing throughout. Uses the new
+// statControlPipe/openControlPipeFile injectable seams (interactive.go, mirroring login.go's
+// dialGame) to count invocations directly instead of inferring them from timing.
+func TestStatControlPipeWithRetryMakesExactlyRetriesPlusOneAttempts(t *testing.T) {
+	orig := statControlPipe
+	t.Cleanup(func() { statControlPipe = orig })
+
+	attempts := 0
+	statControlPipe = func(name string) (os.FileInfo, error) {
+		attempts++
+		return orig(name) // a real, permanently-nonexistent path -- always errors
+	}
+
+	path := t.TempDir() + "/never-created"
+	if _, err := statControlPipeWithRetry(path); err == nil {
+		t.Fatal("statControlPipeWithRetry() error = nil, want a non-nil error for a path that never appears")
+	}
+
+	const want = controlPipeRetries + 1
+	if attempts != want {
+		t.Errorf("statControlPipe was called %d times, want exactly %d (controlPipeRetries+1)", attempts, want)
+	}
+}
+
+func TestOpenControlPipeWithRetryMakesExactlyRetriesPlusOneAttempts(t *testing.T) {
+	orig := openControlPipeFile
+	t.Cleanup(func() { openControlPipeFile = orig })
+
+	attempts := 0
+	openControlPipeFile = func(name string) (*os.File, error) {
+		attempts++
+		return orig(name) // a real, permanently-nonexistent path -- always errors
+	}
+
+	path := t.TempDir() + "/never-created"
+	if _, err := openControlPipeWithRetry(path); err == nil {
+		t.Fatal("openControlPipeWithRetry() error = nil, want a non-nil error for a path that never appears")
+	}
+
+	const want = controlPipeRetries + 1
+	if attempts != want {
+		t.Errorf("openControlPipeFile was called %d times, want exactly %d (controlPipeRetries+1)", attempts, want)
 	}
 }
 

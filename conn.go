@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -403,7 +404,29 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 		c.conn.SetReadDeadline(time.Now().Add(remaining))
 		env, err := c.ReadEnvelope()
 		if err != nil {
-			return nil, fmt.Errorf("read handshake response: %w", err)
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				// A genuine per-read timeout -- return it immediately, matching this
+				// function's pre-existing behavior and waitFor's identical round-49
+				// reasoning (login.go) for not merely looping back to the top-of-loop
+				// deadline check here.
+				return nil, fmt.Errorf("read handshake response: %w", err)
+			}
+			if containsNonTimeoutNetError(err) {
+				return nil, fmt.Errorf("read handshake response: %w", err)
+			}
+			// Round-49 fix: a plain, non-net.Error ReadEnvelope failure (e.g. a
+			// DecodeObject parse failure on one malformed/unrelated push) means
+			// ReadPacket already fully consumed that frame's bytes off the wire before
+			// DecodeObject ever ran -- the stream stays in sync, so this is not
+			// evidence the connection is dead, mirroring login.go's identical
+			// waitForInitPush/waitFor fixes and buildings.go's FetchBuildings fix.
+			// Previously this loop returned immediately on ANY such error instead of
+			// simply skipping the one malformed push and continuing to wait for the
+			// real handshake response, the same tolerance this loop already extends to
+			// a successfully-decoded-but-non-matching envelope a few lines below.
+			slog.Warn("DoHandshake: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err)
+			continue
 		}
 		if env.Controller == controllerSystem && env.Action == actionHandshake {
 			if env.Content == nil {

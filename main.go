@@ -844,6 +844,23 @@ type crossServerTestOpts struct {
 	interactiveExplicit bool
 }
 
+// String/GoString are the round-49 regression fix for the MAJOR finding that crossServerTestOpts
+// -- which carries live credential-shaped fields rt (refresh token), at (access token),
+// shumeiBoxId (anti-fraud device fingerprint), and deviceID -- had no String()/GoString()
+// redaction-by-construction, unlike its near-identical sibling CrossServerLoginParams
+// (crossserver.go, carrying the same AccessTok/ShumeiBoxId/DeviceID fields) and every other
+// credential-carrying struct in the codebase (SessionConfig, deviceIdentity, GSLOpt,
+// LoginParamsInput, CrossServerLoginParams, CrossServerLoginResult, LoginToken), all of which
+// received this exact fix in rounds 47-48. The local variable constructed in main() is held live
+// across runCrossServerTest's entire 300+ line body -- every current call site there logs only
+// individual, already-redacted/length-only fields, so this is defense-in-depth against a future
+// diagnostic line logging the whole struct (e.g. slog.Error("cross-server test failed", "opts", o)
+// or fmt.Errorf("config: %+v", o)), which would otherwise fall through to Go's default
+// reflection-based struct formatter and print the raw refresh token, access token, and device
+// fingerprint in cleartext.
+func (o crossServerTestOpts) String() string   { return "[REDACTED crossServerTestOpts]" }
+func (o crossServerTestOpts) GoString() string { return o.String() }
+
 // runCrossServerTest exercises DoCrossServerLogin directly, using an
 // already-known role's connection details (captured from a prior
 // account.login.new/push.account.login.new response) instead of running
