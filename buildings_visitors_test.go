@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"strings"
 	"testing"
@@ -82,16 +83,16 @@ func TestCollectCmdFor(t *testing.T) {
 
 func TestParseInitBuildings(t *testing.T) {
 	t.Run("well-formed entries are kept", func(t *testing.T) {
-		b1 := NewSFSObject()
+		b1 := sfs.NewSFSObject()
 		b1.PutLong("uuid", 111)
 		b1.PutInt("bId", BuildingFarmland)
-		b2 := NewSFSObject()
+		b2 := sfs.NewSFSObject()
 		b2.PutLong("uuid", 222)
 		b2.PutInt("bId", BuildingIronMine)
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(b1)
 		arr.AddSFSObject(b2)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSArray("building_new", arr)
 
 		got := ParseInitBuildings(params)
@@ -103,15 +104,15 @@ func TestParseInitBuildings(t *testing.T) {
 		}
 	})
 	t.Run("entry missing uuid is skipped, not included as a zero-value target", func(t *testing.T) {
-		bad := NewSFSObject()
+		bad := sfs.NewSFSObject()
 		bad.PutInt("bId", BuildingFarmland) // no uuid field
-		good := NewSFSObject()
+		good := sfs.NewSFSObject()
 		good.PutLong("uuid", 333)
 		good.PutInt("bId", BuildingIronMine)
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(bad)
 		arr.AddSFSObject(good)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSArray("building_new", arr)
 
 		got := ParseInitBuildings(params)
@@ -123,7 +124,7 @@ func TestParseInitBuildings(t *testing.T) {
 		}
 	})
 	t.Run("field missing entirely", func(t *testing.T) {
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		if got := ParseInitBuildings(params); len(got) != 0 {
 			t.Errorf("got %d buildings, want 0", len(got))
 		}
@@ -138,7 +139,7 @@ func TestParseInitBuildings(t *testing.T) {
 // allianceScience, which already warns on this exact anomaly. Proves the new Warn fires for a
 // wrong-typed building_new while a genuinely-absent one (covered above) stays silent.
 func TestParseInitBuildingsWrongTypedBuildingNewWarns(t *testing.T) {
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutUtfString("building_new", "not-an-array")
 
 	var buf bytes.Buffer
@@ -167,7 +168,7 @@ func TestParseInitBuildingsWrongTypedBuildingNewWarns(t *testing.T) {
 // worse off than visitors.go's own pre-round-26 state, which at least had an output cap). So a
 // server-supplied building_new array padded with malformed entries (missing the required "uuid"
 // field) would be scanned in full, with requirePresentField logging a Warn for every single one --
-// unbounded by anything except sfsobject.go's much larger maxDecodedNodes=300,000 decode budget.
+// unbounded by anything except sfsobject.go's much larger sfs.MaxDecodedNodes=300,000 decode budget.
 // ParseInitBuildings feeds the PRIMARY init-push path (login.go's waitForInitPush, called from
 // Login() on every login), so this was reachable on every single login, not just FetchBuildings'
 // fallback path.
@@ -179,13 +180,13 @@ func TestParseInitBuildingsWrongTypedBuildingNewWarns(t *testing.T) {
 func TestParseInitBuildingsCapsRawItemsExaminedNotJustValidOutput(t *testing.T) {
 	const wantMalformed = maxRawBuildingItemsPerPush + 500 // far more malformed entries than the cap
 
-	arr := NewSFSArray()
+	arr := sfs.NewSFSArray()
 	for i := 0; i < wantMalformed; i++ {
-		bad := NewSFSObject()
+		bad := sfs.NewSFSObject()
 		bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
 		arr.AddSFSObject(bad)
 	}
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSArray("building_new", arr)
 
 	var buf bytes.Buffer
@@ -224,10 +225,10 @@ func TestFetchBuildingsPushAddBuildingCapsRawItemsExamined(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		params := NewSFSObject()
-		arr := NewSFSArray()
+		params := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for i := 0; i < wantMalformed; i++ {
-			bad := NewSFSObject()
+			bad := sfs.NewSFSObject()
 			bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
 			arr.AddSFSObject(bad)
 		}
@@ -295,12 +296,12 @@ func TestFetchBuildingsPushInitBuildCapsRawItemsExamined(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		params := NewSFSObject()
-		arr := NewSFSArray()
+		params := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for i := 0; i < wantMalformed; i++ {
-			bad := NewSFSObject()
+			bad := sfs.NewSFSObject()
 			bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
-			wrapper := NewSFSObject()
+			wrapper := sfs.NewSFSObject()
 			wrapper.PutSFSObject("buildInfo", bad)
 			arr.AddSFSObject(wrapper)
 		}
@@ -354,12 +355,12 @@ func TestFetchBuildingsPushInitBuildCapBoundary(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			params := NewSFSObject()
-			arr := NewSFSArray()
+			params := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			for i := 0; i < n; i++ {
-				bad := NewSFSObject()
+				bad := sfs.NewSFSObject()
 				bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
-				wrapper := NewSFSObject()
+				wrapper := sfs.NewSFSObject()
 				wrapper.PutSFSObject("buildInfo", bad)
 				arr.AddSFSObject(wrapper)
 			}
@@ -418,10 +419,10 @@ func TestFetchBuildingsPushAddBuildingCapBoundary(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			params := NewSFSObject()
-			arr := NewSFSArray()
+			params := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			for i := 0; i < n; i++ {
-				bad := NewSFSObject()
+				bad := sfs.NewSFSObject()
 				bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
 				arr.AddSFSObject(bad)
 			}
@@ -486,22 +487,22 @@ func TestFetchBuildingsPushInitBuildWrongTypedUUIDIsRejected(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		wrongTyped := NewSFSObject()
+		wrongTyped := sfs.NewSFSObject()
 		wrongTyped.PutUtfString("uuid", "not-a-long") // wrong SFS type: a uuid must be a Long
 		wrongTyped.PutInt("bId", BuildingFarmland)
-		wrongTypedWrapper := NewSFSObject()
+		wrongTypedWrapper := sfs.NewSFSObject()
 		wrongTypedWrapper.PutSFSObject("buildInfo", wrongTyped)
 
-		genuineZero := NewSFSObject()
+		genuineZero := sfs.NewSFSObject()
 		genuineZero.PutLong("uuid", 0) // a real, well-typed uuid that happens to be zero
 		genuineZero.PutInt("bId", BuildingIronMine)
-		genuineZeroWrapper := NewSFSObject()
+		genuineZeroWrapper := sfs.NewSFSObject()
 		genuineZeroWrapper.PutSFSObject("buildInfo", genuineZero)
 
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(wrongTypedWrapper)
 		arr.AddSFSObject(genuineZeroWrapper)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSArray("defaultBuilds", arr)
 		_ = server.SendExtension("push.init.build", params)
 	}()
@@ -548,22 +549,22 @@ func TestFetchBuildingsPushInitBuildWrongTypedBIdIsRejected(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		wrongTyped := NewSFSObject()
+		wrongTyped := sfs.NewSFSObject()
 		wrongTyped.PutLong("uuid", 111)
 		wrongTyped.PutUtfString("bId", "not-an-int") // wrong SFS type: bId must be an Int
-		wrongTypedWrapper := NewSFSObject()
+		wrongTypedWrapper := sfs.NewSFSObject()
 		wrongTypedWrapper.PutSFSObject("buildInfo", wrongTyped)
 
-		genuineZero := NewSFSObject()
+		genuineZero := sfs.NewSFSObject()
 		genuineZero.PutLong("uuid", 222)
 		genuineZero.PutInt("bId", 0) // a real, well-typed bId that happens to be zero (an unknown type)
-		genuineZeroWrapper := NewSFSObject()
+		genuineZeroWrapper := sfs.NewSFSObject()
 		genuineZeroWrapper.PutSFSObject("buildInfo", genuineZero)
 
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(wrongTypedWrapper)
 		arr.AddSFSObject(genuineZeroWrapper)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSArray("defaultBuilds", arr)
 		_ = server.SendExtension("push.init.build", params)
 	}()
@@ -619,18 +620,18 @@ func TestFetchBuildingsPushInitBuildWrongTypedBIdIsRejected(t *testing.T) {
 // with 2 buildings instead of 1 (both uuid=0, indistinguishable), and no "wrong-typed" warning
 // logged.
 func TestParseInitBuildingsWrongTypedUUIDIsRejected(t *testing.T) {
-	wrongTyped := NewSFSObject()
+	wrongTyped := sfs.NewSFSObject()
 	wrongTyped.PutUtfString("uuid", "not-a-long") // wrong SFS type: a uuid must be a Long
 	wrongTyped.PutInt("bId", BuildingFarmland)
 
-	genuineZero := NewSFSObject()
+	genuineZero := sfs.NewSFSObject()
 	genuineZero.PutLong("uuid", 0) // a real, well-typed uuid that happens to be zero
 	genuineZero.PutInt("bId", BuildingIronMine)
 
-	arr := NewSFSArray()
+	arr := sfs.NewSFSArray()
 	arr.AddSFSObject(wrongTyped)
 	arr.AddSFSObject(genuineZero)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSArray("building_new", arr)
 
 	var buf bytes.Buffer
@@ -665,18 +666,18 @@ func TestParseInitBuildingsWrongTypedUUIDIsRejected(t *testing.T) {
 // entry was actually malformed rather than a genuine, if useless, bId=0. This guard is purely
 // consistency/diagnosability, matching the sibling uuid guard immediately above it in buildings.go.
 func TestParseInitBuildingsWrongTypedBIdIsRejected(t *testing.T) {
-	wrongTyped := NewSFSObject()
+	wrongTyped := sfs.NewSFSObject()
 	wrongTyped.PutLong("uuid", 111)
 	wrongTyped.PutUtfString("bId", "not-an-int") // wrong SFS type: bId must be an Int
 
-	genuineZero := NewSFSObject()
+	genuineZero := sfs.NewSFSObject()
 	genuineZero.PutLong("uuid", 222)
 	genuineZero.PutInt("bId", 0) // a real, well-typed bId that happens to be zero (an unknown type)
 
-	arr := NewSFSArray()
+	arr := sfs.NewSFSArray()
 	arr.AddSFSObject(wrongTyped)
 	arr.AddSFSObject(genuineZero)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSArray("building_new", arr)
 
 	var buf bytes.Buffer
@@ -703,12 +704,12 @@ func TestParseInitBuildingsWrongTypedBIdIsRejected(t *testing.T) {
 
 // TestParseInitBuildingsRejectsNonObjectArrayElement is the round-50 regression test for
 // ParseInitBuildings' population loop's leading type-assertion guard (`bi, ok :=
-// item.Val.(*SFSObject); if !ok { continue }`, buildings.go), which had zero test coverage: every
-// existing malformed-entry test above hands ParseInitBuildings a well-formed *SFSObject with a
-// wrong-typed FIELD inside it, never an array element that isn't an *SFSObject at all. A hostile
+// item.Val.(*sfs.SFSObject); if !ok { continue }`, buildings.go), which had zero test coverage: every
+// existing malformed-entry test above hands ParseInitBuildings a well-formed *sfs.SFSObject with a
+// wrong-typed FIELD inside it, never an array element that isn't an *sfs.SFSObject at all. A hostile
 // or desynced peer sending building_new as an array of bare scalars (or any other non-object
 // value) must be silently skipped item-by-item, not panic on the type assertion or on a later
-// *SFSObject-only accessor call.
+// *sfs.SFSObject-only accessor call.
 //
 // Removing the guard entirely doesn't panic here -- requireFieldType/requirePresentField's own
 // o.Get(field) call is nil-receiver-safe (see TestSFSObjectAccessorsOnNilReceiverDoNotPanic), so a
@@ -718,14 +719,14 @@ func TestParseInitBuildingsWrongTypedBIdIsRejected(t *testing.T) {
 // requirePresentField and misleadingly logs "...entry with no uuid field", as if a real, well-
 // formed-but-incomplete entry had been sent. Asserts that warning is absent.
 func TestParseInitBuildingsRejectsNonObjectArrayElement(t *testing.T) {
-	genuine := NewSFSObject()
+	genuine := sfs.NewSFSObject()
 	genuine.PutLong("uuid", 333)
 	genuine.PutInt("bId", BuildingIronMine)
 
-	arr := NewSFSArray()
-	arr.add(SFSValue{sfsInt, int32(42)}) // not an *SFSObject at all
+	arr := sfs.NewSFSArray()
+	arr.AddValue(sfs.SFSValue{Type: sfs.SFSInt, Val: int32(42)}) // not an *sfs.SFSObject at all
 	arr.AddSFSObject(genuine)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSArray("building_new", arr)
 
 	var buf bytes.Buffer
@@ -735,7 +736,7 @@ func TestParseInitBuildingsRejectsNonObjectArrayElement(t *testing.T) {
 	slog.SetDefault(orig)
 
 	if len(got) != 1 {
-		t.Fatalf("ParseInitBuildings parsed %d buildings, want 1 (only the genuine *SFSObject entry -- the non-object element must be skipped, not panic)", len(got))
+		t.Fatalf("ParseInitBuildings parsed %d buildings, want 1 (only the genuine *sfs.SFSObject entry -- the non-object element must be skipped, not panic)", len(got))
 	}
 	if got[0].Uuid() != 333 || got[0].BId() != BuildingIronMine {
 		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=333 bId=%d entry", got[0].Uuid(), got[0].BId(), BuildingIronMine)
@@ -755,12 +756,12 @@ func TestParseInitBuildingsRejectsNonObjectArrayElement(t *testing.T) {
 // entries, so len(got) itself -- not just a logged-warning count -- proves whether the cap fired at
 // the right point.
 func TestParseInitBuildingsRawItemCapBoundary(t *testing.T) {
-	buildParams := func(n int) *SFSObject {
-		arr := NewSFSArray()
+	buildParams := func(n int) *sfs.SFSObject {
+		arr := sfs.NewSFSArray()
 		for i := 0; i < n; i++ {
 			arr.AddSFSObject(newTestBuildingSFS(int64(i), BuildingFarmland, 1))
 		}
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSArray("building_new", arr)
 		return params
 	}
@@ -815,18 +816,18 @@ func TestFetchBuildingsPushAddBuildingWrongTypedUUIDIsRejected(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		wrongTyped := NewSFSObject()
+		wrongTyped := sfs.NewSFSObject()
 		wrongTyped.PutUtfString("uuid", "not-a-long") // wrong SFS type: a uuid must be a Long
 		wrongTyped.PutInt("bId", BuildingFarmland)
 
-		genuineZero := NewSFSObject()
+		genuineZero := sfs.NewSFSObject()
 		genuineZero.PutLong("uuid", 0) // a real, well-typed uuid that happens to be zero
 		genuineZero.PutInt("bId", BuildingIronMine)
 
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(wrongTyped)
 		arr.AddSFSObject(genuineZero)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSArray("buildings", arr)
 		_ = server.SendExtension("push.add.building", params)
 	}()
@@ -872,18 +873,18 @@ func TestFetchBuildingsPushAddBuildingWrongTypedBIdIsRejected(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		wrongTyped := NewSFSObject()
+		wrongTyped := sfs.NewSFSObject()
 		wrongTyped.PutLong("uuid", 111)
 		wrongTyped.PutUtfString("bId", "not-an-int") // wrong SFS type: bId must be an Int
 
-		genuineZero := NewSFSObject()
+		genuineZero := sfs.NewSFSObject()
 		genuineZero.PutLong("uuid", 222)
 		genuineZero.PutInt("bId", 0) // a real, well-typed bId that happens to be zero (an unknown type)
 
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(wrongTyped)
 		arr.AddSFSObject(genuineZero)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSArray("buildings", arr)
 		_ = server.SendExtension("push.add.building", params)
 	}()
@@ -921,7 +922,7 @@ func TestFetchBuildingsPushAddBuildingWrongTypedBIdIsRejected(t *testing.T) {
 
 // TestFetchBuildingsPushAddBuildingRejectsNonObjectArrayElement is the push.add.building sibling of
 // TestParseInitBuildingsRejectsNonObjectArrayElement above, covering the identical leading
-// type-assertion guard (`bi, ok := item.Val.(*SFSObject); if !ok { continue }`) in FetchBuildings'
+// type-assertion guard (`bi, ok := item.Val.(*sfs.SFSObject); if !ok { continue }`) in FetchBuildings'
 // OWN separate, textually-duplicated push.add.building loop (buildings.go) -- a distinct call site
 // from ParseInitBuildings' loop, so a regression in one would not necessarily be caught by a test
 // against the other. Also asserts the guard's removal-detectable log difference documented on
@@ -933,14 +934,14 @@ func TestFetchBuildingsPushAddBuildingRejectsNonObjectArrayElement(t *testing.T)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		genuine := NewSFSObject()
+		genuine := sfs.NewSFSObject()
 		genuine.PutLong("uuid", 333)
 		genuine.PutInt("bId", BuildingIronMine)
 
-		arr := NewSFSArray()
-		arr.add(SFSValue{sfsInt, int32(42)}) // not an *SFSObject at all
+		arr := sfs.NewSFSArray()
+		arr.AddValue(sfs.SFSValue{Type: sfs.SFSInt, Val: int32(42)}) // not an *sfs.SFSObject at all
 		arr.AddSFSObject(genuine)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSArray("buildings", arr)
 		_ = server.SendExtension("push.add.building", params)
 	}()
@@ -961,7 +962,7 @@ func TestFetchBuildingsPushAddBuildingRejectsNonObjectArrayElement(t *testing.T)
 		t.Fatalf("FetchBuildings() error = %v, want nil", err)
 	}
 	if len(buildings) != 1 {
-		t.Fatalf("got %d buildings, want 1 (only the genuine *SFSObject entry -- the non-object element must be skipped, not panic)", len(buildings))
+		t.Fatalf("got %d buildings, want 1 (only the genuine *sfs.SFSObject entry -- the non-object element must be skipped, not panic)", len(buildings))
 	}
 	if buildings[0].Uuid() != 333 || buildings[0].BId() != BuildingIronMine {
 		t.Errorf("got building uuid=%d bId=%d, want the genuine uuid=333 bId=%d entry", buildings[0].Uuid(), buildings[0].BId(), BuildingIronMine)
@@ -984,7 +985,7 @@ func TestFetchBuildingsWrongTypedTopLevelContainersWarn(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			params := NewSFSObject()
+			params := sfs.NewSFSObject()
 			params.PutUtfString("defaultBuilds", "not-an-array")
 			_ = server.SendExtension("push.init.build", params)
 		}()
@@ -1015,7 +1016,7 @@ func TestFetchBuildingsWrongTypedTopLevelContainersWarn(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			params := NewSFSObject()
+			params := sfs.NewSFSObject()
 			params.PutUtfString("buildings", "not-an-array")
 			_ = server.SendExtension("push.add.building", params)
 		}()
@@ -1050,11 +1051,11 @@ func TestFetchBuildingsWrongTypedTopLevelContainersWarn(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			wrapper := NewSFSObject()
+			wrapper := sfs.NewSFSObject()
 			wrapper.PutUtfString("buildInfo", "not-an-object")
-			defaultBuilds := NewSFSArray()
+			defaultBuilds := sfs.NewSFSArray()
 			defaultBuilds.AddSFSObject(wrapper)
-			params := NewSFSObject()
+			params := sfs.NewSFSObject()
 			params.PutSFSArray("defaultBuilds", defaultBuilds)
 			_ = server.SendExtension("push.init.build", params)
 		}()
@@ -1084,17 +1085,17 @@ func TestFetchBuildingsWrongTypedTopLevelContainersWarn(t *testing.T) {
 
 func TestParseInitVisitors(t *testing.T) {
 	t.Run("well-formed entry kept, missing-uid entry skipped", func(t *testing.T) {
-		bad := NewSFSObject()
+		bad := sfs.NewSFSObject()
 		bad.PutInt("eventId", 2005) // no uid field
-		good := NewSFSObject()
+		good := sfs.NewSFSObject()
 		good.PutLong("uid", 444)
 		good.PutInt("eventId", 2001)
-		list := NewSFSArray()
+		list := sfs.NewSFSArray()
 		list.AddSFSObject(bad)
 		list.AddSFSObject(good)
-		visitor := NewSFSObject()
+		visitor := sfs.NewSFSObject()
 		visitor.PutSFSArray("list", list)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSObject("visitor", visitor)
 
 		got := ParseInitVisitors(params)

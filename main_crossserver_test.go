@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -287,16 +288,16 @@ func TestRunCrossServerTestRtRefreshWithEmptyAccessTokenKeepsOldOne(t *testing.T
 			return
 		}
 		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*SFSObject); ok {
+			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
 				gotParamsAt <- pObj.GetString("at")
 			}
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		_ = server.SendExtension("init", NewSFSObject())
+		_ = server.SendExtension("init", sfs.NewSFSObject())
 	})
 	gameHost, gamePort := splitHostPortInt(t, gameAddr)
 
@@ -1208,12 +1209,12 @@ func fakeInitPushThenFailAllServer() func(*GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
 			return
 		}
 		for {
@@ -1225,7 +1226,7 @@ func fakeInitPushThenFailAllServer() func(*GameConn) {
 			if !ok {
 				continue
 			}
-			fail := NewSFSObject()
+			fail := sfs.NewSFSObject()
 			fail.PutUtfString("errorCode", "999999") // not in benignErrorCodes for any cmd
 			// Reply under BOTH the exact request cmd (sendAndWait's default waitCmds, used by 7
 			// of CollectAll's 8 fixed sub-actions) AND its "push."-prefixed variant (the ONE
@@ -1338,7 +1339,7 @@ func crossServerFetchBuildingsFailureServer() func(*GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
@@ -1352,7 +1353,7 @@ func crossServerFetchBuildingsFailureServer() func(*GameConn) {
 		// timeout). Sending a normal empty `init` push here lets FetchBuildings complete
 		// quickly and successfully instead, which is exactly the round-49 fix's real value: the
 		// malformed push no longer derails an otherwise-healthy fetch.
-		_ = server.SendExtension("init", NewSFSObject())
+		_ = server.SendExtension("init", sfs.NewSFSObject())
 		// Keep reading (and discarding) instead of letting this goroutine return or blocking on
 		// just ONE more read: FetchBuildings' capDeadline shrinks its remaining wait to 3s after
 		// the init push above (buildings.go), during which it keeps this connection open waiting

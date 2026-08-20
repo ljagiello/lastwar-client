@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"strings"
@@ -17,7 +18,7 @@ func TestHelpAllianceMembersSuccess(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutLong("accPoint", 42)
 		readAndReply(server, "", resp)
 	}()
@@ -50,7 +51,7 @@ func TestClaimAllianceGiftsSendsBothTypes(t *testing.T) {
 				t.Errorf("Cmd = %q, want alliance.reward.allreceive", msg.Cmd)
 			}
 			gotTypes = append(gotTypes, msg.Params.GetInt("type"))
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutInt("receiveResult", 1)
 			_ = server.SendExtension(msg.Cmd, resp)
 		}
@@ -116,13 +117,13 @@ func TestClaimAllianceGiftsAbortsRemainingTypesOnNetError(t *testing.T) {
 // regression-safety-gap closer for TestClaimAllianceGiftsAbortsRemainingTypesOnNetError above -- see
 // that test's sibling, TestCollectAllAbortsRemainingActionsOnRealGracefulClose
 // (buildings_orchestration_test.go), for the full rationale: fakeNetErrConn injects an
-// already-a-net.Error fake, never exercising the real bare-io.EOF-through-ReadPacket-through-
-// deadConnError conversion path (packet.go's wrapIfClosed/deadConnError, round 24).
+// already-a-net.Error fake, never exercising the real bare-io.EOF-through-sfs.ReadPacket-through-
+// sfs.DeadConnError conversion path (packet.go's sfs.WrapIfClosed/sfs.DeadConnError, round 24).
 //
 // realEOFConn (buildings_orchestration_test.go, same package) drives a real io.EOF through an actual
 // GameConn instead, mirroring conn_wait_test.go's TestReadEnvelopeGracefulCloseIsNonTimeoutNetError,
 // so ClaimAllianceGifts' very first request -- the Premium (type=1) claim -- fails via the real
-// deadConnError conversion, not a synthetic net.Error stand-in. Same setup and expected shape as
+// sfs.DeadConnError conversion, not a synthetic net.Error stand-in. Same setup and expected shape as
 // TestClaimAllianceGiftsAbortsRemainingTypesOnNetError: exactly 1 write before the abort fires.
 func TestClaimAllianceGiftsAbortsRemainingTypesOnRealGracefulClose(t *testing.T) {
 	fake := &realEOFConn{}
@@ -135,7 +136,7 @@ func TestClaimAllianceGiftsAbortsRemainingTypesOnRealGracefulClose(t *testing.T)
 	}
 	var netErr net.Error
 	if !errors.As(err, &netErr) {
-		t.Fatalf("ClaimAllianceGifts() error = %v, want it to wrap a net.Error (deadConnError, via packet.go's wrapIfClosed)", err)
+		t.Fatalf("ClaimAllianceGifts() error = %v, want it to wrap a net.Error (sfs.DeadConnError, via packet.go's sfs.WrapIfClosed)", err)
 	}
 	if netErr.Timeout() {
 		t.Errorf("ClaimAllianceGifts() error's net.Error has Timeout()==true, want false (a graceful close is a genuine dead connection, not an ordinary timeout)")
@@ -207,7 +208,7 @@ func TestClaimAllianceGiftsContinuesAfterBusinessErrorOnFirstType(t *testing.T) 
 				t.Errorf("Cmd = %q, want alliance.reward.allreceive", msg.Cmd)
 			}
 			gotTypes = append(gotTypes, msg.Params.GetInt("type"))
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			if i == 0 {
 				resp.PutUtfString("errorCode", "999999") // genuine failure, not benign
 			} else {
@@ -238,21 +239,21 @@ func TestClaimAllianceGiftsContinuesAfterBusinessErrorOnFirstType(t *testing.T) 
 
 // allianceScienceEntry builds one well-formed allianceScience-array entry, matching the
 // scienceId/state pair science.data.refresh returns per findRecommendedTech's doc comment.
-func allianceScienceEntry(scienceId, state int32) *SFSObject {
-	e := NewSFSObject()
+func allianceScienceEntry(scienceId, state int32) *sfs.SFSObject {
+	e := sfs.NewSFSObject()
 	e.PutInt("scienceId", scienceId)
 	e.PutInt("state", state)
 	return e
 }
 
 // allianceScienceEntryNullScienceId builds a state==1 entry whose scienceId field is present but
-// explicitly null on the wire -- SFSValue{sfsNull, nil} -- rather than simply absent.
-// o.put is unexported but same-package, so this constructs the same shape DecodeObject would
+// explicitly null on the wire -- sfs.SFSValue{Type: sfs.SFSNull, Val: nil} -- rather than simply absent.
+// o.put is unexported but same-package, so this constructs the same shape sfs.DecodeObject would
 // produce for a real explicit-null field (sfsobject.go:553-554), which Has() alone can't tell
 // apart from a genuine value.
-func allianceScienceEntryNullScienceId(state int32) *SFSObject {
-	e := NewSFSObject()
-	e.put("scienceId", SFSValue{sfsNull, nil})
+func allianceScienceEntryNullScienceId(state int32) *sfs.SFSObject {
+	e := sfs.NewSFSObject()
+	e.PutValue("scienceId", sfs.SFSValue{Type: sfs.SFSNull, Val: nil})
 	e.PutInt("state", state)
 	return e
 }
@@ -260,8 +261,8 @@ func allianceScienceEntryNullScienceId(state int32) *SFSObject {
 // allianceScienceEntryWrongTypedScienceId builds a state==1 entry whose scienceId field is present
 // but has the WRONG concrete SFS type -- a UtfString rather than an Int -- as opposed to
 // allianceScienceEntryNullScienceId's explicitly-null (but correctly-typed-as-absent) case above.
-func allianceScienceEntryWrongTypedScienceId(state int32) *SFSObject {
-	e := NewSFSObject()
+func allianceScienceEntryWrongTypedScienceId(state int32) *sfs.SFSObject {
+	e := sfs.NewSFSObject()
 	e.PutUtfString("scienceId", "not-an-int") // wrong SFS type: scienceId must be an Int
 	e.PutInt("state", state)
 	return e
@@ -269,8 +270,8 @@ func allianceScienceEntryWrongTypedScienceId(state int32) *SFSObject {
 
 // allianceScienceEntryWrongTypedState builds an entry with a well-typed scienceId but a state field
 // present with the WRONG concrete SFS type -- a UtfString rather than an Int.
-func allianceScienceEntryWrongTypedState(scienceId int32) *SFSObject {
-	e := NewSFSObject()
+func allianceScienceEntryWrongTypedState(scienceId int32) *sfs.SFSObject {
+	e := sfs.NewSFSObject()
 	e.PutInt("scienceId", scienceId)
 	e.PutUtfString("state", "not-an-int") // wrong SFS type: state must be an Int
 	return e
@@ -278,12 +279,12 @@ func allianceScienceEntryWrongTypedState(scienceId int32) *SFSObject {
 
 // allianceScienceRefreshResponse builds a science.data.refresh response carrying the given
 // allianceScience entries.
-func allianceScienceRefreshResponse(entries ...*SFSObject) *SFSObject {
-	arr := NewSFSArray()
+func allianceScienceRefreshResponse(entries ...*sfs.SFSObject) *sfs.SFSObject {
+	arr := sfs.NewSFSArray()
 	for _, e := range entries {
 		arr.AddSFSObject(e)
 	}
-	resp := NewSFSObject()
+	resp := sfs.NewSFSObject()
 	resp.PutSFSArray("allianceScience", arr)
 	return resp
 }
@@ -293,7 +294,7 @@ func allianceScienceRefreshResponse(entries ...*SFSObject) *SFSObject {
 // without a live connection.
 func TestFindRecommendedTech(t *testing.T) {
 	t.Run("state==1 entry's scienceId is returned", func(t *testing.T) {
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(allianceScienceEntry(111, 0))
 		arr.AddSFSObject(allianceScienceEntry(555, 1))
 
@@ -303,7 +304,7 @@ func TestFindRecommendedTech(t *testing.T) {
 		}
 	})
 	t.Run("no state==1 entry", func(t *testing.T) {
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(allianceScienceEntry(111, 0))
 		arr.AddSFSObject(allianceScienceEntry(222, 0))
 
@@ -312,9 +313,9 @@ func TestFindRecommendedTech(t *testing.T) {
 		}
 	})
 	t.Run("state==1 entry missing scienceId entirely is skipped", func(t *testing.T) {
-		bad := NewSFSObject()
+		bad := sfs.NewSFSObject()
 		bad.PutInt("state", 1) // no scienceId field
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(bad)
 
 		if _, found := findRecommendedTech(arr); found {
@@ -322,7 +323,7 @@ func TestFindRecommendedTech(t *testing.T) {
 		}
 	})
 	t.Run("state==1 entry with explicit-null scienceId is skipped, not returned as 0", func(t *testing.T) {
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(allianceScienceEntryNullScienceId(1))
 
 		if id, found := findRecommendedTech(arr); found {
@@ -330,7 +331,7 @@ func TestFindRecommendedTech(t *testing.T) {
 		}
 	})
 	t.Run("state==1 entry with wrong-typed scienceId is skipped, not returned as 0", func(t *testing.T) {
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(allianceScienceEntryWrongTypedScienceId(1))
 
 		if id, found := findRecommendedTech(arr); found {
@@ -338,8 +339,8 @@ func TestFindRecommendedTech(t *testing.T) {
 		}
 	})
 	t.Run("non-object array item is skipped, not fatal", func(t *testing.T) {
-		arr := NewSFSArray()
-		arr.AddInt(12345) // malformed: not an SFSObject at all
+		arr := sfs.NewSFSArray()
+		arr.AddInt(12345) // malformed: not an sfs.SFSObject at all
 		arr.AddSFSObject(allianceScienceEntry(777, 1))
 
 		id, found := findRecommendedTech(arr)
@@ -348,7 +349,7 @@ func TestFindRecommendedTech(t *testing.T) {
 		}
 	})
 	t.Run("empty array", func(t *testing.T) {
-		arr := NewSFSArray()
+		arr := sfs.NewSFSArray()
 		if _, found := findRecommendedTech(arr); found {
 			t.Error("findRecommendedTech() found=true, want false for an empty array")
 		}
@@ -363,7 +364,7 @@ func TestFindRecommendedTech(t *testing.T) {
 // requirePresentField's failure never reaches the `return`. A hostile peer responding to
 // science.data.refresh with an array where many/all entries have state==1 but a missing scienceId
 // would cause requirePresentField's Warn to fire on every single one, with no bound, since the raw
-// allianceScience array is bounded only by sfsobject.go's much larger maxDecodedNodes=300,000
+// allianceScience array is bounded only by sfsobject.go's much larger sfs.MaxDecodedNodes=300,000
 // decode budget -- the same gap-class visitors.go's ParseInitVisitors closed in round 26 for
 // visitor.list (see TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput).
 //
@@ -382,9 +383,9 @@ func TestFindRecommendedTech(t *testing.T) {
 func TestFindRecommendedTechCapsRawItemsExamined(t *testing.T) {
 	wantMalformed := allianceScienceRawItemCap * 5 // far more malformed entries than the cap
 
-	arr := NewSFSArray()
+	arr := sfs.NewSFSArray()
 	for i := 0; i < wantMalformed; i++ {
-		bad := NewSFSObject()
+		bad := sfs.NewSFSObject()
 		bad.PutInt("state", 1) // recommended, but deliberately no scienceId field
 		arr.AddSFSObject(bad)
 	}
@@ -426,7 +427,7 @@ func TestFindRecommendedTechCapsRawItemsExamined(t *testing.T) {
 // "allianceScience", sfsFieldKindInt)` back to `requirePresentField(tech, "scienceId",
 // "allianceScience")` makes this test fail with found=true, id=0 instead of found=false.
 func TestFindRecommendedTechWrongTypedScienceIdIsRejected(t *testing.T) {
-	arr := NewSFSArray()
+	arr := sfs.NewSFSArray()
 	arr.AddSFSObject(allianceScienceEntryWrongTypedScienceId(1))
 
 	var buf bytes.Buffer
@@ -465,7 +466,7 @@ func TestFindRecommendedTechWrongTypedScienceIdIsRejected(t *testing.T) {
 // fails the `!= 1` check, so only the log output distinguishes the fixed behavior from the
 // pre-fix one.
 func TestFindRecommendedTechWrongTypedStateIsRejected(t *testing.T) {
-	arr := NewSFSArray()
+	arr := sfs.NewSFSArray()
 	arr.AddSFSObject(allianceScienceEntryWrongTypedState(999))
 
 	var buf bytes.Buffer
@@ -495,8 +496,8 @@ func TestFindRecommendedTechWrongTypedStateIsRejected(t *testing.T) {
 // found (proving the cap didn't clip early), while the identical entry placed one position PAST the
 // cap must not be (proving the cap fired exactly there, not one item late).
 func TestFindRecommendedTechRawItemCapBoundary(t *testing.T) {
-	buildArr := func(n, recommendedAt int) *SFSArray {
-		arr := NewSFSArray()
+	buildArr := func(n, recommendedAt int) *sfs.SFSArray {
+		arr := sfs.NewSFSArray()
 		for i := 0; i < n; i++ {
 			if i == recommendedAt {
 				arr.AddSFSObject(allianceScienceEntry(999, 1))
@@ -552,7 +553,7 @@ func TestDonateRecommendedAllianceTechNoAllianceScienceField(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		readAndReply(server, "", NewSFSObject())
+		readAndReply(server, "", sfs.NewSFSObject())
 	}()
 
 	if err := DonateRecommendedAllianceTech(client); err != nil {
@@ -561,7 +562,7 @@ func TestDonateRecommendedAllianceTechNoAllianceScienceField(t *testing.T) {
 }
 
 // TestDonateRecommendedAllianceTechWrongFieldType checks the second documented no-op branch: an
-// allianceScience field present but not an SFSArray must return nil, not an error, and must not
+// allianceScience field present but not an sfs.SFSArray must return nil, not an error, and must not
 // go on to send a donate request (same no-second-reader reasoning as the test above).
 //
 // It's also the regression test for this round's fix: before it, this branch returned nil with
@@ -574,7 +575,7 @@ func TestDonateRecommendedAllianceTechWrongFieldType(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("allianceScience", "not-an-array")
 		readAndReply(server, "", resp)
 	}()
@@ -657,7 +658,7 @@ func TestDonateRecommendedAllianceTechDonates(t *testing.T) {
 		donateCmd = msg.Cmd
 		gotScienceID = msg.Params.GetInt("scienceId")
 		gotOption = msg.Params.GetInt("option")
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension(msg.Cmd, resp)
 	}()
@@ -712,7 +713,7 @@ func TestDonateRecommendedAllianceTechBenignCooldown(t *testing.T) {
 			return
 		}
 		donateCmd = msg.Cmd
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("errorCode", "120471") // benignErrorCodes: al.science.donate cooldown
 		_ = server.SendExtension(msg.Cmd, resp)
 	}()

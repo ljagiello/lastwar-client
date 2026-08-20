@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"strings"
 	"testing"
@@ -9,7 +10,7 @@ import (
 
 func TestCollectibleBuildings(t *testing.T) {
 	newBuilding := func(uuid int64, bId int32) Building {
-		o := NewSFSObject()
+		o := sfs.NewSFSObject()
 		o.PutLong("uuid", uuid)
 		o.PutInt("bId", bId)
 		return Building{Raw: o}
@@ -30,7 +31,7 @@ func TestCollectibleBuildings(t *testing.T) {
 
 func TestGroupUnclaimedByType(t *testing.T) {
 	newMail := func(uid string, mailType int32, rewardStatus int32) Mail {
-		o := NewSFSObject()
+		o := sfs.NewSFSObject()
 		o.PutUtfString("uid", uid)
 		o.PutInt("type", mailType)
 		o.PutInt("rewardStatus", rewardStatus)
@@ -62,13 +63,13 @@ func TestGroupUnclaimedByType(t *testing.T) {
 // HasUnclaimedReward (back to a bare `RewardStatus() == 0`) would make this fail, since the
 // no-rewardStatus mail would then be misclassified as unclaimed and swept into byType.
 func TestHasUnclaimedRewardMissingFieldIsNotUnclaimed(t *testing.T) {
-	noRewardStatus := NewSFSObject()
+	noRewardStatus := sfs.NewSFSObject()
 	noRewardStatus.PutUtfString("uid", "notif-1")
 	noRewardStatus.PutInt("type", 3)
 	// deliberately no PutInt("rewardStatus", ...) call -- field genuinely absent, as opposed to
 	// an explicit 0.
 
-	withRewardStatus := NewSFSObject()
+	withRewardStatus := sfs.NewSFSObject()
 	withRewardStatus.PutUtfString("uid", "reward-1")
 	withRewardStatus.PutInt("type", 3)
 	withRewardStatus.PutInt("rewardStatus", 0)
@@ -110,17 +111,17 @@ func TestHasUnclaimedRewardMissingFieldIsNotUnclaimed(t *testing.T) {
 // this test's "absent logs nothing" assertion fail: every routine notification-only mail item would
 // again log a spurious Warn.
 func TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified(t *testing.T) {
-	wrongTyped := NewSFSObject()
+	wrongTyped := sfs.NewSFSObject()
 	wrongTyped.PutUtfString("uid", "wrong-type-1")
 	wrongTyped.PutInt("type", 3)
 	wrongTyped.PutUtfString("rewardStatus", "not-an-int") // wrong SFS type: rewardStatus must be an Int
 
-	genuineUnclaimed := NewSFSObject()
+	genuineUnclaimed := sfs.NewSFSObject()
 	genuineUnclaimed.PutUtfString("uid", "genuine-unclaimed-1")
 	genuineUnclaimed.PutInt("type", 3)
 	genuineUnclaimed.PutInt("rewardStatus", 0)
 
-	absentRewardStatus := NewSFSObject()
+	absentRewardStatus := sfs.NewSFSObject()
 	absentRewardStatus.PutUtfString("uid", "notif-absent-1")
 	absentRewardStatus.PutInt("type", 3)
 	// deliberately no PutInt("rewardStatus", ...) call -- the normal, routine shape for
@@ -173,13 +174,13 @@ func TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified(t *testing.T
 // groupUnclaimedByType (back to bare `byType[m.Type()] = append(...)`) would make this fail, since
 // the no-type mail would then be swept into byType[0].
 func TestGroupUnclaimedByTypeMissingTypeFieldIsExcluded(t *testing.T) {
-	noType := NewSFSObject()
+	noType := sfs.NewSFSObject()
 	noType.PutUtfString("uid", "no-type-1")
 	noType.PutInt("rewardStatus", 0)
 	// deliberately no PutInt("type", ...) call -- field genuinely absent, as opposed to an
 	// explicit 0.
 
-	explicitTypeZero := NewSFSObject()
+	explicitTypeZero := sfs.NewSFSObject()
 	explicitTypeZero.PutUtfString("uid", "type-zero-1")
 	explicitTypeZero.PutInt("type", 0)
 	explicitTypeZero.PutInt("rewardStatus", 0)

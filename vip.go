@@ -1,5 +1,7 @@
 package main
 
+import "lastwar-client/internal/sfs"
+
 // ClaimVIPDailyLoginScore sends `vip.add.login.score` -- confirmed live via
 // a real packet capture of the actual game client's VIP screen "Collect"
 // action on the daily login-streak bonus (200 VIP points/day at VIP12,
@@ -19,7 +21,7 @@ package main
 // nothing left to claim.
 func ClaimVIPDailyLoginScore(conn *GameConn) error {
 	const cmd = "vip.add.login.score"
-	_, err := sendAndWait(conn, "vip daily login score response", cmd, NewSFSObject())
+	_, err := sendAndWait(conn, "vip daily login score response", cmd, sfs.NewSFSObject())
 	return err
 }
 
@@ -31,7 +33,7 @@ func ClaimVIPDailyLoginScore(conn *GameConn) error {
 // parameterless on the wire
 // (extracted/lua_decompiled/5810_Net_Msgs_Vip_VipGetEveryDayRewardMessage.lua's
 // OnCreate declares an `actId` argument but never actually puts it on the
-// SFSObject, matching the real client's own captured request having no
+// sfs.SFSObject, matching the real client's own captured request having no
 // params either).
 //
 // Available once per day: replaying the identical call through this Go
@@ -41,6 +43,6 @@ func ClaimVIPDailyLoginScore(conn *GameConn) error {
 // above, so it's likewise safe to call unconditionally on every run.
 func ClaimVIPDailyFreebie(conn *GameConn) error {
 	const cmd = "vip.get.every.day.reward"
-	_, err := sendAndWait(conn, "vip daily freebie response", cmd, NewSFSObject())
+	_, err := sendAndWait(conn, "vip daily freebie response", cmd, sfs.NewSFSObject())
 	return err
 }

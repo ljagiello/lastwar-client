@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"strings"
@@ -35,7 +36,7 @@ func newPipeGameConnPair(t *testing.T) (client, server *GameConn) {
 // *testing.T: it runs in a background goroutine that may still be alive after the test function
 // returns (unblocked by newPipeGameConnPair's t.Cleanup), and calling T methods from a goroutine
 // after the test has completed is unsafe.
-func readAndReply(server *GameConn, replyCmd string, replyParams *SFSObject) {
+func readAndReply(server *GameConn, replyCmd string, replyParams *sfs.SFSObject) {
 	env, err := server.ReadEnvelope()
 	if err != nil {
 		return
@@ -55,12 +56,12 @@ func TestSendAndWaitSuccess(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		readAndReply(server, "", resp)
 	}()
 
-	msg, err := sendAndWait(client, "test success", "test.cmd", NewSFSObject())
+	msg, err := sendAndWait(client, "test success", "test.cmd", sfs.NewSFSObject())
 	if err != nil {
 		t.Fatalf("sendAndWait: %v", err)
 	}
@@ -73,7 +74,7 @@ func TestSendAndWaitBenignErrorCode(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("errorCode", "602026") // benignErrorCodes: "In production, please be patient."
 		readAndReply(server, "", resp)
 	}()
@@ -82,7 +83,7 @@ func TestSendAndWaitBenignErrorCode(t *testing.T) {
 	// scoped benignErrorCodes by cmd (conn.go), and 602026 is documented as scoped exclusively to
 	// this one cmd -- readAndReply echoes back whatever cmd the client sent, so this must match for
 	// classifyResponse to actually take the benign path this test means to exercise.
-	msg, err := sendAndWait(client, "test benign", "building.production.collect", NewSFSObject())
+	msg, err := sendAndWait(client, "test benign", "building.production.collect", sfs.NewSFSObject())
 	if err != nil {
 		t.Fatalf("sendAndWait returned an error for a benign errorCode: %v", err)
 	}
@@ -95,12 +96,12 @@ func TestSendAndWaitRealFailure(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("errorCode", "999999") // not in benignErrorCodes
 		readAndReply(server, "", resp)
 	}()
 
-	msg, err := sendAndWait(client, "test failure", "test.cmd", NewSFSObject())
+	msg, err := sendAndWait(client, "test failure", "test.cmd", sfs.NewSFSObject())
 	if err == nil {
 		t.Fatal("expected sendAndWait to return an error for a genuine (non-benign) errorCode")
 	}
@@ -148,7 +149,7 @@ func TestSendAndWaitWriteStageFailureIsNonTimeoutNetError(t *testing.T) {
 		t.Fatal("test setup bug: writeErr must itself report Timeout()==true")
 	}
 
-	_, err := sendAndWait(client, "test write failure", "test.cmd", NewSFSObject())
+	_, err := sendAndWait(client, "test write failure", "test.cmd", sfs.NewSFSObject())
 	if err == nil {
 		t.Fatal("expected sendAndWait to return an error when the send itself fails")
 	}
@@ -276,7 +277,7 @@ func TestWaitForDeadlineElapsedAfterNonMatchingEnvelope(t *testing.T) {
 	server := &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
 
 	go func() {
-		unrelated := NewSFSObject()
+		unrelated := sfs.NewSFSObject()
 		unrelated.PutUtfString("noise", "an unrelated push, not what pred is waiting for")
 		_ = server.SendExtension("some.other.push", unrelated)
 	}()
@@ -314,12 +315,12 @@ func TestWaitForCmdSkipsUnmatchedPushes(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		unrelated := NewSFSObject()
+		unrelated := sfs.NewSFSObject()
 		unrelated.PutUtfString("noise", "ignore me")
 		if err := server.SendExtension("some.other.push", unrelated); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension("wanted.cmd", resp)
 	}()
@@ -349,10 +350,10 @@ func TestWaitForCmdSurvivesNonExtensionEnvelope(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		if err := server.SendEnvelope(controllerSystem, actionPingPong, NewSFSObject()); err != nil {
+		if err := server.SendEnvelope(controllerSystem, actionPingPong, sfs.NewSFSObject()); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension("wanted.cmd", resp)
 	}()
@@ -370,9 +371,9 @@ func TestWaitForCmdSurvivesNonExtensionEnvelope(t *testing.T) {
 // waitFor (login.go) -- the shared read-loop primitive underlying every sendAndWait/waitForCmd
 // call plus the raw login-response waits in login.go's Login and crossserver.go's
 // DoCrossServerLogin -- used to return ANY ReadEnvelope error immediately with zero net.Error
-// classification at all: `if err != nil { return nil, err }`. A plain DecodeObject parse failure
-// on one malformed/unrecognized push (never itself a net.Error, since ReadPacket has already
-// fully consumed that frame's bytes before DecodeObject ever runs, so the stream stays in sync)
+// classification at all: `if err != nil { return nil, err }`. A plain sfs.DecodeObject parse failure
+// on one malformed/unrecognized push (never itself a net.Error, since sfs.ReadPacket has already
+// fully consumed that frame's bytes before sfs.DecodeObject ever runs, so the stream stays in sync)
 // used to abort the caller's single, non-retried wait outright, even though the genuinely awaited
 // response/push might arrive on the very next read -- the same class of bug login.go's
 // waitForInitPush had before its own round-48 fix. The fake server here writes one
@@ -386,7 +387,7 @@ func TestWaitForSurvivesCorruptEnvelope(t *testing.T) {
 		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension("wanted.cmd", resp)
 	}()
@@ -435,7 +436,7 @@ func TestWaitForConsecutiveDecodeFailuresBoundary(t *testing.T) {
 					return
 				}
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			_ = server.SendExtension("wanted.cmd", resp)
 		}()
@@ -461,7 +462,7 @@ func TestWaitForConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		// Round-51 regression assertion for the MAJOR finding that this give-up error, by
 		// construction, is never itself a net.Error (this branch is only reached after both
 		// the Timeout()==true check and containsNonTimeoutNetError(err) above have already
-		// ruled that out for the underlying corrupt-frame error) -- so without deadConnError's
+		// ruled that out for the underlying corrupt-frame error) -- so without sfs.DeadConnError's
 		// wrap (login.go), every containsNonTimeoutNetError/errors.As(&netErr)-based "abort on
 		// dead connection" check across the codebase (CollectAll, ClaimAllMail, GreetVisitors,
 		// shouldAbortBeforeInteractive, ...) would silently treat a connection that just proved
@@ -469,7 +470,7 @@ func TestWaitForConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		// the fatal one it actually represents.
 		var netErr net.Error
 		if !errors.As(err, &netErr) {
-			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadConnError's wrap)", err, err)
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via sfs.DeadConnError's wrap)", err, err)
 		}
 		if netErr.Timeout() {
 			t.Errorf("netErr.Timeout() = true, want false")
@@ -484,7 +485,7 @@ func TestWaitForConsecutiveDecodeFailuresBoundary(t *testing.T) {
 // that maxConsecutiveDecodeFailures only ever bounded consecutive DECODE FAILURES -- a hostile
 // peer streaming well-formed, successfully-decoded, simply-irrelevant extension pushes for the
 // duration of a wait window resets that counter to 0 on every single one and was never slowed down
-// by it, each one still costing a full ReadPacket/DecodeObject/AsExtension cycle for the entire
+// by it, each one still costing a full sfs.ReadPacket/sfs.DecodeObject/AsExtension cycle for the entire
 // caller-supplied timeout. Proves maxNonMatchingEnvelopesPerWait (login.go) is a strict `>` bound:
 // exactly that many well-formed-but-irrelevant pushes in a row still lets the following matching
 // one succeed, one more makes waitForCmd give up with a benign (Timeout()==true) error instead of
@@ -495,14 +496,14 @@ func TestWaitForNonMatchingEnvelopeCapBoundary(t *testing.T) {
 		// Deliberately not gated on the server goroutine finishing -- see
 		// TestWaitForConsecutiveDecodeFailuresBoundary's identical comment above for why.
 		go func() {
-			noise := NewSFSObject()
+			noise := sfs.NewSFSObject()
 			noise.PutUtfString("irrelevant", "noise")
 			for i := 0; i < n; i++ {
 				if err := server.SendExtension("irrelevant.cmd", noise); err != nil {
 					return
 				}
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			_ = server.SendExtension("wanted.cmd", resp)
 		}()
@@ -530,7 +531,7 @@ func TestWaitForNonMatchingEnvelopeCapBoundary(t *testing.T) {
 			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadlineExceededError)", err, err)
 		}
 		if !netErr.Timeout() {
-			t.Errorf("netErr.Timeout() = true, want false -- this is a benign give-up (like a real timeout), not a genuine dead-connection error (unlike the maxConsecutiveDecodeFailures give-up, which uses deadConnError with Timeout()==false)")
+			t.Errorf("netErr.Timeout() = true, want false -- this is a benign give-up (like a real timeout), not a genuine dead-connection error (unlike the maxConsecutiveDecodeFailures give-up, which uses sfs.DeadConnError with Timeout()==false)")
 		}
 	})
 }
@@ -547,13 +548,13 @@ func TestWaitForCmdSkipRedactsCredentialFields(t *testing.T) {
 	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-1234567890"
 
 	go func() {
-		push := NewSFSObject()
+		push := sfs.NewSFSObject()
 		push.PutUtfString("loginKey", secretLoginKey)
 		push.PutUtfString("gameUid", "g1")
 		if err := server.SendExtension("push.account.login.new", push); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension("account.login.new", resp)
 	}()
@@ -660,11 +661,11 @@ func TestLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutUtfString("ip", "|1.2.3.4") // firstHost("|1.2.3.4") == "" -- the malformed case
 		si.PutInt("port", 9339)
 		si.PutUtfString("zone", "APS2")
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutSFSObject("serverInfo", si)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -707,12 +708,12 @@ func TestLoginRedirectRejectsMissingRedirectPort(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutUtfString("ip", "203.0.113.9")
 		// No "port" field at all -- getIntFlexible(si, "port") resolves this to 0, same as an
 		// unparseable port value would.
 		si.PutUtfString("zone", "APS2")
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutSFSObject("serverInfo", si)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -921,8 +922,8 @@ func TestWaitForInitPushConsecutiveDecodeFailuresBoundary(t *testing.T) {
 					return
 				}
 			}
-			params := NewSFSObject()
-			arr := NewSFSArray()
+			params := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
 			params.PutSFSArray("building_new", arr)
 			_ = server.SendExtension("init", params)
@@ -959,12 +960,12 @@ func TestWaitForInitPushConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		}
 		// Round-51 regression assertion: see TestWaitForConsecutiveDecodeFailuresBoundary's
 		// identical assertion above for the full MAJOR-finding rationale -- this give-up error
-		// must satisfy net.Error with Timeout()==false (via deadConnError, login.go), not just
+		// must satisfy net.Error with Timeout()==false (via sfs.DeadConnError, login.go), not just
 		// be a non-nil error, so Login()'s own containsNonTimeoutNetError-based callers treat
 		// it as the fatal, connection-is-dead condition it represents.
 		var netErr net.Error
 		if !errors.As(err, &netErr) {
-			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadConnError's wrap)", err, err)
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via sfs.DeadConnError's wrap)", err, err)
 		}
 		if netErr.Timeout() {
 			t.Errorf("netErr.Timeout() = true, want false")
@@ -986,15 +987,15 @@ func TestWaitForInitPushNonMatchingEnvelopeCapBoundary(t *testing.T) {
 	sendNoiseThenInit := func(t *testing.T, n int) (buildings []Building, gotInit bool, err error) {
 		client, server := newPipeGameConnPair(t)
 		go func() {
-			noise := NewSFSObject()
+			noise := sfs.NewSFSObject()
 			noise.PutUtfString("irrelevant", "noise")
 			for i := 0; i < n; i++ {
 				if err := server.SendExtension("irrelevant.cmd", noise); err != nil {
 					return
 				}
 			}
-			params := NewSFSObject()
-			arr := NewSFSArray()
+			params := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
 			params.PutSFSArray("building_new", arr)
 			_ = server.SendExtension("init", params)
@@ -1043,11 +1044,11 @@ func TestWaitForInitPushSurvivesNonExtensionEnvelope(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		if err := server.SendEnvelope(controllerSystem, actionPingPong, NewSFSObject()); err != nil {
+		if err := server.SendEnvelope(controllerSystem, actionPingPong, sfs.NewSFSObject()); err != nil {
 			return
 		}
-		params := NewSFSObject()
-		arr := NewSFSArray()
+		params := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
 		params.PutSFSArray("building_new", arr)
 		_ = server.SendExtension("init", params)
@@ -1067,7 +1068,7 @@ func TestWaitForInitPushSurvivesNonExtensionEnvelope(t *testing.T) {
 
 // TestReadPacketGracefulCloseIsNonTimeoutNetError is the packet.go-level regression test for round
 // 24's MAJOR finding: a peer's graceful close (a clean FIN, or the far end process simply exiting,
-// with nothing sent) surfaces from ReadPacket's leading io.ReadFull(r, hb[:]) header read as bare
+// with nothing sent) surfaces from sfs.ReadPacket's leading io.ReadFull(r, hb[:]) header read as bare
 // io.EOF, which does not itself implement net.Error -- and fmt.Errorf's %w wrapping doesn't change
 // that, since errors.As only succeeds if SOME error in the chain implements the target interface.
 // Left unfixed, every one of the 5 "abort remaining independent work on a genuine dead connection"
@@ -1083,7 +1084,7 @@ func TestWaitForInitPushSurvivesNonExtensionEnvelope(t *testing.T) {
 // sending anything at all (the between-packets case; see
 // TestReadPacketMidFrameCloseIsNonTimeoutNetError below for the mid-frame variant).
 func TestReadPacketGracefulCloseIsNonTimeoutNetError(t *testing.T) {
-	_, err := ReadPacket(bytes.NewReader(nil))
+	_, err := sfs.ReadPacket(bytes.NewReader(nil))
 	if err == nil {
 		t.Fatal("expected an error reading a packet off a closed/empty stream, got nil")
 	}
@@ -1105,17 +1106,17 @@ func TestReadPacketGracefulCloseIsNonTimeoutNetError(t *testing.T) {
 	}
 }
 
-// TestReadPacketMidFrameCloseIsNonTimeoutNetError is the readFrameField-path sibling of
+// TestReadPacketMidFrameCloseIsNonTimeoutNetError is the sfs.ReadFrameField-path sibling of
 // TestReadPacketGracefulCloseIsNonTimeoutNetError above: a close partway through a frame (here,
 // right after the header byte but before the length field it promised) rather than cleanly between
 // packets. packet_oom_test.go's TestReadPacketMidFrameTruncationIsNotClassifiedAsCleanEOF already
 // proves this shape correctly satisfies errors.Is(err, io.ErrUnexpectedEOF) (not io.EOF); this test
 // proves it ALSO now satisfies net.Error with Timeout()==false, confirming the fix was applied at
-// readFrameField itself and not just the one header-read call the audit specifically called out.
+// sfs.ReadFrameField itself and not just the one header-read call the audit specifically called out.
 func TestReadPacketMidFrameCloseIsNonTimeoutNetError(t *testing.T) {
-	// A lone header byte declaring hdrBigSized (so ReadPacket expects a 4-byte length field to
+	// A lone header byte declaring sfs.HdrBigSized (so sfs.ReadPacket expects a 4-byte length field to
 	// follow) with nothing after it.
-	_, err := ReadPacket(bytes.NewReader([]byte{hdrBinary | hdrEncrypted | hdrBigSized}))
+	_, err := sfs.ReadPacket(bytes.NewReader([]byte{sfs.HdrBinary | sfs.HdrEncrypted | sfs.HdrBigSized}))
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -1150,7 +1151,7 @@ func (eofConn) Read([]byte) (int, error) { return 0, io.EOF }
 
 // TestReadEnvelopeGracefulCloseIsNonTimeoutNetError is the conn.go-level regression test: proves
 // the fix reaches GameConn.ReadEnvelope, the actual live-connection call site every orchestration
-// loop's sendAndWait/waitForCmd/waitFor chain sits on top of, not just ReadPacket in isolation.
+// loop's sendAndWait/waitForCmd/waitFor chain sits on top of, not just sfs.ReadPacket in isolation.
 func TestReadEnvelopeGracefulCloseIsNonTimeoutNetError(t *testing.T) {
 	conn := eofConn{}
 	client := &GameConn{conn: conn, reader: bufio.NewReaderSize(conn, 4096)}
@@ -1187,7 +1188,7 @@ func TestReadEnvelopeGracefulCloseIsNonTimeoutNetError(t *testing.T) {
 // fall through to login.go's much slower maxConsecutiveDecodeFailures give-up path (~20 failed
 // reads) instead of aborting promptly on the first one -- masking any future regression in the
 // fast single-read classification real TCP actually depends on. Fixed by widening packet.go's
-// wrapIfClosed to also treat io.ErrClosedPipe as a dead connection, matching io.EOF/
+// sfs.WrapIfClosed to also treat io.ErrClosedPipe as a dead connection, matching io.EOF/
 // io.ErrUnexpectedEOF's existing treatment (see its own doc comment for the full rationale). This
 // test proves both that a self-close now resolves fast (not via the ~20-iteration give-up path)
 // and that the resulting error is correctly classified as a genuine dead connection.

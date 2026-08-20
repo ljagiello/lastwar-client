@@ -1,4 +1,4 @@
-package main
+package sfs
 
 import (
 	"math"
@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// TestEncodeObjectOversizedStringReturnsError proves the writeUtfString/int16Count panic-on-
+// TestEncodeObjectOversizedStringReturnsError proves the WriteUtfString/int16Count panic-on-
 // oversized-input bug is fixed: EncodeObject must return an error, not crash the process, when a
 // value string exceeds the wire format's 2-byte length-prefix limit (65535 bytes). This chain
-// (EncodeObject -> writeTaggedValue -> writeValuePayload -> writeUtfString) is reachable from
+// (EncodeObject -> writeTaggedValue -> writeValuePayload -> WriteUtfString) is reachable from
 // server-controlled data with zero recover() anywhere in this repo, so a panic here previously
 // meant any oversized value could crash the whole process.
 func TestEncodeObjectOversizedStringReturnsError(t *testing.T) {
@@ -29,7 +29,7 @@ func TestEncodeObjectOversizedStringReturnsError(t *testing.T) {
 }
 
 // TestEncodeObjectOversizedNestedStringReturnsError proves the error propagates correctly back
-// up through writeValuePayload's sfsObjectType recursion case, not just the top-level string case.
+// up through writeValuePayload's SFSObjectType recursion case, not just the top-level string case.
 func TestEncodeObjectOversizedNestedStringReturnsError(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -49,7 +49,7 @@ func TestEncodeObjectOversizedNestedStringReturnsError(t *testing.T) {
 }
 
 // TestEncodeObjectStringExactlyMaxLenSucceeds is the round-45 regression test for the MINOR
-// finding that writeUtfString's own 65535-byte length-prefix cap (sfsobject.go: `if len(b) >
+// finding that WriteUtfString's own 65535-byte length-prefix cap (sfsobject.go: `if len(b) >
 // 65535`) had no exact-boundary test -- distinct from int16Count's separate item-COUNT cap
 // (round 44's TestEncodeObjectExactlyMaxArrayLengthSucceeds covers that one, not this one).
 // TestEncodeObjectOversizedStringReturnsError/TestEncodeObjectOversizedNestedStringReturnsError
@@ -137,11 +137,11 @@ func TestEncodeObjectExactlyMaxArrayLengthSucceeds(t *testing.T) {
 }
 
 // TestInt32CountExactBoundary is the round-48 regression test for the MINOR finding that
-// int32Count (sfsText/sfsByteArray's wire-count overflow guard, the int32-wide sibling of
-// int16Count above and writeUtfString) had zero test coverage of any kind. Both siblings have
+// int32Count (SFSText/sfsByteArray's wire-count overflow guard, the int32-wide sibling of
+// int16Count above and WriteUtfString) had zero test coverage of any kind. Both siblings have
 // dedicated exact-boundary tests here (TestEncodeObjectExactlyMaxArrayLengthSucceeds/
 // TestEncodeObjectTooManyKeysReturnsError for int16Count; TestEncodeObjectStringExactlyMaxLenSucceeds/
-// TestEncodeObjectOversizedStringReturnsError for writeUtfString), each proving both accept-at-
+// TestEncodeObjectOversizedStringReturnsError for WriteUtfString), each proving both accept-at-
 // boundary and reject-one-past-boundary behavior -- int32Count had none. A true end-to-end
 // EncodeObject test would need a >2GB string/byte-slice value to actually drive n past
 // math.MaxInt32, impractically expensive to construct and run; int32Count is called directly here

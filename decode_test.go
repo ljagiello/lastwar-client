@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"lastwar-client/internal/sfs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,43 +52,43 @@ func captureStdout(t *testing.T, fn func()) string {
 // pair, matching what a real capture of a simple server push looks like.
 func mustEncodePacket(t *testing.T, field, value string) []byte {
 	t.Helper()
-	o := NewSFSObject()
+	o := sfs.NewSFSObject()
 	o.PutUtfString(field, value)
-	body, err := EncodeObject(o)
+	body, err := sfs.EncodeObject(o)
 	if err != nil {
-		t.Fatalf("EncodeObject: %v", err)
+		t.Fatalf("sfs.EncodeObject: %v", err)
 	}
-	packet, err := EncodePacket(body)
+	packet, err := sfs.EncodePacket(body)
 	if err != nil {
-		t.Fatalf("EncodePacket: %v", err)
+		t.Fatalf("sfs.EncodePacket: %v", err)
 	}
 	return packet
 }
 
 // mustEncodeCorruptPacket builds a packet whose framing is entirely valid
-// (correct length prefix, correctly round-trips through ReadPacket) but
-// whose SFSObject body is not: the leading tag byte is overwritten so
-// DecodeObject's "expected top-level tag 18" check fails. This is the
+// (correct length prefix, correctly round-trips through sfs.ReadPacket) but
+// whose sfs.SFSObject body is not: the leading tag byte is overwritten so
+// sfs.DecodeObject's "expected top-level tag 18" check fails. This is the
 // packet-framing-succeeded-but-content-is-garbage case, as distinct from a
-// truncated/corrupt frame (which ReadPacket itself rejects).
+// truncated/corrupt frame (which sfs.ReadPacket itself rejects).
 func mustEncodeCorruptPacket(t *testing.T, field, value string) []byte {
 	t.Helper()
-	o := NewSFSObject()
+	o := sfs.NewSFSObject()
 	o.PutUtfString(field, value)
-	body, err := EncodeObject(o)
+	body, err := sfs.EncodeObject(o)
 	if err != nil {
-		t.Fatalf("EncodeObject: %v", err)
+		t.Fatalf("sfs.EncodeObject: %v", err)
 	}
-	body[0] = 0xEE // not sfsObjectType (18) -> DecodeObject must error
-	packet, err := EncodePacket(body)
+	body[0] = 0xEE // not sfs.SFSObjectType (18) -> sfs.DecodeObject must error
+	packet, err := sfs.EncodePacket(body)
 	if err != nil {
-		t.Fatalf("EncodePacket: %v", err)
+		t.Fatalf("sfs.EncodePacket: %v", err)
 	}
 	return packet
 }
 
 // TestDecodeStreamFile exercises DecodeStreamFile's three independently
-// observable branches against real EncodePacket(EncodeObject(...)) output
+// observable branches against real sfs.EncodePacket(sfs.EncodeObject(...)) output
 // written to a temp file -- no network or mocking involved, since the
 // function itself only ever reads a plain []byte stream.
 func TestDecodeStreamFile(t *testing.T) {
@@ -119,7 +120,7 @@ func TestDecodeStreamFile(t *testing.T) {
 			},
 		},
 		{
-			// Second frame is chopped mid-body: ReadPacket's io.ReadFull on
+			// Second frame is chopped mid-body: sfs.ReadPacket's io.ReadFull on
 			// the body fails with io.ErrUnexpectedEOF (0 < n < requested),
 			// not io.EOF, so this must surface as a non-nil error naming
 			// the byte offset -- not be swallowed as a clean end of stream.
@@ -150,15 +151,15 @@ func TestDecodeStreamFile(t *testing.T) {
 			},
 		},
 		{
-			// Middle packet has valid framing but a corrupt SFSObject body.
-			// DecodeStreamFile must print the DecodeObject error inline and
+			// Middle packet has valid framing but a corrupt sfs.SFSObject body.
+			// DecodeStreamFile must print the sfs.DecodeObject error inline and
 			// move on to the next packet, rather than aborting the stream.
 			// A non-nil error or a missing third-packet line would mean it
 			// stopped instead of continuing; asserting on captured stdout
 			// (not just the returned error) is what actually proves the
 			// loop reached and decoded packet #3, rather than just quietly
 			// returning nil without processing the rest of the file.
-			name: "DecodeObject error on one packet continues to the next",
+			name: "sfs.DecodeObject error on one packet continues to the next",
 			build: func(t *testing.T) []byte {
 				var stream []byte
 				stream = append(stream, mustEncodePacket(t, "packet", "first")...)
@@ -173,8 +174,8 @@ func TestDecodeStreamFile(t *testing.T) {
 				if !strings.Contains(stdout, "packet=first") {
 					t.Errorf("stdout missing decoded packet #1, got:\n%s", stdout)
 				}
-				if !strings.Contains(stdout, "DecodeObject error") {
-					t.Errorf("stdout missing DecodeObject error for packet #2, got:\n%s", stdout)
+				if !strings.Contains(stdout, "sfs.DecodeObject error") {
+					t.Errorf("stdout missing sfs.DecodeObject error for packet #2, got:\n%s", stdout)
 				}
 				if !strings.Contains(stdout, "packet=third") {
 					t.Errorf("stdout missing decoded packet #3 -- stream did not continue past the bad packet, got:\n%s", stdout)
@@ -210,27 +211,27 @@ func TestDecodeStreamFile(t *testing.T) {
 // capture-a-real-login-and-decode-it workflow would hand to -decode-stream.
 func mustEncodePushAccountLoginNewPacket(t *testing.T, loginKey string) []byte {
 	t.Helper()
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutUtfString("gameUid", "12345678")
 	params.PutUtfString("loginKey", loginKey)
 
-	extContent := NewSFSObject()
+	extContent := sfs.NewSFSObject()
 	extContent.PutUtfString("c", "push.account.login.new")
 	extContent.PutInt("r", -1)
 	extContent.PutSFSObject("p", params)
 
-	outer := NewSFSObject()
+	outer := sfs.NewSFSObject()
 	outer.PutByte("c", controllerExtension)
 	outer.PutShort("a", actionCallExtension)
 	outer.PutSFSObject("p", extContent)
 
-	body, err := EncodeObject(outer)
+	body, err := sfs.EncodeObject(outer)
 	if err != nil {
-		t.Fatalf("EncodeObject: %v", err)
+		t.Fatalf("sfs.EncodeObject: %v", err)
 	}
-	packet, err := EncodePacket(body)
+	packet, err := sfs.EncodePacket(body)
 	if err != nil {
-		t.Fatalf("EncodePacket: %v", err)
+		t.Fatalf("sfs.EncodePacket: %v", err)
 	}
 	return packet
 }
@@ -268,18 +269,18 @@ func TestDecodeStreamFileRedactsCredentialFields(t *testing.T) {
 	}
 }
 
-// decodeStreamFileHexHeadWindow mirrors the pre-fix DecodeObject-failure branch's hex-dump window
+// decodeStreamFileHexHeadWindow mirrors the pre-fix sfs.DecodeObject-failure branch's hex-dump window
 // size (decode.go used to do `if len(head) > 32 { head = head[:32] }` before hex-encoding it). Used
 // only by this test's fixture self-check below, to prove the fixture actually places the sensitive
 // value where the old buggy code would have dumped it -- not to reproduce the buggy behavior itself.
 const decodeStreamFileHexHeadWindow = 32
 
 // mustEncodeTruncatedPacketWithLeadingSensitiveField builds a packet whose framing is entirely
-// valid (correct length prefix, round-trips through ReadPacket cleanly, same as
-// mustEncodeCorruptPacket) but whose SFSObject body is cut short mid-way through its *second*
+// valid (correct length prefix, round-trips through sfs.ReadPacket cleanly, same as
+// mustEncodeCorruptPacket) but whose sfs.SFSObject body is cut short mid-way through its *second*
 // field's value -- not its first. The first field (sensitiveKey/sensitiveValue) is written first
 // and is left completely intact in the truncated bytes; only the trailing field is chopped, which
-// is what forces DecodeObject to fail (unexpected EOF reading the trailing field's value) while
+// is what forces sfs.DecodeObject to fail (unexpected EOF reading the trailing field's value) while
 // leaving the sensitive field's bytes sitting undisturbed near the front of the body -- exactly
 // the "truncated deep into an otherwise well-formed object" shape from the finding this guards
 // against, as opposed to mustEncodeCorruptPacket's instant-fail-on-the-first-byte shape.
@@ -290,13 +291,13 @@ const decodeStreamFileHexHeadWindow = 32
 // that doesn't satisfy it wouldn't actually reproduce the bug this test guards against.
 func mustEncodeTruncatedPacketWithLeadingSensitiveField(t *testing.T, sensitiveKey, sensitiveValue string) []byte {
 	t.Helper()
-	o := NewSFSObject()
+	o := sfs.NewSFSObject()
 	o.PutUtfString(sensitiveKey, sensitiveValue)
 	o.PutUtfString("laterField", "padding padding padding padding padding padding padding")
 
-	full, err := EncodeObject(o)
+	full, err := sfs.EncodeObject(o)
 	if err != nil {
-		t.Fatalf("EncodeObject: %v", err)
+		t.Fatalf("sfs.EncodeObject: %v", err)
 	}
 
 	valueOffset := bytes.Index(full, []byte(sensitiveValue))
@@ -311,19 +312,19 @@ func mustEncodeTruncatedPacketWithLeadingSensitiveField(t *testing.T, sensitiveK
 	}
 
 	truncated := full[:len(full)-5] // chop only into laterField's value, sensitiveKey stays intact
-	packet, err := EncodePacket(truncated)
+	packet, err := sfs.EncodePacket(truncated)
 	if err != nil {
-		t.Fatalf("EncodePacket: %v", err)
+		t.Fatalf("sfs.EncodePacket: %v", err)
 	}
 	return packet
 }
 
 // TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure is a regression test for the
-// finding that DecodeStreamFile's DecodeObject-failure branch printed a raw hex dump of up to the
-// first 32 bytes of the (undecoded) frame body -- completely bypassing sensitiveSFSKeys/
-// StringRedacted, which can only ever run on a *successfully* decoded SFSObject, never on the raw
+// finding that DecodeStreamFile's sfs.DecodeObject-failure branch printed a raw hex dump of up to the
+// first 32 bytes of the (undecoded) frame body -- completely bypassing sfs.SensitiveSFSKeys/
+// StringRedacted, which can only ever run on a *successfully* decoded sfs.SFSObject, never on the raw
 // pre-decode bytes. A real capture truncated deep into an otherwise well-formed object can still
-// have an intact sensitive field (here "tk", a session token per sfsobject.go's sensitiveSFSKeys)
+// have an intact sensitive field (here "tk", a session token per sfsobject.go's sfs.SensitiveSFSKeys)
 // sorted near the front of that same 32-byte window, so the old code printed the field name and the
 // live secret in cleartext hex even though decoding had failed. This builds exactly that shape via
 // mustEncodeTruncatedPacketWithLeadingSensitiveField (which itself self-checks that the secret
@@ -348,11 +349,11 @@ func TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure(t *testing.T) 
 	if decodeErr != nil {
 		t.Fatalf("expected nil error (a bad packet is logged and skipped, not fatal), got: %v", decodeErr)
 	}
-	// Sanity: prove the packet actually reached and exercised the DecodeObject-failure path (not,
+	// Sanity: prove the packet actually reached and exercised the sfs.DecodeObject-failure path (not,
 	// say, silently skipped), so the absence of the secret below reflects the fix rather than the
 	// packet never being decoded/printed at all.
-	if !strings.Contains(stdout, "DecodeObject error") {
-		t.Fatalf("stdout missing DecodeObject error line -- packet may not have reached the failure path at all, got:\n%s", stdout)
+	if !strings.Contains(stdout, "sfs.DecodeObject error") {
+		t.Fatalf("stdout missing sfs.DecodeObject error line -- packet may not have reached the failure path at all, got:\n%s", stdout)
 	}
 	if strings.Contains(stdout, secretTk) {
 		t.Errorf("DecodeStreamFile leaked the raw tk value in cleartext on the decode-failure path:\n%s", stdout)

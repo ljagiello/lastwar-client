@@ -1,4 +1,4 @@
-package main
+package sfs
 
 import (
 	"bytes"
@@ -12,21 +12,21 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const compressionThreshold = 1024
+const CompressionThreshold = 1024
 
-// maxFrameSize bounds any length-prefixed allocation in ReadPacket. The
+// MaxFrameSize bounds any length-prefixed allocation in ReadPacket. The
 // connection is plain TCP with no TLS, and the on-wire "encryption" is only
 // a reversible length-keyed XOR (obfuscation, not confidentiality -- see
 // xorCrypt), so length/uncompressedLen are effectively server/on-path
 // controlled: an unbounded make([]byte, length) is a trivial multi-GB OOM
 // vector. 64MiB is comfortably above the ~313KB real init payload this
 // protocol has ever been observed sending.
-const maxFrameSize = 64 << 20 // 64 MiB
+const MaxFrameSize = 64 << 20 // 64 MiB
 
 // zstd.NewReader is expensive; the docs recommend a single shared decoder
 // reused across calls. DecodeAll is safe for concurrent use.
 var zstdDecoder = func() *zstd.Decoder {
-	d, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(maxFrameSize))
+	d, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(MaxFrameSize))
 	if err != nil {
 		panic(err) // only fails on invalid options, never at runtime
 	}
@@ -34,11 +34,11 @@ var zstdDecoder = func() *zstd.Decoder {
 }()
 
 const (
-	hdrBinary     = 0x80
-	hdrEncrypted  = 0x40
-	hdrCompressed = 0x20
+	HdrBinary     = 0x80
+	HdrEncrypted  = 0x40
+	HdrCompressed = 0x20
 	hdrUseLZ4     = 0x10 // receive-side: actually Zstandard, see dossier §04
-	hdrBigSized   = 0x08
+	HdrBigSized   = 0x08
 	hdrForward    = 0x04
 )
 
@@ -63,7 +63,7 @@ func xorCrypt(data []byte) []byte {
 func EncodePacket(body []byte) ([]byte, error) {
 	compressed := false
 	payload := body
-	if len(body) > compressionThreshold {
+	if len(body) > CompressionThreshold {
 		var buf bytes.Buffer
 		w, err := zlib.NewWriterLevel(&buf, zlib.BestCompression)
 		if err != nil {
@@ -87,12 +87,12 @@ func EncodePacket(body []byte) ([]byte, error) {
 	// against. Caught and reverted after a dossier audit pass flagged
 	// the earlier "fix" as based on the wrong reference implementation.
 	bigSized := len(payload) > 65535
-	header := byte(hdrBinary | hdrEncrypted)
+	header := byte(HdrBinary | HdrEncrypted)
 	if compressed {
-		header |= hdrCompressed
+		header |= HdrCompressed
 	}
 	if bigSized {
-		header |= hdrBigSized
+		header |= HdrBigSized
 	}
 
 	encrypted := xorCrypt(payload)
@@ -106,7 +106,7 @@ func EncodePacket(body []byte) ([]byte, error) {
 		// writing a length header that no longer matches the real body size written just below
 		// and permanently desyncing the receiving side's frame-boundary interpretation for the
 		// rest of the connection, the same failure class sfsobject.go's sibling int16Count/
-		// int32Count/writeUtfString helpers already guard against for their own wire counts.
+		// int32Count/WriteUtfString helpers already guard against for their own wire counts.
 		// Not reachable via any current call site (SendEnvelope only ever builds small
 		// hand-built command envelopes), but defense-in-depth matching this codebase's existing
 		// convention of erroring rather than silently wrapping an oversized wire count.
@@ -136,7 +136,7 @@ func uint32Count(n int, what string) (uint32, error) {
 	return uint32(n), nil
 }
 
-// deadConnError wraps an error that is (or unwraps to) io.EOF or
+// DeadConnError wraps an error that is (or unwraps to) io.EOF or
 // io.ErrUnexpectedEOF -- i.e. the underlying reader is definitively
 // closed/exhausted, not a timeout or some other transient I/O error -- so it
 // additionally satisfies net.Error with Timeout()==false and
@@ -162,18 +162,24 @@ func uint32Count(n int, what string) (uint32, error) {
 // (Timeout()==false). Wraps (never replaces) the original error via Unwrap
 // so errors.Is(err, io.EOF)/errors.Is(err, io.ErrUnexpectedEOF) checks
 // elsewhere (e.g. decode.go's DecodeStreamFile stream-termination check, and
-// readFrameField's own mid-frame-vs-clean-EOF classification below) keep
+// ReadFrameField's own mid-frame-vs-clean-EOF classification below) keep
 // working unchanged straight through this wrapper.
-type deadConnError struct {
+type DeadConnError struct {
 	err error
 }
 
-func (e deadConnError) Error() string { return e.err.Error() }
-func (e deadConnError) Unwrap() error { return e.err }
-func (deadConnError) Timeout() bool   { return false }
-func (deadConnError) Temporary() bool { return false }
+func (e DeadConnError) Error() string { return e.err.Error() }
+func (e DeadConnError) Unwrap() error { return e.err }
+func (DeadConnError) Timeout() bool   { return false }
+func (DeadConnError) Temporary() bool { return false }
 
-// wrapIfClosed wraps err in deadConnError when it is, or unwraps to, io.EOF,
+// NewDeadConnError wraps err as a DeadConnError so callers in other packages can construct one
+// without access to the unexported err field. Used wherever the codebase's read loops decide a
+// connection is genuinely dead (e.g. a run of undecodable frames) and want that classified as a
+// non-timeout net.Error, the same way ReadPacket's own I/O-failure paths already are.
+func NewDeadConnError(err error) DeadConnError { return DeadConnError{err: err} }
+
+// WrapIfClosed wraps err in DeadConnError when it is, or unwraps to, io.EOF,
 // io.ErrUnexpectedEOF, or io.ErrClosedPipe. Any other error (including an
 // already-net.Error network failure such as a connection reset, which
 // arrives as a genuine *net.OpError rather than one of those three bare
@@ -200,21 +206,21 @@ func (deadConnError) Temporary() bool { return false }
 // single-read net.Error classification every other genuine dead-connection
 // shape in this file already gets.
 //
-// Only used at ReadPacket's leading header-byte read below -- readFrameField
+// Only used at ReadPacket's leading header-byte read below -- ReadFrameField
 // (round-42 fix) now unconditionally wraps every one of its own errors in
-// deadConnError directly, since unlike the header-byte read, ANY failure
+// DeadConnError directly, since unlike the header-byte read, ANY failure
 // there is fatal to frame-boundary sync, not just an EOF-shaped one.
-func wrapIfClosed(err error) error {
+func WrapIfClosed(err error) error {
 	if err == nil {
 		return nil
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrClosedPipe) {
-		return deadConnError{err: err}
+		return DeadConnError{err: err}
 	}
 	return err
 }
 
-// readFrameField performs io.ReadFull for a frame field read that happens
+// ReadFrameField performs io.ReadFull for a frame field read that happens
 // AFTER a packet's leading header byte has already been successfully read.
 // Per io.ReadFull's documented contract, a read that consumes zero bytes
 // returns bare io.EOF regardless of whether earlier io.ReadFull calls in
@@ -228,13 +234,13 @@ func wrapIfClosed(err error) error {
 // helper) as clean, while any mid-frame truncation surfaces as a real error.
 //
 // Round-42 fix: EVERY error from this function -- not just an EOF-shaped one
-// -- is now unconditionally wrapped in deadConnError, forcing
+// -- is now unconditionally wrapped in DeadConnError, forcing
 // Timeout()==false, instead of only the EOF-shaped subset going through
-// wrapIfClosed while any other error (most concretely, a read DEADLINE
+// WrapIfClosed while any other error (most concretely, a read DEADLINE
 // expiring mid-field, e.g. login.go's waitForInitPush deliberately shortening
 // its read deadline to poll for the halfway active-pull check) passed through
 // unchanged as an ordinary net.Error with Timeout()==true. That used to be
-// genuinely dangerous: readFrameField is, by this doc comment's own first
+// genuinely dangerous: ReadFrameField is, by this doc comment's own first
 // sentence, ONLY ever called after the packet's header byte has already been
 // consumed from the shared, session-long GameConn.reader -- so ANY failure
 // here, for ANY reason, means real wire bytes were already irrevocably
@@ -249,12 +255,12 @@ func wrapIfClosed(err error) error {
 // the leading header-byte read in ReadPacket below (which does NOT go through
 // this helper) can safely report Timeout()==true; every field read past it
 // must be unconditionally fatal.
-func readFrameField(r io.Reader, buf []byte) error {
+func ReadFrameField(r io.Reader, buf []byte) error {
 	if _, err := io.ReadFull(r, buf); err != nil {
 		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF
 		}
-		return deadConnError{err: err}
+		return DeadConnError{err: err}
 	}
 	return nil
 }
@@ -264,83 +270,83 @@ func readFrameField(r io.Reader, buf []byte) error {
 func ReadPacket(r io.Reader) ([]byte, error) {
 	var hb [1]byte
 	if _, err := io.ReadFull(r, hb[:]); err != nil {
-		// wrapIfClosed: a bare io.EOF here (the only shape io.ReadFull produces for a
+		// WrapIfClosed: a bare io.EOF here (the only shape io.ReadFull produces for a
 		// zero-byte read, per its documented contract) is a genuine clean end-of-stream --
 		// e.g. a peer's graceful TCP close between packets -- so it must satisfy net.Error
 		// with Timeout()==false once it reaches a live network caller like
 		// GameConn.ReadEnvelope, while still satisfying errors.Is(err, io.EOF) for
-		// between-packets callers like decode.go's DecodeStreamFile. See deadConnError's
-		// doc comment above readFrameField for the full rationale.
-		return nil, fmt.Errorf("read header: %w", wrapIfClosed(err))
+		// between-packets callers like decode.go's DecodeStreamFile. See DeadConnError's
+		// doc comment above ReadFrameField for the full rationale.
+		return nil, fmt.Errorf("read header: %w", WrapIfClosed(err))
 	}
 	header := hb[0]
 
 	if header&hdrForward != 0 {
 		var sid [2]byte
-		if err := readFrameField(r, sid[:]); err != nil {
+		if err := ReadFrameField(r, sid[:]); err != nil {
 			return nil, fmt.Errorf("read forward sid: %w", err)
 		}
 	}
 
 	var length uint32
-	if header&hdrBigSized != 0 {
+	if header&HdrBigSized != 0 {
 		var lb [4]byte
-		if err := readFrameField(r, lb[:]); err != nil {
+		if err := ReadFrameField(r, lb[:]); err != nil {
 			return nil, fmt.Errorf("read big length: %w", err)
 		}
 		length = binary.BigEndian.Uint32(lb[:])
 	} else {
 		var lb [2]byte
-		if err := readFrameField(r, lb[:]); err != nil {
+		if err := ReadFrameField(r, lb[:]); err != nil {
 			return nil, fmt.Errorf("read length: %w", err)
 		}
 		length = uint32(binary.BigEndian.Uint16(lb[:]))
 	}
-	if length > maxFrameSize {
-		// deadConnError (not a bare fmt.Errorf): the length field has already been
+	if length > MaxFrameSize {
+		// DeadConnError (not a bare fmt.Errorf): the length field has already been
 		// consumed from the shared, session-long reader, and -- unlike the body-size
-		// guard below at line ~304, which fires only after readFrameField has already
+		// guard below at line ~304, which fires only after ReadFrameField has already
 		// consumed the full body -- this guard returns WITHOUT ever reading/draining
 		// those `length` declared body bytes. If the peer actually follows an oversized
 		// length header with real trailing body bytes (the natural way to send an
-		// oversized frame, and exactly the threat maxFrameSize exists to catch), those
+		// oversized frame, and exactly the threat MaxFrameSize exists to catch), those
 		// bytes are left unconsumed on the wire and the next ReadPacket call
 		// misinterprets the first leftover byte as a fresh header, permanently
-		// desyncing frame-boundary interpretation -- the same class of bug readFrameField
+		// desyncing frame-boundary interpretation -- the same class of bug ReadFrameField
 		// was hardened against above. A bare, unwrapped error here would also fail
 		// containsNonTimeoutNetError's type switch (no Unwrap), so callers like
 		// buildings.go's CollectAll would not abort on it and keep issuing requests over
 		// the now-desynced reader.
-		return nil, deadConnError{err: fmt.Errorf("frame body too large: %d bytes (max %d)", length, maxFrameSize)}
+		return nil, DeadConnError{err: fmt.Errorf("frame body too large: %d bytes (max %d)", length, MaxFrameSize)}
 	}
 
 	var uncompressedLen uint32
-	hasZstdLen := header&hdrCompressed != 0 && header&hdrUseLZ4 != 0
+	hasZstdLen := header&HdrCompressed != 0 && header&hdrUseLZ4 != 0
 	if hasZstdLen {
 		var lb [4]byte
-		if err := readFrameField(r, lb[:]); err != nil {
+		if err := ReadFrameField(r, lb[:]); err != nil {
 			return nil, fmt.Errorf("read uncompressed length: %w", err)
 		}
 		uncompressedLen = binary.BigEndian.Uint32(lb[:])
-		if uncompressedLen > maxFrameSize {
-			// deadConnError -- same rationale as the `length` guard above: the
+		if uncompressedLen > MaxFrameSize {
+			// DeadConnError -- same rationale as the `length` guard above: the
 			// uncompressed-length field has already been consumed, and this guard
 			// returns before the `length` declared body bytes (still pending on the
 			// wire) are ever read, leaving the reader mid-frame if the peer sends them.
-			return nil, deadConnError{err: fmt.Errorf("uncompressed length too large: %d bytes (max %d)", uncompressedLen, maxFrameSize)}
+			return nil, DeadConnError{err: fmt.Errorf("uncompressed length too large: %d bytes (max %d)", uncompressedLen, MaxFrameSize)}
 		}
 	}
 
 	body := make([]byte, length)
-	if err := readFrameField(r, body); err != nil {
+	if err := ReadFrameField(r, body); err != nil {
 		return nil, fmt.Errorf("read body (%d bytes): %w", length, err)
 	}
 
-	if header&hdrEncrypted != 0 {
+	if header&HdrEncrypted != 0 {
 		body = xorCrypt(body)
 	}
 
-	if header&hdrCompressed != 0 {
+	if header&HdrCompressed != 0 {
 		if hasZstdLen {
 			// The real client's own `init` bootstrap push (confirmed via
 			// live packet capture against production, ~313KB uncompressed)
@@ -359,13 +365,13 @@ func ReadPacket(r io.Reader) ([]byte, error) {
 			return nil, fmt.Errorf("zlib reader: %w", err)
 		}
 		defer zr.Close()
-		limited := io.LimitReader(zr, maxFrameSize+1)
+		limited := io.LimitReader(zr, MaxFrameSize+1)
 		out, err := io.ReadAll(limited)
 		if err != nil {
 			return nil, fmt.Errorf("zlib inflate: %w", err)
 		}
-		if len(out) > maxFrameSize {
-			return nil, fmt.Errorf("zlib inflated output exceeds %d bytes", maxFrameSize)
+		if len(out) > MaxFrameSize {
+			return nil, fmt.Errorf("zlib inflated output exceeds %d bytes", MaxFrameSize)
 		}
 		return out, nil
 	}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"math"
 	"net"
@@ -18,7 +19,7 @@ import (
 // logging touch: uid, eventId, visitorId -- mirroring the shape ParseInitVisitors produces from a
 // real `init` push (see the Visitor doc comment in visitors.go).
 func newTestVisitor(uid int64, eventId, visitorId int32) Visitor {
-	raw := NewSFSObject()
+	raw := sfs.NewSFSObject()
 	raw.PutLong("uid", uid)
 	raw.PutInt("eventId", eventId)
 	raw.PutInt("visitorId", visitorId)
@@ -36,7 +37,7 @@ func newTestVisitor(uid int64, eventId, visitorId int32) Visitor {
 // already well-tested elsewhere and the only thing worth proving here is this one-line wrapper's
 // own field-name/accessor choice.
 func TestVisitorStartTime(t *testing.T) {
-	raw := NewSFSObject()
+	raw := sfs.NewSFSObject()
 	raw.PutLong("startTime", 1234567890)
 	v := Visitor{Raw: raw}
 
@@ -86,7 +87,7 @@ func TestGreetVisitorsSendsOnePerVisitor(t *testing.T) {
 			}
 			gotUids = append(gotUids, msg.Params.GetLong("uid"))
 			gotOperates = append(gotOperates, msg.Params.GetInt("operate"))
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			_ = server.SendExtension(msg.Cmd, resp)
 		}
@@ -130,13 +131,13 @@ func TestGreetVisitorsAggregatesErrorsAndSkipsBenign(t *testing.T) {
 		newTestVisitor(2003, 2002, 6), // succeeds
 	}
 
-	benign := NewSFSObject()
+	benign := sfs.NewSFSObject()
 	benign.PutUtfString("errorCode", "visitor_err_coming")
-	failure := NewSFSObject()
+	failure := sfs.NewSFSObject()
 	failure.PutUtfString("errorCode", "999999")
-	success := NewSFSObject()
+	success := sfs.NewSFSObject()
 	success.PutBool("success", true)
-	responses := map[int64]*SFSObject{2001: benign, 2002: failure, 2003: success}
+	responses := map[int64]*sfs.SFSObject{2001: benign, 2002: failure, 2003: success}
 
 	var gotUids []int64
 	done := make(chan struct{})
@@ -304,18 +305,18 @@ func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T
 	initDone := make(chan struct{})
 	go func() {
 		defer close(initDone)
-		list := NewSFSArray()
+		list := sfs.NewSFSArray()
 		for i := 0; i < wantVisitors; i++ {
-			v := NewSFSObject()
+			v := sfs.NewSFSObject()
 			v.PutLong("uid", int64(5000+i))
 			v.PutInt("eventId", 2000+int32(i))
 			v.PutInt("visitorId", 6)
 			list.AddSFSObject(v)
 		}
-		visitor := NewSFSObject()
+		visitor := sfs.NewSFSObject()
 		visitor.PutInt("maxNum", maxNum)
 		visitor.PutSFSArray("list", list)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSObject("visitor", visitor)
 		if err := initServer.SendExtension("init", params); err != nil {
 			return
@@ -371,7 +372,7 @@ func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T
 				return
 			}
 			gotUids = append(gotUids, msg.Params.GetLong("uid"))
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			_ = greetServer.SendExtension(msg.Cmd, resp)
 		}
@@ -401,21 +402,21 @@ func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T
 // `visitor={maxNum, list}` sibling field ParseInitVisitors reads (see the Visitor doc comment in
 // visitors.go). maxNum is omitted entirely when hasMaxNum is false, exercising the
 // maxVisitorsDefensiveCeiling fallback path exactly like a real push that never sends the field.
-func newVisitorInitParams(hasMaxNum bool, maxNum int32, listLen int) *SFSObject {
-	list := NewSFSArray()
+func newVisitorInitParams(hasMaxNum bool, maxNum int32, listLen int) *sfs.SFSObject {
+	list := sfs.NewSFSArray()
 	for i := 0; i < listLen; i++ {
-		v := NewSFSObject()
+		v := sfs.NewSFSObject()
 		v.PutLong("uid", int64(9000+i))
 		v.PutInt("eventId", 3000+int32(i))
 		v.PutInt("visitorId", 6)
 		list.AddSFSObject(v)
 	}
-	visitor := NewSFSObject()
+	visitor := sfs.NewSFSObject()
 	if hasMaxNum {
 		visitor.PutInt("maxNum", maxNum)
 	}
 	visitor.PutSFSArray("list", list)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSObject("visitor", visitor)
 	return params
 }
@@ -465,7 +466,7 @@ func TestParseInitVisitorsFallbackCeilingTruncatesWithoutMaxNum(t *testing.T) {
 // closing the finding that ParseInitVisitors' cap was fully bypassable: it used to defer entirely to
 // the server-supplied `maxNum` field with only a `> 0` sanity check and no upper bound, so a hostile
 // or misbehaving -cs-ip peer could set maxNum to an enormous value (paired with a matching number of
-// visitor.list entries, well within sfsobject.go's maxDecodedNodes=300,000 decode budget) and
+// visitor.list entries, well within sfsobject.go's sfs.MaxDecodedNodes=300,000 decode budget) and
 // completely defeat maxVisitorsDefensiveCeiling's own protection -- GreetVisitors trusts whatever
 // slice ParseInitVisitors hands it entirely, so this directly reopened the unbounded sequential
 // wall-clock cost maxVisitorsDefensiveCeiling (round 24) was introduced to bound.
@@ -536,7 +537,7 @@ func TestParseInitVisitorsMaxNumExactlyAtUpperBoundDoesNotClamp(t *testing.T) {
 // requirePresentField pass. A malformed entry (missing the required "uid" field) hit a `continue`
 // that didn't advance len(out) at all, so it never counted against the cap, even though
 // requirePresentField itself logs a Warn for every single one of them. Since the raw `visitor.list`
-// array is bounded only by sfsobject.go's much larger maxDecodedNodes=300,000 decode budget, a
+// array is bounded only by sfsobject.go's much larger sfs.MaxDecodedNodes=300,000 decode budget, a
 // hostile peer could pad visitor.list with malformed entries and force ParseInitVisitors to scan (and
 // log-warn on) all of them regardless of how small the configured cap was.
 //
@@ -558,17 +559,17 @@ func TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput(t *testing.T) {
 		wantMalformed = maxNum * 50 // far more malformed entries than the cap
 	)
 
-	list := NewSFSArray()
+	list := sfs.NewSFSArray()
 	for i := 0; i < wantMalformed; i++ {
-		v := NewSFSObject()
+		v := sfs.NewSFSObject()
 		v.PutInt("eventId", 3000+int32(i)) // deliberately no "uid" field
 		v.PutInt("visitorId", 6)
 		list.AddSFSObject(v)
 	}
-	visitor := NewSFSObject()
+	visitor := sfs.NewSFSObject()
 	visitor.PutInt("maxNum", maxNum)
 	visitor.PutSFSArray("list", list)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSObject("visitor", visitor)
 
 	var buf bytes.Buffer
@@ -650,20 +651,20 @@ func TestParseInitVisitorsFallbackCeilingBoundary(t *testing.T) {
 // sfsFieldKindLong)` back to `requirePresentField(vi, "uid", "visitor.list")` makes this test fail
 // with 2 visitors instead of 1 (both uid=0, indistinguishable), and no "wrong-typed" warning logged.
 func TestParseInitVisitorsWrongTypedUIDIsRejected(t *testing.T) {
-	wrongTyped := NewSFSObject()
+	wrongTyped := sfs.NewSFSObject()
 	wrongTyped.PutUtfString("uid", "not-a-long") // wrong SFS type: a visitor uid must be a Long
 	wrongTyped.PutInt("eventId", 2005)
 
-	genuineZero := NewSFSObject()
+	genuineZero := sfs.NewSFSObject()
 	genuineZero.PutLong("uid", 0) // a real, well-typed uid that happens to be zero
 	genuineZero.PutInt("eventId", 2001)
 
-	list := NewSFSArray()
+	list := sfs.NewSFSArray()
 	list.AddSFSObject(wrongTyped)
 	list.AddSFSObject(genuineZero)
-	visitor := NewSFSObject()
+	visitor := sfs.NewSFSObject()
 	visitor.PutSFSArray("list", list)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSObject("visitor", visitor)
 
 	var buf bytes.Buffer
@@ -713,17 +714,17 @@ func TestParseInitVisitorsWrongTypedUIDIsRejected(t *testing.T) {
 func TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning(t *testing.T) {
 	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
 
-	list := NewSFSArray()
+	list := sfs.NewSFSArray()
 	for i := 0; i < wantListLen; i++ {
-		v := NewSFSObject()
+		v := sfs.NewSFSObject()
 		v.PutLong("uid", int64(9000+i))
 		v.PutInt("eventId", 3000+int32(i))
 		list.AddSFSObject(v)
 	}
-	visitor := NewSFSObject()
+	visitor := sfs.NewSFSObject()
 	visitor.PutUtfString("maxNum", "not-an-int") // wrong SFS type: maxNum must be an Int
 	visitor.PutSFSArray("list", list)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSObject("visitor", visitor)
 
 	var buf bytes.Buffer
@@ -757,17 +758,17 @@ func TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning(t *testing.T) {
 func TestParseInitVisitorsNegativeMaxNumFallsBackWithWarning(t *testing.T) {
 	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
 
-	list := NewSFSArray()
+	list := sfs.NewSFSArray()
 	for i := 0; i < wantListLen; i++ {
-		v := NewSFSObject()
+		v := sfs.NewSFSObject()
 		v.PutLong("uid", int64(9000+i))
 		v.PutInt("eventId", 3000+int32(i))
 		list.AddSFSObject(v)
 	}
-	visitor := NewSFSObject()
+	visitor := sfs.NewSFSObject()
 	visitor.PutInt("maxNum", -5) // correctly-typed, but never a legitimate value
 	visitor.PutSFSArray("list", list)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSObject("visitor", visitor)
 
 	var buf bytes.Buffer
@@ -800,17 +801,17 @@ func TestParseInitVisitorsOutOfRangeLongMaxNumFallsBackWithWarning(t *testing.T)
 	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
 	const hugeMaxNum = int64(math.MaxInt32) + 5000000000
 
-	list := NewSFSArray()
+	list := sfs.NewSFSArray()
 	for i := 0; i < wantListLen; i++ {
-		v := NewSFSObject()
+		v := sfs.NewSFSObject()
 		v.PutLong("uid", int64(9000+i))
 		v.PutInt("eventId", 3000+int32(i))
 		list.AddSFSObject(v)
 	}
-	visitor := NewSFSObject()
+	visitor := sfs.NewSFSObject()
 	visitor.PutLong("maxNum", hugeMaxNum) // correctly-typed Long, but out of int32's range
 	visitor.PutSFSArray("list", list)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutSFSObject("visitor", visitor)
 
 	var buf bytes.Buffer
@@ -839,13 +840,13 @@ func TestParseInitVisitorsOutOfRangeLongMaxNumFallsBackWithWarning(t *testing.T)
 // finding that ParseInitVisitors' four top-level malformed-shape guards (wrong-typed visitor
 // object, absent list, wrong-typed list array, non-object list entry) had zero direct/isolated
 // test coverage -- each was only ever exercised indirectly, end to end, by happy-path tests that
-// build a valid visitor/list/SFSArray/SFSObject chain. ParseInitVisitors parses the bare `init`
+// build a valid visitor/list/sfs.SFSArray/sfs.SFSObject chain. ParseInitVisitors parses the bare `init`
 // bootstrap push, which this codebase's own threat-model comments (e.g.
 // maxVisitorsDefensiveCeiling's doc comment) explicitly treat as attacker-influenceable via a
 // hostile/misbehaving -cs-ip peer, so these four malformed shapes are squarely in scope.
 func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
-	t.Run("visitor field present but wrong-typed (not an SFSObject)", func(t *testing.T) {
-		params := NewSFSObject()
+	t.Run("visitor field present but wrong-typed (not an sfs.SFSObject)", func(t *testing.T) {
+		params := sfs.NewSFSObject()
 		params.PutUtfString("visitor", "not-an-object")
 
 		var buf bytes.Buffer
@@ -864,9 +865,9 @@ func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
 		}
 	})
 	t.Run("list field absent from an otherwise well-formed visitor object", func(t *testing.T) {
-		visitor := NewSFSObject()
+		visitor := sfs.NewSFSObject()
 		visitor.PutInt("maxNum", 5) // present, but deliberately no "list" field
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSObject("visitor", visitor)
 
 		var buf bytes.Buffer
@@ -884,10 +885,10 @@ func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
 			t.Errorf("expected no log output for a genuinely-absent list field, got:\n%s", logged)
 		}
 	})
-	t.Run("list field present but wrong-typed (not an SFSArray)", func(t *testing.T) {
-		visitor := NewSFSObject()
+	t.Run("list field present but wrong-typed (not an sfs.SFSArray)", func(t *testing.T) {
+		visitor := sfs.NewSFSObject()
 		visitor.PutUtfString("list", "not-an-array")
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSObject("visitor", visitor)
 
 		var buf bytes.Buffer
@@ -906,14 +907,14 @@ func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
 		}
 	})
 	t.Run("list entry present but non-object -- skipped, sibling well-formed entries still kept", func(t *testing.T) {
-		good := NewSFSObject()
+		good := sfs.NewSFSObject()
 		good.PutLong("uid", 555)
-		list := NewSFSArray()
-		list.AddInt(12345) // a bare non-object entry, not a *SFSObject
+		list := sfs.NewSFSArray()
+		list.AddInt(12345) // a bare non-object entry, not a *sfs.SFSObject
 		list.AddSFSObject(good)
-		visitor := NewSFSObject()
+		visitor := sfs.NewSFSObject()
 		visitor.PutSFSArray("list", list)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSObject("visitor", visitor)
 
 		got := ParseInitVisitors(params)
@@ -966,15 +967,15 @@ func (c *eofConnWithWrites) SetWriteDeadline(time.Time) error { return nil }
 // just for the already-a-net.Error fakeNetErrConn used by
 // TestGreetVisitorsAbortsRemainingVisitorsOnNetError above. That existing test injects a fake whose
 // Read already returns something satisfying net.Error directly -- it never exercises packet.go's
-// deadConnError conversion (round 24), the piece of production code actually responsible for turning
+// sfs.DeadConnError conversion (round 24), the piece of production code actually responsible for turning
 // a real closed connection's bare io.EOF into a net.Error with Timeout()==false in the first place
-// (see deadConnError's and wrapIfClosed's doc comments in packet.go, and
+// (see sfs.DeadConnError's and sfs.WrapIfClosed's doc comments in packet.go, and
 // TestReadEnvelopeGracefulCloseIsNonTimeoutNetError in conn_wait_test.go, which proves the same
 // conversion at the ReadEnvelope level but never drives it through GreetVisitors itself).
 //
 // eofConnWithWrites' Read returns bare io.EOF -- the shape a real net.Conn produces for a peer's
 // graceful close between packets -- fed through an actual GameConn, so GreetVisitors' first
-// `visitor.operate` call runs the real ReadPacket -> readFrameField/wrapIfClosed -> deadConnError
+// `visitor.operate` call runs the real sfs.ReadPacket -> sfs.ReadFrameField/sfs.WrapIfClosed -> sfs.DeadConnError
 // chain end to end. Only that one request should ever be sent: if GreetVisitors didn't break early,
 // it would go on to attempt every remaining visitor in turn.
 //
@@ -997,13 +998,13 @@ func TestGreetVisitorsAbortsOnRealGracefulCloseEndToEnd(t *testing.T) {
 	}
 	var netErr net.Error
 	if !errors.As(err, &netErr) {
-		t.Fatalf("GreetVisitors() error = %v, want it to wrap a net.Error (packet.go's deadConnError, converted from the real bare io.EOF)", err)
+		t.Fatalf("GreetVisitors() error = %v, want it to wrap a net.Error (packet.go's sfs.DeadConnError, converted from the real bare io.EOF)", err)
 	}
 	if netErr.Timeout() {
 		t.Errorf("GreetVisitors() error wraps a net.Error with Timeout()==true, want false -- a real graceful close must read as a genuine dead connection, not an ordinary per-call timeout")
 	}
 	if !errors.Is(err, io.EOF) {
-		t.Errorf("GreetVisitors() error = %v, want it to still satisfy errors.Is(err, io.EOF) (deadConnError wraps, never replaces, the original io.EOF) -- proving this test actually exercised the real bare-io.EOF conversion path rather than a synthetic already-a-net.Error fake", err)
+		t.Errorf("GreetVisitors() error = %v, want it to still satisfy errors.Is(err, io.EOF) (sfs.DeadConnError wraps, never replaces, the original io.EOF) -- proving this test actually exercised the real bare-io.EOF conversion path rather than a synthetic already-a-net.Error fake", err)
 	}
 	if got := fake.writeCount(); got != 1 {
 		t.Errorf("fake connection saw %d writes, want exactly 1 (only the first visitor's request -- GreetVisitors should have aborted before attempting the other two)", got)

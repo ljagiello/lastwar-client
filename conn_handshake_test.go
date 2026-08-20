@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"strings"
@@ -29,7 +30,7 @@ func TestDoHandshakeSuccess(t *testing.T) {
 		if env.Controller != controllerSystem || env.Action != actionHandshake {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("sess", "abc123")
 		_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
 	}()
@@ -62,7 +63,7 @@ func TestDoHandshakeFailureWrapsErrAuthRejected(t *testing.T) {
 		if env.Controller != controllerSystem || env.Action != actionHandshake {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutShort("ec", 4)
 		_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
 	}()
@@ -81,7 +82,7 @@ func TestDoHandshakeFailureWrapsErrAuthRejected(t *testing.T) {
 // loop): if some other envelope -- e.g. an out-of-order push shaped like push.account.login.new,
 // carrying a live loginKey -- arrives before the real system/actionHandshake response, DoHandshake
 // falls into this skip-and-log branch instead of erroring out. Round 11 added
-// SFSObject.StringRedacted() for exactly this kind of "log a full decoded object" call site, but
+// sfs.SFSObject.StringRedacted() for exactly this kind of "log a full decoded object" call site, but
 // this particular site kept calling the raw, unredacted String() instead -- and evaded round-11's
 // credential_leak_lint_test.go regex specifically because the .String() call was stashed in a
 // local variable (contentStr) two lines above the slog.Info call rather than inline in it. This
@@ -104,14 +105,14 @@ func TestDoHandshakeSkipRedactsCredentialFields(t *testing.T) {
 		// {c,a,p} envelope shape as push.account.login.new, sent under an action id (actionLogin)
 		// DoHandshake isn't waiting for -- this drives it into the skip-and-log fallback branch
 		// rather than the normal-response or ec-rejection paths.
-		skipped := NewSFSObject()
+		skipped := sfs.NewSFSObject()
 		skipped.PutUtfString("loginKey", secretLoginKey)
 		skipped.PutUtfString("gameUid", "g1")
 		if err := server.SendEnvelope(controllerExtension, actionLogin, skipped); err != nil {
 			return
 		}
 
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("sess", "abc123")
 		_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
 	}()
@@ -177,7 +178,7 @@ func TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		unrelated := NewSFSObject()
+		unrelated := sfs.NewSFSObject()
 		unrelated.PutUtfString("noise", "an unrelated push, not the handshake response")
 		_ = server.SendEnvelope(controllerExtension, actionLogin, unrelated)
 	}()
@@ -221,7 +222,7 @@ func TestDoHandshakeDeadlineElapsedAfterNonMatchingEnvelope(t *testing.T) {
 // without ever replying. Per net.Pipe's own semantics (net/pipe.go), closing one end delivers io.EOF,
 // not io.ErrClosedPipe, to the other end's pending/future Reads, so the client's subsequent
 // ReadEnvelope call fails genuinely (not via any deadline/timeout path). packet.go's
-// wrapIfClosed/deadConnError then turns that into a net.Error with Timeout()==false, so asserting
+// sfs.WrapIfClosed/sfs.DeadConnError then turns that into a net.Error with Timeout()==false, so asserting
 // errors.Is(err, io.EOF) and errors.As(err, &netErr) here proves DoHandshake's
 // "read handshake response: %w" wrap survives both all the way out to the caller -- exactly what a
 // future caller doing the same net.Error/Timeout() distinction sendAndWait's callers already rely on
@@ -259,8 +260,8 @@ func TestDoHandshakeReadEnvelopeFailure(t *testing.T) {
 // that DoHandshake's own independent read loop -- reachable only via the disabled-by-default,
 // explicitly experimental -handshake flag -- used to return ANY ReadEnvelope error immediately
 // with zero net.Error classification at all, the same root-cause gap as login.go's waitFor. A
-// plain DecodeObject parse failure on one malformed/unrelated push (never itself a net.Error,
-// since ReadPacket has already fully consumed that frame's bytes before DecodeObject ever runs, so
+// plain sfs.DecodeObject parse failure on one malformed/unrelated push (never itself a net.Error,
+// since sfs.ReadPacket has already fully consumed that frame's bytes before sfs.DecodeObject ever runs, so
 // the stream stays in sync) used to abort the handshake outright. The fake server here writes one
 // well-framed-but-undecodable packet (mustEncodeCorruptPacket, decode_test.go) directly to the
 // connection, then sends a normal handshake response. DoHandshake must survive the corrupt packet
@@ -275,7 +276,7 @@ func TestDoHandshakeSurvivesCorruptEnvelope(t *testing.T) {
 		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("sess", "abc123")
 		_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
 	}()
@@ -327,7 +328,7 @@ func TestDoHandshakeConsecutiveDecodeFailuresBoundary(t *testing.T) {
 					return
 				}
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutUtfString("sess", "abc123")
 			_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
 		}()
@@ -352,11 +353,11 @@ func TestDoHandshakeConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		}
 		// Round-51 regression assertion: see conn_wait_test.go's
 		// TestWaitForConsecutiveDecodeFailuresBoundary for the full MAJOR-finding rationale --
-		// this give-up error must satisfy net.Error with Timeout()==false (via deadConnError,
+		// this give-up error must satisfy net.Error with Timeout()==false (via sfs.DeadConnError,
 		// login.go), not just be a non-nil error.
 		var netErr net.Error
 		if !errors.As(err, &netErr) {
-			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadConnError's wrap)", err, err)
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via sfs.DeadConnError's wrap)", err, err)
 		}
 		if netErr.Timeout() {
 			t.Errorf("netErr.Timeout() = true, want false")
@@ -381,14 +382,14 @@ func TestDoHandshakeNonMatchingEnvelopeCapBoundary(t *testing.T) {
 			if _, rerr := server.ReadEnvelope(); rerr != nil {
 				return
 			}
-			noise := NewSFSObject()
+			noise := sfs.NewSFSObject()
 			noise.PutUtfString("irrelevant", "noise")
 			for i := 0; i < n; i++ {
 				if err := server.SendExtension("irrelevant.cmd", noise); err != nil {
 					return
 				}
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutUtfString("sess", "abc123")
 			_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
 		}()
@@ -435,14 +436,14 @@ func TestDoHandshakeRejectsMissingPPayload(t *testing.T) {
 		}
 		// Built by hand (not SendEnvelope, which always encodes a "p" field) to omit "p"
 		// entirely -- the one shape SendEnvelope itself cannot produce.
-		outer := NewSFSObject()
+		outer := sfs.NewSFSObject()
 		outer.PutByte("c", controllerSystem)
 		outer.PutShort("a", actionHandshake)
-		body, err := EncodeObject(outer)
+		body, err := sfs.EncodeObject(outer)
 		if err != nil {
 			return
 		}
-		packet, err := EncodePacket(body)
+		packet, err := sfs.EncodePacket(body)
 		if err != nil {
 			return
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -88,12 +89,12 @@ func fakeInitPushServer(zoneSeen chan<- string) func(*GameConn) {
 		if zoneSeen != nil && env.Content != nil {
 			zoneSeen <- env.Content.GetString("zn")
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		_ = server.SendExtension("init", NewSFSObject())
+		_ = server.SendExtension("init", sfs.NewSFSObject())
 	}
 }
 
@@ -139,43 +140,43 @@ func fakeInitPushServerWithDuplicateUUIDs() func(*GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
 
-		b1 := NewSFSObject()
+		b1 := sfs.NewSFSObject()
 		b1.PutLong("uuid", 111)
 		b1.PutInt("bId", BuildingFarmland)
-		b1Dup := NewSFSObject()
+		b1Dup := sfs.NewSFSObject()
 		b1Dup.PutLong("uuid", 111)
 		b1Dup.PutInt("bId", BuildingFarmland)
-		b2 := NewSFSObject()
+		b2 := sfs.NewSFSObject()
 		b2.PutLong("uuid", 222)
 		b2.PutInt("bId", BuildingIronMine)
-		buildingArr := NewSFSArray()
+		buildingArr := sfs.NewSFSArray()
 		buildingArr.AddSFSObject(b1)
 		buildingArr.AddSFSObject(b1Dup)
 		buildingArr.AddSFSObject(b2)
 
-		v1 := NewSFSObject()
+		v1 := sfs.NewSFSObject()
 		v1.PutLong("uid", 444)
 		v1.PutInt("eventId", 2001)
-		v1Dup := NewSFSObject()
+		v1Dup := sfs.NewSFSObject()
 		v1Dup.PutLong("uid", 444)
 		v1Dup.PutInt("eventId", 2001)
-		v2 := NewSFSObject()
+		v2 := sfs.NewSFSObject()
 		v2.PutLong("uid", 555)
 		v2.PutInt("eventId", 2002)
-		visitorList := NewSFSArray()
+		visitorList := sfs.NewSFSArray()
 		visitorList.AddSFSObject(v1)
 		visitorList.AddSFSObject(v1Dup)
 		visitorList.AddSFSObject(v2)
-		visitorObj := NewSFSObject()
+		visitorObj := sfs.NewSFSObject()
 		visitorObj.PutSFSArray("list", visitorList)
 
-		init := NewSFSObject()
+		init := sfs.NewSFSObject()
 		init.PutSFSArray("building_new", buildingArr)
 		init.PutSFSObject("visitor", visitorObj)
 		_ = server.SendExtension("init", init)
@@ -250,23 +251,23 @@ func fakeInitPushServerWithWrongTypedBuildingUUID() func(*GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
 
-		wrongTyped := NewSFSObject()
+		wrongTyped := sfs.NewSFSObject()
 		wrongTyped.PutUtfString("uuid", "not-a-long") // wrong SFS type: a building uuid must be a Long
 		wrongTyped.PutInt("bId", BuildingFarmland)
-		genuineZero := NewSFSObject()
+		genuineZero := sfs.NewSFSObject()
 		genuineZero.PutLong("uuid", 0) // a real, well-typed uuid that happens to be zero
 		genuineZero.PutInt("bId", BuildingIronMine)
-		buildingArr := NewSFSArray()
+		buildingArr := sfs.NewSFSArray()
 		buildingArr.AddSFSObject(wrongTyped)
 		buildingArr.AddSFSObject(genuineZero)
 
-		init := NewSFSObject()
+		init := sfs.NewSFSObject()
 		init.PutSFSArray("building_new", buildingArr)
 		_ = server.SendExtension("init", init)
 	}
@@ -337,14 +338,14 @@ func TestLoginRejectsMissingPPayload(t *testing.T) {
 		}
 		// Built by hand (not SendEnvelope, which always encodes a "p" field) to omit "p"
 		// entirely -- the one shape SendEnvelope itself cannot produce.
-		outer := NewSFSObject()
+		outer := sfs.NewSFSObject()
 		outer.PutByte("c", controllerSystem)
 		outer.PutShort("a", actionLogin)
-		body, err := EncodeObject(outer)
+		body, err := sfs.EncodeObject(outer)
 		if err != nil {
 			return
 		}
-		packet, err := EncodePacket(body)
+		packet, err := sfs.EncodePacket(body)
 		if err != nil {
 			return
 		}
@@ -382,7 +383,7 @@ func TestLoginRejectsAuthRejection(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("ec", "28")
 		resp.PutUtfString("errorMsg", "E011")
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
@@ -480,7 +481,7 @@ func TestLoginConnectionFailureWhileWaitingForInit(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
@@ -533,10 +534,10 @@ func TestLoginConnectionFailureWhileWaitingForInit(t *testing.T) {
 
 // TestLoginSurvivesCorruptPushWhileWaitingForInit is the round-48 regression test for the MAJOR
 // finding that waitForInitPush (login.go) used to classify ANY non-timeout ReadEnvelope error --
-// including a plain DecodeObject parse failure on a single malformed/unrecognized push -- the same
-// as a genuine dead connection, aborting the entire login. A DecodeObject failure happens on a
-// frame ReadPacket has ALREADY fully consumed off the wire (see conn.go's ReadEnvelope: ReadPacket
-// runs first and returns the complete body before DecodeObject ever touches it), so the stream
+// including a plain sfs.DecodeObject parse failure on a single malformed/unrecognized push -- the same
+// as a genuine dead connection, aborting the entire login. A sfs.DecodeObject failure happens on a
+// frame sfs.ReadPacket has ALREADY fully consumed off the wire (see conn.go's ReadEnvelope: sfs.ReadPacket
+// runs first and returns the complete body before sfs.DecodeObject ever touches it), so the stream
 // stays in sync -- this is not evidence the connection is dead, exactly the same reasoning
 // buildings.go's containsNonTimeoutNetError-based callers already apply elsewhere. The fake server
 // here writes one well-framed-but-undecodable packet (mustEncodeCorruptPacket, decode_test.go)
@@ -551,17 +552,17 @@ func TestLoginSurvivesCorruptPushWhileWaitingForInit(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		// A well-framed but undecodable packet -- ReadPacket succeeds, DecodeObject fails.
+		// A well-framed but undecodable packet -- sfs.ReadPacket succeeds, sfs.DecodeObject fails.
 		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
 			return
 		}
 		time.Sleep(50 * time.Millisecond) // let the client's read loop process the corrupt packet first
-		_ = server.SendExtension("init", NewSFSObject())
+		_ = server.SendExtension("init", sfs.NewSFSObject())
 	})
 	host, port := splitHostPortInt(t, addr)
 
@@ -767,14 +768,14 @@ func TestLoginExactlyMaxRedirectHopsSucceeds(t *testing.T) {
 			// The last server in the chain (the maxRedirectHops-th hop) completes a normal
 			// login instead of redirecting again -- this is the boundary value itself, which
 			// must still be reachable, not rejected.
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 			// Immediately follow with `init` so waitForInitPush returns right away instead of
 			// silently riding out the full 45s initPushTimeout before Login() gives up and
 			// returns anyway -- this test only cares about the redirect-hop boundary, not
 			// init-push behavior.
-			_ = server.SendExtension("init", NewSFSObject())
+			_ = server.SendExtension("init", sfs.NewSFSObject())
 		})
 	}
 
@@ -952,12 +953,12 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
 			return
 		}
 
@@ -967,7 +968,7 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 			return
 		}
 		gotSendCodeEmail <- sendCodeMsg.Params.GetString("mail")
-		ack := NewSFSObject()
+		ack := sfs.NewSFSObject()
 		ack.PutBool("success", true)
 		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
 			return
@@ -980,7 +981,7 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 		}
 		gotFinishEmail <- finishMsg.Params.GetString("mail")
 		gotFinishCode <- finishMsg.Params.GetString("verifyCode")
-		finishAck := NewSFSObject()
+		finishAck := sfs.NewSFSObject()
 		finishAck.PutBool("success", true)
 		if err := server.SendExtension("account.login.new", finishAck); err != nil {
 			return
@@ -988,7 +989,7 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 
 		// The real account data arrives separately as a push, per login.go's own comment on
 		// why msg2 (not the ack above) is what Login() actually reads gameUid/loginKey from.
-		push := NewSFSObject()
+		push := sfs.NewSFSObject()
 		push.PutUtfString("loginKey", wantLoginKey)
 		push.PutUtfString("gameUid", wantGameUid)
 		push.PutUtfString("gameUserName", wantUsername)
@@ -1107,20 +1108,20 @@ func TestLoginWarnsOnWrongTypedPersistenceFields(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		resp.PutInt("un", 111) // wrong-typed: a real "un" is always a UTF string, never a number
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
 			return
 		}
 
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		ack := NewSFSObject()
+		ack := sfs.NewSFSObject()
 		ack.PutBool("success", true)
 		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
 			return
@@ -1129,14 +1130,14 @@ func TestLoginWarnsOnWrongTypedPersistenceFields(t *testing.T) {
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		finishAck := NewSFSObject()
+		finishAck := sfs.NewSFSObject()
 		finishAck.PutBool("success", true)
 		if err := server.SendExtension("account.login.new", finishAck); err != nil {
 			return
 		}
 
 		// All three push fields wrong-typed too.
-		push := NewSFSObject()
+		push := sfs.NewSFSObject()
 		push.PutInt("loginKey", 222)
 		push.PutInt("gameUid", 333)
 		push.PutInt("gameUserName", 444)
@@ -1229,19 +1230,19 @@ func TestLoginEmailVerificationPathWarnsOnPersistFailure(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
 			return
 		}
 
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		ack := NewSFSObject()
+		ack := sfs.NewSFSObject()
 		ack.PutBool("success", true)
 		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
 			return
@@ -1250,7 +1251,7 @@ func TestLoginEmailVerificationPathWarnsOnPersistFailure(t *testing.T) {
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		finishAck := NewSFSObject()
+		finishAck := sfs.NewSFSObject()
 		finishAck.PutBool("success", true)
 		if err := server.SendExtension("account.login.new", finishAck); err != nil {
 			return
@@ -1263,7 +1264,7 @@ func TestLoginEmailVerificationPathWarnsOnPersistFailure(t *testing.T) {
 		mkdirResults <- os.Mkdir(gameUidStatePath(), 0700)
 		mkdirResults <- os.Mkdir(usernameStatePath(), 0700)
 
-		push := NewSFSObject()
+		push := sfs.NewSFSObject()
 		push.PutUtfString("loginKey", "test-login-key")
 		push.PutUtfString("gameUid", wantGameUid)
 		push.PutUtfString("gameUserName", wantUsername)
@@ -1373,19 +1374,19 @@ func TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
 			return
 		}
 
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		ack := NewSFSObject()
+		ack := sfs.NewSFSObject()
 		ack.PutBool("success", true)
 		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
 			return
@@ -1394,16 +1395,16 @@ func TestLoginEmailVerificationPushErrorDoesNotLeakLoginKey(t *testing.T) {
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		finishAck := NewSFSObject()
+		finishAck := sfs.NewSFSObject()
 		finishAck.PutBool("success", true)
 		if err := server.SendExtension("account.login.new", finishAck); err != nil {
 			return
 		}
 
 		// The push carries both a rejection (errorCode) AND the same cleartext loginKey field a
-		// successful push would -- proving the errorCode branch must redact it too, not just the
+		// successful push would -- proving the errorCode branch must sfs.Redact it too, not just the
 		// success branch.
-		push := NewSFSObject()
+		push := sfs.NewSFSObject()
 		push.PutUtfString("errorCode", "999999")
 		push.PutUtfString("loginKey", secretLoginKey)
 		_ = server.SendExtension("push.account.login.new", push)
@@ -1469,12 +1470,12 @@ func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
 			return
 		}
 
@@ -1482,7 +1483,7 @@ func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		ack := NewSFSObject()
+		ack := sfs.NewSFSObject()
 		ack.PutBool("success", true)
 		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
 			return
@@ -1492,13 +1493,13 @@ func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		finishAck := NewSFSObject()
+		finishAck := sfs.NewSFSObject()
 		finishAck.PutBool("success", true)
 		if err := server.SendExtension("account.login.new", finishAck); err != nil {
 			return
 		}
 
-		push := NewSFSObject()
+		push := sfs.NewSFSObject()
 		push.PutUtfString("loginKey", "test-login-key")
 		push.PutUtfString("gameUid", "real-uid-1")
 		_ = server.SendExtension("push.account.login.new", push)
@@ -1580,9 +1581,9 @@ func TestLoginRedactsCodeDeviceIdAndAirKeyInLogs(t *testing.T) {
 // "sent account.login.send.verify.code" and "verification code should now be arriving" -- used to
 // log opts.Email directly via a plain "email" slog attribute, in cleartext, at default Info level
 // on every email-verification login. This is a raw Go string field, so it entirely bypassed the
-// SFSObject-level redaction system (which only ever sees opts.Email once it's already been put onto
-// an SFSObject as "mail", a separate, non-overlapping instance of the same value -- see
-// sfsobject.go's sensitiveSFSKeys). Fixed to log emailLen instead, matching this exact function's
+// sfs.SFSObject-level redaction system (which only ever sees opts.Email once it's already been put onto
+// an sfs.SFSObject as "mail", a separate, non-overlapping instance of the same value -- see
+// sfsobject.go's sfs.SensitiveSFSKeys). Fixed to log emailLen instead, matching this exact function's
 // own established pattern for DeviceID/AirKey just above.
 //
 // Mirrors TestLoginRedactsCodeDeviceIdAndAirKeyInLogs's structure: same fake server flow, same
@@ -1603,12 +1604,12 @@ func TestLoginRedactsEmailInLogs(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
 			return
 		}
 
@@ -1617,7 +1618,7 @@ func TestLoginRedactsEmailInLogs(t *testing.T) {
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		ack := NewSFSObject()
+		ack := sfs.NewSFSObject()
 		ack.PutBool("success", true)
 		if err := server.SendExtension("account.login.send.verify.code", ack); err != nil {
 			return
@@ -1627,13 +1628,13 @@ func TestLoginRedactsEmailInLogs(t *testing.T) {
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		finishAck := NewSFSObject()
+		finishAck := sfs.NewSFSObject()
 		finishAck.PutBool("success", true)
 		if err := server.SendExtension("account.login.new", finishAck); err != nil {
 			return
 		}
 
-		push := NewSFSObject()
+		push := sfs.NewSFSObject()
 		push.PutUtfString("loginKey", "test-login-key")
 		push.PutUtfString("gameUid", "real-uid-1")
 		_ = server.SendExtension("push.account.login.new", push)
@@ -1701,11 +1702,11 @@ func TestLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutInt("ip", 12345) // wrong-typed: a real ip is always a UTF string, never a number
 		si.PutInt("port", 9339)
 		si.PutUtfString("zone", "APS2")
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutSFSObject("serverInfo", si)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
@@ -1713,7 +1714,7 @@ func TestLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
 		// The wrong-typed ip must not be treated as a redirect, so Login() falls through to
 		// step 5's init-push wait -- send it right away so this test doesn't wait out the real
 		// 45s initPushTimeout.
-		_ = server.SendExtension("init", NewSFSObject())
+		_ = server.SendExtension("init", sfs.NewSFSObject())
 	})
 	host, port := splitHostPortInt(t, addr)
 
@@ -1769,11 +1770,11 @@ func TestLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutUtfString("ip", newHost) // well-typed: the redirect must still be followed
 		si.PutInt("port", int32(newPort))
 		si.PutInt("zone", 999) // wrong-typed: a real zone is always a UTF string, never a number
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutSFSObject("serverInfo", si)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -1893,7 +1894,7 @@ func TestLoginRejectsOversizedInitialZoneAccessTokAndGameUid(t *testing.T) {
 // the identical way it rejects a wrong-typed one -- falling back to "" so the caller's existing
 // `if newZone != "" { zone = newZone }` guard keeps the stale pre-redirect zone instead of ever
 // reaching PutUtfString with an unencodable value. The oversized zone is written directly via
-// SFSObject.put with the sfsText wire tag (mirroring mail_orchestration_test.go's technique for
+// sfs.SFSObject.put with the sfs.SFSText wire tag (mirroring mail_orchestration_test.go's technique for
 // mail.go's uid/lastUid fields) since PutUtfString itself would fail to encode a >65535-byte
 // string.
 func TestLoginRedirectOversizedZoneIsWarned(t *testing.T) {
@@ -1908,11 +1909,11 @@ func TestLoginRedirectOversizedZoneIsWarned(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutUtfString("ip", newHost) // well-typed: the redirect must still be followed
 		si.PutInt("port", int32(newPort))
-		si.put("zone", SFSValue{sfsText, oversizedZone}) // well-typed, but one byte over the wire cap
-		resp := NewSFSObject()
+		si.PutValue("zone", sfs.SFSValue{Type: sfs.SFSText, Val: oversizedZone}) // well-typed, but one byte over the wire cap
+		resp := sfs.NewSFSObject()
 		resp.PutSFSObject("serverInfo", si)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -1962,7 +1963,7 @@ func TestLoginRedirectOversizedZoneIsWarned(t *testing.T) {
 // TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized): the mid-redirect GSL refresh
 // (opt=fix) fetched before following a serverInfo redirect. An oversized refreshed token must fall
 // back to the PREVIOUS access token (capOversizedIdentityField, login.go) instead of ever reaching
-// PutUtfString with a value writeUtfString would hard-reject. newFakeGSLServer's variadic
+// PutUtfString with a value sfs.WriteUtfString would hard-reject. newFakeGSLServer's variadic
 // responses let the first (initial) and second (mid-redirect refresh) GetServerList calls answer
 // differently.
 func TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized(t *testing.T) {
@@ -1978,16 +1979,16 @@ func TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized(t *testing.T) {
 			return
 		}
 		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*SFSObject); ok {
+			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
 				gotParamsAt <- pObj.GetString("at")
 			}
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		_ = server.SendExtension("init", NewSFSObject())
+		_ = server.SendExtension("init", sfs.NewSFSObject())
 	})
 	newHost, newPort := splitHostPortInt(t, newAddr)
 
@@ -2063,16 +2064,16 @@ func TestLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.T) {
 			return
 		}
 		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*SFSObject); ok {
+			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
 				gotParamsAt <- pObj.GetString("at")
 			}
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		_ = server.SendExtension("init", NewSFSObject())
+		_ = server.SendExtension("init", sfs.NewSFSObject())
 	})
 	newHost, newPort := splitHostPortInt(t, newAddr)
 
@@ -2255,12 +2256,12 @@ func TestLoginSendVerifyCodeSendFailureIsNonTimeoutNetError(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		_ = server.SendExtension("init", NewSFSObject())
+		_ = server.SendExtension("init", sfs.NewSFSObject())
 	})
 	host, port := splitHostPortInt(t, addr)
 
@@ -2316,19 +2317,19 @@ func TestLoginAccountLoginNewSendFailureIsNonTimeoutNetError(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
 			return
 		}
-		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
 			return
 		}
 
 		if _, err := readNextExtension(server); err != nil {
 			return
 		}
-		ack := NewSFSObject()
+		ack := sfs.NewSFSObject()
 		ack.PutBool("success", true)
 		_ = server.SendExtension("account.login.send.verify.code", ack)
 	})

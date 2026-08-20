@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rsa"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestCredentialTypesLogValueProtectsJSONHandler(t *testing.T) {
 		{"LoginParamsInput", LoginParamsInput{AccessTok: marker}, "[REDACTED LoginParamsInput]"},
 		{"LoginOptions", LoginOptions{Email: marker}, "[REDACTED LoginOptions]"},
 		{"crossServerTestOpts", crossServerTestOpts{at: marker}, "[REDACTED crossServerTestOpts]"},
-		{"SFSValue", SFSValue{Type: sfsUtfString, Val: marker}, "[REDACTED SFSValue]"},
+		{"SFSValue", sfs.SFSValue{Type: sfs.SFSUtfString, Val: marker}, "[REDACTED SFSValue]"},
 	}
 
 	for _, tt := range tests {

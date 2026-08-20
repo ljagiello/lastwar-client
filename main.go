@@ -218,8 +218,8 @@ func main() {
 
 		// Read the value once into a plain local: not just to avoid three redundant
 		// f.Value.String() calls below, but because flag.Value's String() is a completely
-		// different, unrelated method from SFSObject's -- a plain flag value, never a decoded
-		// SFSObject, so it can never carry a credential field either way -- and keeping every
+		// different, unrelated method from sfs.SFSObject's -- a plain flag value, never a decoded
+		// sfs.SFSObject, so it can never carry a credential field either way -- and keeping every
 		// slog/fmt sink call below working from this local instead of a literal ".String()" call
 		// keeps this block out of credential_leak_lint_test.go's (deliberately blunt, name-based)
 		// scan entirely, rather than needing an allowlist entry to explain that distinction.
@@ -461,7 +461,7 @@ func main() {
 //
 // Round 43 note: packet.go's "frame body too large"/"uncompressed length too large" guards (the
 // original round-26 example here) are NO LONGER an example of this non-fatal case -- they're now
-// wrapped in deadConnError (a genuine net.Error with Timeout()==false), since round 43 found they
+// wrapped in sfs.DeadConnError (a genuine net.Error with Timeout()==false), since round 43 found they
 // fire before the declared body bytes are drained, leaving the reader desynced if a peer actually
 // sends them. containsNonTimeoutNetError now correctly treats that case as fatal below. The zlib
 // decompressed-size guard remains the accurate example: it fires only after the full declared body

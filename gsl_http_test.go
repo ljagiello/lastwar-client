@@ -720,7 +720,7 @@ func TestFlexStringIntWarnsOnMalformedValue(t *testing.T) {
 
 // TestFlexStringIntRedactsSensitiveKeyValue is the round-42 regression test for the MINOR finding
 // that flexString.Int()'s malformed-value Warn logged both the raw value AND (via strconv's own
-// error text, which embeds the value a second time) the value again, with no isSensitiveSFSKey
+// error text, which embeds the value a second time) the value again, with no sfs.IsSensitiveSFSKey
 // gate at all -- unlike this function's structural sibling getIntFlexible (same file), which
 // received exactly this hardening in round 35. Both real call sites today (login.go/main.go's
 // "port") are non-sensitive, so this wasn't exploitable in practice, but a future caller passing
@@ -755,10 +755,10 @@ func TestFlexStringIntRedactsSensitiveKeyValue(t *testing.T) {
 }
 
 // TestLoginTokenStringGoStringRedact is the round-47 regression test for the MAJOR finding that
-// LoginToken -- unlike the SFSObject/SFSArray/SFSValue family, which got exactly this
+// LoginToken -- unlike the sfs.SFSObject/sfs.SFSArray/sfs.SFSValue family, which got exactly this
 // redaction-by-construction treatment in rounds 14-15 -- carried a live bearer access/refresh
 // token with nothing structurally stopping a future call site from formatting it directly.
-// Proves String()/GoString() redact both the bare value and, critically, a LoginToken NESTED
+// Proves String()/GoString() sfs.Redact both the bare value and, critically, a LoginToken NESTED
 // inside a containing struct's %+v -- covering the concrete threat scenario the audit described
 // (a future fmt.Errorf("...: %+v", lsr)-shaped call site on the whole LoginServerListRespon).
 func TestLoginTokenStringGoStringRedact(t *testing.T) {

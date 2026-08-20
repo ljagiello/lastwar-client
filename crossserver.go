@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rsa"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,7 +14,7 @@ import (
 // role/server picked from an account.login.new response's `accountArr`.
 type CrossServerLoginResult struct {
 	Conn    *GameConn
-	Content *SFSObject // the base zone Login response
+	Content *sfs.SFSObject // the base zone Login response
 
 	// Addr/Zone are the FINAL address/zone actually connected to -- these
 	// differ from CrossServerLoginParams' IP/Port/Zone whenever a
@@ -87,7 +88,7 @@ type CrossServerLoginParams struct {
 
 // String/GoString are CrossServerLoginResult's sibling for CrossServerLoginParams -- which
 // carries AccessTok/GameUid/ShumeiBoxId, live credentials -- the same round-48 fix. Every current
-// call site already logs individually-redacted fields (redact(p.AccessTok)/redact(p.ShumeiBoxId)),
+// call site already logs individually-redacted fields (sfs.Redact(p.AccessTok)/sfs.Redact(p.ShumeiBoxId)),
 // not the struct directly, so this is defense-in-depth, not an active leak fix.
 func (p CrossServerLoginParams) String() string   { return "[REDACTED CrossServerLoginParams]" }
 func (p CrossServerLoginParams) GoString() string { return p.String() }
@@ -204,7 +205,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			ShumeiBoxId: p.ShumeiBoxId,
 			IOSMode:     p.IOSMode,
 		})
-		loginContent := NewSFSObject()
+		loginContent := sfs.NewSFSObject()
 		loginContent.PutUtfString("zn", zone)
 		loginContent.PutUtfString("un", p.GameUid)
 		loginContent.PutUtfString("pw", "")
@@ -218,7 +219,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			slog.Debug("full login content", "content", loginContent.StringRedacted())
 		}
 		if f := os.Getenv("LWDEBUG_DUMP_LOGIN_BODY"); f != "" {
-			outer := NewSFSObject()
+			outer := sfs.NewSFSObject()
 			outer.PutByte("c", controllerSystem)
 			outer.PutShort("a", actionLogin)
 			outer.PutSFSObject("p", loginContent)
@@ -232,7 +233,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// follow-up Chmod caught up. atomicWriteStateFile is what config.go's
 			// SaveSessionConfig and identity.go's saveStateFile themselves now use for exactly
 			// this reason.
-			if encoded, err := EncodeObject(outer); err != nil {
+			if encoded, err := sfs.EncodeObject(outer); err != nil {
 				// Debug-only path -- don't fail the actual login over a failed debug dump.
 				slog.Error("failed to encode login body debug dump", "path", f, "error", err)
 			} else if err := atomicWriteStateFile(f, string(encoded)); err != nil {
@@ -244,7 +245,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			return nil, sendStageError{err: err}
 		}
 		slog.Info("login request sent, waiting for response",
-			"gameUid", p.GameUid, "zone", zone, "accessTok", redact(p.AccessTok), "shumeiBoxId", redact(p.ShumeiBoxId))
+			"gameUid", p.GameUid, "zone", zone, "accessTok", sfs.Redact(p.AccessTok), "shumeiBoxId", sfs.Redact(p.ShumeiBoxId))
 
 		env, err := waitFor(conn, 15*time.Second, func(e *Envelope) bool {
 			return e.Controller == controllerSystem && e.Action == actionLogin

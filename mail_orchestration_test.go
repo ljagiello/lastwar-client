@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"strings"
@@ -14,10 +15,10 @@ import (
 	"time"
 )
 
-// newTestMailObj builds the raw *SFSObject shape ListMail parses each `msg` array entry into
+// newTestMailObj builds the raw *sfs.SFSObject shape ListMail parses each `msg` array entry into
 // (see requirePresentField's "uid" requirement and the Mail accessors in mail.go).
-func newTestMailObj(uid string, mailType, rewardStatus int32) *SFSObject {
-	o := NewSFSObject()
+func newTestMailObj(uid string, mailType, rewardStatus int32) *sfs.SFSObject {
+	o := sfs.NewSFSObject()
 	o.PutUtfString("uid", uid)
 	o.PutInt("type", mailType)
 	o.PutInt("rewardStatus", rewardStatus)
@@ -64,8 +65,8 @@ func TestListMailPaginates(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("page 1 Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp1 := NewSFSObject()
-		arr1 := NewSFSArray()
+		resp1 := sfs.NewSFSObject()
+		arr1 := sfs.NewSFSArray()
 		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0))
 		arr1.AddSFSObject(newTestMailObj("uid-2", 4, 1))
 		resp1.PutSFSArray("msg", arr1)
@@ -83,8 +84,8 @@ func TestListMailPaginates(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("page 2 Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp2 := NewSFSObject()
-		arr2 := NewSFSArray()
+		resp2 := sfs.NewSFSObject()
+		arr2 := sfs.NewSFSArray()
 		arr2.AddSFSObject(newTestMailObj("uid-3", 9, 0))
 		resp2.PutSFSArray("msg", arr2)
 		resp2.PutBool("more", false)
@@ -155,8 +156,8 @@ func TestListMailStopsOnMissingLastUid(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp := NewSFSObject()
-		arr := NewSFSArray()
+		resp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestMailObj("uid-1", 3, 0))
 		resp.PutSFSArray("msg", arr)
 		resp.PutBool("more", true)
@@ -208,13 +209,13 @@ func TestListMailStopsOnMissingLastUid(t *testing.T) {
 // ListMail's pagination cursor (the server-supplied lastUid field) had no length cap before being
 // re-sent verbatim as the next page's clientseq -- unlike the per-entry mail uid field, which
 // round 45's maxMailUidLen guard already covers. lastUid gets re-encoded via PutUtfString
-// (writeUtfString's own 65535-byte hard cap) on the NEXT page request, but GetString can't
-// distinguish the 65535-byte-capped sfsUtfString wire tag from the far larger sfsText tag, so an
+// (sfs.WriteUtfString's own 65535-byte hard cap) on the NEXT page request, but GetString can't
+// distinguish the 65535-byte-capped sfs.SFSUtfString wire tag from the far larger sfs.SFSText tag, so an
 // oversized lastUid used to cause a purely local encode failure that sendStageError (conn.go)
 // deliberately classifies the same as a genuine dead connection -- silently aborting the rest of
 // ClaimAllMail and every other -collect action scheduled after it, even though the connection is
 // healthy. Sends a page-1 response with more=true and a lastUid one byte over maxMailUidLen
-// (tagged sfsText, constructed via SFSObject.put directly since PutUtfString itself would fail to
+// (tagged sfs.SFSText, constructed via sfs.SFSObject.put directly since PutUtfString itself would fail to
 // encode a >65535-byte string), mirroring round 45's TestListMailSkipsOversizedUidField technique,
 // and proves ListMail stops pagination after page 1 (never sending a second request) instead of
 // looping into an unencodable cursor, keeping the page-1 mail already collected.
@@ -237,12 +238,12 @@ func TestListMailStopsOnOversizedLastUid(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp := NewSFSObject()
-		arr := NewSFSArray()
+		resp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestMailObj("uid-1", 3, 0))
 		resp.PutSFSArray("msg", arr)
 		resp.PutBool("more", true)
-		resp.put("lastUid", SFSValue{sfsText, oversizedLastUid})
+		resp.PutValue("lastUid", sfs.SFSValue{Type: sfs.SFSText, Val: oversizedLastUid})
 		resp.PutLong("lastMailTime", 999)
 		_ = server.SendExtension("push.chat.get.system.mails", resp)
 		// Intentionally does not read a second request -- see the test's own doc comment for why
@@ -331,8 +332,8 @@ func TestListMailWarnsOnMissingLastMailTime(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("page 1 Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp1 := NewSFSObject()
-		arr1 := NewSFSArray()
+		resp1 := sfs.NewSFSObject()
+		arr1 := sfs.NewSFSArray()
 		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0))
 		resp1.PutSFSArray("msg", arr1)
 		resp1.PutBool("more", true)
@@ -350,8 +351,8 @@ func TestListMailWarnsOnMissingLastMailTime(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("page 2 Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp2 := NewSFSObject()
-		arr2 := NewSFSArray()
+		resp2 := sfs.NewSFSObject()
+		arr2 := sfs.NewSFSArray()
 		arr2.AddSFSObject(newTestMailObj("uid-3", 9, 0))
 		resp2.PutSFSArray("msg", arr2)
 		resp2.PutBool("more", false)
@@ -452,8 +453,8 @@ func TestListMailWarnsOnWrongTypedLastMailTime(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("page 1 Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp1 := NewSFSObject()
-		arr1 := NewSFSArray()
+		resp1 := sfs.NewSFSObject()
+		arr1 := sfs.NewSFSArray()
 		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0))
 		resp1.PutSFSArray("msg", arr1)
 		resp1.PutBool("more", true)
@@ -470,8 +471,8 @@ func TestListMailWarnsOnWrongTypedLastMailTime(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("page 2 Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp2 := NewSFSObject()
-		arr2 := NewSFSArray()
+		resp2 := sfs.NewSFSObject()
+		arr2 := sfs.NewSFSArray()
 		arr2.AddSFSObject(newTestMailObj("uid-3", 9, 0))
 		resp2.PutSFSArray("msg", arr2)
 		resp2.PutBool("more", false)
@@ -570,8 +571,8 @@ func TestListMailWarnsOnNonBoolMoreField(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp := NewSFSObject()
-		arr := NewSFSArray()
+		resp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestMailObj("uid-1", 3, 0))
 		resp.PutSFSArray("msg", arr)
 		resp.PutUtfString("more", "yes") // wrong-typed: server-shape anomaly under test, not a bool
@@ -652,8 +653,8 @@ func TestListMailWarnsOnMaxPagesTruncation(t *testing.T) {
 				t.Errorf("page %d Cmd = %q, want chat.get.system.mails", page, msg.Cmd)
 			}
 			reqCount++
-			resp := NewSFSObject()
-			arr := NewSFSArray()
+			resp := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-page%d", page), 3, 0))
 			resp.PutSFSArray("msg", arr)
 			resp.PutBool("more", true) // always more -- the server never runs out on its own
@@ -749,8 +750,8 @@ func TestListMailAggregateCeilingStopsAcrossPages(t *testing.T) {
 				t.Errorf("page %d Cmd = %q, want chat.get.system.mails", page, msg.Cmd)
 			}
 			reqCount++
-			resp := NewSFSObject()
-			arr := NewSFSArray()
+			resp := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			for i := 0; i < mailListRawItemCap; i++ {
 				arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-p%d-%d", page, i), 3, 0))
 			}
@@ -844,8 +845,8 @@ func TestListMailAggregateCeilingSinglePageOvershootDoesNotExceedCap(t *testing.
 				t.Errorf("page %d Cmd = %q, want chat.get.system.mails", page, msg.Cmd)
 			}
 			reqCount++
-			resp := NewSFSObject()
-			arr := NewSFSArray()
+			resp := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			for i := 0; i < size; i++ {
 				arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-p%d-%d", page, i), 3, 0))
 			}
@@ -906,8 +907,8 @@ func TestListMailDedupesUIDAcrossPages(t *testing.T) {
 			t.Errorf("page 1 request malformed")
 			return
 		}
-		resp1 := NewSFSObject()
-		arr1 := NewSFSArray()
+		resp1 := sfs.NewSFSObject()
+		arr1 := sfs.NewSFSArray()
 		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0))
 		arr1.AddSFSObject(newTestMailObj("uid-2", 4, 1))
 		resp1.PutSFSArray("msg", arr1)
@@ -927,8 +928,8 @@ func TestListMailDedupesUIDAcrossPages(t *testing.T) {
 			t.Errorf("page 2 request malformed")
 			return
 		}
-		resp2 := NewSFSObject()
-		arr2 := NewSFSArray()
+		resp2 := sfs.NewSFSObject()
+		arr2 := sfs.NewSFSArray()
 		// uid-2 is a repeat of page 1's second entry -- the same cursor-repeats-a-uid scenario
 		// this test exercises -- followed by a genuinely new uid-3.
 		arr2.AddSFSObject(newTestMailObj("uid-2", 4, 1))
@@ -974,7 +975,7 @@ func uidsOf(mail []Mail) []string {
 // TestListMailCapsRawItemsExaminedPerPage is the round-27 regression test for ListMail's raw-item
 // scan cap (mail.go's mailListRawItemCap): mailListPageSize (100, the requested page-size hint) and
 // maxPages (20) only bound round-trip COUNT, not the size of any single page's response array,
-// which is otherwise bounded only by sfsobject.go's much larger maxDecodedNodes=300,000 decode
+// which is otherwise bounded only by sfsobject.go's much larger sfs.MaxDecodedNodes=300,000 decode
 // budget. Before this fix, a malformed entry (missing the required "uid" field) hit a `continue`
 // that didn't advance any output-count-based cap, since it never reached the append -- the same
 // gap-class visitors.go's ParseInitVisitors closed in round 26 for visitor.list (see
@@ -1009,10 +1010,10 @@ func TestListMailCapsRawItemsExaminedPerPage(t *testing.T) {
 			t.Errorf("list-mail request malformed")
 			return
 		}
-		resp := NewSFSObject()
-		arr := NewSFSArray()
+		resp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for i := 0; i < wantMalformed; i++ {
-			mo := NewSFSObject()
+			mo := sfs.NewSFSObject()
 			mo.PutInt("type", 3) // deliberately no "uid" field
 			arr.AddSFSObject(mo)
 		}
@@ -1075,8 +1076,8 @@ func TestListMailRawItemCapBoundary(t *testing.T) {
 			if _, ok := env.AsExtension(); !ok {
 				return
 			}
-			resp := NewSFSObject()
-			arr := NewSFSArray()
+			resp := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			for i := 0; i < n; i++ {
 				arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-%d", i), 3, 0))
 			}
@@ -1153,12 +1154,12 @@ func TestListMailWrongTypedUIDIsRejected(t *testing.T) {
 		if _, ok := env.AsExtension(); !ok {
 			return
 		}
-		wrongTyped := NewSFSObject()
+		wrongTyped := sfs.NewSFSObject()
 		wrongTyped.PutInt("uid", 12345) // wrong SFS type: a mail uid must be a UtfString
 		wrongTyped.PutInt("type", 3)
 
-		resp := NewSFSObject()
-		arr := NewSFSArray()
+		resp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(wrongTyped)
 		arr.AddSFSObject(newTestMailObj("real-uid-1", 3, 0))
 		resp.PutSFSArray("msg", arr)
@@ -1195,15 +1196,15 @@ func TestListMailWrongTypedUIDIsRejected(t *testing.T) {
 }
 
 // TestListMailSkipsOversizedUidField is the round-45 regression test for the MAJOR finding that a
-// mail entry's uid field arriving oversized (e.g. tagged sfsText instead of sfsUtfString -- sfsText
-// has no 65535-byte encode-side cap, unlike sfsUtfString) used to pass through ListMail's
-// type-only requireFieldType guard unchanged, then later cause a PURELY LOCAL writeUtfString
+// mail entry's uid field arriving oversized (e.g. tagged sfs.SFSText instead of sfs.SFSUtfString -- sfs.SFSText
+// has no 65535-byte encode-side cap, unlike sfs.SFSUtfString) used to pass through ListMail's
+// type-only requireFieldType guard unchanged, then later cause a PURELY LOCAL sfs.WriteUtfString
 // encode failure when ClaimAllMail re-batched it into a mail.read.status.betch/mail.reward.batch
 // request. sendStageError (conn.go) deliberately, by design, classifies that local encode failure
 // the same as a genuine dead connection, so this single malformed mail entry used to silently
 // abort the rest of ClaimAllMail and, via CollectAll's containsNonTimeoutNetError abort logic
 // (buildings.go), every other -collect action scheduled after it in the same run. Sends one mail
-// entry with a uid one byte over maxMailUidLen (tagged sfsText, constructed via SFSObject.put
+// entry with a uid one byte over maxMailUidLen (tagged sfs.SFSText, constructed via sfs.SFSObject.put
 // directly since PutUtfString itself would fail to encode a >65535-byte string) alongside one
 // well-formed mail entry, and proves ListMail skips only the oversized one (with a Warn), keeping
 // the well-formed entry intact -- closing the gap at its source instead of only softening the
@@ -1223,12 +1224,12 @@ func TestListMailSkipsOversizedUidField(t *testing.T) {
 		if _, ok := env.AsExtension(); !ok {
 			return
 		}
-		oversized := NewSFSObject()
-		oversized.put("uid", SFSValue{sfsText, oversizedUID})
+		oversized := sfs.NewSFSObject()
+		oversized.PutValue("uid", sfs.SFSValue{Type: sfs.SFSText, Val: oversizedUID})
 		oversized.PutInt("type", 3)
 
-		resp := NewSFSObject()
-		arr := NewSFSArray()
+		resp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(oversized)
 		arr.AddSFSObject(newTestMailObj("real-uid-1", 3, 0))
 		resp.PutSFSArray("msg", arr)
@@ -1263,7 +1264,7 @@ func TestListMailSkipsOversizedUidField(t *testing.T) {
 
 // TestListMailAcceptsUidExactlyAtLenCap is TestListMailSkipsOversizedUidField's boundary
 // counterpart: a uid of exactly maxMailUidLen bytes must NOT be skipped -- maxMailUidLen matches
-// writeUtfString's own hard limit exactly (a strict `> 65535`, not `>=`), so any uid this check
+// sfs.WriteUtfString's own hard limit exactly (a strict `> 65535`, not `>=`), so any uid this check
 // accepts is guaranteed re-encodable later by ClaimAllMail's batching.
 func TestListMailAcceptsUidExactlyAtLenCap(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
@@ -1280,8 +1281,8 @@ func TestListMailAcceptsUidExactlyAtLenCap(t *testing.T) {
 		if _, ok := env.AsExtension(); !ok {
 			return
 		}
-		resp := NewSFSObject()
-		arr := NewSFSArray()
+		resp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestMailObj(exactUID, 3, 0))
 		resp.PutSFSArray("msg", arr)
 		resp.PutBool("more", false)
@@ -1327,12 +1328,12 @@ func TestListMailAcceptsUidExactlyAtLenCap(t *testing.T) {
 // sfsFieldKindInt)` back to `requirePresentField(m.Raw, "type", "mail reward")` makes this test
 // fail with both uids merged under byType[0].
 func TestGroupUnclaimedByTypeWrongTypedTypeFieldIsRejected(t *testing.T) {
-	wrongTyped := NewSFSObject()
+	wrongTyped := sfs.NewSFSObject()
 	wrongTyped.PutUtfString("uid", "wrong-type-1")
 	wrongTyped.PutUtfString("type", "not-an-int") // wrong SFS type: type must be an Int
 	wrongTyped.PutInt("rewardStatus", 0)
 
-	genuineZero := NewSFSObject()
+	genuineZero := sfs.NewSFSObject()
 	genuineZero.PutUtfString("uid", "genuine-zero-1")
 	genuineZero.PutInt("type", 0)
 	genuineZero.PutInt("rewardStatus", 0)
@@ -1366,7 +1367,7 @@ func TestGroupUnclaimedByTypeWrongTypedTypeFieldIsRejected(t *testing.T) {
 // wantReadBatches read-status batches and wantRewardBatches reward-claim batches, recording each
 // batch's uids (split back out of the joined "uids" string) so the test can assert the batch
 // boundaries and that no uid was dropped or duplicated.
-func mailBatchServer(t *testing.T, server *GameConn, mails []*SFSObject, wantReadBatches, wantRewardBatches int) (readBatches, rewardBatches [][]string, rewardType int32) {
+func mailBatchServer(t *testing.T, server *GameConn, mails []*sfs.SFSObject, wantReadBatches, wantRewardBatches int) (readBatches, rewardBatches [][]string, rewardType int32) {
 	t.Helper()
 
 	env, err := server.ReadEnvelope()
@@ -1383,8 +1384,8 @@ func mailBatchServer(t *testing.T, server *GameConn, mails []*SFSObject, wantRea
 		t.Errorf("list-mail request: Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		return nil, nil, 0
 	}
-	listResp := NewSFSObject()
-	arr := NewSFSArray()
+	listResp := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
 	for _, mo := range mails {
 		arr.AddSFSObject(mo)
 	}
@@ -1410,7 +1411,7 @@ func mailBatchServer(t *testing.T, server *GameConn, mails []*SFSObject, wantRea
 			t.Errorf("%s request: Cmd = %q, want %s", cmd, msg.Cmd, cmd)
 			return nil
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendExtension(cmd, resp); err != nil {
 			t.Errorf("send %s response: %v", cmd, err)
@@ -1442,7 +1443,7 @@ func mailBatchServer(t *testing.T, server *GameConn, mails []*SFSObject, wantRea
 			return readBatches, rewardBatches, rewardType
 		}
 		rewardType = msg.Params.GetInt("type")
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendExtension("mail.reward.batch", resp); err != nil {
 			t.Errorf("send mail.reward.batch response: %v", err)
@@ -1492,7 +1493,7 @@ func TestClaimAllMailItemCountBatching(t *testing.T) {
 	const total = 101
 	const mailType = int32(7)
 	var wantUids []string
-	var mails []*SFSObject
+	var mails []*sfs.SFSObject
 	for i := 0; i < total; i++ {
 		uid := fmt.Sprintf("uid-%03d", i)
 		wantUids = append(wantUids, uid)
@@ -1537,7 +1538,7 @@ func TestClaimAllMailByteLengthBatching(t *testing.T) {
 	const uidLen = 6499
 	const mailType = int32(5)
 	var wantUids []string
-	var mails []*SFSObject
+	var mails []*sfs.SFSObject
 	for i := 0; i < total; i++ {
 		prefix := fmt.Sprintf("%05d-", i)
 		uid := prefix + strings.Repeat("x", uidLen-len(prefix))
@@ -1661,8 +1662,8 @@ func TestClaimAllMailProcessesPartialMailOnListPageFailure(t *testing.T) {
 		if readReq("chat.get.system.mails") == nil {
 			return
 		}
-		resp1 := NewSFSObject()
-		arr1 := NewSFSArray()
+		resp1 := sfs.NewSFSObject()
+		arr1 := sfs.NewSFSArray()
 		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0)) // rewardStatus=0: unclaimed reward
 		arr1.AddSFSObject(newTestMailObj("uid-2", 4, 1)) // rewardStatus=1: already claimed/no reward
 		resp1.PutSFSArray("msg", arr1)
@@ -1678,7 +1679,7 @@ func TestClaimAllMailProcessesPartialMailOnListPageFailure(t *testing.T) {
 		if readReq("chat.get.system.mails") == nil {
 			return
 		}
-		resp2 := NewSFSObject()
+		resp2 := sfs.NewSFSObject()
 		resp2.PutUtfString("errorCode", "999999") // not in benignErrorCodes: a genuine failure
 		if err := server.SendExtension("push.chat.get.system.mails", resp2); err != nil {
 			return
@@ -1689,7 +1690,7 @@ func TestClaimAllMailProcessesPartialMailOnListPageFailure(t *testing.T) {
 			if uids := msg.Params.GetString("uids"); uids != "" {
 				readStatusUIDs = strings.Split(uids, ",")
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			if err := server.SendExtension("mail.read.status.betch", resp); err != nil {
 				return
@@ -1700,7 +1701,7 @@ func TestClaimAllMailProcessesPartialMailOnListPageFailure(t *testing.T) {
 			if uids := msg.Params.GetString("uids"); uids != "" {
 				rewardUIDs = strings.Split(uids, ",")
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
 				return
@@ -1766,8 +1767,8 @@ func TestClaimAllMailReadStatusFailureLoggingDoesNotOverclaim(t *testing.T) {
 			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		resp := NewSFSObject()
-		arr := NewSFSArray()
+		resp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestMailObj("uid-1", 3, 1)) // rewardStatus=1: no reward to claim
 		resp.PutSFSArray("msg", arr)
 		resp.PutBool("more", false)
@@ -1785,7 +1786,7 @@ func TestClaimAllMailReadStatusFailureLoggingDoesNotOverclaim(t *testing.T) {
 			t.Errorf("read-status request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		readResp := NewSFSObject()
+		readResp := sfs.NewSFSObject()
 		readResp.PutUtfString("errorCode", "999999") // genuine failure, not benign
 		if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
 			return
@@ -1817,7 +1818,7 @@ func TestClaimAllMailReadStatusFailureLoggingDoesNotOverclaim(t *testing.T) {
 // recordingConn is a minimal net.Conn whose Write appends every byte to buf and whose Read always
 // fails with io.EOF (it is never actually read from in this file -- Read only exists to satisfy the
 // net.Conn interface). It exists purely to obtain the exact wire-format bytes SendExtension/
-// EncodeObject produce for a canned response, without needing a live goroutine-synchronized
+// sfs.EncodeObject produce for a canned response, without needing a live goroutine-synchronized
 // net.Pipe round trip: wrap it in a bare &GameConn{conn: rec} (SendExtension/SendEnvelope only ever
 // touch GameConn.conn, never GameConn.reader, so a nil reader is fine here) and call SendExtension
 // on that to fill buf, then hand buf.Bytes() to scriptedNetErrConn below.
@@ -1904,11 +1905,11 @@ type connTurn struct {
 	err   error
 }
 
-// encodeResponse builds the exact wire-format bytes SendExtension/EncodeObject produce for a canned
+// encodeResponse builds the exact wire-format bytes SendExtension/sfs.EncodeObject produce for a canned
 // cmd/resp pair, the same recordingConn-based technique TestClaimAllMailAbortsRemainingBatchesOnNetError
 // and friends already use for scriptedNetErrConn's single chunk -- factored out here because
 // sequencedConn below needs several independently-encoded chunks, not just one.
-func encodeResponse(t *testing.T, cmd string, resp *SFSObject) []byte {
+func encodeResponse(t *testing.T, cmd string, resp *sfs.SFSObject) []byte {
 	t.Helper()
 	rec := &recordingConn{}
 	recorder := &GameConn{conn: rec}
@@ -2023,8 +2024,8 @@ func TestClaimAllMailAbortsRemainingBatchesOnNetError(t *testing.T) {
 
 	const total = 150
 	const mailType = int32(3)
-	listResp := NewSFSObject()
-	arr := NewSFSArray()
+	listResp := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
 	for i := 0; i < total; i++ {
 		arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
 	}
@@ -2055,8 +2056,8 @@ func TestClaimAllMailAbortsRemainingBatchesOnNetError(t *testing.T) {
 // closer for TestClaimAllMailAbortsRemainingBatchesOnNetError above -- see that test's sibling,
 // TestCollectAllAbortsRemainingActionsOnRealGracefulClose (buildings_orchestration_test.go), for the
 // full rationale: scriptedNetErrConn's post-drain tail is fakeNetError{}, an already-a-net.Error
-// fake, never exercising the real bare-io.EOF-through-ReadPacket-through-deadConnError conversion
-// path (packet.go's wrapIfClosed/deadConnError, round 24).
+// fake, never exercising the real bare-io.EOF-through-sfs.ReadPacket-through-sfs.DeadConnError conversion
+// path (packet.go's sfs.WrapIfClosed/sfs.DeadConnError, round 24).
 //
 // Reuses sequencedConn/connTurn (this file, above) rather than introducing a new fixture type:
 // sequencedConn's per-turn err field already supports scripting any error mid-sequence, so a turn
@@ -2071,8 +2072,8 @@ func TestClaimAllMailAbortsRemainingBatchesOnNetError(t *testing.T) {
 func TestClaimAllMailAbortsRemainingBatchesOnRealGracefulClose(t *testing.T) {
 	const total = 150
 	const mailType = int32(3)
-	listResp := NewSFSObject()
-	arr := NewSFSArray()
+	listResp := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
 	for i := 0; i < total; i++ {
 		arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
 	}
@@ -2092,7 +2093,7 @@ func TestClaimAllMailAbortsRemainingBatchesOnRealGracefulClose(t *testing.T) {
 	}
 	var netErr net.Error
 	if !errors.As(err, &netErr) {
-		t.Fatalf("ClaimAllMail() error = %v, want it to wrap a net.Error (deadConnError, via packet.go's wrapIfClosed)", err)
+		t.Fatalf("ClaimAllMail() error = %v, want it to wrap a net.Error (sfs.DeadConnError, via packet.go's sfs.WrapIfClosed)", err)
 	}
 	if netErr.Timeout() {
 		t.Errorf("ClaimAllMail() error's net.Error has Timeout()==true, want false (a graceful close is a genuine dead connection, not an ordinary timeout)")
@@ -2142,8 +2143,8 @@ func TestClaimAllMailSkipsReadStatusOnListMailNetError(t *testing.T) {
 	rec := &recordingConn{}
 	recorder := &GameConn{conn: rec}
 
-	page1Resp := NewSFSObject()
-	arr := NewSFSArray()
+	page1Resp := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
 	arr.AddSFSObject(newTestMailObj("uid-1", 3, 0)) // rewardStatus=0: unclaimed reward
 	page1Resp.PutSFSArray("msg", arr)
 	page1Resp.PutBool("more", true)
@@ -2181,7 +2182,7 @@ func TestClaimAllMailSkipsReadStatusOnListMailNetError(t *testing.T) {
 func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
-	mails := []*SFSObject{
+	mails := []*sfs.SFSObject{
 		newTestMailObj("t3-a", 3, 0),
 		newTestMailObj("t3-b", 3, 0),
 		newTestMailObj("t9-a", 9, 0),
@@ -2208,8 +2209,8 @@ func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
 			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		listResp := NewSFSObject()
-		arr := NewSFSArray()
+		listResp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for _, mo := range mails {
 			arr.AddSFSObject(mo)
 		}
@@ -2229,7 +2230,7 @@ func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
 			t.Errorf("read-status request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		readResp := NewSFSObject()
+		readResp := sfs.NewSFSObject()
 		readResp.PutBool("success", true)
 		if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
 			return
@@ -2254,7 +2255,7 @@ func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
 				uids = strings.Split(s, ",")
 			}
 			gotByType[mailType] = uids
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
 				return
@@ -2310,7 +2311,7 @@ func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
 	const totalTypes = maxMailRewardTypesPerRun + 1 // 301 distinct types, one unclaimed mail each
 	const readBatchSize = 100                       // must match ClaimAllMail's own unexported readBatchSize constant
 
-	mails := make([]*SFSObject, totalTypes)
+	mails := make([]*sfs.SFSObject, totalTypes)
 	for i := 0; i < totalTypes; i++ {
 		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), int32(i), 0)
 	}
@@ -2330,8 +2331,8 @@ func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
 			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		listResp := NewSFSObject()
-		arr := NewSFSArray()
+		listResp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for _, mo := range mails {
 			arr.AddSFSObject(mo)
 		}
@@ -2352,7 +2353,7 @@ func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
 				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
 				return
 			}
-			readResp := NewSFSObject()
+			readResp := sfs.NewSFSObject()
 			readResp.PutBool("success", true)
 			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
 				return
@@ -2374,7 +2375,7 @@ func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
 				return
 			}
 			rewardBatchCount++
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
 				return
@@ -2421,7 +2422,7 @@ func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
 	const totalTypes = maxMailRewardTypesPerRun // exactly at the cap -- must NOT be truncated
 	const readBatchSize = 100                   // must match ClaimAllMail's own unexported readBatchSize constant
 
-	mails := make([]*SFSObject, totalTypes)
+	mails := make([]*sfs.SFSObject, totalTypes)
 	for i := 0; i < totalTypes; i++ {
 		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), int32(i), 0)
 	}
@@ -2441,8 +2442,8 @@ func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
 			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		listResp := NewSFSObject()
-		arr := NewSFSArray()
+		listResp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for _, mo := range mails {
 			arr.AddSFSObject(mo)
 		}
@@ -2463,7 +2464,7 @@ func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
 				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
 				return
 			}
-			readResp := NewSFSObject()
+			readResp := sfs.NewSFSObject()
 			readResp.PutBool("success", true)
 			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
 				return
@@ -2482,7 +2483,7 @@ func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
 				return
 			}
 			rewardBatchCount++
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
 				return
@@ -2533,7 +2534,7 @@ func TestClaimAllMailReadStatusLoopCapsBatchCount(t *testing.T) {
 	const totalMails = maxMailBatchesPerLoop + 1 // 301 mail entries, each forcing its own batch
 	const oversizedUIDLen = 30001                // > maxUIDsBytes/2, forces singleton batches
 
-	mails := make([]*SFSObject, totalMails)
+	mails := make([]*sfs.SFSObject, totalMails)
 	for i := 0; i < totalMails; i++ {
 		uid := fmt.Sprintf("%0*d", oversizedUIDLen, i) // unique, fixed-length oversized uid
 		mails[i] = newTestMailObj(uid, 0, 1)           // rewardStatus=1: already claimed
@@ -2554,8 +2555,8 @@ func TestClaimAllMailReadStatusLoopCapsBatchCount(t *testing.T) {
 			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		listResp := NewSFSObject()
-		arr := NewSFSArray()
+		listResp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for _, mo := range mails {
 			arr.AddSFSObject(mo)
 		}
@@ -2579,7 +2580,7 @@ func TestClaimAllMailReadStatusLoopCapsBatchCount(t *testing.T) {
 				return
 			}
 			readBatchCount++
-			readResp := NewSFSObject()
+			readResp := sfs.NewSFSObject()
 			readResp.PutBool("success", true)
 			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
 				return
@@ -2623,7 +2624,7 @@ func TestClaimAllMailReadStatusLoopBatchCountExactlyAtCapDoesNotTruncate(t *test
 	const totalMails = maxMailBatchesPerLoop // exactly at the cap -- must NOT be truncated
 	const oversizedUIDLen = 30001
 
-	mails := make([]*SFSObject, totalMails)
+	mails := make([]*sfs.SFSObject, totalMails)
 	for i := 0; i < totalMails; i++ {
 		uid := fmt.Sprintf("%0*d", oversizedUIDLen, i)
 		mails[i] = newTestMailObj(uid, 0, 1)
@@ -2644,8 +2645,8 @@ func TestClaimAllMailReadStatusLoopBatchCountExactlyAtCapDoesNotTruncate(t *test
 			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		listResp := NewSFSObject()
-		arr := NewSFSArray()
+		listResp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for _, mo := range mails {
 			arr.AddSFSObject(mo)
 		}
@@ -2667,7 +2668,7 @@ func TestClaimAllMailReadStatusLoopBatchCountExactlyAtCapDoesNotTruncate(t *test
 				return
 			}
 			readBatchCount++
-			readResp := NewSFSObject()
+			readResp := sfs.NewSFSObject()
 			readResp.PutBool("success", true)
 			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
 				return
@@ -2722,7 +2723,7 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 	const totalMails = numTypes * entriesPerType // 301 -- one over maxMailRewardBatchesPerRun
 	const oversizedUIDLen = 30001                // > maxUIDsBytes/2, forces singleton batches
 
-	mails := make([]*SFSObject, 0, totalMails)
+	mails := make([]*sfs.SFSObject, 0, totalMails)
 	uidCounter := 0
 	for typ := 0; typ < numTypes; typ++ {
 		for i := 0; i < entriesPerType; i++ {
@@ -2747,8 +2748,8 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		listResp := NewSFSObject()
-		arr := NewSFSArray()
+		listResp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for _, mo := range mails {
 			arr.AddSFSObject(mo)
 		}
@@ -2774,7 +2775,7 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
 				return
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			if err := server.SendExtension("mail.read.status.betch", resp); err != nil {
 				return
@@ -2796,7 +2797,7 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 				return
 			}
 			rewardBatchCount++
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
 				return
@@ -2846,7 +2847,7 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 		t.Fatalf("test construction bug: totalMails = %d, want exactly maxMailRewardBatchesPerRun (%d)", totalMails, maxMailRewardBatchesPerRun)
 	}
 
-	mails := make([]*SFSObject, 0, totalMails)
+	mails := make([]*sfs.SFSObject, 0, totalMails)
 	uidCounter := 0
 	for typ := 0; typ < numTypes; typ++ {
 		for i := 0; i < entriesPerType; i++ {
@@ -2871,8 +2872,8 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
 			return
 		}
-		listResp := NewSFSObject()
-		arr := NewSFSArray()
+		listResp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for _, mo := range mails {
 			arr.AddSFSObject(mo)
 		}
@@ -2893,7 +2894,7 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
 				return
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			if err := server.SendExtension("mail.read.status.betch", resp); err != nil {
 				return
@@ -2912,7 +2913,7 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 				return
 			}
 			rewardBatchCount++
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
 				return
@@ -2958,7 +2959,7 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
-	mails := []*SFSObject{
+	mails := []*sfs.SFSObject{
 		newTestMailObj("t3-a", 3, 0),
 		newTestMailObj("t9-a", 9, 0),
 	}
@@ -2977,8 +2978,8 @@ func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing
 			t.Errorf("list-mail request malformed")
 			return
 		}
-		listResp := NewSFSObject()
-		arr := NewSFSArray()
+		listResp := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for _, mo := range mails {
 			arr.AddSFSObject(mo)
 		}
@@ -2997,7 +2998,7 @@ func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing
 			t.Errorf("read-status request malformed")
 			return
 		}
-		readResp := NewSFSObject()
+		readResp := sfs.NewSFSObject()
 		readResp.PutBool("success", true)
 		if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
 			return
@@ -3015,7 +3016,7 @@ func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing
 				return
 			}
 			seenTypes = append(seenTypes, msg.Params.GetInt("type"))
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			if i == 0 {
 				resp.PutUtfString("errorCode", "999999") // genuine failure, not benign -- whichever type this is
 			} else {
@@ -3096,8 +3097,8 @@ func TestClaimAllMailNetErrorOnFirstTypeAbortsSecondType(t *testing.T) {
 	rec := &recordingConn{}
 	recorder := &GameConn{conn: rec}
 
-	listResp := NewSFSObject()
-	arr := NewSFSArray()
+	listResp := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
 	arr.AddSFSObject(newTestMailObj("t3-a", 3, 0)) // rewardStatus=0: unclaimed
 	arr.AddSFSObject(newTestMailObj("t9-a", 9, 0)) // rewardStatus=0: unclaimed
 	listResp.PutSFSArray("msg", arr)
@@ -3106,7 +3107,7 @@ func TestClaimAllMailNetErrorOnFirstTypeAbortsSecondType(t *testing.T) {
 		t.Fatalf("build canned list-mail response: %v", err)
 	}
 
-	readResp := NewSFSObject()
+	readResp := sfs.NewSFSObject()
 	readResp.PutBool("success", true)
 	if err := recorder.SendExtension("mail.read.status.betch", readResp); err != nil {
 		t.Fatalf("build canned read-status response: %v", err)
@@ -3151,18 +3152,18 @@ func TestClaimAllMailNetErrorOnFirstTypeAbortsSecondType(t *testing.T) {
 // identical to TestClaimAllMailSkipsReadStatusOnListMailNetError's writeCount -- the two tests
 // together prove the site now distinguishes Timeout()==true from a genuine net.Error.
 func TestClaimAllMailProcessesPartialMailOnListPageTimeout(t *testing.T) {
-	page1Resp := NewSFSObject()
-	arr := NewSFSArray()
+	page1Resp := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
 	arr.AddSFSObject(newTestMailObj("uid-1", 3, 0)) // rewardStatus=0: unclaimed reward
 	page1Resp.PutSFSArray("msg", arr)
 	page1Resp.PutBool("more", true)
 	page1Resp.PutUtfString("lastUid", "uid-1")
 	page1Resp.PutLong("lastMailTime", 555)
 
-	readResp := NewSFSObject()
+	readResp := sfs.NewSFSObject()
 	readResp.PutBool("success", true)
 
-	rewardResp := NewSFSObject()
+	rewardResp := sfs.NewSFSObject()
 	rewardResp.PutBool("success", true)
 
 	fake := &sequencedConn{turns: []connTurn{
@@ -3209,22 +3210,22 @@ func TestClaimAllMailProcessesPartialMailOnListPageTimeout(t *testing.T) {
 func TestClaimAllMailReadStatusContinuesAfterTimeout(t *testing.T) {
 	const total = 101
 	const mailType = int32(7)
-	var mails []*SFSObject
+	var mails []*sfs.SFSObject
 	for i := 0; i < total; i++ {
 		mails = append(mails, newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
 	}
-	listResp := NewSFSObject()
-	arr := NewSFSArray()
+	listResp := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
 	for _, mo := range mails {
 		arr.AddSFSObject(mo)
 	}
 	listResp.PutSFSArray("msg", arr)
 	listResp.PutBool("more", false)
 
-	readSuccess := NewSFSObject()
+	readSuccess := sfs.NewSFSObject()
 	readSuccess.PutBool("success", true)
 
-	rewardSuccess := NewSFSObject()
+	rewardSuccess := sfs.NewSFSObject()
 	rewardSuccess.PutBool("success", true)
 
 	fake := &sequencedConn{turns: []connTurn{
@@ -3273,17 +3274,17 @@ func TestClaimAllMailReadStatusContinuesAfterTimeout(t *testing.T) {
 // type's batch never attempted -- showing up as writeCount()==3, identical to
 // TestClaimAllMailNetErrorOnFirstTypeAbortsSecondType's own (correct, non-timeout) writeCount.
 func TestClaimAllMailRewardLoopContinuesAfterTimeout(t *testing.T) {
-	listResp := NewSFSObject()
-	arr := NewSFSArray()
+	listResp := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
 	arr.AddSFSObject(newTestMailObj("t3-a", 3, 0)) // rewardStatus=0: unclaimed
 	arr.AddSFSObject(newTestMailObj("t9-a", 9, 0)) // rewardStatus=0: unclaimed
 	listResp.PutSFSArray("msg", arr)
 	listResp.PutBool("more", false)
 
-	readSuccess := NewSFSObject()
+	readSuccess := sfs.NewSFSObject()
 	readSuccess.PutBool("success", true)
 
-	rewardSuccess := NewSFSObject()
+	rewardSuccess := sfs.NewSFSObject()
 	rewardSuccess.PutBool("success", true)
 
 	fake := &sequencedConn{turns: []connTurn{
@@ -3309,7 +3310,7 @@ func TestClaimAllMailRewardLoopContinuesAfterTimeout(t *testing.T) {
 }
 
 // TestListMailWarnsOnWrongTypedMsgField is the regression test for the round-39 fix to ListMail's
-// msg-field handling: a response where msg is present but not an *SFSArray (a server-shape anomaly,
+// msg-field handling: a response where msg is present but not an *sfs.SFSArray (a server-shape anomaly,
 // distinct from msg being altogether absent) used to be silently treated the same as absent, with
 // no diagnostic signal. It must now log a warning identifying the anomaly, while still completing
 // pagination safely (the page yields zero mail entries, and the wrong-typed more field default
@@ -3331,7 +3332,7 @@ func TestListMailWarnsOnWrongTypedMsgField(t *testing.T) {
 		if msg.Cmd != "chat.get.system.mails" {
 			t.Errorf("Cmd = %q, want chat.get.system.mails", msg.Cmd)
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("msg", "not-an-array") // wrong-typed: server-shape anomaly under test
 		resp.PutUtfString("lastUid", "cursor-1")
 		resp.PutLong("lastMailTime", 999)

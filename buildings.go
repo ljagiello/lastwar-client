@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"sort"
@@ -153,10 +154,10 @@ func BuildingNameOf(bId int32) string {
 	return fmt.Sprintf("(unknown type %d)", bId)
 }
 
-// Building wraps one buildInfo SFSObject with typed accessors for the
+// Building wraps one buildInfo sfs.SFSObject with typed accessors for the
 // fields documented in the dossier's City/Building domain report.
 type Building struct {
-	Raw *SFSObject
+	Raw *sfs.SFSObject
 }
 
 func (b Building) Uuid() int64    { return b.Raw.GetLong("uuid") }
@@ -167,7 +168,7 @@ func (b Building) PointId() int32 { return b.Raw.GetInt("pId") }
 // requirePresentField reports whether o has field, logging a Warn with the raw entry (for
 // diagnosability) and returning false if it's missing -- shared by every list-parsing code path
 // (buildings, mail, visitors) that must tolerate a malformed/unexpected entry from the server
-// without crashing or silently fabricating a zero-value id. An explicit sfsNull for field is
+// without crashing or silently fabricating a zero-value id. An explicit sfs.SFSNull for field is
 // treated the same as a missing field: Has() only reflects key presence, so a null-typed entry
 // would otherwise slip past the guard and GetInt/GetLong/GetString would fall through to a
 // zero value indistinguishable from a genuine one.
@@ -190,7 +191,7 @@ func (b Building) PointId() int32 { return b.Raw.GetInt("pId") }
 // Every call site that DOES key a dedup map or lookup off a field read via a typed accessor
 // (buildings.go/mail.go/alliance.go/visitors.go's uuid/uid/type/scienceId checks) must use
 // requireFieldType below instead -- see that function's doc comment for why.
-func requirePresentField(o *SFSObject, field, context string) bool {
+func requirePresentField(o *sfs.SFSObject, field, context string) bool {
 	v, ok := o.Get(field)
 	if !ok || v.Val == nil {
 		slog.Warn("skipping "+context+" entry with no "+field+" field", "raw", o.String())
@@ -215,7 +216,7 @@ const (
 	// self-documenting about which accessor they actually use, and so the two can diverge safely if
 	// GetInt/GetLong's own accepted sets ever do.
 	sfsFieldKindInt
-	// sfsFieldKindString mirrors GetString's accepted set: string. Both sfsUtfString and sfsText
+	// sfsFieldKindString mirrors GetString's accepted set: string. Both sfs.SFSUtfString and sfs.SFSText
 	// wire tags decode to Go's plain string type (sfsobject.go's decode switch), so there is no
 	// further wire-tag-level distinction to make from the Go type alone.
 	sfsFieldKindString
@@ -266,7 +267,7 @@ func sfsFieldKindAccepts(kind sfsFieldKind, val interface{}) bool {
 // TestParseInitBuildingsWrongTypedUUIDIsRejected (buildings_visitors_test.go) and
 // TestFindRecommendedTechWrongTypedScienceIdIsRejected (alliance_test.go) for the regression
 // coverage proving a wrong-typed field is now rejected rather than silently coerced to zero.
-func requireFieldType(o *SFSObject, field, context string, kind sfsFieldKind) bool {
+func requireFieldType(o *sfs.SFSObject, field, context string, kind sfsFieldKind) bool {
 	if !requirePresentField(o, field, context) {
 		return false
 	}
@@ -292,7 +293,7 @@ func requireFieldType(o *SFSObject, field, context string, kind sfsFieldKind) bo
 // Before this cap existed, all three loops scanned their raw arrays with NO bound of any kind -- not
 // even an output-count bound, let alone round 26's raw-item-scan bound (visitors.go's
 // ParseInitVisitors) -- so the only ceiling on record-processing cost was sfsobject.go's
-// maxDecodedNodes=300,000 decode-level budget. ParseInitBuildings in particular feeds the PRIMARY
+// sfs.MaxDecodedNodes=300,000 decode-level budget. ParseInitBuildings in particular feeds the PRIMARY
 // init-push path (login.go's waitForInitPush, called from Login() on every login, not just
 // FetchBuildings' fallback), so a hostile/misbehaving -cs-ip peer could pad building_new with up to
 // ~300,000 minimal malformed entries (each triggering a Warn log via requireFieldType below) and
@@ -318,13 +319,13 @@ const maxRawBuildingItemsPerPush = 2000
 // append does, since otherwise a server-supplied array padded entirely with malformed entries would
 // defeat the cap entirely (len(out) would never advance, so an output-count-only cap would never
 // trigger). See maxRawBuildingItemsPerPush's own doc comment for the full threat model.
-func ParseInitBuildings(initParams *SFSObject) []Building {
+func ParseInitBuildings(initParams *sfs.SFSObject) []Building {
 	var out []Building
 	v, ok := initParams.Get("building_new")
 	if !ok {
 		return out
 	}
-	arr, ok := v.Val.(*SFSArray)
+	arr, ok := v.Val.(*sfs.SFSArray)
 	if !ok {
 		// Round-39 fix: present-but-wrong-typed used to be silently indistinguishable from
 		// genuinely-absent, unlike alliance.go's DonateRecommendedAllianceTech's identical-shape
@@ -335,15 +336,15 @@ func ParseInitBuildings(initParams *SFSObject) []Building {
 		slog.Warn("ParseInitBuildings: building_new field is present but not an array", "type", fmt.Sprintf("%T", v.Val))
 		return out
 	}
-	if len(arr.items) > maxRawBuildingItemsPerPush {
+	if len(arr.Items()) > maxRawBuildingItemsPerPush {
 		slog.Warn("building_new longer than raw-item scan cap; truncating",
-			"itemCount", len(arr.items), "cap", maxRawBuildingItemsPerPush)
+			"itemCount", len(arr.Items()), "cap", maxRawBuildingItemsPerPush)
 	}
-	for i, item := range arr.items {
+	for i, item := range arr.Items() {
 		if i >= maxRawBuildingItemsPerPush {
 			break
 		}
-		bi, ok := item.Val.(*SFSObject)
+		bi, ok := item.Val.(*sfs.SFSObject)
 		if !ok {
 			continue
 		}
@@ -379,7 +380,7 @@ func capDeadline(candidate, original time.Time) time.Time {
 
 // checkNonMatchingEnvelopeCap increments *nonMatchingEnvelopes and, once it exceeds
 // maxNonMatchingEnvelopesPerWait (login.go), returns a benign give-up error (deadlineExceededError
-// -- not deadConnError, since a stream of well-formed-but-irrelevant traffic isn't itself evidence
+// -- not sfs.DeadConnError, since a stream of well-formed-but-irrelevant traffic isn't itself evidence
 // of a dead connection). Shared by FetchBuildings' four "this envelope didn't advance real state"
 // sites (non-extension, push.queue.add, push.build.queue.info, default/unrecognized cmd) --
 // login.go's waitFor/waitForInitPush and conn.go's DoHandshake each only have one such site, so
@@ -417,7 +418,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 	// outcome than a bounded timeout for the cron-wrapper usage main.go's own comments describe as
 	// a first-class use case. This client supports connecting to arbitrary hosts via -cs-ip, which
 	// this project's threat model already treats as untrusted/hostile-capable (see round 16's
-	// redactSFSValue fail-open fix for the same threat model applied elsewhere), so a hostile peer
+	// sfs.RedactSFSValue fail-open fix for the same threat model applied elsewhere), so a hostile peer
 	// deliberately doing this is a real scenario, not just a theoretical one.
 	originalDeadline := time.Now().Add(timeout)
 	deadline := originalDeadline
@@ -539,9 +540,9 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			if containsNonTimeoutNetError(err) {
 				return buildings, visitors, fmt.Errorf("read building list: %w", err)
 			}
-			// Round-49 fix: a plain, non-net.Error ReadEnvelope failure (e.g. a DecodeObject
-			// parse failure on one malformed/unrelated push) means ReadPacket already fully
-			// consumed that frame's bytes off the wire before DecodeObject ever ran -- the
+			// Round-49 fix: a plain, non-net.Error ReadEnvelope failure (e.g. a sfs.DecodeObject
+			// parse failure on one malformed/unrelated push) means sfs.ReadPacket already fully
+			// consumed that frame's bytes off the wire before sfs.DecodeObject ever ran -- the
 			// stream stays in sync, so this is not evidence the connection is dead, mirroring
 			// login.go's identical round-48/49 fixes (waitForInitPush, waitFor). Previously
 			// this loop returned immediately on ANY such error, silently truncating the
@@ -549,11 +550,11 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			// skipping the one malformed push and continuing to read.
 			consecutiveDecodeFailures++
 			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
-				// deadConnError (packet.go): round-53 fix for the MAJOR finding that this
+				// sfs.DeadConnError (packet.go): round-53 fix for the MAJOR finding that this
 				// give-up branch was the one sibling among the four independent
 				// maxConsecutiveDecodeFailures loops (login.go's waitFor/waitForInitPush,
 				// conn.go's DoHandshake -- all fixed in round 51) that never wrapped its
-				// give-up outcome in deadConnError, returning a silent nil error instead. That
+				// give-up outcome in sfs.DeadConnError, returning a silent nil error instead. That
 				// used to be indistinguishable from the genuinely benign timeout-break case two
 				// checks above (a connection that simply never sent the awaited push), even
 				// though 21+ consecutive undecodable frames is a much stronger, actively-hostile
@@ -563,7 +564,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 				// never learned the connection had just proven itself dead, so -interactive
 				// could launch directly against it, or -collect could burn a full battery of
 				// doomed requests against it, instead of aborting immediately.
-				err := deadConnError{err: fmt.Errorf("read building list: %d consecutive malformed/undecodable envelopes, giving up with whatever was already collected: %w", consecutiveDecodeFailures, err)}
+				err := sfs.NewDeadConnError(fmt.Errorf("read building list: %d consecutive malformed/undecodable envelopes, giving up with whatever was already collected: %w", consecutiveDecodeFailures, err))
 				slog.Warn("read building list: too many consecutive malformed/undecodable envelopes, giving up early with whatever was already collected",
 					"consecutiveDecodeFailures", consecutiveDecodeFailures)
 				return buildings, visitors, err
@@ -576,7 +577,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 		if !ok {
 			// maxNonMatchingEnvelopesPerWait (login.go doc comment): a non-extension envelope
 			// (e.g. the client's own background heartbeat pong) costs a full
-			// ReadPacket/DecodeObject/AsExtension cycle just like a well-formed-but-irrelevant
+			// sfs.ReadPacket/sfs.DecodeObject/AsExtension cycle just like a well-formed-but-irrelevant
 			// push does below, so it counts against the identical cap.
 			if err := checkNonMatchingEnvelopeCap(&nonMatchingEnvelopes); err != nil {
 				return buildings, visitors, err
@@ -604,25 +605,25 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 		case "push.init.build":
 			gotInitBuild = true
 			if v, ok := msg.Params.Get("defaultBuilds"); ok {
-				if arr, ok := v.Val.(*SFSArray); ok {
+				if arr, ok := v.Val.(*sfs.SFSArray); ok {
 					// Raw-item-scan cap: see maxRawBuildingItemsPerPush's doc comment above
 					// ParseInitBuildings for why this loop needs the identical defensive ceiling
 					// ParseInitBuildings itself applies to building_new -- this is one of the two
 					// sibling inline loops that constant's doc comment refers to.
-					if len(arr.items) > maxRawBuildingItemsPerPush {
+					if len(arr.Items()) > maxRawBuildingItemsPerPush {
 						slog.Warn("push.init.build defaultBuilds longer than raw-item scan cap; truncating",
-							"itemCount", len(arr.items), "cap", maxRawBuildingItemsPerPush)
+							"itemCount", len(arr.Items()), "cap", maxRawBuildingItemsPerPush)
 					}
-					for i, item := range arr.items {
+					for i, item := range arr.Items() {
 						if i >= maxRawBuildingItemsPerPush {
 							break
 						}
-						wrapper, ok := item.Val.(*SFSObject)
+						wrapper, ok := item.Val.(*sfs.SFSObject)
 						if !ok {
 							continue
 						}
 						if biv, ok := wrapper.Get("buildInfo"); ok {
-							if bi, ok := biv.Val.(*SFSObject); ok {
+							if bi, ok := biv.Val.(*sfs.SFSObject); ok {
 								if !requireFieldType(bi, "uuid", "push.init.build", sfsFieldKindLong) {
 									continue
 								}
@@ -666,19 +667,19 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			}
 		case "push.add.building":
 			if v, ok := msg.Params.Get("buildings"); ok {
-				if arr, ok := v.Val.(*SFSArray); ok {
+				if arr, ok := v.Val.(*sfs.SFSArray); ok {
 					// Raw-item-scan cap: see maxRawBuildingItemsPerPush's doc comment above
 					// ParseInitBuildings -- this is the other of the two sibling inline loops that
 					// constant's doc comment refers to.
-					if len(arr.items) > maxRawBuildingItemsPerPush {
+					if len(arr.Items()) > maxRawBuildingItemsPerPush {
 						slog.Warn("push.add.building buildings longer than raw-item scan cap; truncating",
-							"itemCount", len(arr.items), "cap", maxRawBuildingItemsPerPush)
+							"itemCount", len(arr.Items()), "cap", maxRawBuildingItemsPerPush)
 					}
-					for i, item := range arr.items {
+					for i, item := range arr.Items() {
 						if i >= maxRawBuildingItemsPerPush {
 							break
 						}
-						bi, ok := item.Val.(*SFSObject)
+						bi, ok := item.Val.(*sfs.SFSObject)
 						if !ok {
 							continue
 						}
@@ -712,7 +713,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			// nothing in this function's control flow enforces that a credential-bearing push (e.g.
 			// push.account.login.new, or an init push's chatToken) can't land here. No currently
 			// reachable path does so today, but that rests on call-ordering elsewhere in the
-			// client, not on anything this switch itself checks -- redact defensively rather than
+			// client, not on anything this switch itself checks -- sfs.Redact defensively rather than
 			// rely on it.
 			slog.Info("observed push.queue.add", "params", msg.Params.StringRedacted())
 		case "push.build.queue.info":
@@ -821,13 +822,13 @@ func collectCmdFor(bId int32) (cmd string, ok bool) {
 // drained, not just echoed back.
 func CollectIdleReward(conn *GameConn) error {
 	const cmd = "lw.pve.idle.reward"
-	peek := NewSFSObject()
+	peek := sfs.NewSFSObject()
 	peek.PutInt("action", 0)
 	if _, err := sendAndWait(conn, "idle reward available", cmd, peek); err != nil {
 		return err
 	}
 
-	claim := NewSFSObject()
+	claim := sfs.NewSFSObject()
 	claim.PutInt("action", 1)
 	if _, err := sendAndWait(conn, "idle reward collected", cmd, claim); err != nil {
 		return err
@@ -841,7 +842,7 @@ func CollectIdleReward(conn *GameConn) error {
 // ParseInitVisitors now enforces directly -- there is no equivalent "expected building count" field
 // documented anywhere in this codebase's protocol notes, so this can't be a real protocol limit,
 // only defense-in-depth: the same category of deliberately generous, non-protocol-guessing safety
-// margin as sfsobject.go's maxDecodedNodes/maxFrameSize/maxNestDepth.
+// margin as sfsobject.go's sfs.MaxDecodedNodes/sfs.MaxFrameSize/sfs.MaxNestDepth.
 //
 // Set generously large -- no real account's building count could plausibly approach it -- while
 // still finite enough to bound CollectAll's worst-case sequential runtime against a peer that simply
@@ -948,7 +949,7 @@ func CollectAll(conn *GameConn, buildings []Building, visitors []Visitor) error 
 		actions = append(actions, func() error {
 			cmd, _ := collectCmdFor(b.BId())
 			slog.Info("attempting collect", "name", BuildingNameOf(b.BId()), "uuid", b.Uuid(), "buildingLevel", b.Level(), "cmd", cmd)
-			params := NewSFSObject()
+			params := sfs.NewSFSObject()
 			params.PutLong("uuid", b.Uuid())
 			_, err := sendAndWait(conn, "collect "+BuildingNameOf(b.BId()), cmd, params)
 			return err

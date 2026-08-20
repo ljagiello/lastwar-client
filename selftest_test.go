@@ -4,28 +4,29 @@ import (
 	"bytes"
 	"crypto/aes"
 	"lastwar-client/internal/crypto"
+	"lastwar-client/internal/sfs"
 	"testing"
 )
 
 func TestSFSObjectRoundTrip(t *testing.T) {
-	o := NewSFSObject()
+	o := sfs.NewSFSObject()
 	o.PutUtfString("mail", "roundtrip-test@example.com")
 	o.PutInt("type", 0)
 	o.PutLong("bignum", 1234567890123)
 	o.PutBool("flag", true)
-	inner := NewSFSObject()
+	inner := sfs.NewSFSObject()
 	inner.PutUtfString("nested", "yes")
 	o.PutSFSObject("sub", inner)
-	arr := NewSFSArray()
+	arr := sfs.NewSFSArray()
 	arr.AddInt(1)
 	arr.AddInt(2)
 	o.PutSFSArray("arr", arr)
 
-	encoded, err := EncodeObject(o)
+	encoded, err := sfs.EncodeObject(o)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	decoded, err := DecodeObject(encoded)
+	decoded, err := sfs.DecodeObject(encoded)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -39,7 +40,7 @@ func TestSFSObjectRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("sub missing")
 	}
-	subObj := sub.Val.(*SFSObject)
+	subObj := sub.Val.(*sfs.SFSObject)
 	if subObj.GetString("nested") != "yes" {
 		t.Errorf("nested mismatch: %q", subObj.GetString("nested"))
 	}
@@ -261,11 +262,11 @@ func TestAESECBDecryptPKCS7RejectsBadCiphertextLength(t *testing.T) {
 
 func TestPacketRoundTripSmall(t *testing.T) {
 	body := []byte("small payload, no compression")
-	packet, err := EncodePacket(body)
+	packet, err := sfs.EncodePacket(body)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	got, err := ReadPacket(bytes.NewReader(packet))
+	got, err := sfs.ReadPacket(bytes.NewReader(packet))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -275,15 +276,15 @@ func TestPacketRoundTripSmall(t *testing.T) {
 }
 
 func TestPacketRoundTripLargeCompressed(t *testing.T) {
-	body := bytes.Repeat([]byte("x"), 5000) // > compressionThreshold
-	packet, err := EncodePacket(body)
+	body := bytes.Repeat([]byte("x"), 5000) // > sfs.CompressionThreshold
+	packet, err := sfs.EncodePacket(body)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if packet[0]&hdrCompressed == 0 {
+	if packet[0]&sfs.HdrCompressed == 0 {
 		t.Errorf("expected compressed flag to be set for large payload")
 	}
-	got, err := ReadPacket(bytes.NewReader(packet))
+	got, err := sfs.ReadPacket(bytes.NewReader(packet))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}

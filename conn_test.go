@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"strings"
@@ -15,7 +16,7 @@ import (
 
 func TestAsExtension(t *testing.T) {
 	t.Run("non-extension controller", func(t *testing.T) {
-		env := &Envelope{Controller: controllerSystem, Content: NewSFSObject()}
+		env := &Envelope{Controller: controllerSystem, Content: sfs.NewSFSObject()}
 		if _, ok := env.AsExtension(); ok {
 			t.Fatal("expected ok=false for a non-extension controller")
 		}
@@ -27,9 +28,9 @@ func TestAsExtension(t *testing.T) {
 		}
 	})
 	t.Run("well-formed extension message", func(t *testing.T) {
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutUtfString("c", "test.cmd")
-		p := NewSFSObject()
+		p := sfs.NewSFSObject()
 		p.PutInt("foo", 42)
 		content.PutSFSObject("p", p)
 		env := &Envelope{Controller: controllerExtension, Content: content}
@@ -45,7 +46,7 @@ func TestAsExtension(t *testing.T) {
 		}
 	})
 	t.Run("missing p defaults to empty params, not nil", func(t *testing.T) {
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutUtfString("c", "test.cmd")
 		env := &Envelope{Controller: controllerExtension, Content: content}
 		msg, ok := env.AsExtension()
@@ -62,7 +63,7 @@ func TestAsExtension(t *testing.T) {
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		defer slog.SetDefault(orig)
 
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutUtfString("c", "test.cmd")
 		content.PutUtfString("p", "not-an-object")
 		env := &Envelope{Controller: controllerExtension, Content: content}
@@ -86,7 +87,7 @@ func TestAsExtension(t *testing.T) {
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		defer slog.SetDefault(orig)
 
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutInt("c", 5)
 		env := &Envelope{Controller: controllerExtension, Content: content}
 		msg, ok := env.AsExtension()
@@ -111,17 +112,17 @@ func TestAsExtension(t *testing.T) {
 func TestReadEnvelopeWrongTypedFieldsWarn(t *testing.T) {
 	tests := []struct {
 		name       string
-		build      func(o *SFSObject)
+		build      func(o *sfs.SFSObject)
 		wantMsg    string
 		wantCtrl   byte
 		wantAction int16
 	}{
 		{
 			name: "c wrong-typed",
-			build: func(o *SFSObject) {
+			build: func(o *sfs.SFSObject) {
 				o.PutInt("c", 5)
 				o.PutShort("a", actionHandshake)
-				o.PutSFSObject("p", NewSFSObject())
+				o.PutSFSObject("p", sfs.NewSFSObject())
 			},
 			wantMsg:    "c field is present but not a byte",
 			wantCtrl:   0, // zero value -- collides with controllerSystem, exactly the risk this fix documents
@@ -129,10 +130,10 @@ func TestReadEnvelopeWrongTypedFieldsWarn(t *testing.T) {
 		},
 		{
 			name: "a wrong-typed",
-			build: func(o *SFSObject) {
+			build: func(o *sfs.SFSObject) {
 				o.PutByte("c", controllerSystem)
 				o.PutUtfString("a", "bad")
-				o.PutSFSObject("p", NewSFSObject())
+				o.PutSFSObject("p", sfs.NewSFSObject())
 			},
 			wantMsg:    "a field is present but not an int16",
 			wantCtrl:   controllerSystem,
@@ -140,7 +141,7 @@ func TestReadEnvelopeWrongTypedFieldsWarn(t *testing.T) {
 		},
 		{
 			name: "p wrong-typed",
-			build: func(o *SFSObject) {
+			build: func(o *sfs.SFSObject) {
 				o.PutByte("c", controllerSystem)
 				o.PutShort("a", actionHandshake)
 				o.PutUtfString("p", "bad")
@@ -161,15 +162,15 @@ func TestReadEnvelopeWrongTypedFieldsWarn(t *testing.T) {
 			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 			defer slog.SetDefault(orig)
 
-			outer := NewSFSObject()
+			outer := sfs.NewSFSObject()
 			tt.build(outer)
-			body, err := EncodeObject(outer)
+			body, err := sfs.EncodeObject(outer)
 			if err != nil {
-				t.Fatalf("EncodeObject: %v", err)
+				t.Fatalf("sfs.EncodeObject: %v", err)
 			}
-			packet, err := EncodePacket(body)
+			packet, err := sfs.EncodePacket(body)
 			if err != nil {
-				t.Fatalf("EncodePacket: %v", err)
+				t.Fatalf("sfs.EncodePacket: %v", err)
 			}
 
 			writeDone := make(chan error, 1)
@@ -201,7 +202,7 @@ func TestReadEnvelopeWrongTypedFieldsWarn(t *testing.T) {
 }
 
 func newTestExtMsg(cmd string, errorCode any) *ExtensionMessage {
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	if errorCode != nil {
 		switch v := errorCode.(type) {
 		case string:
@@ -372,24 +373,24 @@ func TestClassifyResponse(t *testing.T) {
 func TestClassifyResponseWrongTypedStatusIsNotBenign(t *testing.T) {
 	tests := []struct {
 		name string
-		put  func(p *SFSObject)
+		put  func(p *sfs.SFSObject)
 	}{
 		{
 			name: "status is a double, not an int",
-			put:  func(p *SFSObject) { p.PutDouble("status", 0) },
+			put:  func(p *sfs.SFSObject) { p.PutDouble("status", 0) },
 		},
 		{
 			name: "status is a string, not an int",
-			put:  func(p *SFSObject) { p.PutUtfString("status", "0") },
+			put:  func(p *sfs.SFSObject) { p.PutUtfString("status", "0") },
 		},
 		{
 			name: "status is a bool, not an int",
-			put:  func(p *SFSObject) { p.PutBool("status", false) },
+			put:  func(p *sfs.SFSObject) { p.PutBool("status", false) },
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params := NewSFSObject()
+			params := sfs.NewSFSObject()
 			tt.put(params)
 			msg := &ExtensionMessage{Cmd: "building.production.collect", Params: params}
 
@@ -412,7 +413,7 @@ func TestGameConnSendReceiveRoundTrip(t *testing.T) {
 	client := &GameConn{conn: c1, reader: bufio.NewReaderSize(c1, 4096)}
 	server := &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
 
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutUtfString("hello", "world")
 
 	sendDone := make(chan error, 1)
@@ -492,7 +493,7 @@ func TestSendEnvelopeIsSafeForConcurrentUse(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			params := NewSFSObject()
+			params := sfs.NewSFSObject()
 			params.PutInt("i", int32(i))
 			if err := client.SendExtension(fmt.Sprintf("test.cmd.%d", i), params); err != nil {
 				sendErrs <- err

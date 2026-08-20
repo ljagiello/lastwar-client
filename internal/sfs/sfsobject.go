@@ -1,4 +1,4 @@
-package main
+package sfs
 
 import (
 	"bytes"
@@ -12,15 +12,15 @@ import (
 
 // SFS2X SFSDataType tags, per the reverse-engineered wire format (see dossier §04).
 const (
-	sfsNull           = 0
-	sfsBool           = 1
+	SFSNull           = 0
+	SFSBool           = 1
 	sfsByte           = 2
 	sfsShort          = 3
-	sfsInt            = 4
-	sfsLong           = 5
+	SFSInt            = 4
+	SFSLong           = 5
 	sfsFloat          = 6
-	sfsDouble         = 7
-	sfsUtfString      = 8
+	SFSDouble         = 7
+	SFSUtfString      = 8
 	sfsBoolArray      = 9
 	sfsByteArray      = 10
 	sfsShortArray     = 11
@@ -30,9 +30,9 @@ const (
 	sfsDoubleArray    = 15
 	sfsUtfStringArray = 16
 	sfsArrayType      = 17
-	sfsObjectType     = 18
+	SFSObjectType     = 18
 	sfsClass          = 19 // unused/unimplemented by the game
-	sfsText           = 20
+	SFSText           = 20
 )
 
 // SFSValue is a single tagged field value.
@@ -52,7 +52,7 @@ type SFSValue struct {
 // sensitive."
 //
 // Unlike *SFSObject/*SFSArray, a bare SFSValue carries no key/field-name context at all to check
-// against sensitiveSFSKeys (that check only ever happens one level up, in the parent SFSObject
+// against SensitiveSFSKeys (that check only ever happens one level up, in the parent SFSObject
 // that held this value under a specific key) -- so, mirroring the bare *SFSArray.StringRedacted()
 // method's own reasoning for the identical "no key context to lean on" situation, this
 // blanket-masks unconditionally rather than risk ever printing a value that turns out to be
@@ -99,15 +99,24 @@ func (o *SFSObject) put(key string, v SFSValue) {
 	o.values[key] = v
 }
 
-func (o *SFSObject) PutUtfString(key, val string)      { o.put(key, SFSValue{sfsUtfString, val}) }
-func (o *SFSObject) PutBool(key string, val bool)      { o.put(key, SFSValue{sfsBool, val}) }
+// PutValue sets a raw typed value -- the exported form of put, for other packages' tests that
+// need to inject specific wire tags the PutInt/PutUtfString family can't produce (e.g. a
+// deliberately wrong-typed field).
+func (o *SFSObject) PutValue(key string, v SFSValue) { o.put(key, v) }
+
+// Keys returns the object's field names in insertion order, for read-only access by other
+// packages. Callers must not mutate the returned slice.
+func (o *SFSObject) Keys() []string { return o.keys }
+
+func (o *SFSObject) PutUtfString(key, val string)      { o.put(key, SFSValue{SFSUtfString, val}) }
+func (o *SFSObject) PutBool(key string, val bool)      { o.put(key, SFSValue{SFSBool, val}) }
 func (o *SFSObject) PutByte(key string, val byte)      { o.put(key, SFSValue{sfsByte, val}) }
 func (o *SFSObject) PutShort(key string, val int16)    { o.put(key, SFSValue{sfsShort, val}) }
-func (o *SFSObject) PutInt(key string, val int32)      { o.put(key, SFSValue{sfsInt, val}) }
-func (o *SFSObject) PutLong(key string, val int64)     { o.put(key, SFSValue{sfsLong, val}) }
-func (o *SFSObject) PutDouble(key string, val float64) { o.put(key, SFSValue{sfsDouble, val}) }
+func (o *SFSObject) PutInt(key string, val int32)      { o.put(key, SFSValue{SFSInt, val}) }
+func (o *SFSObject) PutLong(key string, val int64)     { o.put(key, SFSValue{SFSLong, val}) }
+func (o *SFSObject) PutDouble(key string, val float64) { o.put(key, SFSValue{SFSDouble, val}) }
 func (o *SFSObject) PutSFSObject(key string, val *SFSObject) {
-	o.put(key, SFSValue{sfsObjectType, val})
+	o.put(key, SFSValue{SFSObjectType, val})
 }
 func (o *SFSObject) PutSFSArray(key string, val *SFSArray) { o.put(key, SFSValue{sfsArrayType, val}) }
 
@@ -137,7 +146,7 @@ func (o *SFSObject) Get(key string) (SFSValue, bool) {
 
 // GetString reads a field as string, returning "" if the field is absent or its concrete decoded
 // Go type isn't string -- the same "treat as absent/zero-value" fallback GetInt/GetLong use for a
-// wrong-typed field, not a panic or an error. Both sfsUtfString and sfsText wire tags decode to
+// wrong-typed field, not a panic or an error. Both SFSUtfString and SFSText wire tags decode to
 // Go's plain string type (see the decode switch below), so there is no further wire-tag-level
 // distinction to make here. A nil receiver also returns "" rather than panicking -- see Has's own
 // doc comment.
@@ -213,11 +222,11 @@ func (o *SFSObject) GetInt(key string) int32 {
 				// request with no other signal that the value was corrupted rather than
 				// genuinely 0 -- see this function's own doc comment above for the full
 				// "requireFieldType/sfsFieldKindAccepts is a pure type check, not a value-range
-				// one" reasoning this anomaly falls out of. Value gated on isSensitiveSFSKey
+				// one" reasoning this anomaly falls out of. Value gated on IsSensitiveSFSKey
 				// like getIntFlexible's own anomaly logging, since GetInt is called with an
 				// arbitrary caller-supplied key.
 				redactedValue := any(n)
-				if isSensitiveSFSKey(key) {
+				if IsSensitiveSFSKey(key) {
 					redactedValue = "[REDACTED]"
 				}
 				slog.Warn("GetInt: field present as an out-of-int32-range Long, falling back to 0",
@@ -283,12 +292,12 @@ func (o *SFSObject) GoString() string {
 	return o.StringRedacted()
 }
 
-// sensitiveSFSKeys lists the field names this protocol is known to carry live credentials/tokens
+// SensitiveSFSKeys lists the field names this protocol is known to carry live credentials/tokens
 // under, across every login/session response and request this repo decodes or builds (see
-// login.go's redact() call sites, identity.go's BuildLoginParams, and gsl.go's
+// login.go's Redact() call sites, identity.go's BuildLoginParams, and gsl.go's
 // LoginServerListRespon.At/Rt) -- loginKey/accountArr's sibling, gameUid, is deliberately not
 // included: it identifies an account but isn't a bearer credential by itself.
-var sensitiveSFSKeys = map[string]bool{
+var SensitiveSFSKeys = map[string]bool{
 	"loginKey":    true,
 	"at":          true,
 	"rt":          true,
@@ -302,7 +311,7 @@ var sensitiveSFSKeys = map[string]bool{
 	"verifyCode": true,
 	// deviceId is, together with airKey (already above), the actual SFS-layer bearer credential
 	// for the base zone Login (see login.go's/identity.go's BuildLoginParams doc comments) -- it
-	// always appears alongside airKey in loginParams, so it must redact the same way.
+	// always appears alongside airKey in loginParams, so it must Redact the same way.
 	"deviceId": true,
 	// chatToken is documented (docs/auth.mdx, docs/alliance-chat-mail.mdx) as a live bearer
 	// credential for the separate chat WebSocket, carried in the `init` push's params. Not yet
@@ -313,7 +322,7 @@ var sensitiveSFSKeys = map[string]bool{
 	// from the live production server, explicitly calling tk a session token.
 	"tk": true,
 	// ta is the iOS login's analytics blob (identity.go's BuildLoginParams/iosAnalyticsBlob):
-	// a JSON-marshaled string, not a scalar, so StringRedacted() has no way to redact secrets
+	// a JSON-marshaled string, not a scalar, so StringRedacted() has no way to Redact secrets
 	// nested inside it field-by-field -- it can only mask the whole "ta" value or none of it.
 	// identity.go no longer puts real DeviceID/ShumeiBoxId/AirKey values into that blob, but
 	// this stays as defense-in-depth in case a future field embeds something sensitive inside
@@ -412,43 +421,43 @@ var sensitiveSFSKeys = map[string]bool{
 	// bearer tokens or PII, so this decision doesn't need re-deriving next round.
 }
 
-// sensitiveSFSKeysLower is a case-insensitive lookup mirror of sensitiveSFSKeys, built once (at
-// package init, from sensitiveSFSKeys' own literal keys) rather than lowercasing sensitiveSFSKeys
-// itself in place -- see isSensitiveSFSKey's doc comment for why a case-insensitive check is
-// needed, and why sensitiveSFSKeys' own keys stay exact-case for any other/future reader of that
+// sensitiveSFSKeysLower is a case-insensitive lookup mirror of SensitiveSFSKeys, built once (at
+// package init, from SensitiveSFSKeys' own literal keys) rather than lowercasing SensitiveSFSKeys
+// itself in place -- see IsSensitiveSFSKey's doc comment for why a case-insensitive check is
+// needed, and why SensitiveSFSKeys' own keys stay exact-case for any other/future reader of that
 // map.
 var sensitiveSFSKeysLower = buildSensitiveSFSKeysLower()
 
 func buildSensitiveSFSKeysLower() map[string]bool {
-	m := make(map[string]bool, len(sensitiveSFSKeys))
-	for k := range sensitiveSFSKeys {
+	m := make(map[string]bool, len(SensitiveSFSKeys))
+	for k := range SensitiveSFSKeys {
 		m[strings.ToLower(k)] = true
 	}
 	return m
 }
 
-// isSensitiveSFSKey reports whether k names a known-sensitive field, case-insensitively against
-// sensitiveSFSKeys' registered (exact-case) key names. A plain `sensitiveSFSKeys[k]` map lookup is
+// IsSensitiveSFSKey reports whether k names a known-sensitive field, case-insensitively against
+// SensitiveSFSKeys' registered (exact-case) key names. A plain `SensitiveSFSKeys[k]` map lookup is
 // exact-case only: interactive.go's putJSONValue takes a JSON object key from the operator's
 // control-FIFO line verbatim, with no case normalization, so a casing variant of a known-sensitive
 // key (e.g. an operator typing "LoginKey" instead of the registered "loginKey") would bypass
-// redactSFSValue entirely and fall through to formatSFSValueRedacted's plain
+// RedactSFSValue entirely and fall through to formatSFSValueRedacted's plain
 // fmt.Sprintf("%v", val) -- printing a secret typed under a mis-cased key in full cleartext in
 // local logs. Comparing against sensitiveSFSKeysLower closes that gap while leaving
-// sensitiveSFSKeys' own keys unchanged.
-func isSensitiveSFSKey(k string) bool {
+// SensitiveSFSKeys' own keys unchanged.
+func IsSensitiveSFSKey(k string) bool {
 	return sensitiveSFSKeysLower[strings.ToLower(k)]
 }
 
 // maxFormattedNodes bounds the total number of key/item nodes a single top-level StringRedacted()
 // call (and the String()/GoString() methods that delegate to it) will examine before truncating
-// with a visible marker -- independent of maxDecodedNodes below, which only bounds DECODE-time cost
+// with a visible marker -- independent of MaxDecodedNodes below, which only bounds DECODE-time cost
 // for one wire payload, not a later format/log walk of an object that's already sitting in memory.
 // Two real gaps this closes:
 //
 //  1. requirePresentField (buildings.go/mail.go/alliance.go/visitors.go) calls o.String() (->
 //     StringRedacted()) on a SINGLE array item when a required field is missing. That one item's
-//     own internal node count is bounded only by the overall maxDecodedNodes=300,000 decode budget
+//     own internal node count is bounded only by the overall MaxDecodedNodes=300,000 decode budget
 //     for the WHOLE payload -- none of this repo's own raw-item-scan-count caps (buildings.go's
 //     maxRawBuildingItemsPerPush, mail.go's mailListRawItemCap, alliance.go's
 //     allianceScienceRawItemCap, ...) bound a single item's own internal subtree size, only the
@@ -461,14 +470,14 @@ func isSensitiveSFSKey(k string) bool {
 //
 // Both mean an already-decoded SFSObject/SFSArray, however large, can reach a String()/
 // StringRedacted() call with no format-time cost bound of its own. This budget is deliberately
-// independent of maxDecodedNodes -- it exists purely to keep the cost of ONE format call bounded,
+// independent of MaxDecodedNodes -- it exists purely to keep the cost of ONE format call bounded,
 // including for an object built programmatically via Put*/Add* (which has no decode-time bound
-// applied to it at all, since maxDecodedNodes/chargeNodes only run inside DecodeObject's read
+// applied to it at all, since MaxDecodedNodes/chargeNodes only run inside DecodeObject's read
 // path).
 //
 // Round 29 addition: the two gaps above only motivated bounding the total number of KEYS/ITEMS
 // walked -- they didn't account for a single key/item's own VALUE being unboundedly large, if that
-// value is a bare string/sfsText field or one of the 8 primitive-array types (as opposed to a nested
+// value is a bare string/SFSText field or one of the 8 primitive-array types (as opposed to a nested
 // SFSObject/SFSArray, whose own internal keys/items were already correctly charged one unit each).
 // formatSFSValueRedacted's default case now charges additional budget proportional to such a
 // value's own real size (chargeUpTo/primitiveArrayPrefix, sfsobject.go), so a single huge string or
@@ -478,7 +487,7 @@ const maxFormattedNodes = 50_000
 // formatTruncatedMarker is appended to StringRedacted()'s output, in place of the remaining
 // keys/items, once a single top-level call's maxFormattedNodes budget runs out -- an explicit,
 // visible marker rather than silently dropping the rest of the data, matching this file's existing
-// fail-safe conventions (e.g. redactSFSValue's "[REDACTED N items]"/"[REDACTED N fields]" shapes).
+// fail-safe conventions (e.g. RedactSFSValue's "[REDACTED N items]"/"[REDACTED N fields]" shapes).
 const formatTruncatedMarker = "...[truncated: exceeded maxFormattedNodes format budget]"
 
 // formatBudget tracks the remaining format-time node budget across one top-level StringRedacted()
@@ -566,8 +575,8 @@ func (fb *formatBudget) noteTruncation() bool {
 // method, is the real implementation behind both too): a decoded server response or outgoing
 // request can carry a live loginKey/accessToken/airKey/shumeiBoxId in cleartext (this protocol has
 // no separate "credentials" envelope -- they're ordinary fields mixed in with gameplay data).
-// StringRedacted walks o's fields and masks any key matching sensitiveSFSKeys (checked
-// case-insensitively via isSensitiveSFSKey -- see its doc comment), recursing into nested
+// StringRedacted walks o's fields and masks any key matching SensitiveSFSKeys (checked
+// case-insensitively via IsSensitiveSFSKey -- see its doc comment), recursing into nested
 // SFSObject/SFSArray values via formatSFSValueRedacted instead of printing its value, so a call
 // site that wants to log/error-wrap a full decoded object for debugging can do so without risking a
 // credential leak.
@@ -620,8 +629,8 @@ func (o *SFSObject) stringRedactedBudgeted(fb *formatBudget) string {
 		// wire, same as any string value), so it goes through sanitizeForTerminal too -- not just
 		// the value -- before being embedded in the output. See sanitizeForTerminal's doc comment.
 		safeKey := sanitizeForTerminal(k)
-		if isSensitiveSFSKey(k) {
-			fmt.Fprintf(&b, "%s=%s", safeKey, redactSFSValue(v))
+		if IsSensitiveSFSKey(k) {
+			fmt.Fprintf(&b, "%s=%s", safeKey, RedactSFSValue(v))
 		} else {
 			fmt.Fprintf(&b, "%s=%s", safeKey, formatSFSValueRedacted(v, fb))
 		}
@@ -636,7 +645,7 @@ func (o *SFSObject) stringRedactedBudgeted(fb *formatBudget) string {
 // instead of passing it through raw.
 //
 // This protocol has no separate "trusted" vs "untrusted" string channel -- every decoded field
-// value (and, per readUtfString/readValuePayload's sfsObjectType case, every decoded field KEY
+// value (and, per readUtfString/readValuePayload's SFSObjectType case, every decoded field KEY
 // too) is either produced by DecodeObject from bytes a live server or a captured/replayed capture
 // file supplied, both of which are adversarial from this client's point of view. Two real call
 // sites write StringRedacted()'s output straight to a terminal with zero escaping of their own
@@ -675,7 +684,7 @@ func sanitizeForTerminal(s string) string {
 // their Go pointer) so StringRedacted's output is actually useful for inspecting arrays-of-objects
 // like `accountArr`/`defaultBuilds`, while staying redacted at every level via *SFSObject's own
 // stringRedactedBudgeted logic for nested objects (each carries its own keys, so recursing into it
-// correctly re-applies the sensitiveSFSKeys check at that level).
+// correctly re-applies the SensitiveSFSKeys check at that level).
 //
 // fb is the calling top-level StringRedacted() call's shared formatBudget (see its doc comment) --
 // threaded through every recursive call this function makes, including into the nested *SFSObject
@@ -687,8 +696,8 @@ func sanitizeForTerminal(s string) string {
 // all, e.g. a future call site that extracts and logs an array value directly) and blanket-masks
 // every item defensively for exactly that reason. An array reached HERE, though, is always a value
 // already sitting under a specific key inside a parent SFSObject whose StringRedacted() has
-// already checked that key against sensitiveSFSKeys (a sensitive key's array value never reaches
-// this function at all -- SFSObject.StringRedacted() routes those through redactSFSValue's own
+// already checked that key against SensitiveSFSKeys (a sensitive key's array value never reaches
+// this function at all -- SFSObject.StringRedacted() routes those through RedactSFSValue's own
 // *SFSArray case instead, which blanket-masks). So an array reached here is known-non-sensitive by
 // construction, and recursing item-by-item (rather than blanket-masking) is what keeps
 // StringRedacted's output actually useful for inspecting ordinary gameplay arrays-of-objects like
@@ -733,13 +742,13 @@ func formatSFSValueRedacted(v SFSValue, fb *formatBudget) string {
 		b.WriteString("]")
 		return b.String()
 	default:
-		// val may be a bare string/sfsText value, one of the 8 primitive-array types
+		// val may be a bare string/SFSText value, one of the 8 primitive-array types
 		// (readValuePayload's array-tag cases) whose elements can themselves be server-controlled
 		// strings ([]string), or any other plain scalar (int32/int64/int16/byte/float32/float64/
 		// bool/nil).
 		//
 		// Round 29 fix: the first two shapes can be arbitrarily large -- a decoded string's byte
-		// length or a primitive array's element count is bounded only by maxDecodedNodes (the
+		// length or a primitive array's element count is bounded only by MaxDecodedNodes (the
 		// DECODE-time budget for the whole payload), not by this format-time budget -- yet this case
 		// used to charge a flat ONE formatBudget unit for the entire value regardless of its real
 		// size (e.g. a 40,000-element string array cost the same single unit as an empty one), so
@@ -766,7 +775,7 @@ func formatSFSValueRedacted(v SFSValue, fb *formatBudget) string {
 			// truncateAtRuneBoundary, not a raw s[:allowed] byte-index slice: chargeUpTo counts
 			// bytes, so a budget cutoff landing mid-rune of a multi-byte UTF-8 string (round-32
 			// fix) would otherwise emit an invalid, truncated byte sequence into StringRedacted()'s
-			// output -- login.go's redact() was already hardened for the identical byte-vs-rune
+			// output -- login.go's Redact() was already hardened for the identical byte-vs-rune
 			// bug shape (see its own doc comment); this sibling truncation path never was.
 			out := sanitizeForTerminal(truncateAtRuneBoundary(s, allowed))
 			if ranOut && fb.noteTruncation() {
@@ -778,13 +787,13 @@ func formatSFSValueRedacted(v SFSValue, fb *formatBudget) string {
 	}
 }
 
-// redactSFSValue masks a sensitive-keyed field's value. It is FAIL-CLOSED by design: every shape
+// RedactSFSValue masks a sensitive-keyed field's value. It is FAIL-CLOSED by design: every shape
 // it doesn't explicitly recognize as safe falls through to a fixed "[REDACTED]" placeholder rather
 // than to any formatter that might print real content, so a future SFSValue shape this repo adds
 // (or a value shape this function's author didn't anticipate for a given key) is masked by default
 // instead of leaking.
 //
-// Every known sensitive key (sensitiveSFSKeys) carries a plain string on the wire in every case
+// Every known sensitive key (SensitiveSFSKeys) carries a plain string on the wire in every case
 // this repo has decoded; a non-string value under one of those keys would be unexpected, but is
 // still masked -- this closes the gap where a sensitive key's value reached via PutInt/PutLong/
 // PutBool/PutDouble/PutByte/PutShort (any scalar Go type other than string) used to fall through
@@ -799,7 +808,7 @@ func formatSFSValueRedacted(v SFSValue, fb *formatBudget) string {
 //
 // An *SFSArray (the wrapper type sfsArrayType decodes into, as opposed to a primitive array) also
 // gets masked explicitly below, for the same reason one level deeper: formatSFSValueRedacted's own
-// *SFSArray case recurses via formatSFSValueRedacted (not redactSFSValue) on each item, so a raw
+// *SFSArray case recurses via formatSFSValueRedacted (not RedactSFSValue) on each item, so a raw
 // scalar item inside the array would lose the "sensitive" context and print via the naive
 // fmt.Sprintf("%v", val) default -- no current PutSFSArray call site puts a sensitive key's value
 // in an *SFSArray of scalars, but a future decoded server response could represent a sensitive
@@ -810,19 +819,19 @@ func formatSFSValueRedacted(v SFSValue, fb *formatBudget) string {
 // A *SFSObject also gets masked explicitly below -- blanket, by field count, mirroring the
 // *SFSArray case's style exactly -- rather than delegating to formatSFSValueRedacted, whose own
 // *SFSObject case calls the NESTED object's own StringRedacted(). That would only re-check the
-// nested object's OWN key names against sensitiveSFSKeys, completely losing the fact that the
+// nested object's OWN key names against SensitiveSFSKeys, completely losing the fact that the
 // OUTER key was already known-sensitive -- so a secret sitting under an ordinary-looking sub-key
 // name inside that nested object (e.g. {loginKey: {value: "the-real-secret"}}) would print in
 // full. A nil *SFSObject is checked explicitly for the same nil-pointer-panic reason as *SFSArray
 // above.
-func redactSFSValue(v SFSValue) string {
+func RedactSFSValue(v SFSValue) string {
 	if s, ok := v.Val.(string); ok {
-		// redact() (login.go) only shortens s to a first4...last4 shape -- it doesn't strip
+		// Redact() (login.go) only shortens s to a first4...last4 shape -- it doesn't strip
 		// control bytes, so a secret whose first/last 4 bytes happen to contain a raw ESC/BEL
 		// (e.g. an attacker padding a crafted "loginKey" value specifically to smuggle one into
 		// the visible slice) would still reach the terminal unescaped without this. See
 		// sanitizeForTerminal's doc comment.
-		return sanitizeForTerminal(redact(s))
+		return sanitizeForTerminal(Redact(s))
 	}
 	if n, ok := primitiveArrayLen(v.Val); ok {
 		return fmt.Sprintf("[REDACTED %d items]", n)
@@ -848,7 +857,7 @@ func redactSFSValue(v SFSValue) string {
 
 // primitiveArrayLen reports the length of val and true if val is one of the 8 primitive array
 // types readValuePayload's array-tag cases (sfsBoolArray..sfsUtfStringArray) decode into -- plain
-// unwrapped Go slices, as opposed to the *SFSArray wrapper type. Used by redactSFSValue to mask a
+// unwrapped Go slices, as opposed to the *SFSArray wrapper type. Used by RedactSFSValue to mask a
 // sensitive key's array value without dumping its raw contents.
 func primitiveArrayLen(val interface{}) (int, bool) {
 	switch a := val.(type) {
@@ -879,9 +888,9 @@ func primitiveArrayLen(val interface{}) (int, bool) {
 // string truncation: chargeUpTo's returned budget is denominated in bytes, and a cutoff landing
 // mid-rune of a multi-byte UTF-8 string (e.g. a CJK field value) would otherwise leave an invalid,
 // truncated byte sequence in StringRedacted()'s output -- the identical bug shape login.go's
-// redact() was already hardened against (see its own doc comment) for the same underlying reason
-// (sensitiveSFSKeys covers fields that can legitimately carry multi-byte UTF-8, e.g. googleName/
-// mail). If s is already valid UTF-8 (the normal case for a decoded sfsUtfString/sfsText field),
+// Redact() was already hardened against (see its own doc comment) for the same underlying reason
+// (SensitiveSFSKeys covers fields that can legitimately carry multi-byte UTF-8, e.g. googleName/
+// mail). If s is already valid UTF-8 (the normal case for a decoded SFSUtfString/SFSText field),
 // the result is always valid UTF-8 too.
 func truncateAtRuneBoundary(s string, maxBytes int) string {
 	if maxBytes >= len(s) {
@@ -932,9 +941,17 @@ type SFSArray struct {
 
 func NewSFSArray() *SFSArray { return &SFSArray{} }
 
-func (a *SFSArray) add(v SFSValue)              { a.items = append(a.items, v) }
-func (a *SFSArray) AddInt(val int32)            { a.add(SFSValue{sfsInt, val}) }
-func (a *SFSArray) AddSFSObject(val *SFSObject) { a.add(SFSValue{sfsObjectType, val}) }
+func (a *SFSArray) add(v SFSValue) { a.items = append(a.items, v) }
+
+// AddValue appends a raw typed value -- the exported form of add, for other packages' tests
+// that need to build arrays with specific wire tags the AddInt/AddSFSObject family can't produce.
+func (a *SFSArray) AddValue(v SFSValue) { a.add(v) }
+
+// Items returns the array's elements for read-only access by other packages (which cannot
+// reach the unexported items field directly). Callers must not mutate the returned slice.
+func (a *SFSArray) Items() []SFSValue           { return a.items }
+func (a *SFSArray) AddInt(val int32)            { a.add(SFSValue{SFSInt, val}) }
+func (a *SFSArray) AddSFSObject(val *SFSObject) { a.add(SFSValue{SFSObjectType, val}) }
 
 // String makes *SFSArray satisfy fmt.Stringer safely, mirroring SFSObject.String(): it delegates
 // to StringRedacted() rather than printing raw item contents, so handing a bare *SFSArray (one not
@@ -953,13 +970,13 @@ func (a *SFSArray) GoString() string {
 }
 
 // StringRedacted is *SFSArray's safe-to-log dump for the bare/standalone case -- called directly
-// on an *SFSArray with no enclosing SFSObject key to check against sensitiveSFSKeys (String()/
+// on an *SFSArray with no enclosing SFSObject key to check against SensitiveSFSKeys (String()/
 // GoString() above both delegate here). Unlike formatSFSValueRedacted's *SFSArray case (used when
 // an array is reached as a value already sitting under a specific, already-checked key inside a
 // parent object), this method has no key context at all to lean on -- a caller could be logging an
 // array extracted from anywhere, including a sensitive field's value. With no way to tell, it
 // blanket-masks every item unconditionally, the same conservative "[REDACTED N items]" shape
-// redactSFSValue already uses for a sensitive key's *SFSArray value, rather than risk printing an
+// RedactSFSValue already uses for a sensitive key's *SFSArray value, rather than risk printing an
 // item that turns out to be sensitive.
 //
 // A nil receiver returns the safe literal "<nil>" instead of dereferencing a.items and panicking.
@@ -976,25 +993,25 @@ func (a *SFSArray) StringRedacted() string {
 // form: tag(18) + i16 key count + per-key (UTF_STRING key + typed value).
 // Returns an error (rather than panicking) if any key/string/collection
 // along the way is too large to represent on the wire -- see int16Count and
-// writeUtfString.
+// WriteUtfString.
 //
 // A nil o returns a clean error instead of panicking on the o.keys dereference below --
 // mirroring this file's existing nil-guard hardening on writeValuePayload's nested
-// sfsObjectType/sfsArrayType cases and on StringRedacted/formatSFSValueRedacted/redactSFSValue,
+// SFSObjectType/sfsArrayType cases and on StringRedacted/formatSFSValueRedacted/RedactSFSValue,
 // all of which handle a nil *SFSObject/*SFSArray gracefully rather than crashing the process.
 func EncodeObject(o *SFSObject) ([]byte, error) {
 	if o == nil {
 		return nil, fmt.Errorf("sfsobject: cannot encode a nil *SFSObject")
 	}
 	var buf bytes.Buffer
-	buf.WriteByte(sfsObjectType)
+	buf.WriteByte(SFSObjectType)
 	n, err := int16Count(len(o.keys), "keys")
 	if err != nil {
 		return nil, err
 	}
 	writeInt16(&buf, n)
 	for _, k := range o.keys {
-		if err := writeUtfString(&buf, k); err != nil {
+		if err := WriteUtfString(&buf, k); err != nil {
 			return nil, err
 		}
 		v := o.values[k]
@@ -1012,10 +1029,10 @@ func writeTaggedValue(buf *bytes.Buffer, v SFSValue) error {
 
 func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 	switch v.Type {
-	case sfsNull:
+	case SFSNull:
 		// no payload
 		return nil
-	case sfsBool:
+	case SFSBool:
 		if v.Val.(bool) {
 			buf.WriteByte(1)
 		} else {
@@ -1028,24 +1045,24 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 	case sfsShort:
 		writeInt16(buf, v.Val.(int16))
 		return nil
-	case sfsInt:
+	case SFSInt:
 		writeInt32(buf, v.Val.(int32))
 		return nil
-	case sfsLong:
+	case SFSLong:
 		writeInt64(buf, v.Val.(int64))
 		return nil
 	case sfsFloat:
 		binary.Write(buf, binary.BigEndian, math.Float32bits(v.Val.(float32)))
 		return nil
-	case sfsDouble:
+	case SFSDouble:
 		binary.Write(buf, binary.BigEndian, math.Float64bits(v.Val.(float64)))
 		return nil
-	case sfsUtfString:
-		return writeUtfString(buf, v.Val.(string))
-	case sfsText:
-		// Same underlying representation as sfsUtfString (a Go string), but tagged sfsText on the
+	case SFSUtfString:
+		return WriteUtfString(buf, v.Val.(string))
+	case SFSText:
+		// Same underlying representation as SFSUtfString (a Go string), but tagged SFSText on the
 		// wire and length-prefixed with a 4-byte count instead of 2 (mirrors readValuePayload's
-		// sfsText case).
+		// SFSText case).
 		b := []byte(v.Val.(string))
 		n, err := int32Count(len(b), "text bytes")
 		if err != nil {
@@ -1143,12 +1160,12 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 		}
 		writeInt16(buf, n)
 		for _, s := range arr {
-			if err := writeUtfString(buf, s); err != nil {
+			if err := WriteUtfString(buf, s); err != nil {
 				return err
 			}
 		}
 		return nil
-	case sfsObjectType:
+	case SFSObjectType:
 		inner := v.Val.(*SFSObject)
 		if inner == nil {
 			// Mirrors round 15's decode/format-side nil guard (formatSFSValueRedacted's *SFSObject
@@ -1158,7 +1175,7 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 			// latent, defense-in-depth for a future mistake -- but writeTaggedValue/writeValuePayload
 			// have no key name in scope at this point (only the value itself), so the error can't
 			// name the offending key.
-			return fmt.Errorf("sfsobject: nil *SFSObject value (sfsObjectType) cannot be encoded")
+			return fmt.Errorf("sfsobject: nil *SFSObject value (SFSObjectType) cannot be encoded")
 		}
 		n, err := int16Count(len(inner.keys), "keys")
 		if err != nil {
@@ -1166,7 +1183,7 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 		}
 		writeInt16(buf, n)
 		for _, k := range inner.keys {
-			if err := writeUtfString(buf, k); err != nil {
+			if err := WriteUtfString(buf, k); err != nil {
 				return err
 			}
 			if err := writeTaggedValue(buf, inner.values[k]); err != nil {
@@ -1177,7 +1194,7 @@ func writeValuePayload(buf *bytes.Buffer, v SFSValue) error {
 	case sfsArrayType:
 		inner := v.Val.(*SFSArray)
 		if inner == nil {
-			// Mirrors the sfsObjectType nil guard immediately above -- same nil-pointer-panic gap,
+			// Mirrors the SFSObjectType nil guard immediately above -- same nil-pointer-panic gap,
 			// same reasoning, same "no key name in scope at this point" caveat.
 			return fmt.Errorf("sfsobject: nil *SFSArray value (sfsArrayType) cannot be encoded")
 		}
@@ -1228,10 +1245,10 @@ func int32Count(n int, what string) (int32, error) {
 	return int32(n), nil
 }
 
-// writeUtfString returns an error instead of panicking when s is too long to length-prefix with
+// WriteUtfString returns an error instead of panicking when s is too long to length-prefix with
 // a 2-byte count -- reachable from server-controlled data (e.g. a batched join of server-supplied
 // values), so it must not crash the process.
-func writeUtfString(buf *bytes.Buffer, s string) error {
+func WriteUtfString(buf *bytes.Buffer, s string) error {
 	b := []byte(s)
 	if len(b) > 65535 {
 		return fmt.Errorf("sfsobject: string too long to encode (%d bytes, max 65535)", len(b))
@@ -1251,25 +1268,25 @@ type sfsReader struct {
 	nodes int
 }
 
-// maxNestDepth bounds how many levels of nested SFSArray/SFSObject readValuePayload will
+// MaxNestDepth bounds how many levels of nested SFSArray/SFSObject readValuePayload will
 // recurse into before returning a decode error instead of continuing -- real SFS2X payloads
 // from this game have never needed anywhere close to this, and unbounded recursion here is a
 // crash-the-process vector on a payload well under the existing frame-size cap.
-const maxNestDepth = 64
+const MaxNestDepth = 64
 
-// maxDecodedNodes bounds the total number of values a single decode may produce, independent of
+// MaxDecodedNodes bounds the total number of values a single decode may produce, independent of
 // nesting depth or per-level fan-out -- an ordinary few-level-deep, wide-fan-out nested
 // array/object can decode into an enormous number of total leaf nodes even while staying well
-// within maxNestDepth and the wire-level maxFrameSize cap (a measured ~60MB wire payload
+// within MaxNestDepth and the wire-level MaxFrameSize cap (a measured ~60MB wire payload
 // decoding into multiple GB of heap via ordinary 3-level nesting). Chosen comfortably above
 // anything the real ~313KB init payload has ever needed.
-const maxDecodedNodes = 300_000
+const MaxDecodedNodes = 300_000
 
-// chargeNodes adds n to r.nodes and errors if the running total exceeds maxDecodedNodes -- the
+// chargeNodes adds n to r.nodes and errors if the running total exceeds MaxDecodedNodes -- the
 // same budget check readValuePayload already applies once per value via r.nodes++, but a
 // primitive array (sfsBoolArray..sfsUtfStringArray) decodes its up-to-32767 elements directly via
 // readByte/readInt16/etc. rather than recursively calling readValuePayload per element like the
-// container types (sfsArrayType/sfsObjectType) do, so without this it would only ever cost 1
+// container types (sfsArrayType/SFSObjectType) do, so without this it would only ever cost 1
 // toward the budget regardless of how many elements it actually contains -- letting many
 // primitive-array fields, each cheap on the wire, amplify into a Go heap far larger than the
 // wire-frame cap was meant to bound. sfsByteArray is the one exception among the 8 primitive-array
@@ -1277,8 +1294,8 @@ const maxDecodedNodes = 300_000
 // memory cost is already a tight ~1:1 ratio with its wire cost, unlike the other 7 shapes.
 func (r *sfsReader) chargeNodes(n int) error {
 	r.nodes += n
-	if r.nodes > maxDecodedNodes {
-		return fmt.Errorf("sfsobject: decoded node count exceeds %d", maxDecodedNodes)
+	if r.nodes > MaxDecodedNodes {
+		return fmt.Errorf("sfsobject: decoded node count exceeds %d", MaxDecodedNodes)
 	}
 	return nil
 }
@@ -1371,15 +1388,15 @@ func (r *sfsReader) readTaggedValue() (SFSValue, error) {
 
 func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 	// Count every decoded value, not just containers -- leaf-node count is what actually
-	// drives heap amplification for a wide-fan-out nested array/object (see maxDecodedNodes).
+	// drives heap amplification for a wide-fan-out nested array/object (see MaxDecodedNodes).
 	r.nodes++
-	if r.nodes > maxDecodedNodes {
-		return SFSValue{}, fmt.Errorf("sfsobject: decoded node count exceeds %d", maxDecodedNodes)
+	if r.nodes > MaxDecodedNodes {
+		return SFSValue{}, fmt.Errorf("sfsobject: decoded node count exceeds %d", MaxDecodedNodes)
 	}
 	switch tag {
-	case sfsNull:
+	case SFSNull:
 		return SFSValue{tag, nil}, nil
-	case sfsBool:
+	case SFSBool:
 		b, err := r.readByte()
 		return SFSValue{tag, b != 0}, err
 	case sfsByte:
@@ -1388,10 +1405,10 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 	case sfsShort:
 		v, err := r.readInt16()
 		return SFSValue{tag, v}, err
-	case sfsInt:
+	case SFSInt:
 		v, err := r.readInt32()
 		return SFSValue{tag, v}, err
-	case sfsLong:
+	case SFSLong:
 		v, err := r.readInt64()
 		return SFSValue{tag, v}, err
 	case sfsFloat:
@@ -1400,16 +1417,16 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 			return SFSValue{}, err
 		}
 		return SFSValue{tag, math.Float32frombits(binary.BigEndian.Uint32(b))}, nil
-	case sfsDouble:
+	case SFSDouble:
 		b, err := r.readBytes(8)
 		if err != nil {
 			return SFSValue{}, err
 		}
 		return SFSValue{tag, math.Float64frombits(binary.BigEndian.Uint64(b))}, nil
-	case sfsUtfString:
+	case SFSUtfString:
 		s, err := r.readUtfString()
 		return SFSValue{tag, s}, err
-	case sfsText:
+	case SFSText:
 		n, err := r.readInt32()
 		if err != nil {
 			return SFSValue{}, err
@@ -1459,11 +1476,11 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		// overhead, unlike e.g. []string's ~16-byte-per-element Go string headers), and the wire
 		// encoding of a byte array is also exactly n bytes plus a small fixed header -- so wire-size
 		// cost and Go-memory cost are already a tight ~1:1 ratio with no amplification.
-		// maxFrameSize's existing wire-size cap already bounds Go-memory size for byte arrays with
-		// no separate node-budget protection needed, exactly like sfsText (same 1:1 shape, no
+		// MaxFrameSize's existing wire-size cap already bounds Go-memory size for byte arrays with
+		// no separate node-budget protection needed, exactly like SFSText (same 1:1 shape, no
 		// chargeNodes call either) already correctly assumes. Charging here doesn't add real
 		// protection; it just makes a legitimate multi-hundred-KB/multi-MB byte-array field fail
-		// spuriously against the flat maxDecodedNodes budget.
+		// spuriously against the flat MaxDecodedNodes budget.
 		b, err := r.readBytes(int(n))
 		if err != nil {
 			return SFSValue{}, err
@@ -1578,8 +1595,8 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 		}
 		r.depth++
 		defer func() { r.depth-- }()
-		if r.depth > maxNestDepth {
-			return SFSValue{}, fmt.Errorf("sfsobject: nesting depth exceeds %d", maxNestDepth)
+		if r.depth > MaxNestDepth {
+			return SFSValue{}, fmt.Errorf("sfsobject: nesting depth exceeds %d", MaxNestDepth)
 		}
 		arr := NewSFSArray()
 		for i := int16(0); i < n; i++ {
@@ -1590,15 +1607,15 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 			arr.items = append(arr.items, v)
 		}
 		return SFSValue{tag, arr}, nil
-	case sfsObjectType:
+	case SFSObjectType:
 		n, err := r.readArrayCount()
 		if err != nil {
 			return SFSValue{}, err
 		}
 		r.depth++
 		defer func() { r.depth-- }()
-		if r.depth > maxNestDepth {
-			return SFSValue{}, fmt.Errorf("sfsobject: nesting depth exceeds %d", maxNestDepth)
+		if r.depth > MaxNestDepth {
+			return SFSValue{}, fmt.Errorf("sfsobject: nesting depth exceeds %d", MaxNestDepth)
 		}
 		obj := NewSFSObject()
 		for i := int16(0); i < n; i++ {
@@ -1635,7 +1652,7 @@ func DecodeObject(data []byte) (*SFSObject, error) {
 	if err != nil {
 		return nil, err
 	}
-	if tag != sfsObjectType {
+	if tag != SFSObjectType {
 		return nil, fmt.Errorf("sfsobject: expected top-level tag 18 (SFS_OBJECT), got %d", tag)
 	}
 	v, err := r.readValuePayload(tag)

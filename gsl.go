@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"lastwar-client/internal/crypto"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"math"
 	"net/http"
@@ -30,7 +31,7 @@ const (
 
 // maxGSLResponseSize bounds the HTTP responses read via io.ReadAll below
 // (CheckVersion, GetServerList). Reading an untrusted HTTP body without a
-// cap is the same trivial multi-GB OOM vector packet.go's maxFrameSize
+// cap is the same trivial multi-GB OOM vector packet.go's sfs.MaxFrameSize
 // guards against on the TCP side, just tighter: these are small JSON/text
 // config responses, never expected to exceed a few KB.
 const maxGSLResponseSize = 1 << 20 // 1 MiB
@@ -94,7 +95,7 @@ func (f flexString) String() string { return string(f) }
 // instead of this function panicking or the caller silently proceeding with a corrupted value.
 //
 // key names the field this value came from, purely for the malformed-value Warn's own
-// isSensitiveSFSKey(key) redaction gate below -- round-42 fix, closing an asymmetry with this
+// sfs.IsSensitiveSFSKey(key) redaction gate below -- round-42 fix, closing an asymmetry with this
 // function's structural sibling getIntFlexible (same file), which received exactly this
 // hardening in round 35. Both call sites today (login.go, main.go) pass the non-sensitive "port",
 // so this was not exploitable in practice, but a future caller passing a sensitive key would
@@ -108,7 +109,7 @@ func (f flexString) Int(key string) int {
 	if err != nil {
 		redactedValue := any(string(f))
 		redactedErr := any(err)
-		if isSensitiveSFSKey(key) {
+		if sfs.IsSensitiveSFSKey(key) {
 			redactedValue = "[REDACTED]"
 			redactedErr = "[REDACTED]"
 		}
@@ -215,17 +216,17 @@ type LoginToken struct {
 }
 
 // String/GoString are the round-47 regression fix for the MAJOR finding that LoginToken --
-// unlike the SFSObject/SFSArray/SFSValue family, which got exactly this redaction-by-construction
+// unlike the sfs.SFSObject/sfs.SFSArray/sfs.SFSValue family, which got exactly this redaction-by-construction
 // treatment in rounds 14-15 for the identical reason -- carried a live bearer access/refresh token
 // in its Token field with nothing structurally stopping a future debug/error call site from
 // logging the struct (or a *LoginServerListRespon containing it, via its At/Rt fields) directly.
 // Every CURRENT call site (login.go/main.go/crossserver.go) already extracts and wraps only the
-// individual token string via Token.String()+redact() before logging -- this is defense-in-depth
+// individual token string via Token.String()+sfs.Redact() before logging -- this is defense-in-depth
 // for whatever comes next, not a fix for an actively-triggered leak. fmt's struct-field printer
 // checks each field for a Stringer/GoStringer implementation even when the CONTAINING struct
 // doesn't implement one itself, so this also redacts LoginToken automatically wherever it appears
 // nested inside a %v/%+v/%#v of a *LoginServerListRespon (e.g. a future fmt.Errorf("...: %+v",
-// lsr)). Blanket-masks unconditionally, mirroring SFSValue.String()'s own "no per-field key
+// lsr)). Blanket-masks unconditionally, mirroring sfs.SFSValue.String()'s own "no per-field key
 // context to lean on" reasoning -- Time is unread anywhere in this codebase, so redacting it too
 // alongside Token is behaviorally free.
 //
@@ -491,24 +492,24 @@ func firstHost(pipeList string) string {
 // sending wrong-typed fields in practice. The one case that must stay silent, by the same
 // absence-vs-wrong-type convention, is p.serverInfo being genuinely ABSENT (an ordinary shape for
 // responses that never carry a redirect at all) -- only wrong-typed fields warn here.
-func findServerInfo(content *SFSObject) *SFSObject {
+func findServerInfo(content *sfs.SFSObject) *sfs.SFSObject {
 	if content == nil {
 		return nil
 	}
 	if v, ok := content.Get("serverInfo"); ok {
-		if obj, ok := v.Val.(*SFSObject); ok {
+		if obj, ok := v.Val.(*sfs.SFSObject); ok {
 			return obj
 		}
 		slog.Warn("findServerInfo: top-level serverInfo field is present but not an object", "type", fmt.Sprintf("%T", v.Val))
 	}
 	if pv, ok := content.Get("p"); ok {
-		pObj, ok := pv.Val.(*SFSObject)
+		pObj, ok := pv.Val.(*sfs.SFSObject)
 		if !ok {
 			slog.Warn("findServerInfo: p field is present but not an object", "type", fmt.Sprintf("%T", pv.Val))
 			return nil
 		}
 		if v, ok := pObj.Get("serverInfo"); ok {
-			if obj, ok := v.Val.(*SFSObject); ok {
+			if obj, ok := v.Val.(*sfs.SFSObject); ok {
 				return obj
 			}
 			slog.Warn("findServerInfo: p.serverInfo field is present but not an object", "type", fmt.Sprintf("%T", v.Val))
@@ -571,12 +572,12 @@ func findServerInfo(content *SFSObject) *SFSObject {
 // identical-in-substance one) for a single anomaly, confirmed by direct reproduction. Removed
 // rather than left in place, since GetInt's diagnostic already carries the same key/redacted-value
 // information this function's own would have.
-func getIntFlexible(o *SFSObject, key string) int32 {
+func getIntFlexible(o *sfs.SFSObject, key string) int32 {
 	if n := o.GetInt(key); n != 0 {
 		return n
 	}
 	// Round-35 fix: redactedValue gates the three raw-scalar "value" log args below on
-	// isSensitiveSFSKey(key), matching every sibling wrong-typed-field guard in this codebase
+	// sfs.IsSensitiveSFSKey(key), matching every sibling wrong-typed-field guard in this codebase
 	// (requireFieldType/warnIfWrongTypedField/redirectIP/redirectZone all log only
 	// StringRedacted()/goType, never a field's own raw scalar). getIntFlexible is a generic,
 	// key-parameterized helper -- today's only call sites hardcode key="port" (never sensitive),
@@ -584,7 +585,7 @@ func getIntFlexible(o *SFSObject, key string) int32 {
 	// three anomaly-diagnostic Warn calls with no redaction at all, unlike this function's own
 	// fourth branch below, which already used the safe StringRedacted() pattern.
 	redactedValue := func(v any) any {
-		if isSensitiveSFSKey(key) {
+		if sfs.IsSensitiveSFSKey(key) {
 			return "[REDACTED]"
 		}
 		return v

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -94,14 +95,14 @@ func flexPort(n int) flexString { return flexString(strconv.Itoa(n)) }
 // (best-effort host/port parsing -- called from background handler goroutines, so it can't use
 // *testing.T; a malformed addr just yields a redirect a real client would itself fail to follow,
 // which is not a case these tests construct).
-func putRedirectServerInfo(addr, zone string) *SFSObject {
+func putRedirectServerInfo(addr, zone string) *sfs.SFSObject {
 	host, portStr, _ := net.SplitHostPort(addr)
 	port, _ := strconv.Atoi(portStr)
-	si := NewSFSObject()
+	si := sfs.NewSFSObject()
 	si.PutUtfString("ip", host)
 	si.PutInt("port", int32(port))
 	si.PutUtfString("zone", zone)
-	resp := NewSFSObject()
+	resp := sfs.NewSFSObject()
 	resp.PutSFSObject("serverInfo", si)
 	return resp
 }
@@ -149,7 +150,7 @@ func TestDoCrossServerLoginNoRedirect(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -186,7 +187,7 @@ func TestDoCrossServerLoginNoRedirect(t *testing.T) {
 
 // TestDoCrossServerLoginDebugDumpRedactsCredentials is the round-11 regression test for the
 // LWDEBUG_DUMP_LOGIN debug dump (crossserver.go, "full login content"): it used to log the full
-// outgoing login SFSObject raw via loginContent.String(), which carries the live access token
+// outgoing login sfs.SFSObject raw via loginContent.String(), which carries the live access token
 // (p.at) and shumeiBoxId in cleartext -- inconsistent with this same function's sibling
 // LWDEBUG_DUMP_LOGIN_BODY dump (0600-permissioned, explicitly treated as sensitive) and its own
 // later Info log a few lines down (which already redacts the identical two fields). Proves the
@@ -198,7 +199,7 @@ func TestDoCrossServerLoginDebugDumpRedactsCredentials(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -268,7 +269,7 @@ func TestDoCrossServerLoginDebugDumpBodyFileIsChmodded0600(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -314,7 +315,7 @@ func TestDoCrossServerLoginDebugDumpRedactsCredentialsIOSMode(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -388,7 +389,7 @@ func TestDoCrossServerLoginHandshakeLogRedactsSessionToken(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		hsResp := NewSFSObject()
+		hsResp := sfs.NewSFSObject()
 		hsResp.PutInt("ct", 3072)
 		hsResp.PutInt("ms", 1000000)
 		hsResp.PutUtfString("tk", fakeTk)
@@ -401,7 +402,7 @@ func TestDoCrossServerLoginHandshakeLogRedactsSessionToken(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -455,7 +456,7 @@ func TestDoCrossServerLoginSingleRedirect(t *testing.T) {
 			return
 		}
 		gotZoneOnSecondServer = env.Content.GetString("zn")
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -587,7 +588,7 @@ func TestDoCrossServerLoginExactlyMaxRedirectsSucceeds(t *testing.T) {
 			// The last server in the chain (hop == maxRedirects) completes a normal login
 			// instead of redirecting again -- this is the boundary value itself, which must
 			// still be reachable, not rejected.
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 		})
@@ -628,11 +629,11 @@ func TestDoCrossServerLoginRedirectRejectsEmptyRedirectIP(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutUtfString("ip", "|1.2.3.4") // firstHost("|1.2.3.4") == "" -- the malformed case
 		si.PutInt("port", 9339)
 		si.PutUtfString("zone", "APS2")
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutSFSObject("serverInfo", si)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -680,11 +681,11 @@ func TestDoCrossServerLoginRedirectWrongTypedIPIsWarned(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutInt("ip", 12345) // wrong-typed: a real ip is always a UTF string, never a number
 		si.PutInt("port", 9339)
 		si.PutUtfString("zone", "APS2")
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutSFSObject("serverInfo", si)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -851,7 +852,7 @@ func TestDoCrossServerLoginAcceptsZoneGameUidAccessTokExactlyAtCap(t *testing.T)
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -920,11 +921,11 @@ func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
 		}
 		gotUn <- env.Content.GetString("un")
 		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*SFSObject); ok {
+			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
 				gotParamsGameUid <- pObj.GetString("gameUid")
 			}
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -984,7 +985,7 @@ func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
 // TestDoCrossServerLoginRedirectRefreshesGameUid's sibling for an oversized (rather than
 // legitimate) mid-redirect GSL refresh: an oversized accessTok/gameUid returned by the opt=fix
 // refresh must fall back to the PREVIOUS value (capOversizedIdentityField, login.go) instead of
-// ever reaching PutUtfString with a value writeUtfString would hard-reject, which would otherwise
+// ever reaching PutUtfString with a value sfs.WriteUtfString would hard-reject, which would otherwise
 // fail the post-redirect Login's encode step and get misclassified by sendStageError (conn.go) as
 // a genuine dead connection.
 func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing.T) {
@@ -1017,11 +1018,11 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing
 		}
 		gotUn <- env.Content.GetString("un")
 		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*SFSObject); ok {
+			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
 				gotParamsAt <- pObj.GetString("at")
 			}
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -1125,11 +1126,11 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.
 			return
 		}
 		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*SFSObject); ok {
+			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
 				gotParamsAt <- pObj.GetString("at")
 			}
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -1216,7 +1217,7 @@ func TestDoCrossServerLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
 			return
 		}
 		gotZoneOnSecondServer = env.Content.GetString("zn")
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -1226,11 +1227,11 @@ func TestDoCrossServerLoginRedirectWrongTypedZoneIsWarned(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutUtfString("ip", newHost) // well-typed: the redirect must still be followed
 		si.PutInt("port", int32(newPort))
 		si.PutInt("zone", 999) // wrong-typed: a real zone is always a UTF string, never a number
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutSFSObject("serverInfo", si)
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
 	})
@@ -1408,14 +1409,14 @@ func TestDoCrossServerLoginRejectsMissingPPayload(t *testing.T) {
 		}
 		// Built by hand (not SendEnvelope, which always encodes a "p" field) to omit "p"
 		// entirely -- the one shape SendEnvelope itself cannot produce.
-		outer := NewSFSObject()
+		outer := sfs.NewSFSObject()
 		outer.PutByte("c", controllerSystem)
 		outer.PutShort("a", actionLogin)
-		body, err := EncodeObject(outer)
+		body, err := sfs.EncodeObject(outer)
 		if err != nil {
 			return
 		}
-		packet, err := EncodePacket(body)
+		packet, err := sfs.EncodePacket(body)
 		if err != nil {
 			return
 		}
@@ -1454,7 +1455,7 @@ func TestDoCrossServerLoginRejectsAuthRejection(t *testing.T) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("ec", "28")
 		resp.PutUtfString("errorMsg", "E011")
 		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)

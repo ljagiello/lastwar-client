@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"sort"
@@ -27,7 +28,7 @@ import (
 //     read (`mail.read.status.betch`) is NOT scoped by type at all, and
 //     is not conditional on having a reward either -- see ClaimAllMail.
 type Mail struct {
-	Raw *SFSObject
+	Raw *sfs.SFSObject
 }
 
 func (m Mail) Uid() string         { return m.Raw.GetString("uid") }
@@ -84,7 +85,7 @@ func (m Mail) HasUnclaimedReward() bool {
 // pagination loop below will examine, independent of ListMail's own mailListPageSize (100, the
 // requested page-size hint) and maxPages (20) -- both of those bound round-trip COUNT only, not the
 // size of any single page's response array, which is otherwise bounded only by sfsobject.go's much
-// larger maxDecodedNodes=300,000 decode budget. Without this, a malformed entry (not an *SFSObject,
+// larger sfs.MaxDecodedNodes=300,000 decode budget. Without this, a malformed entry (not an *sfs.SFSObject,
 // or missing/wrong-typed the required "uid" field via requireFieldType) hits a `continue` that
 // doesn't advance any output-count-based cap, since it never reaches the append -- the same gap
 // visitors.go's ParseInitVisitors closed in round 26 for visitor.list, applied here to mail.list
@@ -107,7 +108,7 @@ const mailListRawItemCap = 1000
 // round-trip COUNT, not aggregate size). Round-40 fix: before this existed, a hostile -cs-ip peer
 // could answer each of up to maxPages(20) page requests with mailListRawItemCap(1000) valid-shaped
 // mail entries and always report more=true with a valid, distinct lastUid/lastMailTime to keep
-// pagination advancing -- accumulating up to 20*1000=20,000 retained *SFSObject-backed Mail
+// pagination advancing -- accumulating up to 20*1000=20,000 retained *sfs.SFSObject-backed Mail
 // entries with zero aggregate cap anywhere in this function, the same "aggregate ceiling missing"
 // gap buildings.go (maxAggregateBuildingsPerFetch) and visitors.go (maxVisitorsUpperBound) both
 // already close for their own accumulators. ClaimAllMail then walks the full uncapped result,
@@ -162,16 +163,16 @@ const maxMailRewardBatchesPerRun = 300
 
 // maxMailUidLen bounds how long a single mail entry's `uid` field may be before ListMail's
 // per-entry loop below skips it (with a Warn) instead of appending it to `all` -- round-45 fix.
-// GetString (sfsobject.go) makes no distinction between the sfsUtfString wire tag (length-capped
-// at 65535 bytes by readUtfString's own 2-byte length prefix) and the sfsText wire tag (bounded
-// only by packet.go's maxFrameSize, via a 4-byte length prefix) -- both decode to a plain Go
+// GetString (sfsobject.go) makes no distinction between the sfs.SFSUtfString wire tag (length-capped
+// at 65535 bytes by readUtfString's own 2-byte length prefix) and the sfs.SFSText wire tag (bounded
+// only by packet.go's sfs.MaxFrameSize, via a 4-byte length prefix) -- both decode to a plain Go
 // string, and requireFieldType's sfsFieldKindString check accepts either shape identically. So a
-// uid arriving tagged sfsText (rather than the presumably-expected sfsUtfString) could previously
+// uid arriving tagged sfs.SFSText (rather than the presumably-expected sfs.SFSUtfString) could previously
 // be arbitrarily long, well past the wire format's own 65535-byte string-length limit.
 // batchByCountAndBytes always admits at least one uid per batch even if that uid alone exceeds its
 // own maxUIDsBytes budget (see its own doc comment), so an oversized uid became its own singleton
-// batch and reached writeUtfString (sfsobject.go) when ClaimAllMail re-encoded it into a
-// mail.read.status.betch/mail.reward.batch request's "uids" field -- writeUtfString hard-errors for
+// batch and reached sfs.WriteUtfString (sfsobject.go) when ClaimAllMail re-encoded it into a
+// mail.read.status.betch/mail.reward.batch request's "uids" field -- sfs.WriteUtfString hard-errors for
 // any string over 65535 bytes, a PURELY LOCAL encode failure with no involvement of the network at
 // all. That local error is wrapped in sendStageError (conn.go), whose Timeout() is hardcoded false
 // by design (see its own doc comment: this is intentional, covering "a local encode error from
@@ -180,7 +181,7 @@ const maxMailRewardBatchesPerRun = 300
 // the rest of ClaimAllMail, and via CollectAll's identical containsNonTimeoutNetError abort logic
 // (buildings.go), every other -collect action scheduled after it in the same run. Set at exactly
 // the wire format's own hard limit -- any uid this function would otherwise accept is guaranteed
-// re-encodable by writeUtfString later, closing the gap at its source instead of only softening the
+// re-encodable by sfs.WriteUtfString later, closing the gap at its source instead of only softening the
 // downstream misclassification.
 const maxMailUidLen = 65535
 
@@ -242,7 +243,7 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 			break
 		}
 		truncated = false
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutUtfString("clientseq", clientseq)
 		params.PutLong("time", reqTime)
 		params.PutInt("count", mailListPageSize)
@@ -256,11 +257,11 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 		}
 		v, ok := msg.Params.Get("msg")
 		if ok {
-			if arr, ok := v.Val.(*SFSArray); ok {
-				if len(arr.items) > mailListRawItemCap {
-					slog.Warn("list mail: page response array longer than raw-item scan cap; truncating scan", "page", page, "arrayLen", len(arr.items), "cap", mailListRawItemCap)
+			if arr, ok := v.Val.(*sfs.SFSArray); ok {
+				if len(arr.Items()) > mailListRawItemCap {
+					slog.Warn("list mail: page response array longer than raw-item scan cap; truncating scan", "page", page, "arrayLen", len(arr.Items()), "cap", mailListRawItemCap)
 				}
-				for i, item := range arr.items {
+				for i, item := range arr.Items() {
 					if i >= mailListRawItemCap {
 						break
 					}
@@ -273,7 +274,7 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 					if len(all) >= maxAggregateMailPerFetch {
 						break
 					}
-					mo, ok := item.Val.(*SFSObject)
+					mo, ok := item.Val.(*sfs.SFSObject)
 					if !ok {
 						continue
 					}
@@ -284,7 +285,7 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 					uid := m.Uid()
 					if len(uid) > maxMailUidLen {
 						// See maxMailUidLen's own doc comment: an oversized uid (e.g. arriving
-						// tagged sfsText instead of sfsUtfString) can never be successfully
+						// tagged sfs.SFSText instead of sfs.SFSUtfString) can never be successfully
 						// re-encoded by ClaimAllMail's batching later, so skip it here instead of
 						// letting that later local encode failure be misclassified as a dead
 						// connection and abort unrelated -collect work.
@@ -328,8 +329,8 @@ func ListMail(conn *GameConn) ([]Mail, error) {
 			break
 		}
 		// Round-46 fix: lastUid gets re-sent verbatim as the next page's clientseq via
-		// PutUtfString (writeUtfString's own 65535-byte hard cap), but GetString can't
-		// distinguish the 65535-byte-capped sfsUtfString wire tag from the far larger sfsText
+		// PutUtfString (sfs.WriteUtfString's own 65535-byte hard cap), but GetString can't
+		// distinguish the 65535-byte-capped sfs.SFSUtfString wire tag from the far larger sfs.SFSText
 		// tag -- the identical wire-tag-equivalence gap round 45 closed for the per-entry mail
 		// uid field (maxMailUidLen, above). Left unguarded here, an oversized lastUid would
 		// cause a purely local encode failure on the NEXT page request that sendStageError
@@ -495,7 +496,7 @@ func ClaimAllMail(conn *GameConn) error {
 	// readBatchSize caps how many mail uids go into a single "mail.read.status.betch" or
 	// "mail.reward.batch" request. maxUIDsBytes additionally caps the byte length of each
 	// batch's joined "uids" string, keeping it safely under the wire format's 65535-byte
-	// string-length limit -- past that, sfsobject.go's encoder (writeUtfString) now returns a
+	// string-length limit -- past that, sfsobject.go's encoder (sfs.WriteUtfString) now returns a
 	// clean error rather than panicking, but that's still a batch-encode failure that drops the
 	// whole batch for this run, so it's worth avoiding rather than merely surviving.
 	// readBatchSize alone isn't enough protection here: a mail uid is a server-supplied string
@@ -519,7 +520,7 @@ func ClaimAllMail(conn *GameConn) error {
 	// remaining batch for no benefit.
 	readAbortedByNetErr := false
 	for _, batch := range truncateMailBatches(batchByCountAndBytes(allUIDs, readBatchSize, maxUIDsBytes), "read-status") {
-		readParams := NewSFSObject()
+		readParams := sfs.NewSFSObject()
 		readParams.PutUtfString("uids", strings.Join(batch, ","))
 		_, err := sendAndWait(conn, fmt.Sprintf("mail read-status (batch %d, size %d)", offset, len(batch)), "mail.read.status.betch", readParams)
 		if err != nil {
@@ -599,7 +600,7 @@ rewardLoop:
 				break rewardLoop
 			}
 			totalRewardBatches++
-			rewardParams := NewSFSObject()
+			rewardParams := sfs.NewSFSObject()
 			rewardParams.PutUtfString("uids", strings.Join(batch, ","))
 			rewardParams.PutInt("type", mailType)
 			_, err := sendAndWait(conn, fmt.Sprintf("mail reward-batch (type %d, batch %d, size %d)", mailType, offset, len(batch)), "mail.reward.batch", rewardParams)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -705,13 +706,13 @@ func mainCollectInteractiveFakeGameServer() func(*GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		loginResp := NewSFSObject()
+		loginResp := sfs.NewSFSObject()
 		loginResp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, loginResp); err != nil {
 			return
 		}
-		initParams := NewSFSObject()
-		buildingArr := NewSFSArray()
+		initParams := sfs.NewSFSObject()
+		buildingArr := sfs.NewSFSArray()
 		buildingArr.AddSFSObject(newTestBuildingSFS(1, 0, 1)) // bId=0: present, but not collectible
 		initParams.PutSFSArray("building_new", buildingArr)
 		if err := server.SendExtension("init", initParams); err != nil {
@@ -728,7 +729,7 @@ func mainCollectInteractiveFakeGameServer() func(*GameConn) {
 			if !ok {
 				return
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			replyCmd := msg.Cmd
 			switch msg.Cmd {
 			case "chat.get.system.mails":
@@ -822,17 +823,17 @@ func TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogic
 }
 
 // writeMalformedOversizedFrame writes a single malformed packet header directly on server's raw
-// connection: a declared body length over maxFrameSize (packet.go's own "frame body too large"
-// guard, mirroring packet_oom_test.go's TestReadPacketRejectsOversizedDeclaredLength). ReadPacket
+// connection: a declared body length over sfs.MaxFrameSize (packet.go's own "frame body too large"
+// guard, mirroring packet_oom_test.go's TestReadPacketRejectsOversizedDeclaredLength). sfs.ReadPacket
 // rejects this using only the header's length field, before ever attempting to read (let alone
 // allocate) a length-sized body.
 //
 // Round-43 fix: the resulting client-side error is now wrapped in packet.go's net.Error-satisfying
-// deadConnError, NOT a plain fmt.Errorf -- this guard fires after the length field is already
+// sfs.DeadConnError, NOT a plain fmt.Errorf -- this guard fires after the length field is already
 // consumed and returns without draining the declared body, so a peer that actually follows an
 // oversized header with real trailing bytes (unlike this helper, which sends only the 5-byte
 // header and nothing else) would leave the reader desynced. Since this helper's own trailing
-// silence is what makes ReadPacket's guard trip on JUST the header, it remains useful for testing
+// silence is what makes sfs.ReadPacket's guard trip on JUST the header, it remains useful for testing
 // that the guard rejects using only the header fields (see the packet_oom_test.go tests above), but
 // is NO LONGER suitable for a test that needs a genuinely non-fatal, non-net.Error decode failure
 // -- use writeMalformedZlibBombFrame below for that instead.
@@ -843,9 +844,9 @@ func TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogic
 // from such a goroutine is unsafe.
 func writeMalformedOversizedFrame(server *GameConn) {
 	var hdr bytes.Buffer
-	hdr.WriteByte(hdrBinary | hdrEncrypted | hdrBigSized)
+	hdr.WriteByte(sfs.HdrBinary | sfs.HdrEncrypted | sfs.HdrBigSized)
 	var lb [4]byte
-	binary.BigEndian.PutUint32(lb[:], maxFrameSize+1)
+	binary.BigEndian.PutUint32(lb[:], sfs.MaxFrameSize+1)
 	hdr.Write(lb[:])
 	_, _ = server.conn.Write(hdr.Bytes())
 }
@@ -866,8 +867,8 @@ var (
 
 func malformedZlibBombPacket() []byte {
 	malformedZlibBombPacketOnce.Do(func() {
-		plain := bytes.Repeat([]byte{0}, maxFrameSize+4096)
-		packet, err := EncodePacket(plain)
+		plain := bytes.Repeat([]byte{0}, sfs.MaxFrameSize+4096)
+		packet, err := sfs.EncodePacket(plain)
 		if err != nil {
 			return
 		}
@@ -877,13 +878,13 @@ func malformedZlibBombPacket() []byte {
 }
 
 // writeMalformedZlibBombFrame writes a single legitimately-framed, zlib-compressed packet whose
-// declared (compressed) length is small but whose DECOMPRESSED output exceeds maxFrameSize --
+// declared (compressed) length is small but whose DECOMPRESSED output exceeds sfs.MaxFrameSize --
 // packet.go's "zlib inflated output exceeds" guard. Unlike writeMalformedOversizedFrame's guard,
-// this one fires only AFTER readFrameField has already consumed the full declared (compressed)
+// this one fires only AFTER sfs.ReadFrameField has already consumed the full declared (compressed)
 // body from the reader, so the underlying byte stream stays synchronized afterward regardless of
 // this error -- a genuine "plain decode error over an otherwise still-healthy connection". The
 // resulting client-side error remains a plain, unwrapped fmt.Errorf, not packet.go's
-// net.Error-satisfying deadConnError, so this is the round-43 replacement for
+// net.Error-satisfying sfs.DeadConnError, so this is the round-43 replacement for
 // writeMalformedOversizedFrame at any call site that specifically needs shouldAbortBeforeInteractive
 // to take its non-fatal branch.
 func writeMalformedZlibBombFrame(server *GameConn) {
@@ -908,12 +909,12 @@ func mainFetchBuildingsFailureFakeGameServer() func(*GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		loginResp := NewSFSObject()
+		loginResp := sfs.NewSFSObject()
 		loginResp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, loginResp); err != nil {
 			return
 		}
-		if err := server.SendExtension("init", NewSFSObject()); err != nil {
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
 			return
 		}
 		writeMalformedZlibBombFrame(server)
@@ -960,7 +961,7 @@ func mainFetchBuildingsFailureFakeGameServer() func(*GameConn) {
 //
 // Round-43 note: mainFetchBuildingsFailureFakeGameServer's fake server now triggers this via
 // writeMalformedZlibBombFrame, not writeMalformedOversizedFrame -- packet.go's round-43 fix wraps
-// the oversized-declared-length error in deadConnError (a genuine net.Error), which would now make
+// the oversized-declared-length error in sfs.DeadConnError (a genuine net.Error), which would now make
 // shouldAbortBeforeInteractive abort unconditionally, defeating this test's whole premise. The
 // zlib-bomb decode failure remains a plain, non-net.Error error over an otherwise-synchronized
 // stream, so it's still the right trigger for exercising the non-fatal branch this test targets.
@@ -1043,20 +1044,20 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*GameCon
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		loginResp := NewSFSObject()
+		loginResp := sfs.NewSFSObject()
 		loginResp.PutBool("success", true)
 		if err := server.SendEnvelope(controllerSystem, actionLogin, loginResp); err != nil {
 			return
 		}
 
-		v := NewSFSObject()
+		v := sfs.NewSFSObject()
 		v.PutLong("uid", 777)
 		v.PutInt("eventId", 1)
-		list := NewSFSArray()
+		list := sfs.NewSFSArray()
 		list.AddSFSObject(v)
-		visitorObj := NewSFSObject()
+		visitorObj := sfs.NewSFSObject()
 		visitorObj.PutSFSArray("list", list)
-		initParams := NewSFSObject()
+		initParams := sfs.NewSFSObject()
 		initParams.PutSFSObject("visitor", visitorObj) // building_new deliberately omitted -- 0 buildings
 		if err := server.SendExtension("init", initParams); err != nil {
 			return
@@ -1086,7 +1087,7 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*GameCon
 			if err != nil {
 				return
 			}
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			replyCmd := msg.Cmd
 			switch msg.Cmd {
 			case "visitor.operate":

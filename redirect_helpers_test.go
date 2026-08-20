@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"math"
 	"strconv"
@@ -12,11 +13,11 @@ import (
 
 func TestFindServerInfo(t *testing.T) {
 	t.Run("nested under p", func(t *testing.T) {
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutUtfString("ip", "1.2.3.4")
-		p := NewSFSObject()
+		p := sfs.NewSFSObject()
 		p.PutSFSObject("serverInfo", si)
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutSFSObject("p", p)
 		got := findServerInfo(content)
 		if got == nil || got.GetString("ip") != "1.2.3.4" {
@@ -24,9 +25,9 @@ func TestFindServerInfo(t *testing.T) {
 		}
 	})
 	t.Run("top-level fallback", func(t *testing.T) {
-		si := NewSFSObject()
+		si := sfs.NewSFSObject()
 		si.PutUtfString("ip", "5.6.7.8")
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutSFSObject("serverInfo", si)
 		got := findServerInfo(content)
 		if got == nil || got.GetString("ip") != "5.6.7.8" {
@@ -34,7 +35,7 @@ func TestFindServerInfo(t *testing.T) {
 		}
 	})
 	t.Run("absent", func(t *testing.T) {
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		if got := findServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
 		}
@@ -54,7 +55,7 @@ func TestFindServerInfo(t *testing.T) {
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		defer slog.SetDefault(orig)
 
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutUtfString("serverInfo", "not-an-object")
 		if got := findServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
@@ -69,7 +70,7 @@ func TestFindServerInfo(t *testing.T) {
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		defer slog.SetDefault(orig)
 
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutUtfString("p", "not-an-object")
 		if got := findServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
@@ -84,9 +85,9 @@ func TestFindServerInfo(t *testing.T) {
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		defer slog.SetDefault(orig)
 
-		p := NewSFSObject()
+		p := sfs.NewSFSObject()
 		p.PutUtfString("serverInfo", "not-an-object")
-		content := NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutSFSObject("p", p)
 		if got := findServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
@@ -101,8 +102,8 @@ func TestFindServerInfo(t *testing.T) {
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		defer slog.SetDefault(orig)
 
-		p := NewSFSObject()
-		content := NewSFSObject()
+		p := sfs.NewSFSObject()
+		content := sfs.NewSFSObject()
 		content.PutSFSObject("p", p)
 		if got := findServerInfo(content); got != nil {
 			t.Fatalf("expected nil, got %v", got)
@@ -115,27 +116,27 @@ func TestFindServerInfo(t *testing.T) {
 
 func TestGetIntFlexible(t *testing.T) {
 	t.Run("numeric field", func(t *testing.T) {
-		o := NewSFSObject()
+		o := sfs.NewSFSObject()
 		o.PutInt("port", 25092)
 		if got := getIntFlexible(o, "port"); got != 25092 {
 			t.Fatalf("got %d, want 25092", got)
 		}
 	})
 	t.Run("string-numeric field", func(t *testing.T) {
-		o := NewSFSObject()
+		o := sfs.NewSFSObject()
 		o.PutUtfString("port", "17783")
 		if got := getIntFlexible(o, "port"); got != 17783 {
 			t.Fatalf("got %d, want 17783", got)
 		}
 	})
 	t.Run("absent", func(t *testing.T) {
-		o := NewSFSObject()
+		o := sfs.NewSFSObject()
 		if got := getIntFlexible(o, "port"); got != 0 {
 			t.Fatalf("got %d, want 0", got)
 		}
 	})
 	t.Run("empty string", func(t *testing.T) {
-		o := NewSFSObject()
+		o := sfs.NewSFSObject()
 		o.PutUtfString("port", "")
 		if got := getIntFlexible(o, "port"); got != 0 {
 			t.Fatalf("got %d, want 0", got)
@@ -172,7 +173,7 @@ func TestGetIntFlexibleRejectsOutOfInt32RangeString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o := NewSFSObject()
+			o := sfs.NewSFSObject()
 			o.PutUtfString("port", strconv.FormatInt(tt.val, 10))
 
 			got := getIntFlexible(o, "port")
@@ -196,7 +197,7 @@ func TestGetIntFlexibleRejectsOutOfInt32RangeString(t *testing.T) {
 	// legitimate in-range ports (including the exact MinInt32/MaxInt32 boundary values themselves).
 	inRange := []int64{0, 1, 25092, -1, math.MaxInt32, math.MinInt32}
 	for _, v := range inRange {
-		o := NewSFSObject()
+		o := sfs.NewSFSObject()
 		o.PutUtfString("port", strconv.FormatInt(v, 10))
 		if got := getIntFlexible(o, "port"); got != int32(v) {
 			t.Errorf("getIntFlexible(%q) = %d, want %d (an in-range numeric string must still round-trip normally)", strconv.FormatInt(v, 10), got, int32(v))
@@ -212,9 +213,9 @@ func TestGetIntFlexibleRejectsOutOfInt32RangeString(t *testing.T) {
 // Proves both new anomaly cases now warn, while a genuinely-absent field and legitimately-zero
 // in-range/string values (already covered by TestGetIntFlexible) stay silent.
 func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
-	run := func(t *testing.T, setup func(o *SFSObject)) string {
+	run := func(t *testing.T, setup func(o *sfs.SFSObject)) string {
 		t.Helper()
-		o := NewSFSObject()
+		o := sfs.NewSFSObject()
 		setup(o)
 
 		var buf bytes.Buffer
@@ -230,7 +231,7 @@ func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
 	}
 
 	t.Run("non-numeric string warns", func(t *testing.T) {
-		logged := run(t, func(o *SFSObject) { o.PutUtfString("port", "not-a-number") })
+		logged := run(t, func(o *sfs.SFSObject) { o.PutUtfString("port", "not-a-number") })
 		if !strings.Contains(logged, "non-numeric") {
 			t.Errorf("expected a Warn mentioning the non-numeric string, got:\n%s", logged)
 		}
@@ -241,7 +242,7 @@ func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
 	// diagnosed anomaly cases for this function omitted this one, even though it's exactly as
 	// anomalous as the non-numeric-string case immediately above.
 	t.Run("out-of-range numeric string warns", func(t *testing.T) {
-		logged := run(t, func(o *SFSObject) { o.PutUtfString("port", "4294967301") }) // 1<<32 + 5
+		logged := run(t, func(o *sfs.SFSObject) { o.PutUtfString("port", "4294967301") }) // 1<<32 + 5
 		if !strings.Contains(logged, "out-of-int32-range") {
 			t.Errorf("expected a Warn mentioning the out-of-range numeric string, got:\n%s", logged)
 		}
@@ -259,25 +260,25 @@ func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
 	// removed. Asserts exactly one occurrence, not just "contains", so a reintroduced duplicate
 	// would fail this test instead of passing it unnoticed the way a bare Contains check would.
 	t.Run("out-of-range native Long warns exactly once, not twice", func(t *testing.T) {
-		logged := run(t, func(o *SFSObject) { o.PutLong("port", int64(math.MaxInt32)+12345) })
+		logged := run(t, func(o *sfs.SFSObject) { o.PutLong("port", int64(math.MaxInt32)+12345) })
 		if got := strings.Count(logged, "out-of-int32-range"); got != 1 {
 			t.Errorf("got %d Warn line(s) mentioning out-of-int32-range, want exactly 1 (GetInt's own diagnostic, not a redundant second one from getIntFlexible itself):\n%s", got, logged)
 		}
 	})
 	t.Run("wrong Go type warns", func(t *testing.T) {
-		logged := run(t, func(o *SFSObject) { o.PutBool("port", true) })
+		logged := run(t, func(o *sfs.SFSObject) { o.PutBool("port", true) })
 		if !strings.Contains(logged, "wrong-typed") {
 			t.Errorf("expected a Warn mentioning the wrong-typed field, got:\n%s", logged)
 		}
 	})
 	t.Run("absent stays silent", func(t *testing.T) {
-		logged := run(t, func(o *SFSObject) {})
+		logged := run(t, func(o *sfs.SFSObject) {})
 		if logged != "" {
 			t.Errorf("expected no log output for a genuinely-absent field, got:\n%s", logged)
 		}
 	})
 	t.Run("legitimate zero stays silent", func(t *testing.T) {
-		logged := run(t, func(o *SFSObject) { o.PutInt("port", 0) })
+		logged := run(t, func(o *sfs.SFSObject) { o.PutInt("port", 0) })
 		if logged != "" {
 			t.Errorf("expected no log output for a legitimately-zero, correctly-typed field, got:\n%s", logged)
 		}
@@ -286,7 +287,7 @@ func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
 
 // TestGetIntFlexibleRedactsSensitiveKeyValue is the round-35 regression test for the MINOR finding
 // that getIntFlexible logged a decoded field's raw scalar value directly in three of its four
-// anomaly Warn branches, with no isSensitiveSFSKey gate -- unlike every sibling wrong-typed-field
+// anomaly Warn branches, with no sfs.IsSensitiveSFSKey gate -- unlike every sibling wrong-typed-field
 // guard in this codebase (requireFieldType/warnIfWrongTypedField/redirectIP/redirectZone all log
 // only StringRedacted()/goType, never a field's own raw scalar), and unlike getIntFlexible's own
 // fourth branch (the wrong-Go-type case), which already used the safe pattern. getIntFlexible is a
@@ -294,9 +295,9 @@ func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
 // sensitive), but this proves the guard itself works correctly for a key that IS sensitive,
 // independent of what today's callers happen to pass.
 func TestGetIntFlexibleRedactsSensitiveKeyValue(t *testing.T) {
-	run := func(t *testing.T, key string, setup func(o *SFSObject)) string {
+	run := func(t *testing.T, key string, setup func(o *sfs.SFSObject)) string {
 		t.Helper()
-		o := NewSFSObject()
+		o := sfs.NewSFSObject()
 		setup(o)
 
 		var buf bytes.Buffer
@@ -310,7 +311,7 @@ func TestGetIntFlexibleRedactsSensitiveKeyValue(t *testing.T) {
 
 	t.Run("out-of-range native Long under a sensitive key is redacted", func(t *testing.T) {
 		const secret = int64(math.MaxInt32) + 987654321
-		logged := run(t, "loginKey", func(o *SFSObject) { o.PutLong("loginKey", secret) })
+		logged := run(t, "loginKey", func(o *sfs.SFSObject) { o.PutLong("loginKey", secret) })
 		if strings.Contains(logged, fmt.Sprintf("%d", secret)) {
 			t.Errorf("expected the real out-of-range value to be redacted, got:\n%s", logged)
 		}
@@ -319,7 +320,7 @@ func TestGetIntFlexibleRedactsSensitiveKeyValue(t *testing.T) {
 		}
 	})
 	t.Run("non-numeric string under a sensitive key is redacted", func(t *testing.T) {
-		logged := run(t, "loginKey", func(o *SFSObject) { o.PutUtfString("loginKey", "sk-live-not-a-number-secret") })
+		logged := run(t, "loginKey", func(o *sfs.SFSObject) { o.PutUtfString("loginKey", "sk-live-not-a-number-secret") })
 		if strings.Contains(logged, "sk-live-not-a-number-secret") {
 			t.Errorf("expected the real non-numeric string value to be redacted, got:\n%s", logged)
 		}
@@ -328,7 +329,7 @@ func TestGetIntFlexibleRedactsSensitiveKeyValue(t *testing.T) {
 		}
 	})
 	t.Run("out-of-range numeric string under a sensitive key is redacted", func(t *testing.T) {
-		logged := run(t, "loginKey", func(o *SFSObject) { o.PutUtfString("loginKey", "4294967301") })
+		logged := run(t, "loginKey", func(o *sfs.SFSObject) { o.PutUtfString("loginKey", "4294967301") })
 		if strings.Contains(logged, "4294967301") {
 			t.Errorf("expected the real out-of-range numeric string value to be redacted, got:\n%s", logged)
 		}
@@ -337,9 +338,9 @@ func TestGetIntFlexibleRedactsSensitiveKeyValue(t *testing.T) {
 		}
 	})
 	// Sanity check: a non-sensitive key's value must still appear in the log unredacted, proving
-	// redactedValue doesn't over-redact indiscriminately.
+	// redactedValue doesn't over-sfs.Redact indiscriminately.
 	t.Run("non-sensitive key value stays visible", func(t *testing.T) {
-		logged := run(t, "port", func(o *SFSObject) { o.PutUtfString("port", "not-a-number") })
+		logged := run(t, "port", func(o *sfs.SFSObject) { o.PutUtfString("port", "not-a-number") })
 		if !strings.Contains(logged, "not-a-number") {
 			t.Errorf("expected the non-sensitive field's real value to remain visible, got:\n%s", logged)
 		}

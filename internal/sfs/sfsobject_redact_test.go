@@ -1,4 +1,4 @@
-package main
+package sfs
 
 import (
 	"bytes"
@@ -43,15 +43,15 @@ func TestStringRedactedMasksSensitiveKeys(t *testing.T) {
 	if !strings.Contains(got, "g-123456") {
 		t.Errorf("StringRedacted must not mask ordinary non-sensitive nested fields, got: %s", got)
 	}
-	// redact()'s own shape (first4...last4) should still be visible for a long secret, proving
+	// Redact()'s own shape (first4...last4) should still be visible for a long secret, proving
 	// this went through actual redaction rather than, say, dropping the field entirely.
 	if !strings.Contains(got, "sens...7890") {
-		t.Errorf("StringRedacted should mask loginKey via redact()'s first4...last4 shape, got: %s", got)
+		t.Errorf("StringRedacted should mask loginKey via Redact()'s first4...last4 shape, got: %s", got)
 	}
 }
 
 // TestStringRedactedMasksNewSensitiveKeys is the round-12 regression test for the completeness
-// gap the round-12 audit found in round 11's sensitiveSFSKeys: verifyCode (the live one-time
+// gap the round-12 audit found in round 11's SensitiveSFSKeys: verifyCode (the live one-time
 // email-verification code, login.go's account.login.new), deviceId (the SFS-layer bearer
 // credential paired with airKey, identity.go's BuildLoginParams), chatToken (the separate chat
 // WebSocket's bearer credential, docs/auth.mdx's `init` push), and tk (the vanilla SFS2X
@@ -87,7 +87,7 @@ func TestStringRedactedMasksNewSensitiveKeys(t *testing.T) {
 // is one of the 8 primitive array types readValuePayload's array-tag cases decode into (plain
 // unwrapped Go slices, not *SFSObject/*SFSArray) fell through formatSFSValueRedacted's type
 // switch into its naive `default: fmt.Sprintf("%v", val)` case, printing the raw slice contents
-// with no masking at all -- defeating redactSFSValue's whole point for that shape.
+// with no masking at all -- defeating RedactSFSValue's whole point for that shape.
 func TestStringRedactedMasksSensitivePrimitiveArray(t *testing.T) {
 	secretStrings := []string{"secret-arr-item-must-not-leak-1", "secret-arr-item-must-not-leak-2"}
 	secretInts := []int32{918273645, 192837465}
@@ -120,7 +120,7 @@ func TestStringRedactedMasksSensitivePrimitiveArray(t *testing.T) {
 // TestStringRedactedMasksAllPrimitiveArrayTypes extends
 // TestStringRedactedMasksSensitivePrimitiveArray to cover all 8 primitive-array wire types
 // (sfsBoolArray..sfsUtfStringArray) under a sensitive key, not just []string/[]int32 -- proving
-// primitiveArrayLen's type switch (and therefore redactSFSValue's masking) has no gap for any of
+// primitiveArrayLen's type switch (and therefore RedactSFSValue's masking) has no gap for any of
 // the 8 shapes readValuePayload's array-tag cases can actually decode into.
 func TestStringRedactedMasksAllPrimitiveArrayTypes(t *testing.T) {
 	cases := []struct {
@@ -165,7 +165,7 @@ func TestStringRedactedMasksAllPrimitiveArrayTypes(t *testing.T) {
 // TestStringRedactedFormatsAllPrimitiveArrayTypesForNonSensitiveFields is the round-34 regression
 // test for the MINOR finding: primitiveArrayPrefix (sfsobject.go), which formats a primitive
 // array's actual elements for a NON-sensitive field (formatSFSValueRedacted's default case calls it
-// directly, unlike redactSFSValue's sensitive-key masking path, which only ever calls the separate
+// directly, unlike RedactSFSValue's sensitive-key masking path, which only ever calls the separate
 // primitiveArrayLen for a bare count), had 7 of its 8 type-switch cases with zero test coverage --
 // confirmed via mutation testing (deleting the []byte case outright still left the full suite
 // passing). TestStringRedactedMasksAllPrimitiveArrayTypes above exercises all 8 wire types too, but
@@ -206,37 +206,6 @@ func TestStringRedactedFormatsAllPrimitiveArrayTypesForNonSensitiveFields(t *tes
 				t.Errorf("StringRedacted() should not mask a non-sensitive %s array, got: %s", c.name, got)
 			}
 		})
-	}
-}
-
-// TestBuildLoginParamsIOSModeDoesNotLeakSecretsInAnalyticsBlob is the round-13 regression test for
-// the credential leak the round-13 audit found: BuildLoginParams' IOSMode branch built the "ta"
-// analytics blob's LwDeviceID/LwShumeiID/LwAirKey fields directly from the real live
-// in.DeviceID/in.ShumeiBoxId/in.AirKey values, JSON-marshaled the result, and stored it as a plain
-// string under the "ta" key. Since "ta" wasn't in sensitiveSFSKeys, StringRedacted() masked the
-// top-level deviceId/airKey/shumeiBoxId keys correctly but printed the identical secret values in
-// full cleartext nested inside "ta"'s JSON value, in the same output string.
-func TestBuildLoginParamsIOSModeDoesNotLeakSecretsInAnalyticsBlob(t *testing.T) {
-	const secretDeviceID = "secret-device-id-must-not-leak-abcdef123456"
-	const secretAirKey = "secret-air-key-must-not-leak-ghijkl789012"
-	const secretShumeiBoxId = "secret-shumei-box-id-must-not-leak-mnopqr345678"
-
-	p := BuildLoginParams(LoginParamsInput{
-		FutureID:    1,
-		DeviceID:    secretDeviceID,
-		AirKey:      secretAirKey,
-		GameUid:     "g-123456",
-		ServerID:    "1234",
-		ShumeiBoxId: secretShumeiBoxId,
-		IOSMode:     true,
-	})
-
-	got := p.StringRedacted()
-
-	for _, secret := range []string{secretDeviceID, secretAirKey, secretShumeiBoxId} {
-		if strings.Contains(got, secret) {
-			t.Errorf("StringRedacted leaks a secret identity value (possibly nested inside the ta analytics blob) in cleartext (%q): %s", secret, got)
-		}
 	}
 }
 
@@ -312,9 +281,9 @@ func TestFmtVerbAutoInvokesStringerSafely(t *testing.T) {
 
 // TestStringRedactedMasksSensitiveRawSFSArray is the round-14 regression test for Fix 2: a
 // sensitive key whose value is a raw *SFSArray (the wrapper type sfsArrayType decodes into, built
-// here the same way PutSFSArray's callers do) of scalar items used to fall through redactSFSValue
+// here the same way PutSFSArray's callers do) of scalar items used to fall through RedactSFSValue
 // into formatSFSValueRedacted's *SFSArray case, which recurses via formatSFSValueRedacted (not
-// redactSFSValue) on each item -- losing the "sensitive" context one level down, so each raw scalar
+// RedactSFSValue) on each item -- losing the "sensitive" context one level down, so each raw scalar
 // item printed via the naive fmt.Sprintf("%v", val) default with no redaction at all. No current
 // PutSFSArray call site does this for a sensitive key, but a future decoded server response could.
 func TestStringRedactedMasksSensitiveRawSFSArray(t *testing.T) {
@@ -322,8 +291,8 @@ func TestStringRedactedMasksSensitiveRawSFSArray(t *testing.T) {
 	const secretItem2 = "secret-raw-array-item-must-not-leak-2"
 
 	arr := NewSFSArray()
-	arr.add(SFSValue{sfsUtfString, secretItem1})
-	arr.add(SFSValue{sfsUtfString, secretItem2})
+	arr.add(SFSValue{SFSUtfString, secretItem1})
+	arr.add(SFSValue{SFSUtfString, secretItem2})
 
 	o := NewSFSObject()
 	o.PutSFSArray("loginKey", arr)
@@ -345,7 +314,7 @@ func TestStringRedactedMasksSensitiveRawSFSArray(t *testing.T) {
 }
 
 // TestStringRedactedMasksMailAndDeviceIdentifierPII is the round-15 regression test for Fixes 1-2:
-// sensitiveSFSKeys was missing "mail" (the real user email address login.go's email-verification
+// SensitiveSFSKeys was missing "mail" (the real user email address login.go's email-verification
 // flow puts under this literal SFS key, PutUtfString("mail", opts.Email)) and the device/
 // advertising-identifier PII cluster docs/live-validation.mdx documents as real fields a genuine
 // (non-Go-client) Login request carries (IMEI, AndroidID, androidDid, idfa, idfv, gaid, afuid,
@@ -424,8 +393,8 @@ func TestBareSFSArrayNeverLeaksViaFmtVerbs(t *testing.T) {
 	const secretItem = "secret-bare-array-item-must-not-leak-abcdef123456"
 
 	arr := NewSFSArray()
-	arr.add(SFSValue{sfsUtfString, secretItem})
-	arr.add(SFSValue{sfsUtfString, "ordinary-item"})
+	arr.add(SFSValue{SFSUtfString, secretItem})
+	arr.add(SFSValue{SFSUtfString, "ordinary-item"})
 
 	cases := map[string]string{
 		"%v":  fmt.Sprintf("%v", arr),
@@ -540,12 +509,12 @@ func TestNilNestedValueDoesNotPanic(t *testing.T) {
 
 // TestDecodeLargeByteArrayFieldNotChargedAgainstMaxDecodedNodes is the round-14 regression test for
 // Fix 3: sfsByteArray's decode case used to call chargeNodes(int(n)) for the raw byte count,
-// treating every decoded byte as a separate "node" toward the flat maxDecodedNodes(300_000) budget
+// treating every decoded byte as a separate "node" toward the flat MaxDecodedNodes(300_000) budget
 // -- making ~293,000 bytes a hard ceiling on any single legitimate byte-array field, even though a
 // Go []byte's memory cost is already a tight ~1:1 ratio with its wire cost (no per-element
-// allocation overhead the way e.g. []string has), so maxFrameSize's existing 64MiB wire-size cap
+// allocation overhead the way e.g. []string has), so MaxFrameSize's existing 64MiB wire-size cap
 // already bounds it with no amplification risk. This test decodes a single 1MiB sfsByteArray field
-// (comfortably over the old ~293,000-byte ceiling, comfortably under maxFrameSize) and confirms it
+// (comfortably over the old ~293,000-byte ceiling, comfortably under MaxFrameSize) and confirms it
 // no longer spuriously fails.
 func TestDecodeLargeByteArrayFieldNotChargedAgainstMaxDecodedNodes(t *testing.T) {
 	const size = 1 << 20 // 1 MiB
@@ -566,7 +535,7 @@ func TestDecodeLargeByteArrayFieldNotChargedAgainstMaxDecodedNodes(t *testing.T)
 	decoded, err := DecodeObject(encoded)
 	if err != nil {
 		t.Fatalf("DecodeObject of a legitimate %d-byte single sfsByteArray field failed: %v -- this field "+
-			"must not be charged per-byte against maxDecodedNodes (see sfsobject.go's sfsByteArray decode "+
+			"must not be charged per-byte against MaxDecodedNodes (see sfsobject.go's sfsByteArray decode "+
 			"case)", size, err)
 	}
 
@@ -589,14 +558,14 @@ func TestDecodeLargeByteArrayFieldNotChargedAgainstMaxDecodedNodes(t *testing.T)
 }
 
 // TestRedactSFSValueMasksScalarTypesUnderSensitiveKey is the round-16 regression test for Fix 1a:
-// redactSFSValue's fallback for any non-string, non-array value under a sensitive key used to be
+// RedactSFSValue's fallback for any non-string, non-array value under a sensitive key used to be
 // formatSFSValueRedacted(v) -- the ordinary, NON-redacting recursive formatter, whose own default
 // case is the naive fmt.Sprintf("%v", val). This meant a sensitive key's value reached via
 // PutInt/PutLong/PutBool/PutDouble/PutByte/PutShort (any scalar Go type other than string) printed
 // in full cleartext. Proven live-reachable via interactive.go's putJSONValue, which routes any bare
 // JSON number param to PutLong with no key-name restriction -- an operator typing
 // `account.login.new {"verifyCode": 837291}` used to leak 837291 in cleartext through
-// handleInteractiveLine's params.StringRedacted() logging. redactSFSValue's fallback is now the
+// handleInteractiveLine's params.StringRedacted() logging. RedactSFSValue's fallback is now the
 // fixed "[REDACTED]" placeholder, so every scalar type is masked regardless of shape.
 func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
 	cases := []struct {
@@ -644,12 +613,12 @@ func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
 		}
 	})
 
-	// sfsFloat (bare float32) and sfsNull (nil) are checked separately from the table-driven cases
+	// sfsFloat (bare float32) and SFSNull (nil) are checked separately from the table-driven cases
 	// above: neither has a PutFloat/PutNull helper anywhere in this codebase, so unlike
 	// PutInt/PutLong/PutDouble/PutByte/PutShort above, they're only reachable by constructing an
-	// SFSValue directly -- e.g. a value decoded off the wire via readValuePayload's sfsFloat/sfsNull
+	// SFSValue directly -- e.g. a value decoded off the wire via readValuePayload's sfsFloat/SFSNull
 	// cases -- which same-package tests can already do via the unexported `put` method. The code
-	// already handles both correctly (redactSFSValue's fail-closed fallback covers any shape it
+	// already handles both correctly (RedactSFSValue's fail-closed fallback covers any shape it
 	// doesn't explicitly recognize as safe), but neither shape had a regression test proving it.
 	t.Run("sfsFloat (bare float32, only reachable via decode)", func(t *testing.T) {
 		o := NewSFSObject()
@@ -668,9 +637,9 @@ func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
 		}
 	})
 
-	t.Run("sfsNull (nil, only reachable via decode)", func(t *testing.T) {
+	t.Run("SFSNull (nil, only reachable via decode)", func(t *testing.T) {
 		o := NewSFSObject()
-		o.put("verifyCode", SFSValue{sfsNull, nil})
+		o.put("verifyCode", SFSValue{SFSNull, nil})
 		o.PutUtfString("nickname", "player-one")
 
 		got := o.StringRedacted()
@@ -684,13 +653,13 @@ func TestRedactSFSValueMasksScalarTypesUnderSensitiveKey(t *testing.T) {
 }
 
 // TestStringRedactedMasksCaseVariantSensitiveKeys is the round-17 regression test for Fix 1:
-// StringRedacted's sensitiveSFSKeys lookup used to be an exact-case Go map lookup with no
+// StringRedacted's SensitiveSFSKeys lookup used to be an exact-case Go map lookup with no
 // case-folding. interactive.go's putJSONValue takes a JSON object key from the operator's
 // control-FIFO line verbatim, with no case normalization, so a casing variant of a known-sensitive
 // key (e.g. an operator typing "LoginKey" instead of the registered "loginKey") bypassed
-// redactSFSValue entirely and fell through to formatSFSValueRedacted's plain
+// RedactSFSValue entirely and fell through to formatSFSValueRedacted's plain
 // fmt.Sprintf("%v", val) -- printing a secret typed under a mis-cased key in full cleartext in
-// local logs. isSensitiveSFSKey (sfsobject.go) now compares case-insensitively instead.
+// local logs. IsSensitiveSFSKey (sfsobject.go) now compares case-insensitively instead.
 func TestStringRedactedMasksCaseVariantSensitiveKeys(t *testing.T) {
 	const secretLoginKey = "secret-case-variant-loginkey-must-not-leak-abcdef123456"
 
@@ -713,12 +682,12 @@ func TestStringRedactedMasksCaseVariantSensitiveKeys(t *testing.T) {
 }
 
 // TestRedactSFSValueMasksNestedSFSObjectUnderSensitiveKey is the round-16 regression test for Fix
-// 1b: redactSFSValue's fallback for a nested *SFSObject value under a sensitive key used to
+// 1b: RedactSFSValue's fallback for a nested *SFSObject value under a sensitive key used to
 // delegate to formatSFSValueRedacted(v), whose own *SFSObject case calls the NESTED object's OWN
 // StringRedacted() -- which only re-checks the NESTED object's OWN key names against
-// sensitiveSFSKeys, completely losing the fact that the OUTER key was already known-sensitive. A
+// SensitiveSFSKeys, completely losing the fact that the OUTER key was already known-sensitive. A
 // secret sitting under an ordinary-looking sub-key name inside that nested object (e.g.
-// {loginKey: {value: "the-real-secret"}}) used to print in full. redactSFSValue now has an
+// {loginKey: {value: "the-real-secret"}}) used to print in full. RedactSFSValue now has an
 // explicit *SFSObject case that blanket-masks by field count instead, mirroring the *SFSArray
 // case's style.
 func TestRedactSFSValueMasksNestedSFSObjectUnderSensitiveKey(t *testing.T) {
@@ -745,7 +714,7 @@ func TestRedactSFSValueMasksNestedSFSObjectUnderSensitiveKey(t *testing.T) {
 }
 
 // TestRedactSFSValueNilPointerUnderSensitiveKeyDoesNotPanic is the round-16 regression test for
-// Fix 2 (and the *SFSObject analog added alongside Fix 1a): redactSFSValue's existing *SFSArray
+// Fix 2 (and the *SFSObject analog added alongside Fix 1a): RedactSFSValue's existing *SFSArray
 // case had no nil check -- PutSFSArray(sensitiveKey, (*SFSArray)(nil)) followed by
 // StringRedacted() panicked with a nil pointer dereference, since the type assertion succeeds
 // (ok=true) for a nil pointer of the right dynamic type, and then `arr.items` dereferences it.
@@ -793,7 +762,7 @@ func TestRedactSFSValueNilPointerUnderSensitiveKeyDoesNotPanic(t *testing.T) {
 }
 
 // TestStringRedactedMasksFix4SensitiveKeys is the round-16 regression test for Fix 4:
-// sensitiveSFSKeys was missing gcmRegisterId/parseRegisterId (push-notification device tokens,
+// SensitiveSFSKeys was missing gcmRegisterId/parseRegisterId (push-notification device tokens,
 // same actionable-device-targeting risk class as firebaseId), googleName (a real person's Google
 // account display name -- more directly PII than a device token), mt (undocumented meaning, same
 // field cluster per docs/live-validation.mdx), and simOp/simOpName/phone_model/osVersion/
@@ -835,7 +804,7 @@ func TestStringRedactedMasksFix4SensitiveKeys(t *testing.T) {
 
 // TestEncodeObjectNilNestedValueReturnsErrorNotPanic is the round-16 regression test for Fix 3,
 // mirroring round 15's TestNilNestedValueDoesNotPanic (the decode/format-side fix) but for the
-// encode path: writeValuePayload's sfsObjectType case (`inner := v.Val.(*SFSObject)` then
+// encode path: writeValuePayload's SFSObjectType case (`inner := v.Val.(*SFSObject)` then
 // `len(inner.keys)`) and sfsArrayType case (`inner := v.Val.(*SFSArray)` then `len(inner.items)`)
 // used to panic with a nil pointer dereference on PutSFSObject(key, nil)/PutSFSArray(key, nil) --
 // the type assertion succeeds (ok=true) for a nil pointer of the right dynamic type, so
@@ -909,8 +878,8 @@ func TestEncodeObjectNilNestedValueReturnsErrorNotPanic(t *testing.T) {
 
 // TestStringRedactedSanitizesTerminalEscapeSequences is the round-19 regression test for Fix 1
 // (MAJOR): decoded server strings used to reach StringRedacted()'s output completely raw --
-// formatSFSValueRedacted's default case was a bare fmt.Sprintf("%v", val) and redactSFSValue's
-// string case returned redact(s) unmodified, neither stripping nor escaping control characters. A
+// formatSFSValueRedacted's default case was a bare fmt.Sprintf("%v", val) and RedactSFSValue's
+// string case returned Redact(s) unmodified, neither stripping nor escaping control characters. A
 // malicious server or crafted capture file could embed a raw ESC (0x1b)/BEL (0x07)-based ANSI
 // terminal-title-injection sequence in any decoded string field, and it would reach the operator's
 // screen unescaped the moment that value flowed into decode.go's -decode-stream tool or
@@ -918,7 +887,7 @@ func TestEncodeObjectNilNestedValueReturnsErrorNotPanic(t *testing.T) {
 // sanitizeForTerminal (sfsobject.go) now escapes every C0 control byte other than newline/tab
 // (plus DEL) as a visible "\xHH" sequence at every leaf point a raw string reaches
 // StringRedacted()'s output: an ordinary field's value (formatSFSValueRedacted's default case), a
-// sensitive field's redact()-shortened value (redactSFSValue), and a decoded field's KEY name
+// sensitive field's Redact()-shortened value (RedactSFSValue), and a decoded field's KEY name
 // itself (StringRedacted()'s own loop).
 func TestStringRedactedSanitizesTerminalEscapeSequences(t *testing.T) {
 	// A classic xterm OSC-0 "set window title" injection, terminated by BEL -- the same
@@ -947,9 +916,9 @@ func TestStringRedactedSanitizesTerminalEscapeSequences(t *testing.T) {
 		}
 	})
 
-	t.Run("sensitive field value surviving redact()'s first4...last4 shortening", func(t *testing.T) {
-		// redact() keeps the first 4 and last 4 bytes of a long string -- place the injection at
-		// both ends so it survives into the shortened output regardless of exactly how redact()
+	t.Run("sensitive field value surviving Redact()'s first4...last4 shortening", func(t *testing.T) {
+		// Redact() keeps the first 4 and last 4 bytes of a long string -- place the injection at
+		// both ends so it survives into the shortened output regardless of exactly how Redact()
 		// slices it.
 		secret := titleInjection + "middle-of-a-very-long-secret-value-padding-out-the-string" + titleInjection
 
@@ -1014,10 +983,10 @@ func TestStringRedactedSanitizesTerminalEscapeSequences(t *testing.T) {
 // TestEncodeObjectNilTopLevelReturnsErrorNotPanic is the round-19 regression test for Fix 2:
 // EncodeObject(nil) used to panic with a nil pointer dereference on the `len(o.keys)` access
 // inside its int16Count call, instead of returning a clean error -- inconsistent with this file's
-// own nil-guard hardening on writeValuePayload's sfsObjectType/sfsArrayType cases (round 16, see
+// own nil-guard hardening on writeValuePayload's SFSObjectType/sfsArrayType cases (round 16, see
 // TestEncodeObjectNilNestedValueReturnsErrorNotPanic above, which covers a nil value NESTED inside
 // a valid parent object -- a different code path from the top-level `o` itself being nil) and on
-// StringRedacted/formatSFSValueRedacted/redactSFSValue (rounds 15-16), all of which already handle
+// StringRedacted/formatSFSValueRedacted/RedactSFSValue (rounds 15-16), all of which already handle
 // a nil *SFSObject/*SFSArray gracefully. This test covers the top-level EncodeObject(nil) call,
 // which none of the existing nil-related tests exercised.
 func TestEncodeObjectNilTopLevelReturnsErrorNotPanic(t *testing.T) {
@@ -1086,7 +1055,7 @@ func TestSFSValueStringAndGoStringRedactSecret(t *testing.T) {
 // (part of the Google-identity field cluster identity.go's BuildLoginParams constructs alongside
 // the already-recognized googleName/androidDid) as sensitive. Both used to sit in
 // sfsobject_sensitive_keys_sync_test.go's knownNonSensitiveSFSKeys allowlist instead; see
-// sensitiveSFSKeys' own doc comments on these two entries (sfsobject.go) for the full reasoning.
+// SensitiveSFSKeys' own doc comments on these two entries (sfsobject.go) for the full reasoning.
 func TestStringRedactedMasksRound28SensitiveKeys(t *testing.T) {
 	const secretUsername = "secret-real-account-username-must-not-leak"
 	const secretGooglePlay = "secret-googleplay-value-must-not-leak"
@@ -1113,7 +1082,7 @@ func TestStringRedactedMasksRound28SensitiveKeys(t *testing.T) {
 // "gameUserName" as sensitive: it's "un"'s exact sibling on the OTHER login path (login.go's
 // push.account.login.new response, vs. "un" on the base-zone Login response) -- both carry the
 // identical real-account-username value and are persisted via the same ident.SaveUsername() call,
-// but only "un" was added to sensitiveSFSKeys in round 28. See sensitiveSFSKeys' own doc comment on
+// but only "un" was added to SensitiveSFSKeys in round 28. See SensitiveSFSKeys' own doc comment on
 // "gameUserName" (sfsobject.go) for the full reasoning.
 func TestStringRedactedMasksGameUserName(t *testing.T) {
 	const secretUsername = "secret-real-game-username-must-not-leak"
@@ -1134,10 +1103,10 @@ func TestStringRedactedMasksGameUserName(t *testing.T) {
 
 // TestStringRedactedFormatBudgetBoundsLargeArray is the round-28 regression test for the MAJOR
 // format-time-budget finding: before this fix, StringRedacted()/formatSFSValueRedacted() had ZERO
-// format-time cost bound of their own -- maxDecodedNodes only bounds DECODE-time cost for one wire
+// format-time cost bound of their own -- MaxDecodedNodes only bounds DECODE-time cost for one wire
 // payload, not a later format/log walk of an object that's already sitting in memory. That gap is
 // most starkly real for an object built PROGRAMMATICALLY via Put*/Add*, as this test does (not via
-// DecodeObject): maxDecodedNodes/chargeNodes only ever run inside DecodeObject's read path, so such
+// DecodeObject): MaxDecodedNodes/chargeNodes only ever run inside DecodeObject's read path, so such
 // an object had no size cap anywhere before this fix, regardless of how it's later formatted. This
 // builds an *SFSArray with far more items than maxFormattedNodes and proves a single
 // StringRedacted() call on it is now bounded in both output size and the number of items it
@@ -1212,7 +1181,7 @@ func TestStringRedactedFormatBudgetBoundsManyTopLevelKeys(t *testing.T) {
 }
 
 // TestStringRedactedFormatBudgetBoundsLargePrimitiveArrayField is the round-29 regression test for
-// the MINOR finding: formatSFSValueRedacted's default case (handling a bare string/sfsText value and
+// the MINOR finding: formatSFSValueRedacted's default case (handling a bare string/SFSText value and
 // all 8 primitive-array types) used to charge only ONE formatBudget unit for the ENTIRE value
 // regardless of its actual size (e.g. a 40,000-element string array was charged as 1 unit) -- so a
 // single huge primitive-array-valued field was effectively EXEMPT from maxFormattedNodes, unlike a
@@ -1454,7 +1423,7 @@ func TestStringRedactedBudgetedNilReceiver(t *testing.T) {
 // format-budget cutoff landing mid-rune of a multi-byte UTF-8 string emitted an invalid, truncated
 // byte sequence into StringRedacted()'s output -- reachable via decode.go's -decode-stream tool,
 // which prints StringRedacted()'s output through a raw, non-escaping fmt.Printf. login.go's
-// redact() was already hardened for the identical byte-vs-rune bug shape; this sibling truncation
+// Redact() was already hardened for the identical byte-vs-rune bug shape; this sibling truncation
 // path never was, until truncateAtRuneBoundary (sfsobject.go).
 //
 // Uses a 3-byte-per-rune CJK character (making a byte-boundary/rune-boundary mismatch highly
@@ -1518,7 +1487,7 @@ func TestFormatSFSValueRedactedBareStringWithExhaustedBudget(t *testing.T) {
 	for i := 0; i < maxFormattedNodes-2; i++ {
 		arr.AddInt(int32(i))
 	}
-	arr.add(SFSValue{sfsUtfString, "nonempty-string-value-that-must-not-appear"})
+	arr.add(SFSValue{SFSUtfString, "nonempty-string-value-that-must-not-appear"})
 
 	o := NewSFSObject()
 	o.PutSFSArray("arr", arr)

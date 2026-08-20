@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"os"
@@ -23,11 +24,11 @@ import (
 // (ParseInitBuildings, collectCmdFor) is already covered directly in buildings_visitors_test.go;
 // this file is only about the orchestration built on top of it.
 
-// newTestBuildingSFS builds a minimal building_new-shaped SFSObject with the fields Building's
+// newTestBuildingSFS builds a minimal building_new-shaped sfs.SFSObject with the fields Building's
 // accessors read -- uuid/bId/lv -- mirroring what a real init push carries (see ParseInitBuildings'
 // doc comment in buildings.go).
-func newTestBuildingSFS(uuid int64, bId, lv int32) *SFSObject {
-	b := NewSFSObject()
+func newTestBuildingSFS(uuid int64, bId, lv int32) *sfs.SFSObject {
+	b := sfs.NewSFSObject()
 	b.PutLong("uuid", uuid)
 	b.PutInt("bId", bId)
 	b.PutInt("lv", lv)
@@ -40,7 +41,7 @@ func newTestBuilding(uuid int64, bId, lv int32) Building {
 
 // TestFetchBuildingsSurvivesCorruptPush is the round-49 regression test for the MAJOR finding that
 // FetchBuildings' read loop used an inverted-polarity net.Error check (only Timeout()==true was
-// treated as benign), so a plain, non-net.Error DecodeObject parse failure on one malformed/
+// treated as benign), so a plain, non-net.Error sfs.DecodeObject parse failure on one malformed/
 // unrelated push was misclassified identically to a genuine dead connection and aborted the whole
 // building/visitor accumulation early -- the same class of bug login.go's waitForInitPush/waitFor
 // had before their own round-48/49 fixes. The fake server here writes one well-framed-but-
@@ -58,8 +59,8 @@ func TestFetchBuildingsSurvivesCorruptPush(t *testing.T) {
 		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
 			return
 		}
-		params := NewSFSObject()
-		arr := NewSFSArray()
+		params := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
 		params.PutSFSArray("building_new", arr)
 		_ = server.SendExtension("init", params)
@@ -101,7 +102,7 @@ func TestFetchBuildingsSurvivesCorruptPush(t *testing.T) {
 // loop give up early with whatever was collected so far (nothing, since it never reaches the init
 // push).
 //
-// Round-53 fix: the cap+1 case now expects a non-nil deadConnError, not the plain nil-error break
+// Round-53 fix: the cap+1 case now expects a non-nil sfs.DeadConnError, not the plain nil-error break
 // this test originally asserted -- FetchBuildings was the one sibling among the four independent
 // maxConsecutiveDecodeFailures loops (login.go's waitFor/waitForInitPush, conn.go's DoHandshake --
 // all fixed in round 51) that silently discarded this outcome instead of surfacing it as the
@@ -116,8 +117,8 @@ func TestFetchBuildingsConsecutiveDecodeFailuresBoundary(t *testing.T) {
 					return
 				}
 			}
-			params := NewSFSObject()
-			arr := NewSFSArray()
+			params := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
 			params.PutSFSArray("building_new", arr)
 			_ = server.SendExtension("init", params)
@@ -145,11 +146,11 @@ func TestFetchBuildingsConsecutiveDecodeFailuresBoundary(t *testing.T) {
 	t.Run("cap+1 consecutive corrupt frames: gives up before reaching the init push", func(t *testing.T) {
 		buildings, logged, err := sendCorruptThenInit(t, maxConsecutiveDecodeFailures+1)
 		if err == nil {
-			t.Fatal("FetchBuildings() error = nil, want a deadConnError once the consecutive-failure cap is exceeded")
+			t.Fatal("FetchBuildings() error = nil, want a sfs.DeadConnError once the consecutive-failure cap is exceeded")
 		}
 		var netErr net.Error
 		if !errors.As(err, &netErr) {
-			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadConnError's wrap)", err, err)
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via sfs.DeadConnError's wrap)", err, err)
 		}
 		if netErr.Timeout() {
 			t.Errorf("netErr.Timeout() = true, want false -- this must be distinguishable from the benign silence-until-deadline timeout case")
@@ -171,7 +172,7 @@ func TestFetchBuildingsConsecutiveDecodeFailuresBoundary(t *testing.T) {
 // stream of well-formed-but-irrelevant pushes -- see conn_wait_test.go's
 // TestWaitForNonMatchingEnvelopeCapBoundary for the full rationale (a hostile peer streaming
 // well-formed "push.queue.add"/"push.build.queue.info"/unrecognized-cmd pushes costs a full
-// ReadPacket/DecodeObject/AsExtension/StringRedacted/slog.Info cycle each, unconditionally at Info
+// sfs.ReadPacket/sfs.DecodeObject/AsExtension/StringRedacted/slog.Info cycle each, unconditionally at Info
 // level, with nothing previously bounding how many of them one wait call would process). Proves
 // maxNonMatchingEnvelopesPerWait (login.go) is a strict `>` bound here too, exercised via
 // checkNonMatchingEnvelopeCap's shared push.queue.add call site (buildings.go) -- the same helper
@@ -181,15 +182,15 @@ func TestFetchBuildingsNonMatchingEnvelopeCapBoundary(t *testing.T) {
 	sendNoiseThenInit := func(t *testing.T, n int) (buildings []Building, err error) {
 		client, server := newPipeGameConnPair(t)
 		go func() {
-			noise := NewSFSObject()
+			noise := sfs.NewSFSObject()
 			noise.PutUtfString("irrelevant", "noise")
 			for i := 0; i < n; i++ {
 				if err := server.SendExtension("push.queue.add", noise); err != nil {
 					return
 				}
 			}
-			params := NewSFSObject()
-			arr := NewSFSArray()
+			params := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
 			params.PutSFSArray("building_new", arr)
 			_ = server.SendExtension("init", params)
@@ -242,11 +243,11 @@ func TestFetchBuildingsSurvivesNonExtensionEnvelope(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		if err := server.SendEnvelope(controllerSystem, actionPingPong, NewSFSObject()); err != nil {
+		if err := server.SendEnvelope(controllerSystem, actionPingPong, sfs.NewSFSObject()); err != nil {
 			return
 		}
-		params := NewSFSObject()
-		arr := NewSFSArray()
+		params := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
 		params.PutSFSArray("building_new", arr)
 		_ = server.SendExtension("init", params)
@@ -286,19 +287,19 @@ func TestFetchBuildingsInitPushParsesBuildingsAndVisitors(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		params := NewSFSObject()
-		arr := NewSFSArray()
+		params := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
 		arr.AddSFSObject(newTestBuildingSFS(222, BuildingIronMine, 5))
 		params.PutSFSArray("building_new", arr)
 
-		visitorList := NewSFSArray()
-		v := NewSFSObject()
+		visitorList := sfs.NewSFSArray()
+		v := sfs.NewSFSObject()
 		v.PutLong("uid", 999)
 		v.PutInt("eventId", 2001)
 		v.PutInt("visitorId", 6)
 		visitorList.AddSFSObject(v)
-		visitor := NewSFSObject()
+		visitor := sfs.NewSFSObject()
 		visitor.PutSFSArray("list", visitorList)
 		params.PutSFSObject("visitor", visitor)
 
@@ -376,8 +377,8 @@ func TestFetchBuildingsTimeoutKeepsPartialResults(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		params := NewSFSObject()
-		arr := NewSFSArray()
+		params := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		arr.AddSFSObject(newTestBuildingSFS(333, BuildingGoldMine, 1))
 		params.PutSFSArray("buildings", arr)
 		_ = server.SendExtension("push.add.building", params)
@@ -406,7 +407,7 @@ func TestFetchBuildingsTimeoutKeepsPartialResults(t *testing.T) {
 // FetchBuildings' push-observer switch (buildings.go's "push.queue.add"/"push.build.queue.info"/
 // default cases): all three previously dumped msg.Params via the raw, unredacted String(), so any
 // credential-bearing push landing in this switch while FetchBuildings is listening -- e.g. an
-// unrecognized cmd carrying a sensitiveSFSKeys field like loginKey -- would leak it into the log.
+// unrecognized cmd carrying a sfs.SensitiveSFSKeys field like loginKey -- would leak it into the log.
 // No currently-reachable path is known to route such a push through here (the fix's own comment in
 // buildings.go explains why that's an unenforced assumption, not a proven invariant), but this test
 // doesn't rely on that: it sends an arbitrary unrecognized cmd carrying a live loginKey directly, so
@@ -423,7 +424,7 @@ func TestFetchBuildingsRedactsCredentialFieldsInUnrecognizedPush(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		push := NewSFSObject()
+		push := sfs.NewSFSObject()
 		push.PutUtfString("loginKey", secretLoginKey)
 		push.PutUtfString("someField", "ordinary gameplay data")
 		_ = server.SendExtension("push.some.unrecognized.event", push)
@@ -471,19 +472,19 @@ func TestFetchBuildingsDedupesBuildingUUIDAcrossSources(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		initParams := NewSFSObject()
-		initArr := NewSFSArray()
+		initParams := sfs.NewSFSObject()
+		initArr := sfs.NewSFSArray()
 		initArr.AddSFSObject(newTestBuildingSFS(dupeUUID, BuildingFarmland, 1))
 		initParams.PutSFSArray("building_new", initArr)
 		if err := server.SendExtension("init", initParams); err != nil {
 			return
 		}
 
-		wrapper := NewSFSObject()
+		wrapper := sfs.NewSFSObject()
 		wrapper.PutSFSObject("buildInfo", newTestBuildingSFS(dupeUUID, BuildingFarmland, 1))
-		defaultBuilds := NewSFSArray()
+		defaultBuilds := sfs.NewSFSArray()
 		defaultBuilds.AddSFSObject(wrapper)
-		pibParams := NewSFSObject()
+		pibParams := sfs.NewSFSObject()
 		pibParams.PutSFSArray("defaultBuilds", defaultBuilds)
 		if err := server.SendExtension("push.init.build", pibParams); err != nil {
 			return
@@ -556,11 +557,11 @@ func TestFetchBuildingsWaitsForAuthoritativeInitDespiteEarlyPushInitBuild(t *tes
 	go func() {
 		defer close(done)
 		// push.init.build FIRST, with nothing else seen yet -- the previously-buggy ordering.
-		wrapper := NewSFSObject()
+		wrapper := sfs.NewSFSObject()
 		wrapper.PutSFSObject("buildInfo", newTestBuildingSFS(inferiorUUID, BuildingIronMine, 1))
-		defaultBuilds := NewSFSArray()
+		defaultBuilds := sfs.NewSFSArray()
 		defaultBuilds.AddSFSObject(wrapper)
-		pibParams := NewSFSObject()
+		pibParams := sfs.NewSFSObject()
 		pibParams.PutSFSArray("defaultBuilds", defaultBuilds)
 		if err := server.SendExtension("push.init.build", pibParams); err != nil {
 			return
@@ -570,8 +571,8 @@ func TestFetchBuildingsWaitsForAuthoritativeInitDespiteEarlyPushInitBuild(t *tes
 
 		// The DELAYED authoritative init, arriving well after the 3s shrink window would have
 		// already expired the pre-fix deadline.
-		initParams := NewSFSObject()
-		initArr := NewSFSArray()
+		initParams := sfs.NewSFSObject()
+		initArr := sfs.NewSFSArray()
 		initArr.AddSFSObject(newTestBuildingSFS(authoritativeUUID, BuildingFarmland, 5))
 		initParams.PutSFSArray("building_new", initArr)
 		if err := server.SendExtension("init", initParams); err != nil {
@@ -623,16 +624,16 @@ func TestFetchBuildingsDedupesVisitorUIDAcrossInitPushes(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	const dupeUID = int64(888)
-	newInitParamsWithVisitor := func() *SFSObject {
-		visitorList := NewSFSArray()
-		v := NewSFSObject()
+	newInitParamsWithVisitor := func() *sfs.SFSObject {
+		visitorList := sfs.NewSFSArray()
+		v := sfs.NewSFSObject()
 		v.PutLong("uid", dupeUID)
 		v.PutInt("eventId", 2001)
 		v.PutInt("visitorId", 6)
 		visitorList.AddSFSObject(v)
-		visitor := NewSFSObject()
+		visitor := sfs.NewSFSObject()
 		visitor.PutSFSArray("list", visitorList)
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutSFSObject("visitor", visitor)
 		return params
 	}
@@ -717,8 +718,8 @@ func TestFetchBuildingsDeadlineCappedAgainstRepeatedInitPushes(t *testing.T) {
 			if i > 0 {
 				time.Sleep(pushSpacing)
 			}
-			params := NewSFSObject()
-			arr := NewSFSArray()
+			params := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			arr.AddSFSObject(newTestBuildingSFS(int64(1000+i), BuildingFarmland, 1))
 			params.PutSFSArray("building_new", arr)
 			if err := server.SendExtension("init", params); err != nil {
@@ -782,16 +783,16 @@ func TestFetchBuildingsAggregateVisitorCeilingAcrossManyPushes(t *testing.T) {
 	go func() {
 		defer close(done)
 		for p := 0; p < numPushes; p++ {
-			params := NewSFSObject()
-			visitorList := NewSFSArray()
+			params := sfs.NewSFSObject()
+			visitorList := sfs.NewSFSArray()
 			for i := 0; i < visitorsPerPush; i++ {
-				v := NewSFSObject()
+				v := sfs.NewSFSObject()
 				v.PutLong("uid", int64(p*visitorsPerPush+i+1)) // distinct uid every push -- defeats dedup
 				v.PutInt("eventId", 2000)
 				v.PutInt("visitorId", 6)
 				visitorList.AddSFSObject(v)
 			}
-			visitor := NewSFSObject()
+			visitor := sfs.NewSFSObject()
 			visitor.PutSFSArray("list", visitorList)
 			params.PutSFSObject("visitor", visitor)
 			if err := server.SendExtension("init", params); err != nil {
@@ -844,16 +845,16 @@ func TestFetchBuildingsSinglePushNearCapVisitorsDoesNotOvershootAggregateCeiling
 	go func() {
 		defer close(done)
 		sendInitVisitorsPush := func(count int, uidOffset int) error {
-			params := NewSFSObject()
-			visitorList := NewSFSArray()
+			params := sfs.NewSFSObject()
+			visitorList := sfs.NewSFSArray()
 			for i := 0; i < count; i++ {
-				v := NewSFSObject()
+				v := sfs.NewSFSObject()
 				v.PutLong("uid", int64(uidOffset+i+1)) // distinct uid across both pushes -- defeats dedup
 				v.PutInt("eventId", 2000)
 				v.PutInt("visitorId", 6)
 				visitorList.AddSFSObject(v)
 			}
-			visitor := NewSFSObject()
+			visitor := sfs.NewSFSObject()
 			visitor.PutInt("maxNum", 99999) // clamped to maxVisitorsUpperBound by ParseInitVisitors
 			visitor.PutSFSArray("list", visitorList)
 			params.PutSFSObject("visitor", visitor)
@@ -907,8 +908,8 @@ func TestFetchBuildingsAggregateBuildingCeilingAcrossManyPushes(t *testing.T) {
 	go func() {
 		defer close(done)
 		for p := 0; p < numPushes; p++ {
-			params := NewSFSObject()
-			arr := NewSFSArray()
+			params := sfs.NewSFSObject()
+			arr := sfs.NewSFSArray()
 			for i := 0; i < buildingsPerPush; i++ {
 				uuid := int64(p*buildingsPerPush + i + 1) // distinct uuid every push -- defeats dedup
 				arr.AddSFSObject(newTestBuildingSFS(uuid, BuildingFarmland, 1))
@@ -964,8 +965,8 @@ func TestFetchBuildingsSinglePushNearRawItemCapDoesNotOvershootAggregateCeiling(
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		params := NewSFSObject()
-		arr := NewSFSArray()
+		params := sfs.NewSFSObject()
+		arr := sfs.NewSFSArray()
 		for i := 0; i < maxRawBuildingItemsPerPush; i++ {
 			arr.AddSFSObject(newTestBuildingSFS(int64(i+1), BuildingFarmland, 1))
 		}
@@ -1055,7 +1056,7 @@ func TestCollectIdleRewardSuccess(t *testing.T) {
 				t.Errorf("Cmd = %q, want lw.pve.idle.reward", msg.Cmd)
 			}
 			gotActions = append(gotActions, msg.Params.GetInt("action"))
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			resp.PutBool("success", true)
 			_ = server.SendExtension(msg.Cmd, resp)
 		}
@@ -1119,7 +1120,7 @@ func TestCollectAllAggregatesErrorsWithoutShortCircuiting(t *testing.T) {
 			}
 			counts[msg.Cmd]++
 
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			replyCmd := msg.Cmd
 			switch msg.Cmd {
 			case "chat.get.system.mails":
@@ -1239,7 +1240,7 @@ func TestCollectAllCapsCollectibleBuildingsAndLogsWarning(t *testing.T) {
 				return
 			}
 
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			replyCmd := msg.Cmd
 			switch msg.Cmd {
 			case "chat.get.system.mails":
@@ -1336,7 +1337,7 @@ func TestCollectAllExactlyAtCapDoesNotTruncate(t *testing.T) {
 				return
 			}
 
-			resp := NewSFSObject()
+			resp := sfs.NewSFSObject()
 			replyCmd := msg.Cmd
 			switch msg.Cmd {
 			case "chat.get.system.mails":
@@ -1491,7 +1492,7 @@ func TestCollectAllAbortsRemainingActionsOnNetError(t *testing.T) {
 // needed here to prove exactly how many requests were sent before an abort fired. This closes a
 // round-25 regression-safety gap: fakeNetErrConn's Read fails with an already-a-net.Error fake, but
 // a real net.Conn's graceful-close Read failure is bare io.EOF, which does NOT itself implement
-// net.Error -- only packet.go's wrapIfClosed/deadConnError (round 24) converts it into one. Driving
+// net.Error -- only packet.go's sfs.WrapIfClosed/sfs.DeadConnError (round 24) converts it into one. Driving
 // a real io.EOF through an actual GameConn, as this type does, is what proves that conversion path
 // is wired all the way through to each orchestration entry point below, not just exercised in
 // isolation (conn_wait_test.go's TestReadEnvelopeGracefulCloseIsNonTimeoutNetError). Defined here
@@ -1529,9 +1530,9 @@ func (c *realEOFConn) SetWriteDeadline(time.Time) error { return nil }
 // orchestration-level net.Error early-abort test in this package (ClaimAllMail's,
 // ClaimAllianceGifts', handleInteractiveLine's) -- injects fakeNetErrConn, an already-a-net.Error
 // fake standing in for a dead connection. None of them actually exercise the real
-// bare-io.EOF-through-ReadPacket-through-deadConnError conversion path round 24 fixed
-// (packet.go's wrapIfClosed/deadConnError) -- so a future regression anywhere between packet.go and
-// CollectAll (a new buffering wrapper, wrapIfClosed dropped at one call site, etc.) would go
+// bare-io.EOF-through-sfs.ReadPacket-through-sfs.DeadConnError conversion path round 24 fixed
+// (packet.go's sfs.WrapIfClosed/sfs.DeadConnError) -- so a future regression anywhere between packet.go and
+// CollectAll (a new buffering wrapper, sfs.WrapIfClosed dropped at one call site, etc.) would go
 // completely undetected by the existing synthetic-fake test alone.
 //
 // realEOFConn's every Read returns bare io.EOF -- the actual shape a real net.Conn produces for a
@@ -1553,7 +1554,7 @@ func TestCollectAllAbortsRemainingActionsOnRealGracefulClose(t *testing.T) {
 	}
 	var netErr net.Error
 	if !errors.As(err, &netErr) {
-		t.Fatalf("CollectAll() error = %v, want it to wrap a net.Error (deadConnError, via packet.go's wrapIfClosed)", err)
+		t.Fatalf("CollectAll() error = %v, want it to wrap a net.Error (sfs.DeadConnError, via packet.go's sfs.WrapIfClosed)", err)
 	}
 	if netErr.Timeout() {
 		t.Errorf("CollectAll() error's net.Error has Timeout()==true, want false (a graceful close is a genuine dead connection, not an ordinary timeout)")

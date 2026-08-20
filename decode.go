@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"os"
 )
@@ -12,7 +13,7 @@ import (
 // DecodeStreamFile reads a reassembled, single-direction raw TCP byte
 // stream (see docs/capturing-and-decoding-traffic.mdx) containing
 // back-to-back framed SFS2X packets, and prints each one in human-readable
-// form to stdout. This is the exact same ReadPacket/DecodeObject this
+// form to stdout. This is the exact same sfs.ReadPacket/sfs.DecodeObject this
 // client uses on its own live connection (packet.go, sfsobject.go) --
 // deliberately not a separate copy, so a decoded capture can never drift
 // out of sync with what this client actually implements. `label` is just
@@ -27,7 +28,7 @@ func DecodeStreamFile(label, path string) error {
 	n := 0
 	for {
 		start := len(data) - r.Len()
-		body, err := ReadPacket(r)
+		body, err := sfs.ReadPacket(r)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				fmt.Printf("[%s] reached end of stream cleanly after %d packets (%d bytes consumed of %d)\n", label, n, start, len(data))
@@ -36,16 +37,16 @@ func DecodeStreamFile(label, path string) error {
 			return fmt.Errorf("stream truncated or corrupt at offset %d (remaining %d bytes): %w", start, r.Len(), err)
 		}
 		n++
-		obj, err := DecodeObject(body)
+		obj, err := sfs.DecodeObject(body)
 		if err != nil {
 			// Deliberately no hex/content dump of body here: a decode failure can still have an
 			// intact sensitive field (e.g. "tk"/"loginKey") sitting near the front of an otherwise-
 			// undecoded frame (a truncated capture, for instance), and body is the raw pre-decode
-			// bytes -- there's no SFSObject to run through sensitiveSFSKeys/StringRedacted yet, so
+			// bytes -- there's no sfs.SFSObject to run through sfs.SensitiveSFSKeys/StringRedacted yet, so
 			// any raw slice of it bypasses that redaction entirely. Print only the error itself and
 			// the body's byte length (diagnostic, reveals nothing about content) -- never body's
 			// bytes. See decode_test.go's TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure.
-			fmt.Printf("[%s] #%d @offset %d: DecodeObject error: %v (body %d bytes)\n", label, n, start, err, len(body))
+			fmt.Printf("[%s] #%d @offset %d: sfs.DecodeObject error: %v (body %d bytes)\n", label, n, start, err, len(body))
 			continue
 		}
 		fmt.Printf("[%s] #%d @offset %d: %s\n", label, n, start, obj.StringRedacted())

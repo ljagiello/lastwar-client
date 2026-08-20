@@ -1,4 +1,4 @@
-package main
+package sfs
 
 import (
 	"bytes"
@@ -63,8 +63,8 @@ func sampleSFSObjects() []*SFSObject {
 	primitiveArrays.put("floatArr", SFSValue{sfsFloatArray, []float32{1.5}})
 	primitiveArrays.put("doubleArr", SFSValue{sfsDoubleArray, []float64{2.5}})
 	primitiveArrays.put("stringArr", SFSValue{sfsUtfStringArray, []string{"a", "b"}})
-	primitiveArrays.put("text", SFSValue{sfsText, "a long-form text field"})
-	primitiveArrays.put("nullField", SFSValue{sfsNull, nil})
+	primitiveArrays.put("text", SFSValue{SFSText, "a long-form text field"})
+	primitiveArrays.put("nullField", SFSValue{SFSNull, nil})
 
 	return []*SFSObject{primitives, nested, withArray, primitiveArrays}
 }
@@ -76,7 +76,7 @@ func sampleSFSObjects() []*SFSObject {
 // byte shapes into something DecodeObject itself will actually accept as input.
 func wrapSingleFieldObject(key string, fieldTagAndPayload []byte) []byte {
 	var buf []byte
-	buf = append(buf, sfsObjectType)
+	buf = append(buf, SFSObjectType)
 	buf = binary.BigEndian.AppendUint16(buf, 1) // 1 key
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(key)))
 	buf = append(buf, key...)
@@ -85,7 +85,7 @@ func wrapSingleFieldObject(key string, fieldTagAndPayload []byte) []byte {
 }
 
 // seedDeepNestBomb mirrors sfsobject_array_test.go's TestNestingDepthRejected: a chain of nested
-// SFSArrays well past maxNestDepth, wrapped as a full DecodeObject input.
+// SFSArrays well past MaxNestDepth, wrapped as a full DecodeObject input.
 func seedDeepNestBomb() []byte {
 	const levels = 200
 	var val []byte
@@ -95,16 +95,16 @@ func seedDeepNestBomb() []byte {
 		val = append(val, sfsArrayType)
 		val = binary.BigEndian.AppendUint16(val, 1)
 	}
-	val = append(val, sfsBool, 1)
+	val = append(val, SFSBool, 1)
 	return wrapSingleFieldObject("bomb", val)
 }
 
 // seedWideFanoutBomb mirrors sfsobject_array_test.go's TestDecodedNodeCountRejected: a shallow but
-// wide-fan-out nested array whose total leaf count crosses maxDecodedNodes, wrapped as a full
+// wide-fan-out nested array whose total leaf count crosses MaxDecodedNodes, wrapped as a full
 // DecodeObject input.
 func seedWideFanoutBomb() []byte {
 	const outerCount = 10
-	const innerCount = 30001 // outerCount * innerCount > maxDecodedNodes (300_000)
+	const innerCount = 30001 // outerCount * innerCount > MaxDecodedNodes (300_000)
 
 	var val []byte
 	val = append(val, sfsArrayType)
@@ -113,7 +113,7 @@ func seedWideFanoutBomb() []byte {
 		val = append(val, sfsArrayType)
 		val = binary.BigEndian.AppendUint16(val, innerCount)
 		for j := 0; j < innerCount; j++ {
-			val = append(val, sfsNull)
+			val = append(val, SFSNull)
 		}
 	}
 	return wrapSingleFieldObject("bomb", val)
@@ -168,8 +168,8 @@ func FuzzDecodeObject(f *testing.F) {
 	// A handful of trivially-malformed inputs a real corrupted/truncated frame could produce.
 	f.Add([]byte(nil))
 	f.Add([]byte{})
-	f.Add([]byte{sfsObjectType})
-	f.Add([]byte{sfsNull})
+	f.Add([]byte{SFSObjectType})
+	f.Add([]byte{SFSNull})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _ = DecodeObject(data)
@@ -178,35 +178,35 @@ func FuzzDecodeObject(f *testing.F) {
 
 // seedOversizedDeclaredLengthHeader mirrors packet_oom_test.go's
 // TestReadPacketRejectsOversizedDeclaredLength: a header-only frame declaring a body length over
-// maxFrameSize, which ReadPacket must reject with an error before attempting to read or allocate
+// MaxFrameSize, which ReadPacket must reject with an error before attempting to read or allocate
 // the (here, nonexistent) body.
 func seedOversizedDeclaredLengthHeader() []byte {
 	var hdr bytes.Buffer
-	hdr.WriteByte(hdrBinary | hdrEncrypted | hdrBigSized)
+	hdr.WriteByte(HdrBinary | HdrEncrypted | HdrBigSized)
 	var lb [4]byte
-	binary.BigEndian.PutUint32(lb[:], maxFrameSize+1)
+	binary.BigEndian.PutUint32(lb[:], MaxFrameSize+1)
 	hdr.Write(lb[:])
 	return hdr.Bytes()
 }
 
 // seedOversizedZstdUncompressedLengthHeader mirrors packet_oom_test.go's
 // TestReadPacketRejectsOversizedZstdUncompressedLength: a frame whose zstd-flagged
-// uncompressed-length field exceeds maxFrameSize, which ReadPacket must reject before attempting
+// uncompressed-length field exceeds MaxFrameSize, which ReadPacket must reject before attempting
 // decompression.
 func seedOversizedZstdUncompressedLengthHeader() []byte {
 	var hdr bytes.Buffer
-	hdr.WriteByte(hdrBinary | hdrEncrypted | hdrCompressed | hdrUseLZ4)
+	hdr.WriteByte(HdrBinary | HdrEncrypted | HdrCompressed | hdrUseLZ4)
 	var lb [2]byte
 	binary.BigEndian.PutUint16(lb[:], 16) // small, otherwise-valid declared compressed length
 	hdr.Write(lb[:])
 	var ub [4]byte
-	binary.BigEndian.PutUint32(ub[:], maxFrameSize+1)
+	binary.BigEndian.PutUint32(ub[:], MaxFrameSize+1)
 	hdr.Write(ub[:])
 	return hdr.Bytes()
 }
 
 // seedCompressedPacket builds a real EncodePacket(EncodeObject(...)) frame whose body is large
-// enough (>compressionThreshold) and repetitive enough to reliably exercise EncodePacket's zlib
+// enough (>CompressionThreshold) and repetitive enough to reliably exercise EncodePacket's zlib
 // branch, so the fuzz corpus includes a genuine compressed-frame shape for ReadPacket's
 // decompression path, not just uncompressed ones.
 func seedCompressedPacket(f *testing.F) []byte {
@@ -221,7 +221,7 @@ func seedCompressedPacket(f *testing.F) []byte {
 	if err != nil {
 		f.Fatalf("EncodePacket: %v", err)
 	}
-	if packet[0]&hdrCompressed == 0 {
+	if packet[0]&HdrCompressed == 0 {
 		f.Fatalf("seed setup bug: expected this packet to hit EncodePacket's compressed branch")
 	}
 	return packet
@@ -247,7 +247,7 @@ func seedBigSizedPacket(f *testing.F) []byte {
 	if err != nil {
 		f.Fatalf("EncodePacket: %v", err)
 	}
-	if packet[0]&hdrBigSized == 0 {
+	if packet[0]&HdrBigSized == 0 {
 		f.Fatalf("seed setup bug: expected this packet to hit EncodePacket's bigSized branch")
 	}
 	return packet
@@ -280,8 +280,8 @@ func FuzzReadPacket(f *testing.F) {
 	// produce.
 	f.Add([]byte(nil))
 	f.Add([]byte{})
-	f.Add([]byte{hdrBinary | hdrEncrypted})
-	f.Add([]byte{hdrBinary | hdrEncrypted | hdrForward})
+	f.Add([]byte{HdrBinary | HdrEncrypted})
+	f.Add([]byte{HdrBinary | HdrEncrypted | hdrForward})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _ = ReadPacket(bytes.NewReader(data))

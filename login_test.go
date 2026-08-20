@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"os"
@@ -131,10 +132,10 @@ func TestRedact(t *testing.T) {
 		{"exactly 8 chars", "12345678", "***"},
 		// Round-33 regression: the ASCII "exactly 8 chars" case above has byte length == rune
 		// count == 8, so it can't distinguish the outer len(s)<=8 byte-length prefilter from the
-		// inner n<=8 rune-count check a few lines into redact()'s body -- a regression loosening
+		// inner n<=8 rune-count check a few lines into sfs.Redact()'s body -- a regression loosening
 		// either one to "< 8" would still pass it. An exactly-8-rune, all-multi-byte CJK string
 		// has byte length 24 (> 8, so it clears the outer prefilter) but rune count exactly 8,
-		// isolating the inner rune-count check specifically: it must still fully redact to "***",
+		// isolating the inner rune-count check specifically: it must still fully sfs.Redact to "***",
 		// not fall through to the general k=n/8 formula (which would reveal 1 rune from each end).
 		{"exactly 8 runes, all multi-byte (byte length 24)", "田中太郎鈴木一郎", "***"},
 		// 16 runes: k = n/8 = 2, so this reveals 2 runes from each end, not the
@@ -146,10 +147,10 @@ func TestRedact(t *testing.T) {
 		// constant from 8 to 7 would pass the whole suite unnoticed (confirmed via mutation testing).
 		// 22 runes: k = 22/8 = 2 (not 22/7 = 3), isolating the divisor specifically.
 		{"22 runes isolates the n/8 divisor from n/7 (round-35 mutation-testing gap)", "abcdefghijklmnopqrstuv", "ab...uv"},
-		// Regression for a byte-index-vs-rune-index bug: sensitiveSFSKeys (sfsobject.go)
+		// Regression for a byte-index-vs-rune-index bug: sfs.SensitiveSFSKeys (sfsobject.go)
 		// includes googleName (a Google account display name) and mail (an
 		// internationalized email address), both of which can legitimately carry
-		// multi-byte UTF-8. redact() used to slice s[:4]/s[len(s)-4:] by raw byte
+		// multi-byte UTF-8. sfs.Redact() used to slice s[:4]/s[len(s)-4:] by raw byte
 		// index, which can land mid-rune on such input and emit invalid UTF-8 into
 		// both slog's JSON sink and StringRedacted()'s raw fmt.Printf terminal sink.
 		{
@@ -162,12 +163,12 @@ func TestRedact(t *testing.T) {
 			input: "田中太郎@example.com",
 			want:  "田中...om",
 		},
-		// Regression for the majority-exposure bug: redact() used to apply the same
+		// Regression for the majority-exposure bug: sfs.Redact() used to apply the same
 		// flat first-4/last-4 shape to any string over 8 runes regardless of which
-		// sensitive key invoked it, and sfsobject.go's redactSFSValue calls it for
+		// sensitive key invoked it, and sfsobject.go's sfs.RedactSFSValue calls it for
 		// EVERY sensitive string field -- including "pw"/"password", not just long
 		// opaque tokens. For a realistic human password length (9-20 runes), that
-		// revealed a clear MAJORITY: redact("Summer2024!") (11 runes) used to
+		// revealed a clear MAJORITY: sfs.Redact("Summer2024!") (11 runes) used to
 		// produce "Summ...024!", exposing 8 of 11 characters (~73%). The generic
 		// "9-20 rune input reveals a clear minority" check below (not just this
 		// exact-match case) is what actually proves the fix, since an exact-match
@@ -180,15 +181,15 @@ func TestRedact(t *testing.T) {
 		// Long opaque tokens (loginKey/accessToken, typically 32-64+ chars) must
 		// keep a useful fixed-width prefix/suffix for visually correlating "is this
 		// the same token as before" across log lines -- the scaling formula must not
-		// over-redact these down to uselessness. 40 runes: k = min(4, 40/8) = 4,
+		// over-sfs.Redact these down to uselessness. 40 runes: k = min(4, 40/8) = 4,
 		// converging back on the original first-4/last-4 shape.
 		{
 			name:  "long opaque token (40 chars) keeps a useful first-4/last-4 shape",
 			input: "ABCD" + strings.Repeat("x", 32) + "WXYZ",
 			want:  "ABCD...WXYZ",
 		},
-		// Round-39 regression: an input well past maxRedactRuneScanInput (1024 bytes) must take
-		// the bounded fast path (firstNRunesPrefix/lastNRunesSuffix) and still produce the
+		// Round-39 regression: an input well past sfs.MaxRedactRuneScanInput (1024 bytes) must take
+		// the bounded fast path (sfs.FirstNRunesPrefix/sfs.LastNRunesSuffix) and still produce the
 		// identical first-4/last-4 shape the full rune-scan path would have, proving the fast
 		// path's output isn't just fast but also correct.
 		{
@@ -204,15 +205,15 @@ func TestRedact(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := redact(c.input)
+			got := sfs.Redact(c.input)
 			if got != c.want {
-				t.Errorf("redact(%q) = %q, want %q", c.input, got, c.want)
+				t.Errorf("sfs.Redact(%q) = %q, want %q", c.input, got, c.want)
 			}
 			if !utf8.ValidString(got) {
-				t.Errorf("redact(%q) = %q is not valid UTF-8", c.input, got)
+				t.Errorf("sfs.Redact(%q) = %q is not valid UTF-8", c.input, got)
 			}
 			if c.input != "" && got != "***" && strings.Contains(got, c.input) {
-				t.Errorf("redact(%q) = %q leaks the full original secret", c.input, got)
+				t.Errorf("sfs.Redact(%q) = %q leaks the full original secret", c.input, got)
 			}
 			// For a realistic password length (9-20 runes), the number of runes
 			// that appear unredacted in the output must be a clear MINORITY of
@@ -225,7 +226,7 @@ func TestRedact(t *testing.T) {
 				visible := utf8.RuneCountInString(strings.ReplaceAll(got, "...", ""))
 				maxVisible := n * 40 / 100
 				if visible > maxVisible {
-					t.Errorf("redact(%q) = %q reveals %d of %d runes (%d%%), want at most %d runes (40%% of input length) -- majority-exposure regression for a realistic password length",
+					t.Errorf("sfs.Redact(%q) = %q reveals %d of %d runes (%d%%), want at most %d runes (40%% of input length) -- majority-exposure regression for a realistic password length",
 						c.input, got, visible, n, visible*100/n, maxVisible)
 				}
 			}
@@ -234,31 +235,31 @@ func TestRedact(t *testing.T) {
 }
 
 // TestRedactHugeInputAvoidsFullRuneScanAllocation is the round-39 regression test for the MAJOR
-// finding that redact() (login.go) used to unconditionally convert its ENTIRE input to []rune
+// finding that sfs.Redact() (login.go) used to unconditionally convert its ENTIRE input to []rune
 // regardless of size -- an ~4x-amplifying allocation for ASCII input -- with sfsobject.go's
-// redactSFSValue calling this on a sensitive field's value with NO format-time budget at all
+// sfs.RedactSFSValue calling this on a sensitive field's value with NO format-time budget at all
 // (unlike every other value shape StringRedacted() formats). A hostile/spoofed server could tag a
-// field literally named loginKey/accessToken as an oversized string (up to maxFrameSize=64MiB),
+// field literally named loginKey/accessToken as an oversized string (up to sfs.MaxFrameSize=64MiB),
 // forcing an unbounded ~320MB-peak allocation on every StringRedacted() call that reaches it.
 // TestRedact's own huge-input cases above prove the fast path's OUTPUT is correct; this proves the
 // fast path is actually bounded -- measuring actual BYTES allocated (not allocation event COUNT,
 // which a single big []rune backing array wouldn't distinguish from a handful of tiny ones) via
-// runtime.MemStats, asserting redact() on a 10MB input allocates only a small number of bytes, not
+// runtime.MemStats, asserting sfs.Redact() on a 10MB input allocates only a small number of bytes, not
 // bytes proportional to the input size (a full []rune(s) conversion of a 10MB ASCII string alone
 // would allocate a ~40MB backing array -- four bytes per rune -- trivially distinguishable from
 // the handful of small string headers/slices the bounded fast path needs).
 func TestRedactHugeInputAvoidsFullRuneScanAllocation(t *testing.T) {
-	const hugeSize = 10 * 1024 * 1024 // 10MB -- far past maxRedactRuneScanInput (1024 bytes)
+	const hugeSize = 10 * 1024 * 1024 // 10MB -- far past sfs.MaxRedactRuneScanInput (1024 bytes)
 	huge := "ABCD" + strings.Repeat("x", hugeSize) + "WXYZ"
 
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	got := redact(huge)
+	got := sfs.Redact(huge)
 	runtime.ReadMemStats(&after)
 
 	if got != "ABCD...WXYZ" {
-		t.Fatalf("redact(huge 10MB input) = %q, want %q", got, "ABCD...WXYZ")
+		t.Fatalf("sfs.Redact(huge 10MB input) = %q, want %q", got, "ABCD...WXYZ")
 	}
 	// A full []rune(huge) conversion alone would allocate roughly 4x hugeSize bytes (~40MB) for
 	// the backing array; the bounded fast path needs only a handful of tiny string
@@ -266,21 +267,21 @@ func TestRedactHugeInputAvoidsFullRuneScanAllocation(t *testing.T) {
 	// remaining utterly incompatible with an allocation pattern proportional to a 10MB input.
 	const maxWantAllocBytes = 1024 * 1024
 	if allocBytes := after.TotalAlloc - before.TotalAlloc; allocBytes > maxWantAllocBytes {
-		t.Errorf("redact(huge 10MB input) allocated %d bytes, want at most %d -- the fast path is not actually bounded, redact() likely still scans/allocates proportional to input size", allocBytes, maxWantAllocBytes)
+		t.Errorf("sfs.Redact(huge 10MB input) allocated %d bytes, want at most %d -- the fast path is not actually bounded, sfs.Redact() likely still scans/allocates proportional to input size", allocBytes, maxWantAllocBytes)
 	}
 }
 
 // TestRedactRuneScanInputExactBoundary is the round-47 regression test for the MINOR finding that
-// maxRedactRuneScanInput's strict `len(s) > maxRedactRuneScanInput` branch selector (login.go) had
+// sfs.MaxRedactRuneScanInput's strict `len(s) > sfs.MaxRedactRuneScanInput` branch selector (login.go) had
 // no test isolating the exact 1024/1025-byte boundary. TestRedact's large-input cases and
 // TestRedactHugeInputAvoidsFullRuneScanAllocation above are both far past this threshold; and
-// content alone can't distinguish the two paths here, since redact()'s length-scaling formula
+// content alone can't distinguish the two paths here, since sfs.Redact()'s length-scaling formula
 // (k := n/8, capped at 4) has already saturated at k=4 for any input this long, making the
 // full-rune-scan slow path and the bounded fast path produce byte-for-byte identical output
 // ("ABCD...WXYZ" for both). Only an allocation-based assertion can tell them apart: at exactly
-// maxRedactRuneScanInput bytes, the slow path's []rune(s) conversion allocates roughly 4 bytes per
+// sfs.MaxRedactRuneScanInput bytes, the slow path's []rune(s) conversion allocates roughly 4 bytes per
 // ASCII rune (~4KB for a 1024-byte input); one byte more must take the bounded fast path, whose
-// firstNRunesPrefix/lastNRunesSuffix slicing plus a single small "..."-join allocates only a
+// sfs.FirstNRunesPrefix/sfs.LastNRunesSuffix slicing plus a single small "..."-join allocates only a
 // handful of bytes, not thousands.
 func TestRedactRuneScanInputExactBoundary(t *testing.T) {
 	measureAlloc := func(t *testing.T, s string) uint64 {
@@ -288,33 +289,33 @@ func TestRedactRuneScanInputExactBoundary(t *testing.T) {
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
-		got := redact(s)
+		got := sfs.Redact(s)
 		runtime.ReadMemStats(&after)
 		if got != "ABCD...WXYZ" {
-			t.Fatalf("redact(%d-byte input) = %q, want %q", len(s), got, "ABCD...WXYZ")
+			t.Fatalf("sfs.Redact(%d-byte input) = %q, want %q", len(s), got, "ABCD...WXYZ")
 		}
 		return after.TotalAlloc - before.TotalAlloc
 	}
 
 	t.Run("exactly at cap: slow full-rune-scan path, allocates proportionally", func(t *testing.T) {
-		s := "ABCD" + strings.Repeat("x", maxRedactRuneScanInput-8) + "WXYZ"
-		if len(s) != maxRedactRuneScanInput {
-			t.Fatalf("test setup bug: input is %d bytes, want exactly %d", len(s), maxRedactRuneScanInput)
+		s := "ABCD" + strings.Repeat("x", sfs.MaxRedactRuneScanInput-8) + "WXYZ"
+		if len(s) != sfs.MaxRedactRuneScanInput {
+			t.Fatalf("test setup bug: input is %d bytes, want exactly %d", len(s), sfs.MaxRedactRuneScanInput)
 		}
 		const minWantAllocBytes = 3000 // a []rune conversion of ~1024 ASCII runes needs ~4096 bytes alone
 		if allocBytes := measureAlloc(t, s); allocBytes < minWantAllocBytes {
-			t.Errorf("redact(%d-byte input) allocated only %d bytes, want at least %d -- expected the slow full-rune-scan path (proportional allocation), got something that looks like the bounded fast path instead", len(s), allocBytes, minWantAllocBytes)
+			t.Errorf("sfs.Redact(%d-byte input) allocated only %d bytes, want at least %d -- expected the slow full-rune-scan path (proportional allocation), got something that looks like the bounded fast path instead", len(s), allocBytes, minWantAllocBytes)
 		}
 	})
 
 	t.Run("one byte over cap: bounded fast path, allocation stays flat", func(t *testing.T) {
-		s := "ABCD" + strings.Repeat("x", maxRedactRuneScanInput-7) + "WXYZ"
-		if len(s) != maxRedactRuneScanInput+1 {
-			t.Fatalf("test setup bug: input is %d bytes, want exactly %d", len(s), maxRedactRuneScanInput+1)
+		s := "ABCD" + strings.Repeat("x", sfs.MaxRedactRuneScanInput-7) + "WXYZ"
+		if len(s) != sfs.MaxRedactRuneScanInput+1 {
+			t.Fatalf("test setup bug: input is %d bytes, want exactly %d", len(s), sfs.MaxRedactRuneScanInput+1)
 		}
 		const maxWantAllocBytesAtBoundary = 512
 		if allocBytes := measureAlloc(t, s); allocBytes > maxWantAllocBytesAtBoundary {
-			t.Errorf("redact(%d-byte input) allocated %d bytes, want at most %d -- expected the bounded fast path, got something that looks like the proportional slow path instead", len(s), allocBytes, maxWantAllocBytesAtBoundary)
+			t.Errorf("sfs.Redact(%d-byte input) allocated %d bytes, want at most %d -- expected the bounded fast path, got something that looks like the proportional slow path instead", len(s), allocBytes, maxWantAllocBytesAtBoundary)
 		}
 	})
 }

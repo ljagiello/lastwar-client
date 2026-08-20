@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"io"
 	"lastwar-client/internal/crypto"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"os"
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // LoginResult carries everything a caller needs after a successful login:
@@ -21,9 +21,9 @@ import (
 type LoginResult struct {
 	Conn      *GameConn
 	Ident     *deviceIdentity
-	Account   *SFSObject // push.account.login.new params, if the email path ran (nil on loginKey fast-path)
-	Buildings []Building // populated if the `init` bootstrap push arrived during login (see waitForInitPush)
-	Visitors  []Visitor  // populated alongside Buildings, from the same `init` push (see waitForInitPush)
+	Account   *sfs.SFSObject // push.account.login.new params, if the email path ran (nil on loginKey fast-path)
+	Buildings []Building     // populated if the `init` bootstrap push arrived during login (see waitForInitPush)
+	Visitors  []Visitor      // populated alongside Buildings, from the same `init` push (see waitForInitPush)
 }
 
 // LoginOptions configures how Login authenticates.
@@ -35,7 +35,7 @@ type LoginOptions struct {
 
 // String/GoString are the round-49 regression fix for the MINOR finding that LoginOptions --
 // whose Email field carries the operator's real account email, a value sfsobject.go's
-// sensitiveSFSKeys map already classifies as sensitive under the "mail" key -- had no
+// sfs.SensitiveSFSKeys map already classifies as sensitive under the "mail" key -- had no
 // String()/GoString() redaction-by-construction, the same class of gap round 47/48 closed for
 // LoginToken/deviceIdentity/SessionConfig/GSLOpt/LoginParamsInput. opts is held live across
 // Login()'s entire body; every current call site that logs anything about the email logs only
@@ -123,7 +123,7 @@ func buildBaseZoneLoginAddr(ip string, port int) (string, error) {
 // this file's doc comment above the redirect-handling loop below, and crossserver.go's
 // DoCrossServerLogin doc comment, for why silently losing this signal is not merely theoretical).
 // context names the caller for the log line's benefit (e.g. "login.go base-zone Login").
-func redirectIP(siObj *SFSObject, context string) string {
+func redirectIP(siObj *sfs.SFSObject, context string) string {
 	v, ok := siObj.Get("ip")
 	if !ok || v.Val == nil {
 		return ""
@@ -149,7 +149,7 @@ func redirectIP(siObj *SFSObject, context string) string {
 // serverInfo object is documented as sometimes sending wrong-typed fields -- zone is exactly as
 // exposed to that as ip and port are. context names the caller for the log line's benefit, same
 // as redirectIP.
-func redirectZone(siObj *SFSObject, context string) string {
+func redirectZone(siObj *sfs.SFSObject, context string) string {
 	v, ok := siObj.Get("zone")
 	if !ok || v.Val == nil {
 		return ""
@@ -168,10 +168,10 @@ func redirectZone(siObj *SFSObject, context string) string {
 // re-encoded via PutUtfString on every login/redial attempt with no length check at all, despite
 // originating from the identical unguarded sources: a gsl.go flexString field bounded only by the
 // 1MiB whole-HTTP-body maxGSLResponseSize cap, or an SFS2X serverInfo redirect field that can
-// arrive tagged sfsText (bounded only by packet.go's 64MiB maxFrameSize) -- GetString cannot tell
-// that tag apart from the 65535-byte-capped sfsUtfString tag it also decodes to the identical Go
-// string type for. writeUtfString (sfsobject.go) hard-rejects anything over 65535 bytes, so an
-// oversized value reaching PutUtfString fails EncodeObject/SendEnvelope, and that purely local
+// arrive tagged sfs.SFSText (bounded only by packet.go's 64MiB sfs.MaxFrameSize) -- GetString cannot tell
+// that tag apart from the 65535-byte-capped sfs.SFSUtfString tag it also decodes to the identical Go
+// string type for. sfs.WriteUtfString (sfsobject.go) hard-rejects anything over 65535 bytes, so an
+// oversized value reaching PutUtfString fails sfs.EncodeObject/SendEnvelope, and that purely local
 // encode failure gets wrapped in sendStageError (conn.go), which deliberately, by design, forces
 // Timeout()==false -- indistinguishable from a genuine dead connection to every caller. field/
 // context name the caller for the log line's benefit; fallback is the value used instead of the
@@ -213,7 +213,7 @@ var dialGame = DialGame
 // pagination cursor), and the old hardcoded "persist" wording produced nonsensical log lines like
 // "skipping mail reward status persist: rewardStatus field present but wrong-typed" there. Fixed
 // (round 31) by dropping the persistence-specific word from the template entirely.
-func warnIfWrongTypedField(o *SFSObject, field, context string, kind sfsFieldKind) {
+func warnIfWrongTypedField(o *sfs.SFSObject, field, context string, kind sfsFieldKind) {
 	v, ok := o.Get(field)
 	if !ok || v.Val == nil {
 		return
@@ -264,7 +264,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	// Not "username": ident.Username -- that would print the operator's real persisted account
 	// username in cleartext at Info level on every run. Mirrors the emailLen pattern used
 	// elsewhere in this file for the same PII-in-a-plain-string reason (see step 6 below).
-	slog.Info("persisted state", "usernameLen", len(ident.Username), "gameUid", ident.GameUid, "loginKey", redact(ident.LoginKey))
+	slog.Info("persisted state", "usernameLen", len(ident.Username), "gameUid", ident.GameUid, "loginKey", sfs.Redact(ident.LoginKey))
 
 	opt := gslOptFor(ident)
 	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt)
@@ -386,7 +386,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			AccessTok: accessTok,
 			ServerID:  serverID,
 		})
-		loginContent := NewSFSObject()
+		loginContent := sfs.NewSFSObject()
 		loginContent.PutUtfString("zn", zone)
 		loginContent.PutUtfString("un", "")
 		loginContent.PutUtfString("pw", "")
@@ -395,7 +395,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			conn.Close()
 			return nil, sendStageError{err: err}
 		}
-		slog.Info("login request sent, waiting for response", "gameUid", gameUid, "at", redact(accessTok))
+		slog.Info("login request sent, waiting for response", "gameUid", gameUid, "at", sfs.Redact(accessTok))
 
 		env, err := waitFor(conn, 15*time.Second, func(e *Envelope) bool {
 			return e.Controller == controllerSystem && e.Action == actionLogin
@@ -570,7 +570,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 
 	slog.Info("step 6: request email verify code")
-	sendCodeParams := NewSFSObject()
+	sendCodeParams := sfs.NewSFSObject()
 	sendCodeParams.PutUtfString("mail", opts.Email)
 	sendCodeParams.PutUtfString("lang", "en")
 	if err := conn.SendExtension("account.login.send.verify.code", sendCodeParams); err != nil {
@@ -603,7 +603,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	slog.Info("got code", "codeLen", len(code))
 
 	slog.Info("step 8: complete login with account.login.new (type=0, mail+code)")
-	finishParams := NewSFSObject()
+	finishParams := sfs.NewSFSObject()
 	finishParams.PutInt("type", 0)
 	finishParams.PutUtfString("mail", opts.Email)
 	finishParams.PutUtfString("verifyCode", code)
@@ -642,11 +642,11 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		// redaction. Build the error from explicitly-selected, individually-redacted fields
 		// instead of dumping the raw response.
 		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED (push): errorCode=%v gameUid=%s loginKey=%s: %w",
-			ec.Val, msg2.Params.GetString("gameUid"), redact(msg2.Params.GetString("loginKey")), ErrAuthRejected)
+			ec.Val, msg2.Params.GetString("gameUid"), sfs.Redact(msg2.Params.GetString("loginKey")), ErrAuthRejected)
 	}
 	// Not msg2.Params.String() -- the full response carries loginKey (and
 	// accountArr) in cleartext, and String() does no field-level redaction.
-	slog.Info("login success", "gameUid", msg2.Params.GetString("gameUid"), "loginKey", redact(msg2.Params.GetString("loginKey")))
+	slog.Info("login success", "gameUid", msg2.Params.GetString("gameUid"), "loginKey", sfs.Redact(msg2.Params.GetString("loginKey")))
 	result.Account = msg2.Params
 
 	// warnIfWrongTypedField below adds a diagnostic for the "field present but wrong-typed"
@@ -676,106 +676,6 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 
 	return result, nil
-}
-
-// maxRedactRuneScanInput bounds how large an input redact() will fully rune-scan (the []rune(s)
-// conversion below) before switching to a bounded fast path that extracts just the first/last 4
-// runes directly without ever materializing a full copy of the input. Round-39 fix: redact()
-// previously always converted the FULL input to []rune regardless of size -- an ~4x-amplifying
-// allocation for ASCII input (each 1-byte rune becomes a 4-byte int32) -- and sfsobject.go's
-// redactSFSValue calls this on a sensitive field's value with NO format-time budget at all, unlike
-// every other value shape StringRedacted() formats (all bounded by formatBudget/maxFormattedNodes,
-// per formatSFSValueRedacted's own chargeUpTo/truncateAtRuneBoundary handling). A hostile/spoofed
-// server (or crafted -decode-stream capture) can tag a field literally named
-// loginKey/accessToken/airKey as an oversized string (up to maxFrameSize=64MiB), forcing an
-// unbounded ~320MB-peak allocation on every StringRedacted() call that reaches it -- and this
-// fires repeatedly per session (conn.go's logCommandResult on every failed response, buildings.go's
-// push-handling switch on every observed push), not just once. Any input above this threshold is
-// comfortably long enough -- even under a pathological 4-bytes-per-rune input -- to guarantee
-// redact()'s own length-scaling formula (k := n/8, capped at 4) has already saturated at k=4, so
-// the fast path below can skip straight to that shape without computing an exact rune count or
-// allocating a full []rune of the input.
-const maxRedactRuneScanInput = 1024
-
-// firstNRunesPrefix returns the byte-slice prefix of s covering its first n runes (or all of s if
-// it has fewer), without ever converting s to []rune -- Go's built-in `for range` over a string
-// already decodes UTF-8 one rune at a time and lets this stop after n runes instead of continuing
-// through the rest of a potentially huge string.
-func firstNRunesPrefix(s string, n int) string {
-	count := 0
-	for i := range s {
-		if count == n {
-			return s[:i]
-		}
-		count++
-	}
-	return s
-}
-
-// lastNRunesSuffix is firstNRunesPrefix's mirror for the tail: walks backward from the end of s,
-// decoding one rune at a time via utf8.DecodeLastRuneInString, stopping after n runes instead of
-// ever scanning forward through the rest of a potentially huge string.
-func lastNRunesSuffix(s string, n int) string {
-	count := 0
-	end := len(s)
-	for end > 0 && count < n {
-		_, size := utf8.DecodeLastRuneInString(s[:end])
-		end -= size
-		count++
-	}
-	return s[end:]
-}
-
-func redact(s string) string {
-	if s == "" {
-		return ""
-	}
-	if len(s) <= 8 {
-		return "***"
-	}
-	if len(s) > maxRedactRuneScanInput {
-		return firstNRunesPrefix(s, 4) + "..." + lastNRunesSuffix(s, 4)
-	}
-	// Slice by rune, not byte, boundary: sensitiveSFSKeys covers fields that can
-	// legitimately carry multi-byte UTF-8 (googleName is a Google account display
-	// name, e.g. CJK; mail is an internationalized email address). Raw byte-index
-	// slicing (the pre-fix s[:4]/s[len(s)-4:] here) can land mid-rune and emit
-	// invalid UTF-8 into both slog's JSON sink and StringRedacted()'s raw
-	// fmt.Printf terminal sink.
-	r := []rune(s)
-	n := len(r)
-	if n <= 8 {
-		// Byte length is >8 (checked above) but rune count is small -- a short
-		// multi-byte string (e.g. a 3-rune CJK name at 3 bytes/rune = 9 bytes).
-		// Not enough runes to usefully show a non-overlapping prefix/suffix
-		// slice without leaking most or all of it back out, so fully redact
-		// instead, same as the short-input case above.
-		return "***"
-	}
-	// How many runes to reveal from each end. This used to be a flat 4/4
-	// regardless of length, which is fine for long opaque tokens
-	// (loginKey/accessToken, typically 32-64+ chars, where showing a fixed
-	// prefix/suffix as a correlation aid across log lines doesn't meaningfully
-	// weaken anything) but badly over-exposes realistic human password
-	// lengths: sfsobject.go's redactSFSValue calls this for EVERY sensitive
-	// string field, including "pw"/"password", not just long tokens, and the
-	// old flat rule revealed a clear MAJORITY of a realistic password --
-	// redact("Summer2024!") (11 runes) used to produce "Summ...024!", 8 of 11
-	// chars (~73%) visible.
-	//
-	// Scale k with length instead: n/8, capped at 4. This keeps the reveal a
-	// clear minority across the realistic password range (~18-25% visible for
-	// 9-20 rune input, well under a 40% ceiling) while converging on exactly
-	// the original first-4/last-4 shape once n reaches 32 -- long enough that
-	// revealing 8 chars is itself a small minority (25%) -- and never reveals
-	// more than that fixed 4/4 prefix/suffix for even longer tokens, keeping
-	// the shape useful for visually correlating "is this the same token as
-	// before" across log lines.
-	k := n / 8
-	if k > 4 {
-		k = 4
-	}
-	return string(r[:k]) + "..." + string(r[n-k:])
 }
 
 // waitForInitPush waits for the bare `init` bootstrap push (report 14 §5:
@@ -818,7 +718,7 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 		if !sentActivePull && !time.Now().Before(halfway) {
 			sentActivePull = true
 			slog.Info("halfway through init-wait window; sending login.init as active-pull fallback")
-			req := NewSFSObject()
+			req := sfs.NewSFSObject()
 			req.PutInt("_id", 2)
 			req.PutUtfString("dataConfigMd5", "")
 			if err := conn.SendExtension("login.init", req); err != nil {
@@ -863,11 +763,11 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 				// server just never sends `init`. No error to report.
 				return nil, nil, false, nil
 			}
-			// Round-48 fix: only a genuine, non-timeout net.Error (ReadPacket's own I/O
-			// failures, wrapped in deadConnError -- see conn.go) is treated as a real
-			// connection failure worth aborting on. A plain DecodeObject parse error (wrapped
-			// only via fmt.Errorf, never a net.Error) means ReadPacket already fully consumed
-			// this frame's bytes off the wire before DecodeObject ever ran -- the stream stays
+			// Round-48 fix: only a genuine, non-timeout net.Error (sfs.ReadPacket's own I/O
+			// failures, wrapped in sfs.DeadConnError -- see conn.go) is treated as a real
+			// connection failure worth aborting on. A plain sfs.DecodeObject parse error (wrapped
+			// only via fmt.Errorf, never a net.Error) means sfs.ReadPacket already fully consumed
+			// this frame's bytes off the wire before sfs.DecodeObject ever ran -- the stream stays
 			// in sync, exactly the same reasoning buildings.go's own containsNonTimeoutNetError
 			// callers use to classify this shape of error as non-fatal. Previously ANY
 			// non-timeout error here -- including a single malformed/unrecognized push -- was
@@ -880,7 +780,7 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 			}
 			consecutiveDecodeFailures++
 			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
-				// deadConnError (packet.go): round-51 fix for the MAJOR finding that this
+				// sfs.DeadConnError (packet.go): round-51 fix for the MAJOR finding that this
 				// give-up error, by construction, is never itself a net.Error (this branch is
 				// only reached after both the Timeout()==true check and
 				// containsNonTimeoutNetError(err) above have already ruled that out for err),
@@ -892,7 +792,7 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 				// connection that just proved it cannot decode 20+ consecutive frames is, for
 				// every practical purpose, exactly as dead as one that failed with a genuine
 				// I/O error.
-				return nil, nil, false, deadConnError{err: fmt.Errorf("waitForInitPush: %d consecutive malformed/undecodable pushes, giving up: %w", consecutiveDecodeFailures, err)}
+				return nil, nil, false, sfs.NewDeadConnError(fmt.Errorf("waitForInitPush: %d consecutive malformed/undecodable pushes, giving up: %w", consecutiveDecodeFailures, err))
 			}
 			slog.Warn("waitForInitPush: failed to read/decode a push while waiting for init; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue
@@ -905,9 +805,9 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 		// maxNonMatchingEnvelopesPerWait (round-53 fix, doc comment above): a non-extension
 		// envelope (!ok, e.g. the client's own background heartbeat pong) and a well-formed but
 		// non-"init" push both count against this cap identically -- neither advances real
-		// state, and both cost a full ReadPacket/DecodeObject/AsExtension cycle regardless.
+		// state, and both cost a full sfs.ReadPacket/sfs.DecodeObject/AsExtension cycle regardless.
 		// Benign give-up, matching this function's own pre-existing silence-until-deadline
-		// convention (nil error) -- not deadConnError, since a stream of well-formed-but-
+		// convention (nil error) -- not sfs.DeadConnError, since a stream of well-formed-but-
 		// irrelevant traffic isn't itself evidence of a dead connection.
 		nonMatchingEnvelopes++
 		if nonMatchingEnvelopes > maxNonMatchingEnvelopesPerWait {
@@ -1017,8 +917,8 @@ func (deadlineExceededError) Temporary() bool { return false }
 // read loops will silently tolerate before giving up -- round-50 fix, closing a DoS gap the
 // round-48/49 Warn+continue fixes introduced across all four such loops (waitFor and
 // waitForInitPush here, buildings.go's FetchBuildings, conn.go's DoHandshake): tolerating a
-// SINGLE malformed frame is correct (ReadPacket has already fully consumed that frame's bytes
-// before DecodeObject ever ran, so the stream stays in sync -- see those fixes' own doc
+// SINGLE malformed frame is correct (sfs.ReadPacket has already fully consumed that frame's bytes
+// before sfs.DecodeObject ever ran, so the stream stays in sync -- see those fixes' own doc
 // comments), but tolerating an UNBOUNDED stream of them let a hostile peer burn CPU and log
 // volume for the full remaining wall-clock window of every wait, with only the caller-supplied
 // timeout (up to 45s for waitForInitPush) eventually stopping it. Mirrors interactive.go's own
@@ -1034,7 +934,7 @@ const maxConsecutiveDecodeFailures = 20
 // fixes never addressed: those fixes only bound consecutive DECODE FAILURES (maxConsecutiveDecodeFailures
 // above), but a hostile peer that streams well-formed, successfully-decoded, simply-irrelevant
 // pushes for the duration of a wait window resets that counter to 0 on every single one and is
-// never slowed down by it. Each such push still costs a full ReadPacket/DecodeObject/AsExtension
+// never slowed down by it. Each such push still costs a full sfs.ReadPacket/sfs.DecodeObject/AsExtension
 // cycle, and several of these loops' own "observed/skipped" diagnostics (buildings.go's
 // FetchBuildings default/push.queue.add/push.build.queue.info cases, conn.go's DoHandshake)
 // unconditionally format and log the full decoded content at Info level -- not gated behind
@@ -1043,7 +943,7 @@ const maxConsecutiveDecodeFailures = 20
 // window (up to 45s for waitForInitPush).
 //
 // Treated as benign (reuses deadlineExceededError's net.Error/Timeout()==true shape), not fatal
-// (unlike maxConsecutiveDecodeFailures' deadConnError): a long stream of well-formed-but-irrelevant
+// (unlike maxConsecutiveDecodeFailures' sfs.DeadConnError): a long stream of well-formed-but-irrelevant
 // traffic is not, on its own, evidence the connection itself is dead the way a stream of
 // undecodable garbage is -- it might simply be a very busy connection that hasn't yet sent the
 // awaited response. Only incremented on envelopes that do NOT advance real state (a skipped/
@@ -1082,9 +982,9 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 				return nil, err
 			}
 			// Round-49 fix: a plain, non-net.Error ReadEnvelope failure (e.g. a
-			// DecodeObject parse failure on one malformed/unrelated push) means
-			// ReadPacket already fully consumed that frame's bytes off the wire
-			// before DecodeObject ever ran -- the stream stays in sync, so this is
+			// sfs.DecodeObject parse failure on one malformed/unrelated push) means
+			// sfs.ReadPacket already fully consumed that frame's bytes off the wire
+			// before sfs.DecodeObject ever ran -- the stream stays in sync, so this is
 			// not evidence the connection is dead, mirroring waitForInitPush's
 			// identical round-48 fix. Previously ANY such error aborted the caller's
 			// single, non-retried wait outright -- login.go's Login and
@@ -1094,7 +994,7 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 			// awaited response/push might arrive on the very next read.
 			consecutiveDecodeFailures++
 			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
-				// deadConnError (packet.go): round-51 fix -- see waitForInitPush's identical
+				// sfs.DeadConnError (packet.go): round-51 fix -- see waitForInitPush's identical
 				// fix above for the full MAJOR-finding rationale. This give-up error is never
 				// itself a net.Error by construction (reached only after both the
 				// Timeout()==true check and containsNonTimeoutNetError(err) above already
@@ -1102,7 +1002,7 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 				// containsNonTimeoutNetError-based "abort on dead connection" check (mail.go's
 				// ClaimAllMail, buildings.go's CollectAll, main.go's
 				// shouldAbortBeforeInteractive, ...) silently misclassified it as benign.
-				return nil, deadConnError{err: fmt.Errorf("waitFor: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err)}
+				return nil, sfs.NewDeadConnError(fmt.Errorf("waitFor: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err))
 			}
 			slog.Warn("waitFor: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue

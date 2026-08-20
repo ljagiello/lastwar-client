@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"math/big"
 	"os"
@@ -128,7 +129,7 @@ type deviceIdentity struct {
 // redaction-by-construction the way gsl.go's LoginToken got in round 47 for the identical class of
 // risk. Login() keeps a live *deviceIdentity in scope for its entire multi-hundred-line body and
 // hands it out further via LoginResult.Ident to every caller; every CURRENT call site already
-// extracts and wraps LoginKey in redact() before logging, so this is defense-in-depth for whatever
+// extracts and wraps LoginKey in sfs.Redact() before logging, so this is defense-in-depth for whatever
 // comes next, not a fix for an actively-triggered leak -- a future slog.Error("login failed",
 // "ident", ident) or fmt.Errorf("state: %+v", result) would otherwise fall through to Go's default
 // reflection-based struct formatter and print LoginKey/GameUid/Username in clear text. Value
@@ -419,14 +420,14 @@ func saveStateFile(path, data string) error {
 
 // maxIdentityFieldLen bounds how long a value SaveLoginKey/SaveGameUid/SaveUsername will accept --
 // round-46 fix, the same wire-tag-equivalence gap round 45 closed for mail.go's uid field:
-// GetString (sfsobject.go) can't distinguish the 65535-byte-capped sfsUtfString wire tag from the
-// ~64MiB-capped sfsText tag, both of which decode to the same Go string, so a server response
-// tagging loginKey/gameUid/un/gameUserName as sfsText could previously smuggle an arbitrarily large
+// GetString (sfsobject.go) can't distinguish the 65535-byte-capped sfs.SFSUtfString wire tag from the
+// ~64MiB-capped sfs.SFSText tag, both of which decode to the same Go string, so a server response
+// tagging loginKey/gameUid/un/gameUserName as sfs.SFSText could previously smuggle an arbitrarily large
 // value straight into d.LoginKey/d.GameUid/d.Username and onto disk. Two concrete harms: an
 // unbounded-size write to a credential state file (saveStateFile below has no size check of its
 // own), and -- more seriously -- BuildLoginParams/DoCrossServerLogin unconditionally re-embed
 // these persisted values into every future login/cross-server-login request via PutUtfString,
-// whose underlying writeUtfString (sfsobject.go) hard-rejects any string over 65535 bytes at
+// whose underlying sfs.WriteUtfString (sfsobject.go) hard-rejects any string over 65535 bytes at
 // encode time -- so an oversized persisted value would permanently break every subsequent login
 // attempt using that identity, in-memory for the rest of the current session and on disk for every
 // future run, until an operator manually intervened. Rejecting before either the in-memory field
@@ -548,15 +549,15 @@ type iosAnalyticsBlob struct {
 	LwZone          string `json:"lw_zone"`
 }
 
-// BuildLoginParams builds the full ~50-field SFSObject for the base SFS zone login (dossier §05 /
+// BuildLoginParams builds the full ~50-field sfs.SFSObject for the base SFS zone login (dossier §05 /
 // §2.3). uid is empty on a brand-new device (the server assigns one back via GSL's
 // serverList[].gameUid, which the caller should pass in as gameUid once known).
-func BuildLoginParams(in LoginParamsInput) *SFSObject {
+func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	now := time.Now().Unix()
 	cmdBaseTime := strconv.FormatInt(now, 10)
 	oneCode, coreV := oneCodeAndCoreV()
 
-	p := NewSFSObject()
+	p := sfs.NewSFSObject()
 	p.PutInt("_id", in.FutureID)
 	p.PutInt("netType", 2) // 2 = wifi, matches the common case
 	effectiveAppVersion, effectiveVersionCode := appVersion, versionCode
@@ -584,8 +585,8 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 		// in.ShumeiBoxId/in.AirKey values used for the top-level request fields elsewhere in
 		// this function. That leaked those live secrets in cleartext: this whole blob gets
 		// JSON-marshaled and stored as a single opaque string under the "ta" key, and
-		// SFSObject.StringRedacted() only masks known-sensitive *keys* -- it has no way to see
-		// or redact secrets embedded inside another field's string value. sensitiveSFSKeys now
+		// sfs.SFSObject.StringRedacted() only masks known-sensitive *keys* -- it has no way to see
+		// or sfs.Redact secrets embedded inside another field's string value. sfs.SensitiveSFSKeys now
 		// also lists "ta" itself (see sfsobject.go) as defense-in-depth, but the real fix is
 		// here: never put a live credential into a field that isn't itself a redacted key.
 		// These three fields are placeholders (empty string, matching this struct's existing
@@ -614,7 +615,7 @@ func BuildLoginParams(in LoginParamsInput) *SFSObject {
 	p.PutUtfString("ta", ta)
 	p.PutUtfString("distinct_id", "")
 	p.PutUtfString("phone_screen", "1920*1080")
-	p.PutSFSObject("configVersion", NewSFSObject())
+	p.PutSFSObject("configVersion", sfs.NewSFSObject())
 
 	// Dossier §05 documented these as "only if uid empty", inferred from
 	// static analysis. Confirmed live: a real reconnect (non-empty uid)

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"slices"
@@ -31,7 +32,7 @@ const (
 type Envelope struct {
 	Controller byte
 	Action     int16
-	Content    *SFSObject
+	Content    *sfs.SFSObject
 }
 
 // GameConn is a raw (plaintext, connectionType 0) SFS2X socket connection.
@@ -86,19 +87,19 @@ func (c *GameConn) Close() error {
 	return c.closeErr
 }
 
-// SendEnvelope builds the outer {c,a,p} SFSObject, serializes, frames, and
+// SendEnvelope builds the outer {c,a,p} sfs.SFSObject, serializes, frames, and
 // writes it to the socket. Safe for concurrent use (heartbeat + main flow).
-func (c *GameConn) SendEnvelope(controller byte, action int16, content *SFSObject) error {
-	outer := NewSFSObject()
+func (c *GameConn) SendEnvelope(controller byte, action int16, content *sfs.SFSObject) error {
+	outer := sfs.NewSFSObject()
 	outer.PutByte("c", controller)
 	outer.PutShort("a", action)
 	outer.PutSFSObject("p", content)
 
-	body, err := EncodeObject(outer)
+	body, err := sfs.EncodeObject(outer)
 	if err != nil {
 		return fmt.Errorf("encode envelope: %w", err)
 	}
-	packet, err := EncodePacket(body)
+	packet, err := sfs.EncodePacket(body)
 	if err != nil {
 		return fmt.Errorf("encode packet: %w", err)
 	}
@@ -115,11 +116,11 @@ func (c *GameConn) SendEnvelope(controller byte, action int16, content *SFSObjec
 
 // SendExtension sends a client->server `cmd` extension request, matching
 // SFSNetwork.SendMessage(cmd, ...) -- dossier §04/§06.
-func (c *GameConn) SendExtension(cmd string, params *SFSObject) error {
+func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
 	if params == nil {
-		params = NewSFSObject()
+		params = sfs.NewSFSObject()
 	}
-	extContent := NewSFSObject()
+	extContent := sfs.NewSFSObject()
 	extContent.PutUtfString("c", cmd)
 	extContent.PutInt("r", -1)
 	extContent.PutSFSObject("p", params)
@@ -128,11 +129,11 @@ func (c *GameConn) SendExtension(cmd string, params *SFSObject) error {
 
 // ReadEnvelope blocks until the next framed packet arrives and decodes it.
 func (c *GameConn) ReadEnvelope() (*Envelope, error) {
-	body, err := ReadPacket(c.reader)
+	body, err := sfs.ReadPacket(c.reader)
 	if err != nil {
 		return nil, err
 	}
-	obj, err := DecodeObject(body)
+	obj, err := sfs.DecodeObject(body)
 	if err != nil {
 		return nil, fmt.Errorf("decode envelope: %w", err)
 	}
@@ -160,7 +161,7 @@ func (c *GameConn) ReadEnvelope() (*Envelope, error) {
 		}
 	}
 	if v, ok := obj.Get("p"); ok {
-		if p, ok := v.Val.(*SFSObject); ok {
+		if p, ok := v.Val.(*sfs.SFSObject); ok {
 			env.Content = p
 		} else {
 			slog.Warn("ReadEnvelope: p field is present but not an object", "type", fmt.Sprintf("%T", v.Val))
@@ -172,7 +173,7 @@ func (c *GameConn) ReadEnvelope() (*Envelope, error) {
 // ExtensionMessage is a decoded server->client `cmd` push/response.
 type ExtensionMessage struct {
 	Cmd    string
-	Params *SFSObject
+	Params *sfs.SFSObject
 }
 
 // AsExtension interprets an Envelope as an extension message (controller=1),
@@ -198,16 +199,16 @@ func (e *Envelope) AsExtension() (*ExtensionMessage, bool) {
 			slog.Warn("AsExtension: c field is present but not a string", "type", fmt.Sprintf("%T", v.Val))
 		}
 	}
-	var params *SFSObject
+	var params *sfs.SFSObject
 	if v, ok := e.Content.Get("p"); ok {
-		if p, ok := v.Val.(*SFSObject); ok {
+		if p, ok := v.Val.(*sfs.SFSObject); ok {
 			params = p
 		} else {
 			slog.Warn("AsExtension: p field is present but not an object", "cmd", cmd, "type", fmt.Sprintf("%T", v.Val))
 		}
 	}
 	if params == nil {
-		params = NewSFSObject()
+		params = sfs.NewSFSObject()
 	}
 	return &ExtensionMessage{Cmd: cmd, Params: params}, true
 }
@@ -316,9 +317,9 @@ const defaultCmdTimeout = 8 * time.Second
 //
 // A failed send is unconditionally treated as a genuine connection failure regardless of the
 // underlying cause (write-deadline exceeded, connection reset, or even a local encode error from
-// deeper in SendExtension/SendEnvelope) -- unlike packet.go's deadConnError, which only activates
-// for the specific EOF/ErrUnexpectedEOF shapes wrapIfClosed recognizes, this wrapper is applied
-// unconditionally to sendAndWait's entire send-stage branch. Mirrors deadConnError's net.Error-
+// deeper in SendExtension/SendEnvelope) -- unlike packet.go's sfs.DeadConnError, which only activates
+// for the specific EOF/ErrUnexpectedEOF shapes sfs.WrapIfClosed recognizes, this wrapper is applied
+// unconditionally to sendAndWait's entire send-stage branch. Mirrors sfs.DeadConnError's net.Error-
 // shaping technique (a small unexported struct forcing Timeout()==false/Temporary()==false) and
 // wraps -- never replaces -- the original error via Unwrap, so errors.Is/errors.As against the
 // underlying cause (e.g. a specific *net.OpError) keep working through this wrapper. Only applied
@@ -328,7 +329,7 @@ const defaultCmdTimeout = 8 * time.Second
 // an independent send path that shares SendEnvelope/writeTimeout with sendAndWait but was missed
 // when this type was introduced, leaving DoHandshake's send failures unwrapped while its
 // read-side branches (the wall-clock deadline check, and ReadEnvelope failures via packet.go's
-// wrapIfClosed/deadConnError) were already hardened. See
+// sfs.WrapIfClosed/sfs.DeadConnError) were already hardened. See
 // TestDoHandshakeSendFailureIsNonTimeoutNetError (conn_handshake_test.go).
 type sendStageError struct {
 	err error
@@ -346,7 +347,7 @@ func (sendStageError) Temporary() bool { return false }
 // across this file and buildings.go/mail.go/alliance.go/vip.go/visitors.go. waitCmds defaults
 // to [sendCmd]; pass an explicit value when the response arrives under a different command name
 // (e.g. mail.go's push.chat.get.system.mails).
-func sendAndWait(conn *GameConn, label, sendCmd string, params *SFSObject, waitCmds ...string) (*ExtensionMessage, error) {
+func sendAndWait(conn *GameConn, label, sendCmd string, params *sfs.SFSObject, waitCmds ...string) (*ExtensionMessage, error) {
 	if err := conn.SendExtension(sendCmd, params); err != nil {
 		wrapped := sendStageError{err: err}
 		slog.Error(label+" send failed", "cmd", sendCmd, "error", wrapped)
@@ -378,8 +379,8 @@ func sendAndWait(conn *GameConn, label, sendCmd string, params *SFSObject, waitC
 // and untested for the still-open init-push/reconnect-block questions.
 // api="1.7.8" cl="Unity" match the game's own SDK defaults exactly
 // (Smartfox2xLw.decompiled.cs:3613-3621).
-func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
-	req := NewSFSObject()
+func (c *GameConn) DoHandshake(timeout time.Duration) (*sfs.SFSObject, error) {
+	req := sfs.NewSFSObject()
 	req.PutUtfString("api", "1.7.8")
 	req.PutUtfString("cl", "Unity")
 	if err := c.SendEnvelope(controllerSystem, actionHandshake, req); err != nil {
@@ -418,9 +419,9 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 				return nil, fmt.Errorf("read handshake response: %w", err)
 			}
 			// Round-49 fix: a plain, non-net.Error ReadEnvelope failure (e.g. a
-			// DecodeObject parse failure on one malformed/unrelated push) means
-			// ReadPacket already fully consumed that frame's bytes off the wire before
-			// DecodeObject ever ran -- the stream stays in sync, so this is not
+			// sfs.DecodeObject parse failure on one malformed/unrelated push) means
+			// sfs.ReadPacket already fully consumed that frame's bytes off the wire before
+			// sfs.DecodeObject ever ran -- the stream stays in sync, so this is not
 			// evidence the connection is dead, mirroring login.go's identical
 			// waitForInitPush/waitFor fixes and buildings.go's FetchBuildings fix.
 			// Previously this loop returned immediately on ANY such error instead of
@@ -429,13 +430,13 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 			// a successfully-decoded-but-non-matching envelope a few lines below.
 			consecutiveDecodeFailures++
 			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
-				// deadConnError (packet.go): round-51 fix -- mirrors login.go's identical
+				// sfs.DeadConnError (packet.go): round-51 fix -- mirrors login.go's identical
 				// waitFor/waitForInitPush fix. This give-up error is never itself a net.Error
 				// by construction (reached only after both the Timeout()==true check and
 				// containsNonTimeoutNetError(err) above already ruled that out), so without
 				// this wrap it was silently misclassified as a benign failure by any caller
 				// checking containsNonTimeoutNetError/errors.As(&netErr)&&!netErr.Timeout().
-				return nil, deadConnError{err: fmt.Errorf("DoHandshake: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err)}
+				return nil, sfs.NewDeadConnError(fmt.Errorf("DoHandshake: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err))
 			}
 			slog.Warn("DoHandshake: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue
@@ -460,7 +461,7 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 		// the StringRedacted() formatting/Info-log below so a peer flooding this loop with
 		// irrelevant traffic can't force unbounded formatting cost on the very iteration that
 		// finally gives up. Benign give-up (deadlineExceededError, matching this function's own
-		// wall-clock-deadline-elapsed branch above), not deadConnError -- a stream of
+		// wall-clock-deadline-elapsed branch above), not sfs.DeadConnError -- a stream of
 		// well-formed-but-irrelevant traffic isn't itself evidence of a dead connection.
 		nonMatchingEnvelopes++
 		if nonMatchingEnvelopes > maxNonMatchingEnvelopesPerWait {
@@ -474,7 +475,7 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 		// before the real handshake response -- and this is exactly the site round-11's
 		// credential_leak_lint_test.go doc comment named as a known, deliberately-uncaught
 		// gap (contentStr was a local variable, not an inline .String() call, so the lint
-		// regex missed it). See sfsobject.go's sensitiveSFSKeys/StringRedacted and
+		// regex missed it). See sfsobject.go's sfs.SensitiveSFSKeys/StringRedacted and
 		// TestDoHandshakeSkipRedactsCredentialFields (conn_handshake_test.go) for coverage.
 		contentStr := "<nil>"
 		if env.Content != nil {
@@ -499,7 +500,7 @@ func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				pp := NewSFSObject()
+				pp := sfs.NewSFSObject()
 				pp.PutLong("clientTime", time.Since(start).Milliseconds())
 				if err := c.SendEnvelope(controllerSystem, actionPingPong, pp); err != nil {
 					// sendStageError: consistency with sendAndWait/DoHandshake/the login-path send

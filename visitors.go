@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"math"
 	"net"
@@ -43,7 +44,7 @@ import (
 // (an arrival delay/animation window) rather than actually greetable yet.
 // Still open: a genuinely successful greet's reward payload shape.
 type Visitor struct {
-	Raw *SFSObject
+	Raw *sfs.SFSObject
 }
 
 func (v Visitor) Uid() int64       { return v.Raw.GetLong("uid") }
@@ -65,7 +66,7 @@ func (v Visitor) StartTime() int64 { return v.Raw.GetLong("startTime") }
 // network call per parsed visitor, and each can cost up to a full defaultCmdTimeout (8s, conn.go)
 // against a peer that simply never responds -- this project's own threat model already treats an
 // arbitrary/hostile -cs-ip peer as in-scope (see capDeadline's own doc comment, round 16's
-// redactSFSValue fail-open fix). Set well above the live-confirmed maxNum=5 (see the Visitor doc
+// sfs.RedactSFSValue fail-open fix). Set well above the live-confirmed maxNum=5 (see the Visitor doc
 // comment above) as a defensive margin, not hardcoded to exactly 5, since the real live value could
 // legitimately vary a bit across accounts/game versions -- but still small enough to keep
 // GreetVisitors' worst-case sequential wall-clock cost bounded to a couple minutes, not an
@@ -76,7 +77,7 @@ const maxVisitorsDefensiveCeiling = 25
 // own `visitor.maxNum` field (see the Visitor doc comment above). Before this existed,
 // ParseInitVisitors trusted maxNum verbatim as long as it was > 0, which let a hostile or
 // misbehaving -cs-ip peer simply set maxNum to an enormous value -- paired with a matching number of
-// visitor.list entries, well within sfsobject.go's maxDecodedNodes=300,000 decode budget -- and
+// visitor.list entries, well within sfsobject.go's sfs.MaxDecodedNodes=300,000 decode budget -- and
 // completely defeat maxVisitorsDefensiveCeiling's own protection. That was the wrong model to begin
 // with: an attacker-controlled field is not itself an enforcement mechanism against that same
 // attacker, precisely the reasoning buildings.go's maxCollectibleBuildingsPerRun doc comment gives
@@ -104,11 +105,11 @@ const maxVisitorsUpperBound = 300
 //
 // The cap bounds the number of RAW `visitor.list` items examined (round 26), not merely the number
 // of valid ones appended to the returned slice. Before round 26, the loop below only stopped once
-// len(out) reached limit -- so a malformed entry (not an *SFSObject, or missing/wrong-typed the
+// len(out) reached limit -- so a malformed entry (not an *sfs.SFSObject, or missing/wrong-typed the
 // required "uid" field via requireFieldType) hit a `continue` that didn't count against the cap at
 // all, since it never reached the append. requireFieldType itself logs a Warn per malformed entry,
-// and the raw `arr.items` slice is bounded only by sfsobject.go's much larger
-// maxDecodedNodes=300,000 decode budget -- so a hostile peer could pad visitor.list with up to
+// and the raw `arr.Items()` slice is bounded only by sfsobject.go's much larger
+// sfs.MaxDecodedNodes=300,000 decode budget -- so a hostile peer could pad visitor.list with up to
 // ~300,000 minimal malformed entries (e.g. objects with no "uid" field) and force this function to
 // scan and log-warn on every single one regardless of how small `limit` was configured, even though
 // the returned slice (and therefore GreetVisitors' own worst-case cost, see
@@ -121,13 +122,13 @@ const maxVisitorsUpperBound = 300
 // coerce to uid=0 via GetLong's own zero-value fallback -- colliding with a genuinely-zero uid, or
 // another wrong-typed one, in FetchBuildings' seenVisitorUUIDs and login.go's dedupeVisitors (the
 // PRIMARY init-push path), silently dropping one of the two as a spurious "duplicate".
-func ParseInitVisitors(initParams *SFSObject) []Visitor {
+func ParseInitVisitors(initParams *sfs.SFSObject) []Visitor {
 	var out []Visitor
 	v, ok := initParams.Get("visitor")
 	if !ok {
 		return out
 	}
-	visitorObj, ok := v.Val.(*SFSObject)
+	visitorObj, ok := v.Val.(*sfs.SFSObject)
 	if !ok {
 		// Round-39 fix: present-but-wrong-typed used to be silently indistinguishable from
 		// genuinely-absent, unlike alliance.go's DonateRecommendedAllianceTech's identical-shape
@@ -143,7 +144,7 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 		// so this stays silent by design.
 		return out
 	}
-	arr, ok := listV.Val.(*SFSArray)
+	arr, ok := listV.Val.(*sfs.SFSArray)
 	if !ok {
 		// See the visitor-field guard's own comment above for the round-39 rationale.
 		slog.Warn("ParseInitVisitors: list field is present but not an array", "type", fmt.Sprintf("%T", listV.Val))
@@ -200,15 +201,15 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 				"maxNum", maxNum, "cap", maxVisitorsDefensiveCeiling)
 		}
 	}
-	if len(arr.items) > limit {
-		slog.Warn("visitor.list longer than cap; truncating", "listLen", len(arr.items), "cap", limit)
+	if len(arr.Items()) > limit {
+		slog.Warn("visitor.list longer than cap; truncating", "listLen", len(arr.Items()), "cap", limit)
 	}
 
-	for i, item := range arr.items {
+	for i, item := range arr.Items() {
 		if i >= limit {
 			break
 		}
-		vi, ok := item.Val.(*SFSObject)
+		vi, ok := item.Val.(*sfs.SFSObject)
 		if !ok {
 			continue
 		}
@@ -231,7 +232,7 @@ func GreetVisitors(conn *GameConn, visitors []Visitor) error {
 	var errs []error
 	for _, v := range visitors {
 		slog.Info("attempting visitor greet", "uid", v.Uid(), "eventId", v.EventId(), "visitorId", v.VisitorId())
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutLong("uid", v.Uid())
 		params.PutInt("operate", 1)
 		_, err := sendAndWait(conn, fmt.Sprintf("visitor greet response (uid %d)", v.Uid()), "visitor.operate", params)

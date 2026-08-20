@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"os"
 	"regexp"
@@ -19,7 +20,7 @@ import (
 // float64's 53-bit exact-integer range, so putJSONValue must prefer an
 // exact int64 (PutLong) and only fall back to a lossy float64 (PutDouble)
 // when the number can't be represented as one. We check the *type tag*
-// SFSObject actually stored, not just the value, since a wrong-but-close
+// sfs.SFSObject actually stored, not just the value, since a wrong-but-close
 // float64 would otherwise pass a value-only comparison.
 // TestOsExitInInteractiveCallsConnCloseExplicitlyFirst is the round-41 regression test for the
 // MINOR finding that RunInteractive's four os.Exit(1) sites (control-pipe stat/non-FIFO/open
@@ -83,13 +84,13 @@ func TestPutJSONValue(t *testing.T) {
 		name   string
 		value  any
 		wantOK bool
-		check  func(t *testing.T, o *SFSObject) // only run when wantOK
+		check  func(t *testing.T, o *sfs.SFSObject) // only run when wantOK
 	}{
 		{
 			name:   "string",
 			value:  "hello",
 			wantOK: true,
-			check: func(t *testing.T, o *SFSObject) {
+			check: func(t *testing.T, o *sfs.SFSObject) {
 				if got := o.GetString("k"); got != "hello" {
 					t.Errorf("GetString() = %q, want %q", got, "hello")
 				}
@@ -99,10 +100,10 @@ func TestPutJSONValue(t *testing.T) {
 			name:   "bool true",
 			value:  true,
 			wantOK: true,
-			check: func(t *testing.T, o *SFSObject) {
+			check: func(t *testing.T, o *sfs.SFSObject) {
 				v, _ := o.Get("k")
-				if v.Type != sfsBool || v.Val != true {
-					t.Errorf("got %+v, want sfsBool(true)", v)
+				if v.Type != sfs.SFSBool || v.Val != true {
+					t.Errorf("got %+v, want sfs.SFSBool(true)", v)
 				}
 			},
 		},
@@ -110,23 +111,23 @@ func TestPutJSONValue(t *testing.T) {
 			name:   "bool false",
 			value:  false,
 			wantOK: true,
-			check: func(t *testing.T, o *SFSObject) {
+			check: func(t *testing.T, o *sfs.SFSObject) {
 				v, _ := o.Get("k")
-				if v.Type != sfsBool || v.Val != false {
-					t.Errorf("got %+v, want sfsBool(false)", v)
+				if v.Type != sfs.SFSBool || v.Val != false {
+					t.Errorf("got %+v, want sfs.SFSBool(false)", v)
 				}
 			},
 		},
 		{
 			// 19 digits: past float64's exact-integer range but still
-			// within int64, i.e. an ordinary uuid. Must land as sfsLong.
+			// within int64, i.e. an ordinary uuid. Must land as sfs.SFSLong.
 			name:   "json.Number that fits int64 uses PutLong",
 			value:  json.Number("1234567890123456789"),
 			wantOK: true,
-			check: func(t *testing.T, o *SFSObject) {
+			check: func(t *testing.T, o *sfs.SFSObject) {
 				v, _ := o.Get("k")
-				if v.Type != sfsLong {
-					t.Fatalf("got type %d, want sfsLong (%d)", v.Type, sfsLong)
+				if v.Type != sfs.SFSLong {
+					t.Fatalf("got type %d, want sfs.SFSLong (%d)", v.Type, sfs.SFSLong)
 				}
 				if got := o.GetLong("k"); got != 1234567890123456789 {
 					t.Errorf("GetLong() = %d, want 1234567890123456789", got)
@@ -139,10 +140,10 @@ func TestPutJSONValue(t *testing.T) {
 			name:   "fractional json.Number falls back to PutDouble",
 			value:  json.Number("123.45"),
 			wantOK: true,
-			check: func(t *testing.T, o *SFSObject) {
+			check: func(t *testing.T, o *sfs.SFSObject) {
 				v, _ := o.Get("k")
-				if v.Type != sfsDouble {
-					t.Fatalf("got type %d, want sfsDouble (%d)", v.Type, sfsDouble)
+				if v.Type != sfs.SFSDouble {
+					t.Fatalf("got type %d, want sfs.SFSDouble (%d)", v.Type, sfs.SFSDouble)
 				}
 				if got, ok := v.Val.(float64); !ok || got != 123.45 {
 					t.Errorf("got %v, want 123.45", v.Val)
@@ -157,10 +158,10 @@ func TestPutJSONValue(t *testing.T) {
 			name:   "int64-overflowing json.Number falls back to PutDouble",
 			value:  json.Number("99999999999999999999"),
 			wantOK: true,
-			check: func(t *testing.T, o *SFSObject) {
+			check: func(t *testing.T, o *sfs.SFSObject) {
 				v, _ := o.Get("k")
-				if v.Type != sfsDouble {
-					t.Fatalf("got type %d, want sfsDouble (%d)", v.Type, sfsDouble)
+				if v.Type != sfs.SFSDouble {
+					t.Fatalf("got type %d, want sfs.SFSDouble (%d)", v.Type, sfs.SFSDouble)
 				}
 			},
 		},
@@ -192,7 +193,7 @@ func TestPutJSONValue(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			o := NewSFSObject()
+			o := sfs.NewSFSObject()
 			got := putJSONValue(o, "k", c.value)
 			if got != c.wantOK {
 				t.Fatalf("putJSONValue() = %v, want %v", got, c.wantOK)
@@ -217,7 +218,7 @@ func TestPutJSONValue(t *testing.T) {
 // explicitly avoid echoing raw operator text for the identical reason: it could carry a credential
 // the operator meant to pass as params). An out-of-both-int64-and-float64-range JSON number
 // literal (e.g. 1e400, which strconv.ParseFloat documents as returning +Inf with a non-nil range
-// error) under a sensitive key name must now redact the logged value; a non-sensitive key must
+// error) under a sensitive key name must now sfs.Redact the logged value; a non-sensitive key must
 // keep logging the real value, matching every other wrong-typed-field Warn/Error in this codebase.
 func TestPutJSONValueRedactsSensitiveKeyOnUnparseableNumber(t *testing.T) {
 	tests := []struct {
@@ -235,7 +236,7 @@ func TestPutJSONValueRedactsSensitiveKeyOnUnparseableNumber(t *testing.T) {
 			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 			defer slog.SetDefault(orig)
 
-			o := NewSFSObject()
+			o := sfs.NewSFSObject()
 			got := putJSONValue(o, tt.key, json.Number("1e400"))
 			if got {
 				t.Fatalf("putJSONValue() = true, want false for an out-of-range number")

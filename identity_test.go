@@ -177,12 +177,12 @@ func TestSaveLoginKeyTightensExistingFilePermissions(t *testing.T) {
 // TestSaveIdentityFieldRejectsOversizedValue is the round-46 regression test for the MAJOR finding
 // that SaveLoginKey/SaveGameUid/SaveUsername persisted a server-supplied value with no length cap
 // at all -- the same wire-tag-equivalence gap round 45 closed for mail.go's uid field: GetString
-// (sfsobject.go) can't distinguish the 65535-byte-capped sfsUtfString wire tag from the far larger
-// sfsText tag, both of which decode to the same Go string, so a server response tagging
-// loginKey/gameUid/un/gameUserName as sfsText could previously smuggle an oversized value straight
+// (sfsobject.go) can't distinguish the 65535-byte-capped sfs.SFSUtfString wire tag from the far larger
+// sfs.SFSText tag, both of which decode to the same Go string, so a server response tagging
+// loginKey/gameUid/un/gameUserName as sfs.SFSText could previously smuggle an oversized value straight
 // into the in-memory identity AND onto disk -- and since BuildLoginParams/DoCrossServerLogin
 // unconditionally re-embed these persisted values into every future login request via
-// PutUtfString (hard-capped at 65535 bytes by writeUtfString), an oversized value would then
+// PutUtfString (hard-capped at 65535 bytes by sfs.WriteUtfString), an oversized value would then
 // permanently break every subsequent login attempt until an operator manually intervened. Proves
 // all three Save* methods reject a one-byte-over-cap value with an error, leaving BOTH the
 // in-memory field and the on-disk state file untouched (still holding whatever value, if any, was

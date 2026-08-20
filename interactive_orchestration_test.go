@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"os"
@@ -44,7 +45,7 @@ func TestHandleInteractiveLineAbortsOnUnsupportedValue(t *testing.T) {
 }
 
 // TestHandleInteractiveLineSendsParsedCommand checks the normal path: a well-formed
-// "cmd.name {json}" line is parsed into an SFSObject and sent as an Extension call with that exact
+// "cmd.name {json}" line is parsed into an sfs.SFSObject and sent as an Extension call with that exact
 // cmd, and a matching reply within the window is read back without handleInteractiveLine erroring
 // out (it just logs -- there's no return value to assert on, so we assert on what the fake server
 // on the other end of the pipe actually received).
@@ -53,7 +54,7 @@ func TestHandleInteractiveLineSendsParsedCommand(t *testing.T) {
 
 	type got struct {
 		cmd    string
-		params *SFSObject
+		params *sfs.SFSObject
 	}
 	gotCh := make(chan got, 1)
 	go func() {
@@ -66,7 +67,7 @@ func TestHandleInteractiveLineSendsParsedCommand(t *testing.T) {
 			return
 		}
 		gotCh <- got{msg.Cmd, msg.Params}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension(msg.Cmd, resp)
 	}()
@@ -121,7 +122,7 @@ func TestHandleInteractiveLineRedactsCredentialFields(t *testing.T) {
 		if !ok {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("loginKey", secretLoginKey)
 		resp.PutUtfString("gameUid", "g1")
 		_ = server.SendExtension(msg.Cmd, resp)
@@ -322,7 +323,7 @@ func TestHandleInteractiveLineSendsBareCommandWithNoSpace(t *testing.T) {
 
 	type got struct {
 		cmd    string
-		params *SFSObject
+		params *sfs.SFSObject
 	}
 	gotCh := make(chan got, 1)
 	go func() {
@@ -335,7 +336,7 @@ func TestHandleInteractiveLineSendsBareCommandWithNoSpace(t *testing.T) {
 			return
 		}
 		gotCh <- got{msg.Cmd, msg.Params}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension(msg.Cmd, resp)
 	}()
@@ -361,7 +362,7 @@ func TestHandleInteractiveLineSendsBareCommandWithNoSpace(t *testing.T) {
 	if g.cmd != "some.command" {
 		t.Errorf("Cmd = %q, want some.command", g.cmd)
 	}
-	if n := len(g.params.keys); n != 0 {
+	if n := len(g.params.Keys()); n != 0 {
 		t.Errorf("params has %d entries, want 0 for a bare command with no JSON", n)
 	}
 }
@@ -428,8 +429,8 @@ func TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit(t *testing.T) {
 // to abort the entire -interactive session (os.Exit(1)) over a single, well-framed-but-undecodable
 // push arriving while an operator command's response was awaited -- the identical class of bug
 // login.go's waitForInitPush had before its round-48 fix, closed at the shared waitFor root cause
-// in round 49. A corrupt push is not a genuine net.Error (ReadPacket already fully consumed its
-// bytes off the wire before DecodeObject ever ran, so the stream stays in sync), yet the pre-fix
+// in round 49. A corrupt push is not a genuine net.Error (sfs.ReadPacket already fully consumed its
+// bytes off the wire before sfs.DecodeObject ever ran, so the stream stays in sync), yet the pre-fix
 // code treated it identically to a dead connection. Uses a real net.Pipe connection (unlike
 // TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit's synthetic fakeNetErrConn) since the
 // corruption must survive actual packet framing/decoding to reproduce the bug.
@@ -443,7 +444,7 @@ func TestHandleInteractiveLineSurvivesCorruptPushWhileWaitingForResponse(t *test
 		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
 			return
 		}
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension("some.command", resp)
 	}()
@@ -523,12 +524,12 @@ func TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits(t *testing.T) {
 // closer for TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits above -- see that test's
 // sibling, TestCollectAllAbortsRemainingActionsOnRealGracefulClose
 // (buildings_orchestration_test.go), for the full rationale: fakeNetErrConn injects an
-// already-a-net.Error fake, never exercising the real bare-io.EOF-through-ReadPacket-through-
-// deadConnError conversion path (packet.go's wrapIfClosed/deadConnError, round 24).
+// already-a-net.Error fake, never exercising the real bare-io.EOF-through-sfs.ReadPacket-through-
+// sfs.DeadConnError conversion path (packet.go's sfs.WrapIfClosed/sfs.DeadConnError, round 24).
 //
 // realEOFConn (buildings_orchestration_test.go, same package) drives a real io.EOF through an actual
 // GameConn instead, mirroring conn_wait_test.go's TestReadEnvelopeGracefulCloseIsNonTimeoutNetError,
-// so waitForCmd's read fails via the real deadConnError conversion -- what a real peer's graceful TCP
+// so waitForCmd's read fails via the real sfs.DeadConnError conversion -- what a real peer's graceful TCP
 // close actually produces -- not a synthetic net.Error stand-in. Same subprocess re-exec idiom as
 // TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits above: handleInteractiveLine calls
 // os.Exit(1) directly on this path, so it can't be driven to completion in-process without also

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"lastwar-client/internal/sfs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,7 +26,7 @@ var sinkStartRe = regexp.MustCompile(`\b(slog\.(Info|Warn|Error|Debug|Log)|fmt\.
 // stringCallRe matches a raw-dump call this guard treats as dangerous when it appears inside a
 // sink call. Hoisted to package level for the same reason as sinkStartRe above.
 //
-// Round-14 addition: since SFSObject.String() itself is now safe by default (it delegates to
+// Round-14 addition: since sfs.SFSObject.String() itself is now safe by default (it delegates to
 // StringRedacted(), see sfsobject.go), the raw, unredacted dump that used to live under the name
 // String() was renamed to the unexported unsafeRawString(). Round 15 then deleted
 // unsafeRawString() (and its formatSFSValue() recursion helper) entirely as dead code, once a
@@ -33,7 +34,7 @@ var sinkStartRe = regexp.MustCompile(`\b(slog\.(Info|Warn|Error|Debug|Log)|fmt\.
 // codebase today. This pattern still flags both names: .unsafeRawString() is kept purely as
 // defense-in-depth against a hypothetical future reintroduction of that escape hatch, and plain
 // .String() for the same historical reasons (see TestNoRawSFSObjectDumpInLogsOrErrors's doc
-// comment for why that's kept even though it's no longer unsafe for SFSObject specifically).
+// comment for why that's kept even though it's no longer unsafe for sfs.SFSObject specifically).
 // Neither alternative matches anything dangerous in this codebase as it stands today.
 var stringCallRe = regexp.MustCompile(`\.(String|unsafeRawString)\(\)`)
 
@@ -41,7 +42,7 @@ var stringCallRe = regexp.MustCompile(`\.(String|unsafeRawString)\(\)`)
 // finding), broadened in round 12 after the audit found the original guard's blind spots let a
 // real instance (decode.go's -decode-stream tool, buildings.go's -list-buildings dump) slip past
 // undetected: the credential-leak bug class this audit series has hunted -- a decoded/outgoing
-// SFSObject's raw .String() dump flowing into a log line, wrapped error, or printed output, where
+// sfs.SFSObject's raw .String() dump flowing into a log line, wrapped error, or printed output, where
 // it might carry a live loginKey/accessToken/airKey/shumeiBoxId/verifyCode/deviceId/chatToken/tk
 // -- has recurred across many call sites despite each individual instance being fixed as found.
 // This test is the catch: it scans every non-test .go source file for a slog.*/fmt.*/log.Print*
@@ -70,8 +71,8 @@ var stringCallRe = regexp.MustCompile(`\.(String|unsafeRawString)\(\)`)
 // TestStripStringsAndComments and TestJoinSinkCallClosesParenCountBypass for the regression
 // coverage that proves this.
 //
-// Round-14 change of purpose: SFSObject.String() itself is now safe by default -- it delegates to
-// StringRedacted() (see sfsobject.go), so a bare .String() call on an SFSObject can no longer leak
+// Round-14 change of purpose: sfs.SFSObject.String() itself is now safe by default -- it delegates to
+// StringRedacted() (see sfsobject.go), so a bare .String() call on an sfs.SFSObject can no longer leak
 // a credential no matter what sink it flows into, and neither can an implicit fmt.Stringer
 // auto-invocation via %v/Println/slog's Any-kind formatting (a path this text-scanning guard could
 // never see anyway, since no literal ".String()" appears in source for that -- closing that gap
@@ -88,14 +89,14 @@ var stringCallRe = regexp.MustCompile(`\.(String|unsafeRawString)\(\)`)
 // flags ".unsafeRawString()" in case that name is ever reintroduced by a future contributor
 // reaching for the same "I need the raw dump" pattern, and flags plain ".String()" for the same
 // historical reasons (four rounds of this bug class living under that exact name is reason enough
-// to keep watching it, even though it's no longer unsafe for SFSObject specifically) -- see the
-// allowlist entries below for the SFSObject.String() call sites, which are now unconditionally
+// to keep watching it, even though it's no longer unsafe for sfs.SFSObject specifically) -- see the
+// allowlist entries below for the sfs.SFSObject.String() call sites, which are now unconditionally
 // safe rather than "safe because we checked the data."
 func TestNoRawSFSObjectDumpInLogsOrErrors(t *testing.T) {
 	// allowlist maps "file.go:<trimmed text of the line where the sink call starts>" to why that
 	// call is safe. Every entry here was individually confirmed safe by this repo's own audit
 	// rounds -- add a new entry only with the same level of scrutiny: confirm the specific
-	// message/data this line logs can never carry a credential field (see sensitiveSFSKeys in
+	// message/data this line logs can never carry a credential field (see sfs.SensitiveSFSKeys in
 	// sfsobject.go for the current known list), not just that it seems unlikely. Round 12's audit
 	// specifically re-verified every entry below against this repo's own docs/*.mdx and found two
 	// (the Handshake-response entries) were WRONG -- the response does carry a session token
@@ -105,7 +106,7 @@ func TestNoRawSFSObjectDumpInLogsOrErrors(t *testing.T) {
 		`conn.go:slog.Info(label, "cmd", msg.Cmd, "response", msg.Params.String())`:                                        "msg.Params.String() is now unconditionally safe (round 14: String() delegates to StringRedacted()) -- same reasoning as the buildings.go entry above",
 		`conn.go:slog.Warn(label+" no-op (expected)", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.String())`: "same reasoning as the conn.go entry above",
 		`conn.go:slog.Warn(label+" no-op (status=0, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.String())`:      "same reasoning as the conn.go entry above",
-		`interactive.go:slog.Info("shutting down", "signal", sig.String())`:                                                "sig is an os.Signal, not an SFSObject -- String() here is the standard library's, unrelated to this bug class",
+		`interactive.go:slog.Info("shutting down", "signal", sig.String())`:                                                "sig is an os.Signal, not an sfs.SFSObject -- String() here is the standard library's, unrelated to this bug class",
 		`interactive.go:slog.Error("no matching response within "+defaultCmdTimeout.String(), "error", err)`:               "defaultCmdTimeout is a time.Duration (const defaultCmdTimeout = 8 * time.Second, conn.go) -- String() here is the standard library's Duration.String(), unrelated to this bug class, same as the sig/val entries immediately above",
 	}
 
@@ -152,8 +153,8 @@ func TestNoRawSFSObjectDumpInLogsOrErrors(t *testing.T) {
 			}
 			t.Errorf("%s:%d: a slog.*/fmt.*/log.Print* call embeds a raw .String() call -- this is exactly the "+
 				"credential-leak pattern this repo has hit repeatedly (loginKey/accessToken/airKey/shumeiBoxId/"+
-				"verifyCode/deviceId/chatToken/tk can ride along in a decoded SFSObject with no field-level "+
-				"redaction). Use SFSObject.StringRedacted() instead, or if this specific line is genuinely safe "+
+				"verifyCode/deviceId/chatToken/tk can ride along in a decoded sfs.SFSObject with no field-level "+
+				"redaction). Use sfs.SFSObject.StringRedacted() instead, or if this specific line is genuinely safe "+
 				"(confirmed no credential field can ever appear in this data), add it to the allowlist in this "+
 				"test with a one-line justification.\n\tline: %s", relName, startIdx+1, trimmedStart)
 		}
@@ -174,16 +175,16 @@ func TestNoRawSFSObjectDumpInLogsOrErrors(t *testing.T) {
 // used by TestNoSensitiveGetStringLoggedRaw (below) to find call sites that extract a field's raw
 // Go string value by key. Unlike a `.String()`/`.StringRedacted()` dump of a whole object,
 // GetString(key) returns a bare string with no field-name context at all once it's in the caller's
-// hands, so it bypasses StringRedacted()'s key-by-key sensitiveSFSKeys check entirely -- there is
-// nothing left downstream that could redact it.
+// hands, so it bypasses StringRedacted()'s key-by-key sfs.SensitiveSFSKeys check entirely -- there is
+// nothing left downstream that could sfs.Redact it.
 var getStringSensitiveKeyRe = regexp.MustCompile(`\.GetString\("(\w+)"\)`)
 
 // redactWrappedGetStringRe matches the one form TestNoSensitiveGetStringLoggedRaw treats as SAFE:
-// the extracted value immediately wrapped in redact() (login.go's own first4...last4 shortening
-// helper), e.g. `redact(msg2.Params.GetString("loginKey"))` -- the pattern every current call site
+// the extracted value immediately wrapped in sfs.Redact() (login.go's own first4...last4 shortening
+// helper), e.g. `sfs.Redact(msg2.Params.GetString("loginKey"))` -- the pattern every current call site
 // that legitimately logs a sensitive field's actual *value* (as opposed to just its length) already
 // uses.
-var redactWrappedGetStringRe = regexp.MustCompile(`redact\([\w.]*GetString\("(\w+)"\)\)`)
+var redactWrappedGetStringRe = regexp.MustCompile(`sfs.Redact\([\w.]*GetString\("(\w+)"\)\)`)
 
 // sensitiveGetStringOccurrence describes one `.GetString("key")` occurrence found within a single
 // sink call's joined source text (see findUnsafeSensitiveGetStringCalls) -- key is the sensitive key
@@ -197,14 +198,14 @@ type sensitiveGetStringOccurrence struct {
 
 // findUnsafeSensitiveGetStringCalls scans rawJoined (the raw, unstripped joined text of one
 // slog.*/fmt.*/log.Print* sink call -- see joinSinkCall) for every `.GetString("key")` occurrence
-// whose key is registered in sensitiveSFSKeys and that is NOT wrapped in redact(...) AT THAT SAME
+// whose key is registered in sfs.SensitiveSFSKeys and that is NOT wrapped in sfs.Redact(...) AT THAT SAME
 // OCCURRENCE.
 //
 // Round-29 fix: this used to be computed differently, via a `safeKeys map[string]bool` populated
 // per matched KEY NAME from every redactWrappedGetStringRe match anywhere in the block, then ANY
 // getStringSensitiveKeyRe match for that key name was skipped if safeKeys[key] was true. That is a
 // real false-negative gap: a hypothetical line like
-// `slog.Info("x", "masked", redact(o.GetString("loginKey")), "raw", o.GetString("loginKey"))` would
+// `slog.Info("x", "masked", sfs.Redact(o.GetString("loginKey")), "raw", o.GetString("loginKey"))` would
 // set safeKeys["loginKey"]=true from the wrapped occurrence, and the SECOND, genuinely-unsafe raw
 // occurrence of GetString("loginKey") in the SAME sink call would then also be incorrectly skipped,
 // purely because it shares a key name with the safe one elsewhere in the block.
@@ -223,7 +224,7 @@ func findUnsafeSensitiveGetStringCalls(rawJoined string) []sensitiveGetStringOcc
 	for _, m := range getStringSensitiveKeyRe.FindAllStringSubmatchIndex(rawJoined, -1) {
 		start, end := m[0], m[1]
 		key := rawJoined[m[2]:m[3]]
-		if !sensitiveSFSKeys[key] {
+		if !sfs.SensitiveSFSKeys[key] {
 			continue
 		}
 		safe := false
@@ -243,7 +244,7 @@ func findUnsafeSensitiveGetStringCalls(rawJoined string) []sensitiveGetStringOcc
 
 // TestNoSensitiveGetStringLoggedRaw is the round-28 sibling of TestNoRawSFSObjectDumpInLogsOrErrors
 // above, closing a related but distinct gap in the same credential-leak bug class. That test scans
-// for a raw .String()/.StringRedacted()-style dump of a *whole* SFSObject reaching a log/error sink;
+// for a raw .String()/.StringRedacted()-style dump of a *whole* sfs.SFSObject reaching a log/error sink;
 // this one scans for a *single field's* raw value reaching one via .GetString(key) -- a call that
 // returns a bare Go string with no way for anything downstream to know which key it came from, so
 // it can never be redacted after the fact the way a full StringRedacted() dump can.
@@ -251,7 +252,7 @@ func findUnsafeSensitiveGetStringCalls(rawJoined string) []sensitiveGetStringOcc
 // This is exactly the shape of the round-28 finding: login.go used to call
 // `slog.Info("login OK", "un", env.Content.GetString("un"))`, logging the server's real returned
 // account username in cleartext at Info level on every successful login -- even after "un" was
-// registered in sensitiveSFSKeys (sfsobject.go), since StringRedacted()'s redaction never runs on
+// registered in sfs.SensitiveSFSKeys (sfsobject.go), since StringRedacted()'s redaction never runs on
 // this call path at all.
 //
 // Scans every non-test .go source file for a slog.*/fmt.*/log.Print* sink call, using
@@ -261,10 +262,10 @@ func findUnsafeSensitiveGetStringCalls(rawJoined string) []sensitiveGetStringOcc
 // erases string-literal CONTENTS (so a stray paren inside one can't confuse the paren tally), which
 // would erase the very key name -- `"un"` inside `GetString("un")` -- this scan needs to see. It
 // then delegates to findUnsafeSensitiveGetStringCalls (above) to flag a `.GetString("key")` call for
-// a key registered in sensitiveSFSKeys, unless that same OCCURRENCE (not just the same key name
+// a key registered in sfs.SensitiveSFSKeys, unless that same OCCURRENCE (not just the same key name
 // somewhere in the block -- see that function's own doc comment for the round-29 fix this
-// implements) is wrapped in redact(...) (the one safe pattern this repo uses for logging a
-// sensitive field's value, e.g. login.go's `redact(msg2.Params.GetString("loginKey"))`).
+// implements) is wrapped in sfs.Redact(...) (the one safe pattern this repo uses for logging a
+// sensitive field's value, e.g. login.go's `sfs.Redact(msg2.Params.GetString("loginKey"))`).
 //
 // Known, accepted limitation, mirroring the sibling test's own documented gap: this cannot catch a
 // GetString(...) result stashed in a local variable and logged several statements later -- only the
@@ -274,7 +275,7 @@ func findUnsafeSensitiveGetStringCalls(rawJoined string) []sensitiveGetStringOcc
 func TestNoSensitiveGetStringLoggedRaw(t *testing.T) {
 	// allowlist mirrors TestNoRawSFSObjectDumpInLogsOrErrors' own allowlist shape: "file.go:<trimmed
 	// sink-call start line>" -> justification. Empty today -- every current GetString(sensitiveKey)
-	// call embedded directly in a sink is either wrapped in redact() (safe, and never matched by
+	// call embedded directly in a sink is either wrapped in sfs.Redact() (safe, and never matched by
 	// this scan to begin with) or was fixed by the round-28 change this test guards.
 	allowlist := map[string]string{}
 
@@ -325,10 +326,10 @@ func TestNoSensitiveGetStringLoggedRaw(t *testing.T) {
 					continue
 				}
 				t.Errorf("%s:%d: a slog.*/fmt.*/log.Print* call embeds .GetString(%q) directly -- %q is a "+
-					"registered sensitive key (sensitiveSFSKeys, sfsobject.go), so this bypasses "+
+					"registered sensitive key (sfs.SensitiveSFSKeys, sfsobject.go), so this bypasses "+
 					"StringRedacted()'s field-by-field redaction entirely and logs the real value in "+
 					"cleartext. Log its length instead (mirroring the emailLen/usernameLen pattern), or "+
-					"wrap it in redact(...) if the value itself is genuinely useful to log, or add this "+
+					"wrap it in sfs.Redact(...) if the value itself is genuinely useful to log, or add this "+
 					"line to the allowlist in this test with a one-line justification if it's genuinely "+
 					"safe.\n\tline: %s", relName, lineNum, occ.key, occ.key, trimmedStart)
 			}
@@ -714,7 +715,7 @@ func TestGetStringSensitiveKeyReMatches(t *testing.T) {
 
 // TestRedactWrappedGetStringReMatches is a small table-driven test confirming
 // redactWrappedGetStringRe (round-28) matches the one safe form -- a GetString(key) call
-// immediately wrapped in redact(...) -- while not matching a bare, unwrapped GetString(key) call or
+// immediately wrapped in sfs.Redact(...) -- while not matching a bare, unwrapped GetString(key) call or
 // one wrapped in something else. Same round-29 "no dedicated test" gap as getStringSensitiveKeyRe
 // above.
 func TestRedactWrappedGetStringReMatches(t *testing.T) {
@@ -724,10 +725,10 @@ func TestRedactWrappedGetStringReMatches(t *testing.T) {
 		want    bool
 		wantKey string
 	}{
-		{"redact-wrapped call on a chained selector matches", `redact(msg2.Params.GetString("loginKey"))`, true, "loginKey"},
-		{"redact-wrapped call on a bare receiver matches", `redact(o.GetString("at"))`, true, "at"},
+		{"sfs.Redact-wrapped call on a chained selector matches", `sfs.Redact(msg2.Params.GetString("loginKey"))`, true, "loginKey"},
+		{"sfs.Redact-wrapped call on a bare receiver matches", `sfs.Redact(o.GetString("at"))`, true, "at"},
 		{"bare unwrapped GetString does not match", `o.GetString("loginKey")`, false, ""},
-		{"GetString wrapped in something other than redact does not match", `strings.ToUpper(o.GetString("loginKey"))`, false, ""},
+		{"GetString wrapped in something other than sfs.Redact does not match", `strings.ToUpper(o.GetString("loginKey"))`, false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -746,17 +747,17 @@ func TestRedactWrappedGetStringReMatches(t *testing.T) {
 // TestFindUnsafeSensitiveGetStringCallsCatchesSameKeyPositionalFalseNegative is the round-29
 // regression test for the false-negative gap findUnsafeSensitiveGetStringCalls' own doc comment
 // describes: a genuinely-unsafe raw GetString(key) occurrence in the same sink call as a safe
-// redact(...)-wrapped occurrence of the SAME key name must still be caught, not incorrectly skipped
+// sfs.Redact(...)-wrapped occurrence of the SAME key name must still be caught, not incorrectly skipped
 // just because a key-name-only safety check (the pre-round-29 logic) would have marked that whole
 // key name as safe from the wrapped occurrence alone.
 func TestFindUnsafeSensitiveGetStringCallsCatchesSameKeyPositionalFalseNegative(t *testing.T) {
 	// A sanity check that "loginKey" really is registered as sensitive, so this test fixture
 	// actually exercises the intended code path.
-	if !sensitiveSFSKeys["loginKey"] {
-		t.Fatal("test fixture assumes \"loginKey\" is a registered sensitive key (sensitiveSFSKeys, sfsobject.go)")
+	if !sfs.SensitiveSFSKeys["loginKey"] {
+		t.Fatal("test fixture assumes \"loginKey\" is a registered sensitive key (sfs.SensitiveSFSKeys, sfsobject.go)")
 	}
 
-	rawJoined := `slog.Info("x", "masked", redact(o.GetString("loginKey")), "raw", o.GetString("loginKey"))`
+	rawJoined := `slog.Info("x", "masked", sfs.Redact(o.GetString("loginKey")), "raw", o.GetString("loginKey"))`
 
 	got := findUnsafeSensitiveGetStringCalls(rawJoined)
 	if len(got) != 1 {
@@ -767,10 +768,10 @@ func TestFindUnsafeSensitiveGetStringCallsCatchesSameKeyPositionalFalseNegative(
 		t.Errorf("flagged occurrence key = %q, want %q", got[0].key, "loginKey")
 	}
 	// The flagged occurrence must be the SECOND (unwrapped) one, not the first (safely wrapped) one
-	// -- confirm its offset falls after the redact(...) call closes.
+	// -- confirm its offset falls after the sfs.Redact(...) call closes.
 	wrapEnd := strings.Index(rawJoined, "))") + len("))")
 	if got[0].offset < wrapEnd {
-		t.Errorf("flagged occurrence at offset %d falls inside/before the redact(...)-wrapped call "+
+		t.Errorf("flagged occurrence at offset %d falls inside/before the sfs.Redact(...)-wrapped call "+
 			"(which ends at %d) -- the WRAPPED occurrence was incorrectly flagged instead of the raw one",
 			got[0].offset, wrapEnd)
 	}
@@ -785,7 +786,7 @@ func TestFindUnsafeSensitiveGetStringCallsCatchesSameKeyPositionalFalseNegative(
 	}
 	oldFoundUnsafe := false
 	for _, m := range getStringSensitiveKeyRe.FindAllStringSubmatch(rawJoined, -1) {
-		if sensitiveSFSKeys[m[1]] && !oldSafeKeys[m[1]] {
+		if sfs.SensitiveSFSKeys[m[1]] && !oldSafeKeys[m[1]] {
 			oldFoundUnsafe = true
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"os"
@@ -293,7 +294,7 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		return
 	}
 
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	if rest != "" {
 		// UseNumber: uuids routinely exceed float64's 53-bit exact-integer
 		// range (2^53 ~ 16 digits; uuids here run to 19), so the default
@@ -407,7 +408,7 @@ func handleInteractiveLine(conn *GameConn, line string) {
 	slog.Info("received response", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
 }
 
-func putJSONValue(o *SFSObject, key string, v any) bool {
+func putJSONValue(o *sfs.SFSObject, key string, v any) bool {
 	switch val := v.(type) {
 	case string:
 		o.PutUtfString(key, val)
@@ -429,7 +430,7 @@ func putJSONValue(o *SFSObject, key string, v any) bool {
 			// etc.) used to reach this branch and log its raw value in cleartext, unlike a
 			// successfully-parsed value, which only ever reaches the wire via params.StringRedacted().
 			logVal := val.String()
-			if isSensitiveSFSKey(key) {
+			if sfs.IsSensitiveSFSKey(key) {
 				logVal = "[REDACTED]"
 			}
 			slog.Error("unparseable JSON number", "key", key, "value", logVal)

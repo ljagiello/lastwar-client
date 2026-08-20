@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"lastwar-client/internal/sfs"
+	"testing"
+)
 
 // TestClaimVIPDailyLoginScoreSendsExactCmdAndEmptyParams checks the plain success path: per
 // vip.go's own doc comment, ClaimVIPDailyLoginScore is genuinely parameterless on the wire (the
@@ -24,8 +27,8 @@ func TestClaimVIPDailyLoginScoreSendsExactCmdAndEmptyParams(t *testing.T) {
 			return
 		}
 		gotCmd = msg.Cmd
-		gotParamCount = len(msg.Params.keys)
-		resp := NewSFSObject()
+		gotParamCount = len(msg.Params.Keys())
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension(msg.Cmd, resp)
 	}()
@@ -52,7 +55,7 @@ func TestClaimVIPDailyLoginScoreBenignAlreadyClaimedToday(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("errorCode", "120289") // benignErrorCodes: "no score" -- already claimed today
 		readAndReply(server, "", resp)
 	}()
@@ -64,7 +67,7 @@ func TestClaimVIPDailyLoginScoreBenignAlreadyClaimedToday(t *testing.T) {
 
 // TestClaimVIPDailyFreebieSendsExactCmdAndEmptyParams checks the plain success path: per vip.go's
 // own doc comment, ClaimVIPDailyFreebie is also parameterless on the wire (the decompiled
-// OnCreate declares an actId argument but never actually puts it on the SFSObject), so this
+// OnCreate declares an actId argument but never actually puts it on the sfs.SFSObject), so this
 // asserts both the exact cmd string sent and that no params are attached.
 func TestClaimVIPDailyFreebieSendsExactCmdAndEmptyParams(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
@@ -83,8 +86,8 @@ func TestClaimVIPDailyFreebieSendsExactCmdAndEmptyParams(t *testing.T) {
 			return
 		}
 		gotCmd = msg.Cmd
-		gotParamCount = len(msg.Params.keys)
-		resp := NewSFSObject()
+		gotParamCount = len(msg.Params.Keys())
+		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension(msg.Cmd, resp)
 	}()
@@ -112,7 +115,7 @@ func TestClaimVIPDailyFreebieBenignAlreadyClaimedToday(t *testing.T) {
 	client, server := newPipeGameConnPair(t)
 
 	go func() {
-		resp := NewSFSObject()
+		resp := sfs.NewSFSObject()
 		resp.PutUtfString("errorCode", "120289") // benignErrorCodes: "no reward" -- already claimed today
 		readAndReply(server, "", resp)
 	}()

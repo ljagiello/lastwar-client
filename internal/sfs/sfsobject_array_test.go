@@ -1,4 +1,4 @@
-package main
+package sfs
 
 import (
 	"bytes"
@@ -154,7 +154,7 @@ func TestArrayDecodeRoundTrips(t *testing.T) {
 
 // TestArrayEncodeDecodeRoundTrips proves writeValuePayload's array/text cases -- added to close
 // the audit finding that the encode path had no cases for any primitive-array wire type or
-// sfsText, though decode fully supported them -- produce bytes that readValuePayload decodes back
+// SFSText, though decode fully supported them -- produce bytes that readValuePayload decodes back
 // to the original value. Unlike TestArrayDecodeRoundTrips above (which only proves decode parses
 // hand-built bytes), this drives both directions through the real encode and decode code paths.
 func TestArrayEncodeDecodeRoundTrips(t *testing.T) {
@@ -236,9 +236,9 @@ func TestArrayEncodeDecodeRoundTrips(t *testing.T) {
 	t.Run("Text", func(t *testing.T) {
 		want := "a long-form text field"
 		var buf bytes.Buffer
-		writeValuePayload(&buf, SFSValue{sfsText, want})
+		writeValuePayload(&buf, SFSValue{SFSText, want})
 		r := &sfsReader{data: buf.Bytes()}
-		v, err := r.readValuePayload(sfsText)
+		v, err := r.readValuePayload(SFSText)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -258,14 +258,14 @@ func TestNestedCountRejectsNegative(t *testing.T) {
 	})
 	t.Run("SFSObject", func(t *testing.T) {
 		r := &sfsReader{data: []byte{0xFF, 0xFF}} // count = -1
-		if _, err := r.readValuePayload(sfsObjectType); err == nil {
+		if _, err := r.readValuePayload(SFSObjectType); err == nil {
 			t.Fatal("expected error for negative nested object count, got nil")
 		}
 	})
 }
 
 func TestNestingDepthRejected(t *testing.T) {
-	// Comfortably over maxNestDepth. Each level is a 1-byte tag + 2-byte count=1, so this stays
+	// Comfortably over MaxNestDepth. Each level is a 1-byte tag + 2-byte count=1, so this stays
 	// small and the depth check aborts well before any real recursion risk -- this test should
 	// run instantly, not build a giant structure.
 	const levels = 200
@@ -274,7 +274,7 @@ func TestNestingDepthRejected(t *testing.T) {
 	for i := 0; i < levels-1; i++ {
 		buf = append(buf, sfsArrayType, 0, 1) // one more nested array: tag byte + count=1
 	}
-	buf = append(buf, sfsBool, 1) // innermost leaf value: tag=bool, value=true
+	buf = append(buf, SFSBool, 1) // innermost leaf value: tag=bool, value=true
 
 	r := &sfsReader{data: buf}
 	_, err := r.readValuePayload(sfsArrayType)
@@ -284,20 +284,20 @@ func TestNestingDepthRejected(t *testing.T) {
 }
 
 // TestNestingDepthExactlyAtCapSucceeds is the round-43 regression test for the MINOR finding that
-// maxNestDepth's strict greater-than boundary (r.depth > maxNestDepth, sfsobject.go) had no
+// MaxNestDepth's strict greater-than boundary (r.depth > MaxNestDepth, sfsobject.go) had no
 // exact-boundary test -- TestNestingDepthRejected above only proves 200 levels (comfortably OVER
 // the 64-level cap) is rejected, never that exactly 64 levels -- the boundary value itself -- is
 // still accepted, which would catch an off-by-one `>=` mutation that rejected one level early.
 // Mirrors this round's sibling boundary tests (TestCollectAllExactlyAtCapDoesNotTruncate,
 // TestParseInitVisitorsMaxNumExactlyAtUpperBoundDoesNotClamp, etc.) applied to this decode-time cap.
 func TestNestingDepthExactlyAtCapSucceeds(t *testing.T) {
-	const levels = maxNestDepth
+	const levels = MaxNestDepth
 	var buf []byte
 	buf = append(buf, 0, 1) // outermost array's count = 1 (tag passed as a parameter, not read from the stream)
 	for i := 0; i < levels-1; i++ {
 		buf = append(buf, sfsArrayType, 0, 1) // one more nested array: tag byte + count=1
 	}
-	buf = append(buf, sfsBool, 1) // innermost leaf value: tag=bool, value=true
+	buf = append(buf, SFSBool, 1) // innermost leaf value: tag=bool, value=true
 
 	r := &sfsReader{data: buf}
 	if _, err := r.readValuePayload(sfsArrayType); err != nil {
@@ -305,9 +305,9 @@ func TestNestingDepthExactlyAtCapSucceeds(t *testing.T) {
 	}
 }
 
-// TestNestingDepthRejectedSFSObject is the round-50 regression test for the sfsObjectType sibling
-// of TestNestingDepthRejected above: the depth check (r.depth > maxNestDepth) is applied
-// identically in the sfsObjectType case (sfsobject.go), but until now was only ever exercised via
+// TestNestingDepthRejectedSFSObject is the round-50 regression test for the SFSObjectType sibling
+// of TestNestingDepthRejected above: the depth check (r.depth > MaxNestDepth) is applied
+// identically in the SFSObjectType case (sfsobject.go), but until now was only ever exercised via
 // nested SFSArrays, never nested SFSObjects -- a plausible independent regression site, since the
 // two cases increment/check/defer-decrement r.depth as separate, textually-duplicated blocks
 // rather than shared code.
@@ -317,37 +317,37 @@ func TestNestingDepthRejectedSFSObject(t *testing.T) {
 	buf = append(buf, 0, 1) // outermost object's count = 1 (tag passed as a parameter, not read from the stream)
 	for i := 0; i < levels-1; i++ {
 		buf = append(buf, 0, 0)          // key: empty string (2-byte length = 0)
-		buf = append(buf, sfsObjectType) // one more nested object: tag byte
+		buf = append(buf, SFSObjectType) // one more nested object: tag byte
 		buf = append(buf, 0, 1)          // nested object's own count = 1
 	}
 	buf = append(buf, 0, 0)       // innermost leaf key: empty string
-	buf = append(buf, sfsBool, 1) // innermost leaf value: tag=bool, value=true
+	buf = append(buf, SFSBool, 1) // innermost leaf value: tag=bool, value=true
 
 	r := &sfsReader{data: buf}
-	_, err := r.readValuePayload(sfsObjectType)
+	_, err := r.readValuePayload(SFSObjectType)
 	if err == nil {
 		t.Fatal("expected an error for excessive nesting depth via nested SFSObjects, got nil (this would have risked a stack overflow before the depth-limit fix)")
 	}
 }
 
-// TestNestingDepthExactlyAtCapSucceedsSFSObject is the sfsObjectType sibling of
+// TestNestingDepthExactlyAtCapSucceedsSFSObject is the SFSObjectType sibling of
 // TestNestingDepthExactlyAtCapSucceeds above, proving the same off-by-one boundary
-// (r.depth > maxNestDepth) is correct for nested SFSObjects specifically, not just nested
+// (r.depth > MaxNestDepth) is correct for nested SFSObjects specifically, not just nested
 // SFSArrays.
 func TestNestingDepthExactlyAtCapSucceedsSFSObject(t *testing.T) {
-	const levels = maxNestDepth
+	const levels = MaxNestDepth
 	var buf []byte
 	buf = append(buf, 0, 1) // outermost object's count = 1
 	for i := 0; i < levels-1; i++ {
 		buf = append(buf, 0, 0)
-		buf = append(buf, sfsObjectType)
+		buf = append(buf, SFSObjectType)
 		buf = append(buf, 0, 1)
 	}
 	buf = append(buf, 0, 0)
-	buf = append(buf, sfsBool, 1)
+	buf = append(buf, SFSBool, 1)
 
 	r := &sfsReader{data: buf}
-	if _, err := r.readValuePayload(sfsObjectType); err != nil {
+	if _, err := r.readValuePayload(SFSObjectType); err != nil {
 		t.Errorf("readValuePayload() error = %v, want nil for exactly %d levels of nesting via nested SFSObjects (the boundary value itself, not over the cap)", err, levels)
 	}
 }
@@ -362,7 +362,7 @@ func TestByteArrayRejectsNegativeCount(t *testing.T) {
 	}
 }
 
-// TestTextRejectsNegativeCount mirrors TestByteArrayRejectsNegativeCount: sfsText shares
+// TestTextRejectsNegativeCount mirrors TestByteArrayRejectsNegativeCount: SFSText shares
 // sfsByteArray's bare 4-byte length prefix, and now shares its explicit negative-length guard
 // too, so a corrupt/hostile length produces the same specific, tag-appropriate error instead of
 // falling through to readBytes' generic negative-length check.
@@ -371,7 +371,7 @@ func TestTextRejectsNegativeCount(t *testing.T) {
 	var buf []byte
 	buf = binary.BigEndian.AppendUint32(buf, uint32(negOne))
 	r := &sfsReader{data: buf}
-	_, err := r.readValuePayload(sfsText)
+	_, err := r.readValuePayload(SFSText)
 	if err == nil {
 		t.Fatal("expected an error for a negative text count, got nil")
 	}
@@ -386,7 +386,7 @@ func TestTextRejectsNegativeCount(t *testing.T) {
 // negative-count test above (TestNestedCountRejectsNegative, TestByteArrayRejectsNegativeCount,
 // TestTextRejectsNegativeCount, ...) only reaches this guard indirectly, through a caller that has
 // already independently validated non-negativity itself (readArrayCount's own `n < 0` check, or
-// sfsByteArray/sfsText's explicit int32-negative-length guards) before ever calling readBytes --
+// sfsByteArray/SFSText's explicit int32-negative-length guards) before ever calling readBytes --
 // so readBytes' own guard, defense-in-depth for any call site that does NOT pre-validate, was never
 // actually exercised. Calls readBytes directly with n=-1, the one shape that can only ever reach
 // this specific guard.
@@ -418,7 +418,7 @@ func TestReadTaggedValuePropagatesReadByteError(t *testing.T) {
 func TestArrayTruncatedMidElementPropagatesError(t *testing.T) {
 	var buf []byte
 	buf = append(buf, 0, 2)       // declared item count = 2
-	buf = append(buf, sfsBool, 1) // item 0: a well-formed bool, tag+value
+	buf = append(buf, SFSBool, 1) // item 0: a well-formed bool, tag+value
 	// item 1 is never written -- the array header promised 2 items but only 1 arrived.
 
 	r := &sfsReader{data: buf}
@@ -526,7 +526,7 @@ func TestGetIntRejectsOutOfInt32RangeLong(t *testing.T) {
 // A real call site (alliance.go's findRecommendedTech -> DonateRecommendedAllianceTech) reads a
 // corrupted scienceId this way straight into a live al.science.donate network request with no
 // other signal the value was wrong rather than genuinely 0. Also proves the logged value is
-// redacted for a sensitive key, matching getIntFlexible's own isSensitiveSFSKey gating.
+// redacted for a sensitive key, matching getIntFlexible's own IsSensitiveSFSKey gating.
 func TestGetIntWarnsOnOutOfRangeLong(t *testing.T) {
 	run := func(t *testing.T, key string, val int64) string {
 		t.Helper()
@@ -585,34 +585,6 @@ func TestGetIntWarnsOnOutOfRangeLong(t *testing.T) {
 	})
 }
 
-// TestRequireFieldTypeAcceptsOutOfRangeLongButGetIntReturnsZero is the round-30 regression test for
-// the testing-rigor finding: no test previously combined an out-of-int32-range int64 value with
-// requireFieldType(...) (buildings.go) returning true -- since the Go TYPE int64 is one
-// sfsFieldKindInt accepts (see sfsFieldKindAccepts) -- followed by the corresponding accessor
-// (GetInt, sfsobject.go) returning 0 on that same field. Only each half was tested in isolation
-// before this: TestGetIntRejectsOutOfInt32RangeLong above proves GetInt's own zero-value fallback,
-// while buildings_visitors_test.go's requireFieldType tests only exercise wrong-Go-TYPE fields, not
-// a correctly-int64-typed-but-out-of-range one. This locks in the intentional "type-valid but
-// value-invalid pass-through" design GetInt's own doc comment documents: requireFieldType/
-// sfsFieldKindAccepts is a pure Go-type check, not a value-range check, so a present,
-// correctly-int64-typed, but out-of-int32-range field passes requireFieldType's guard and then
-// GetInt on that same field still degrades safely to its documented zero-value fallback rather than
-// silently wrapping.
-func TestRequireFieldTypeAcceptsOutOfRangeLongButGetIntReturnsZero(t *testing.T) {
-	o := NewSFSObject()
-	// 1<<32 + 5 is comfortably out of int32's range (and wraps to 5 under a naive int32(n)
-	// truncation, the exact bug TestGetIntRejectsOutOfInt32RangeLong guards against) while still
-	// being a plain int64 -- the Go type sfsFieldKindInt accepts.
-	o.PutLong("bId", int64(1)<<32+5)
-
-	if !requireFieldType(o, "bId", "test-context", sfsFieldKindInt) {
-		t.Fatal("requireFieldType should accept an int64-typed field for sfsFieldKindInt even when its value is out of int32's range -- sfsFieldKindAccepts is a pure Go-type check, not a value-range check")
-	}
-	if got := o.GetInt("bId"); got != 0 {
-		t.Errorf("GetInt(bId) = %d, want 0 (the documented zero-value fallback for an out-of-int32-range Long) even though requireFieldType passed", got)
-	}
-}
-
 // TestDecodeObjectRejectsTrailingBytes proves DecodeObject errors instead of silently ignoring
 // leftover bytes after a well-formed top-level object -- every real caller (conn.go, decode.go)
 // hands DecodeObject an exact-length frame body, so a trailing remainder means the encode/decode
@@ -644,14 +616,14 @@ func TestDecodeObjectRejectsTrailingBytes(t *testing.T) {
 	}
 }
 
-// TestDecodedNodeCountRejected proves the maxDecodedNodes ceiling catches breadth-driven
-// amplification that maxNestDepth alone does not: this payload is only 2 levels deep (far under
-// maxNestDepth=64) but its outer*inner fan-out crosses maxDecodedNodes in total leaf count -- the
+// TestDecodedNodeCountRejected proves the MaxDecodedNodes ceiling catches breadth-driven
+// amplification that MaxNestDepth alone does not: this payload is only 2 levels deep (far under
+// MaxNestDepth=64) but its outer*inner fan-out crosses MaxDecodedNodes in total leaf count -- the
 // same shape as the audit's ~60MB/59M-node reproduction, scaled down so this test builds and runs
 // in well under a second instead of allocating gigabytes.
 func TestDecodedNodeCountRejected(t *testing.T) {
 	const outerCount = 10
-	const innerCount = 30001 // outerCount * innerCount > maxDecodedNodes (300_000), each count well under the int16-per-level cap
+	const innerCount = 30001 // outerCount * innerCount > MaxDecodedNodes (300_000), each count well under the int16-per-level cap
 
 	var buf []byte
 	buf = binary.BigEndian.AppendUint16(buf, outerCount)
@@ -659,25 +631,25 @@ func TestDecodedNodeCountRejected(t *testing.T) {
 		buf = append(buf, sfsArrayType)
 		buf = binary.BigEndian.AppendUint16(buf, innerCount)
 		for j := 0; j < innerCount; j++ {
-			buf = append(buf, sfsNull)
+			buf = append(buf, SFSNull)
 		}
 	}
 
 	r := &sfsReader{data: buf}
 	_, err := r.readValuePayload(sfsArrayType)
 	if err == nil {
-		t.Fatal("expected an error once decoded node count exceeds maxDecodedNodes, got nil (this would allow unbounded heap amplification via wide, shallow nesting)")
+		t.Fatal("expected an error once decoded node count exceeds MaxDecodedNodes, got nil (this would allow unbounded heap amplification via wide, shallow nesting)")
 	}
 }
 
 // TestDecodedNodeCountExactlyAtCapSucceeds is the round-44 regression test for the MINOR finding
-// that maxDecodedNodes' strict greater-than boundary (r.nodes > maxDecodedNodes, checked in both
+// that MaxDecodedNodes' strict greater-than boundary (r.nodes > MaxDecodedNodes, checked in both
 // readValuePayload and chargeNodes) had no exact-boundary test -- TestDecodedNodeCountRejected
 // above only proves a payload comfortably OVER the 300,000-node cap is rejected, never that a
 // payload landing on EXACTLY 300,000 total decoded nodes -- the boundary value itself -- is still
 // accepted, which would catch an off-by-one `>=` mutation that rejected the last legitimate node.
-// Mirrors TestDecodedNodeCountRejected's outer-array-of-inner-arrays-of-sfsNull shape, sized to
-// land on exactly maxDecodedNodes: 1 (the outer array's own node, charged by the direct
+// Mirrors TestDecodedNodeCountRejected's outer-array-of-inner-arrays-of-SFSNull shape, sized to
+// land on exactly MaxDecodedNodes: 1 (the outer array's own node, charged by the direct
 // readValuePayload(sfsArrayType) call below) + outerCount (each inner array's own node) + the sum
 // of each inner array's leaf count. Group sizes are uneven (9 groups of 30,000 plus one of 29,989)
 // purely to hit the exact total without needing an evenly-divisible count -- each individual count
@@ -690,8 +662,8 @@ func TestDecodedNodeCountExactlyAtCapSucceeds(t *testing.T) {
 	for _, c := range innerCounts {
 		total += c
 	}
-	if total != maxDecodedNodes {
-		t.Fatalf("test construction bug: total nodes = %d, want exactly %d", total, maxDecodedNodes)
+	if total != MaxDecodedNodes {
+		t.Fatalf("test construction bug: total nodes = %d, want exactly %d", total, MaxDecodedNodes)
 	}
 
 	var buf []byte
@@ -700,32 +672,32 @@ func TestDecodedNodeCountExactlyAtCapSucceeds(t *testing.T) {
 		buf = append(buf, sfsArrayType)
 		buf = binary.BigEndian.AppendUint16(buf, uint16(innerCount))
 		for j := 0; j < innerCount; j++ {
-			buf = append(buf, sfsNull)
+			buf = append(buf, SFSNull)
 		}
 	}
 
 	r := &sfsReader{data: buf}
 	if _, err := r.readValuePayload(sfsArrayType); err != nil {
-		t.Errorf("readValuePayload() error = %v, want nil for a payload decoding to exactly %d total nodes (the boundary value, not over the cap)", err, maxDecodedNodes)
+		t.Errorf("readValuePayload() error = %v, want nil for a payload decoding to exactly %d total nodes (the boundary value, not over the cap)", err, MaxDecodedNodes)
 	}
-	if r.nodes != maxDecodedNodes {
-		t.Errorf("r.nodes = %d, want exactly %d (test construction should land precisely on the boundary)", r.nodes, maxDecodedNodes)
+	if r.nodes != MaxDecodedNodes {
+		t.Errorf("r.nodes = %d, want exactly %d (test construction should land precisely on the boundary)", r.nodes, MaxDecodedNodes)
 	}
 }
 
 // TestDecodedNodeCountRejectedForPrimitiveArrays is the round-13 regression test for the
-// maxDecodedNodes undercount the round-13 audit found: the 8 primitive-array decode cases
+// MaxDecodedNodes undercount the round-13 audit found: the 8 primitive-array decode cases
 // (sfsBoolArray..sfsUtfStringArray) each only charged 1 node regardless of how many elements they
 // actually decoded (up to 32767 per array, read directly via readByte/readInt16/etc. rather than
 // recursively through readValuePayload per element like the container types), so a wire payload
 // with many primitive-array fields could stay comfortably under the old (undercounted) budget
 // while decoding into far more Go heap than the budget was meant to bound. This payload is only
 // one level deep (an SFSObject with outerCount sibling fields, no nesting at all) but its
-// outerCount*arrayLen total element count crosses maxDecodedNodes(300_000) -- under the old,
+// outerCount*arrayLen total element count crosses MaxDecodedNodes(300_000) -- under the old,
 // per-field-flat-1 counting this would have cost only outerCount=10 nodes and sailed through.
 func TestDecodedNodeCountRejectedForPrimitiveArrays(t *testing.T) {
 	const outerCount = 10
-	const arrayLen = 32767 // max representable int16 array count; outerCount*arrayLen (327,670) > maxDecodedNodes (300_000)
+	const arrayLen = 32767 // max representable int16 array count; outerCount*arrayLen (327,670) > MaxDecodedNodes (300_000)
 
 	var buf []byte
 	buf = binary.BigEndian.AppendUint16(buf, outerCount) // SFSObject key count
@@ -739,9 +711,9 @@ func TestDecodedNodeCountRejectedForPrimitiveArrays(t *testing.T) {
 	}
 
 	r := &sfsReader{data: buf}
-	_, err := r.readValuePayload(sfsObjectType)
+	_, err := r.readValuePayload(SFSObjectType)
 	if err == nil {
-		t.Fatal("expected an error once a primitive array's decoded element count pushes the total over maxDecodedNodes, got nil (this would allow ~8x Go-heap amplification within the existing wire-frame cap via many cheap-on-the-wire primitive-array fields)")
+		t.Fatal("expected an error once a primitive array's decoded element count pushes the total over MaxDecodedNodes, got nil (this would allow ~8x Go-heap amplification within the existing wire-frame cap via many cheap-on-the-wire primitive-array fields)")
 	}
 }
 

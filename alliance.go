@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
 	"time"
@@ -32,7 +33,7 @@ import (
 // currently exist.
 func HelpAllianceMembers(conn *GameConn) error {
 	const cmd = "al.help.all"
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutLong("cmdBaseTime", time.Now().UnixMilli())
 	_, err := sendAndWait(conn, "alliance help-all response", cmd, params)
 	return err
@@ -92,7 +93,7 @@ func ClaimAllianceGifts(conn *GameConn) error {
 	// the exact same way. Mirrors CollectAll's identical errors.As-against-net.Error early-abort
 	// (buildings.go) and ClaimAllMail's (mail.go).
 	for _, giftType := range []int32{allianceGiftPremium, allianceGiftRegular} {
-		params := NewSFSObject()
+		params := sfs.NewSFSObject()
 		params.PutInt("type", giftType)
 		_, err := sendAndWait(conn, fmt.Sprintf("alliance gift claim response (type %d)", giftType), cmd, params)
 		errs = append(errs, err)
@@ -170,7 +171,7 @@ func ClaimAllianceGifts(conn *GameConn) error {
 // asked.
 func DonateRecommendedAllianceTech(conn *GameConn) error {
 	const refreshCmd = "science.data.refresh"
-	msg, err := sendAndWait(conn, "alliance tech tree fetch", refreshCmd, NewSFSObject())
+	msg, err := sendAndWait(conn, "alliance tech tree fetch", refreshCmd, sfs.NewSFSObject())
 	if err != nil {
 		return err
 	}
@@ -179,7 +180,7 @@ func DonateRecommendedAllianceTech(conn *GameConn) error {
 		slog.Info("no alliance tech tree data returned")
 		return nil
 	}
-	arr, ok := v.Val.(*SFSArray)
+	arr, ok := v.Val.(*sfs.SFSArray)
 	if !ok {
 		slog.Warn("alliance tech tree: allianceScience field is present but not an array, skipping donation", "type", fmt.Sprintf("%T", v.Val))
 		return nil
@@ -192,7 +193,7 @@ func DonateRecommendedAllianceTech(conn *GameConn) error {
 
 	const donateCmd = "al.science.donate"
 	slog.Info("donating to recommended alliance tech", "scienceId", recommendedID)
-	params := NewSFSObject()
+	params := sfs.NewSFSObject()
 	params.PutInt("scienceId", recommendedID)
 	params.PutInt("option", 1)
 	_, err = sendAndWait(conn, fmt.Sprintf("alliance tech donate response (scienceId %d)", recommendedID), donateCmd, params)
@@ -206,7 +207,7 @@ func DonateRecommendedAllianceTech(conn *GameConn) error {
 // only unbounded scan/log cost -- a hostile peer responding to science.data.refresh with an array
 // where many/all entries have state==1 but a missing scienceId would otherwise cause
 // requireFieldType's Warn to fire on every single one, with no bound, since the raw
-// allianceScience array is bounded only by sfsobject.go's much larger maxDecodedNodes=300,000
+// allianceScience array is bounded only by sfsobject.go's much larger sfs.MaxDecodedNodes=300,000
 // decode budget. Same gap-class as visitors.go's ParseInitVisitors (round 26) and ListMail's
 // mailListRawItemCap (mail.go), applied here. Set generously above the live-confirmed ~45 real
 // entries -- a legitimately larger tech tree from a future game update shouldn't be needlessly
@@ -229,15 +230,15 @@ const allianceScienceRawItemCap = 1000
 // fallback -- indistinguishable from a genuine scienceId=0, and enough to make
 // DonateRecommendedAllianceTech send a real al.science.donate request against the wrong tech. See
 // TestFindRecommendedTechWrongTypedScienceIdIsRejected (alliance_test.go).
-func findRecommendedTech(arr *SFSArray) (scienceId int32, found bool) {
-	if len(arr.items) > allianceScienceRawItemCap {
-		slog.Warn("alliance tech tree: allianceScience array longer than raw-item scan cap; truncating scan", "arrayLen", len(arr.items), "cap", allianceScienceRawItemCap)
+func findRecommendedTech(arr *sfs.SFSArray) (scienceId int32, found bool) {
+	if len(arr.Items()) > allianceScienceRawItemCap {
+		slog.Warn("alliance tech tree: allianceScience array longer than raw-item scan cap; truncating scan", "arrayLen", len(arr.Items()), "cap", allianceScienceRawItemCap)
 	}
-	for i, item := range arr.items {
+	for i, item := range arr.Items() {
 		if i >= allianceScienceRawItemCap {
 			break
 		}
-		tech, ok := item.Val.(*SFSObject)
+		tech, ok := item.Val.(*sfs.SFSObject)
 		if !ok {
 			continue
 		}
