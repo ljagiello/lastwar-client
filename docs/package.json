@@ -9,5 +9,9 @@
   },
   "devDependencies": {
     "mint": "^4.2.812"
+  },
+  "overrides": {
+    "sharp": "^0.35.3",
+    "qs": "^6.15.3"
   }
 }
