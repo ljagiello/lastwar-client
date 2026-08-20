@@ -69,6 +69,17 @@ func (v SFSValue) GoString() string {
 	return v.String()
 }
 
+// LogValue makes SFSValue satisfy slog.LogValuer -- round-53 fix, the same gap String()/GoString()
+// alone leave open for every credential-bearing type in this codebase (see gsl.go's
+// LoginToken.LogValue for the full rationale): slog.NewJSONHandler (the only handler main.go ever
+// installs) never consults fmt.Stringer/fmt.GoStringer, only slog.LogValuer, which slog resolves
+// before handler dispatch. Unlike *SFSObject/*SFSArray (whose keys/values fields are unexported,
+// so json.Marshal already yields "{}" for them with no protection needed), SFSValue's Type/Val
+// fields ARE exported, so it has no such accidental immunity.
+func (v SFSValue) LogValue() slog.Value {
+	return slog.StringValue(v.String())
+}
+
 // SFSObject is an ordered string-keyed map, matching the client's own
 // "insert order doesn't matter for lookup, but we preserve it for wire
 // determinism" behavior.

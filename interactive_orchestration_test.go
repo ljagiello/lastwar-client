@@ -1011,3 +1011,96 @@ func TestRunInteractivePersistentScanErrorDoesNotExitDuringShutdown(t *testing.T
 	// The writer goroutine exits on its next failed OpenFile once path's directory is gone
 	// (t.TempDir()'s own cleanup); no explicit signal needed here.
 }
+
+// TestRunInteractiveNotAFIFOExits is the round-53 regression test for the MINOR finding that
+// RunInteractive's "controlPipe exists but is not a FIFO" guard had zero test coverage, unlike its
+// immediate sibling two lines above (the stat-failure branch, thoroughly exercised end-to-end via
+// main_test.go's and main_crossserver_test.go's subprocess tests). The guard's own log message
+// anticipates the exact operator mistake ("did you forget mkfifo?"), and if its
+// fi.Mode()&os.ModeNamedPipe == 0 condition were ever accidentally inverted or dropped,
+// RunInteractive would silently os.Open a plain regular file and dispatch every line in it as a
+// live SFS2X command against the authenticated connection, then loop forever re-reading it -- a
+// materially more dangerous outcome than the intended fail-fast exit(1). Subprocess idiom (the
+// guard os.Exit(1)s), pointing -- via a direct RunInteractive call, no main() flow needed -- at a
+// plain regular file instead of a FIFO.
+func TestRunInteractiveNotAFIFOExits(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_NOT_FIFO") == "1" {
+		client, _ := newPipeGameConnPair(t)
+		path := t.TempDir() + "/not-a-fifo"
+		if err := os.WriteFile(path, []byte("building.production.collect {\"uuid\":123}\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		RunInteractive(client, path)
+		// Only reached if RunInteractive fails to exit -- the outer assertions below will then
+		// see a clean subprocess exit and fail with a clear message instead of silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunInteractiveNotAFIFOExits$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS_NOT_FIFO=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	log := stderr.String()
+	if !strings.Contains(log, "did you forget mkfifo") {
+		t.Errorf("subprocess stderr = %s\nwant the not-a-FIFO diagnostic -- confirms the exit came from that guard, not some earlier failure", log)
+	}
+	// The dangerous regression shape this test exists to catch: dispatching the regular file's
+	// content as a live command instead of exiting. handleInteractiveLine logs "sending command"
+	// before any send, so its absence proves no line was ever dispatched.
+	if strings.Contains(log, "sending command") {
+		t.Errorf("subprocess stderr = %s\nwant NO command dispatch -- a non-FIFO control path must fail fast, never have its content executed", log)
+	}
+}
+
+// TestRunInteractiveOpenFailureExits is TestRunInteractiveNotAFIFOExits' sibling for the third of
+// RunInteractive's fatal control-pipe branches (openControlPipeWithRetry exhausting its retries),
+// the other zero-coverage branch the round-53 audit flagged. A real FIFO is created (so the stat
+// and mode checks both pass) and the openControlPipeFile seam -- which
+// TestOpenControlPipeWithRetryMakesExactlyRetriesPlusOneAttempts already uses for the helper in
+// isolation, but which nothing ever wired into a real end-to-end RunInteractive run -- is forced
+// to fail persistently.
+func TestRunInteractiveOpenFailureExits(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_OPEN_FAIL") == "1" {
+		client, _ := newPipeGameConnPair(t)
+		path := t.TempDir() + "/control-pipe"
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatalf("Mkfifo: %v", err)
+		}
+		openControlPipeFile = func(string) (*os.File, error) {
+			return nil, errors.New("simulated persistent open failure")
+		}
+		RunInteractive(client, path)
+		return
+	}
+
+	// -test.timeout on the CHILD: a regression that makes this branch loop instead of exit (the
+	// exact shape mutation-testing this fix produced) would otherwise hang the child forever and
+	// stall this outer test until the whole suite's timeout. The real path completes in ~0.3s
+	// (5 retries x 50ms), so 15s is generous; a hung child gets killed by its own framework with
+	// a non-1 exit code, failing the assertion below cleanly.
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunInteractiveOpenFailureExits$", "-test.timeout=15s")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS_OPEN_FAIL=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	if log := stderr.String(); !strings.Contains(log, "open control pipe failed") {
+		t.Errorf("subprocess stderr = %s\nwant the open-failure diagnostic -- confirms the exit came from that branch, not some earlier failure", log)
+	}
+}

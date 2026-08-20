@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCrossServerSaveBackNeeded is a fast, deterministic unit test of the pure comparison
@@ -203,6 +204,140 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 	}
 	if got.GameUid != freshGameUid {
 		t.Errorf("persisted GameUid = %q, want %q (the refreshed server list's gameUid)", got.GameUid, freshGameUid)
+	}
+}
+
+// TestRunCrossServerTestSaveBackFailureWarnsAndContinues is the round-53 regression test for the
+// MINOR finding that the warn-and-continue branch taken when persisting a cross-server
+// redirect/refresh back to the session config fails (SaveSessionConfig's error return inside
+// runCrossServerTest) had zero test coverage -- TestRunCrossServerTestRtRefreshPersistsFreshAccessToken
+// above only exercises the successful-write path. Points configSavePath at a path whose parent
+// directory doesn't exist (plausible for a typo'd -config path, since this codebase never calls
+// os.MkdirAll for state/config paths), so atomicWriteStateFile's os.CreateTemp fails with ENOENT,
+// and asserts: (a) the intended WARN fires rather than the run crashing or exiting, and (b) the
+// rest of runCrossServerTest genuinely continues afterward (the "fetching building list" step
+// runs). A future refactor that accidentally turned this into a fatal os.Exit, or silently
+// discarded the error instead of logging it, would be caught here.
+func TestRunCrossServerTestSaveBackFailureWarnsAndContinues(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	gameAddr := startFakeGameServer(t, fakeInitPushServer(nil))
+	gameHost, gamePort := splitHostPortInt(t, gameAddr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code: "0",
+		ServerList: []LoginServerInfo{
+			{IP: flexString(gameHost), Port: flexPort(gamePort), Zone: "APS-REAL", GameUid: "uid-real"},
+		},
+		At: &LoginToken{Token: "fresh-access-token-from-refresh"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	runCrossServerTest(crossServerTestOpts{
+		// Stale placeholders, deliberately different from the refresh response in every field so
+		// crossServerSaveBackNeeded fires and the SaveSessionConfig call is actually reached.
+		ip:      "stale-placeholder-host",
+		port:    1,
+		zone:    "APS-STALE",
+		gameUid: "uid-stale",
+		at:      "stale-access-token",
+		rt:      "some-refresh-token",
+
+		// Parent directory does not exist -- the one shape that makes SaveSessionConfig's
+		// underlying os.CreateTemp fail deterministically without any injection seam.
+		configSavePath: t.TempDir() + "/no-such-subdir/session.json",
+	})
+
+	slog.SetDefault(orig)
+	logged := buf.String()
+
+	if !strings.Contains(logged, "failed to persist redirected server address to session config") {
+		t.Errorf("expected the persist-failure WARN, got:\n%s", logged)
+	}
+	if strings.Contains(logged, "persisted redirected server address to session config") {
+		t.Errorf("expected the SUCCESS log to be absent (the write must actually have failed), got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "fetching building list") {
+		t.Errorf("expected the run to continue past the failed persist into the building-list fetch, got:\n%s", logged)
+	}
+}
+
+// TestRunCrossServerTestRtRefreshWithEmptyAccessTokenKeepsOldOne is the round-53 regression test
+// for the MAJOR finding that runCrossServerTest's -cs-rt refresh handling set
+// accessTok = lsr.At.Token.String() whenever lsr.At != nil, with no emptiness check at all -- not
+// even capOversizedIdentityField's length-only guard -- and refreshHasUsableData treated a
+// non-nil-but-empty-token At as fully "usable", so this path took the success branch and silently
+// discarded whatever valid -cs-at access token was already in scope. Mirrors
+// TestRunCrossServerTestRtRefreshPersistsFreshAccessToken's structure, but the fake GSL server
+// returns an empty-token At (the shape under test) instead of a fresh one, and asserts the ORIGINAL
+// -cs-at token is what actually reaches the redialed game server, not an empty string.
+func TestRunCrossServerTestRtRefreshWithEmptyAccessTokenKeepsOldOne(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const oldAccessTok = "tok-1-good"
+
+	gotParamsAt := make(chan string, 1)
+	gameAddr := startFakeGameServer(t, func(server *GameConn) {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		if pv, ok := env.Content.Get("p"); ok {
+			if pObj, ok := pv.Val.(*SFSObject); ok {
+				gotParamsAt <- pObj.GetString("at")
+			}
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		_ = server.SendExtension("init", NewSFSObject())
+	})
+	gameHost, gamePort := splitHostPortInt(t, gameAddr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: flexString(gameHost), Port: flexPort(gamePort), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: ""}, // present but empty -- the shape under test
+	})
+	useFakeGSLServer(t, gsl)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	runCrossServerTest(crossServerTestOpts{
+		ip:         gameHost,
+		port:       gamePort,
+		zone:       "APS1",
+		gameUid:    "uid-1",
+		at:         oldAccessTok,
+		atExplicit: true,
+		rt:         "some-refresh-token",
+	})
+
+	slog.SetDefault(orig)
+
+	select {
+	case at := <-gotParamsAt:
+		if at != oldAccessTok {
+			t.Errorf("redialed Login params.at = %q, want %q (an empty GSL-refresh token must never clobber the original -cs-at)", at, oldAccessTok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake game server never received a Login request")
+	}
+
+	logged := buf.String()
+	if strings.Contains(logged, "fresh access token acquired") {
+		t.Errorf("expected NO \"fresh access token acquired\" log (the refresh token was empty, not usable), got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "GSL refresh response carried no access token -- continuing with the original -cs-at unrefreshed") {
+		t.Errorf("expected a Warn that the refresh carried no usable access token, got:\n%s", logged)
 	}
 }
 

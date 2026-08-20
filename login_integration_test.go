@@ -368,6 +368,46 @@ func TestLoginRejectsMissingPPayload(t *testing.T) {
 	}
 }
 
+// TestLoginRejectsAuthRejection is the round-53 regression test for the MAJOR finding that the
+// branch turning a server-sent "ec" field on the base-zone login response into ErrAuthRejected --
+// the sole mechanism gating main.go's documented, contractually important exit-code-2 ("confirmed
+// stale/rejected session") behavior -- had zero test coverage. No existing test ever sends an "ec"
+// field on a controllerSystem/actionLogin envelope, so a future edit that typo'd the field name or
+// dropped the %w-wrap around ErrAuthRejected would silently break the exit-code-2 contract with
+// nothing to catch it.
+func TestLoginRejectsAuthRejection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutUtfString("ec", "28")
+		resp.PutUtfString("errorMsg", "E011")
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	_, err := Login(LoginOptions{})
+	if err == nil {
+		t.Fatal("Login() error = nil, want an error for a response carrying an ec field")
+	}
+	if !errors.Is(err, ErrAuthRejected) {
+		t.Errorf("err = %v, want errors.Is(err, ErrAuthRejected) to hold", err)
+	}
+	if !strings.Contains(err.Error(), "LOGIN FAILED") {
+		t.Errorf("err = %v, want it to mention LOGIN FAILED", err)
+	}
+}
+
 // TestLoginBaseZoneResponseWaitConnectionFailure is the round-51 regression test for the MAJOR
 // finding that Login()'s base-zone login-response wait's own network-failure branch (the
 // `if err != nil { conn.Close(); return nil, err }` right after the base-zone waitFor call,
@@ -1998,6 +2038,91 @@ func TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized(t *testing.T) {
 	logged := buf.String()
 	if !strings.Contains(logged, "accessTok exceeds identity field length cap") {
 		t.Errorf("expected a Warn about the oversized refreshed accessTok, got:\n%s", logged)
+	}
+}
+
+// TestLoginRedirectRefreshKeepsOldAccessTokWhenEmpty is the round-53 regression test for the MAJOR
+// finding that Login()'s mid-redirect GSL access-token refresh unconditionally overwrote the
+// already-valid accessTok with freshLsr.At.Token.String() whenever freshLsr.At was non-nil, even
+// when the decoded Token field was empty -- unlike the byte-for-byte adjacent gameUid reassignment
+// a few lines below, which was already correctly guarded against exactly this shape. gsl.go's
+// LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at" field (via
+// looksLikeJSONObject) as present, including "{}" or one with no/empty "token" -- a plausible shape
+// for a degraded or rejected opt=fix refresh response. Mirrors
+// TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized's technique exactly, substituting an
+// empty-token LoginToken for the mid-redirect refresh response instead of an oversized one.
+func TestLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const oldAccessTok = "tok-1-good"
+
+	gotParamsAt := make(chan string, 1)
+	newAddr := startFakeGameServer(t, func(server *GameConn) {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		if pv, ok := env.Content.Get("p"); ok {
+			if pObj, ok := pv.Val.(*SFSObject); ok {
+				gotParamsAt <- pObj.GetString("at")
+			}
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+			return
+		}
+		_ = server.SendExtension("init", NewSFSObject())
+	})
+	newHost, newPort := splitHostPortInt(t, newAddr)
+
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		_ = server.SendEnvelope(controllerSystem, actionLogin, putRedirectServerInfo(newAddr, "APS2"))
+	})
+	oldHost, oldPort := splitHostPortInt(t, oldAddr)
+
+	gsl := newFakeGSLServer(t,
+		LoginServerListRespon{
+			Code:       "0",
+			ServerList: []LoginServerInfo{{IP: flexString(oldHost), Port: flexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
+			At:         &LoginToken{Token: oldAccessTok},
+		},
+		LoginServerListRespon{
+			Code:       "0",
+			ServerList: []LoginServerInfo{{IP: flexString(newHost), Port: flexPort(newPort), Zone: "APS2", GameUid: "uid-1"}},
+			At:         &LoginToken{Token: ""}, // present but empty -- the shape under test
+		},
+	)
+	useFakeGSLServer(t, gsl)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	result, err := Login(LoginOptions{})
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("Login: %v (an empty refreshed accessTok must fall back to the previous token, not fail the login)", err)
+	}
+	defer result.Conn.Close()
+
+	select {
+	case at := <-gotParamsAt:
+		if at != oldAccessTok {
+			t.Errorf("post-redirect Login params.at = %q, want %q (the stale, still-valid access token -- an empty refreshed token must never clobber it)", at, oldAccessTok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-redirect fake server never received a Login request")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "returned an empty access token; keeping the existing one") {
+		t.Errorf("expected a Warn about the empty refreshed accessTok, got:\n%s", logged)
 	}
 }
 

@@ -137,6 +137,10 @@ type deviceIdentity struct {
 func (d deviceIdentity) String() string   { return "[REDACTED deviceIdentity]" }
 func (d deviceIdentity) GoString() string { return d.String() }
 
+// LogValue makes deviceIdentity satisfy slog.LogValuer -- see gsl.go's LoginToken.LogValue for the
+// full round-53 rationale. Value receiver, same reasoning as String()/GoString() above.
+func (d deviceIdentity) LogValue() slog.Value { return slog.StringValue(d.String()) }
+
 func stateFilePath(name string) string {
 	dir, err := os.UserHomeDir()
 	if err != nil {
@@ -494,6 +498,10 @@ type LoginParamsInput struct {
 // multi-hundred-line flow.
 func (in LoginParamsInput) String() string   { return "[REDACTED LoginParamsInput]" }
 func (in LoginParamsInput) GoString() string { return in.String() }
+
+// LogValue makes LoginParamsInput satisfy slog.LogValuer -- see gsl.go's LoginToken.LogValue for
+// the full round-53 rationale.
+func (in LoginParamsInput) LogValue() slog.Value { return slog.StringValue(in.String()) }
 
 const iosPackageName = "com.lastwar.ios"
 

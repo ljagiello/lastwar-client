@@ -1092,6 +1092,100 @@ func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing
 	}
 }
 
+// TestDoCrossServerLoginRedirectRefreshKeepsOldAccessTokWhenEmpty is the round-53 regression test
+// for the MAJOR finding that DoCrossServerLogin's mid-redirect GSL refresh had the exact same
+// unguarded p.AccessTok = capOversizedIdentityField(...) overwrite as login.go's matching redirect
+// path, while its own adjacent gameUid reassignment was already correctly guarded against exactly
+// this shape. gsl.go's LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at"
+// field as present via looksLikeJSONObject, including "{}" or one with no/empty "token" -- a
+// plausible shape for a degraded or rejected opt=fix refresh response. Mirrors
+// TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized's technique, substituting an
+// empty-token LoginToken for the mid-redirect refresh response instead of an oversized one.
+func TestDoCrossServerLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.T) {
+	const oldAccessTok = "tok-1-good"
+
+	gslServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := LoginServerListRespon{
+			Code: "0",
+			At:   &LoginToken{Token: ""}, // present but empty -- the shape under test
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(gslServer.Close)
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	gotParamsAt := make(chan string, 1)
+	newAddr := startFakeGameServer(t, func(server *GameConn) {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		if pv, ok := env.Content.Get("p"); ok {
+			if pObj, ok := pv.Val.(*SFSObject); ok {
+				gotParamsAt <- pObj.GetString("at")
+			}
+		}
+		resp := NewSFSObject()
+		resp.PutBool("success", true)
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+
+	oldAddr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		_ = server.SendEnvelope(controllerSystem, actionLogin, putRedirectServerInfo(newAddr, "APS2"))
+	})
+	host, port := splitHostPortInt(t, oldAddr)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	p := CrossServerLoginParams{
+		IP:         host,
+		Port:       port,
+		Zone:       "APS1",
+		GameUid:    "uid-1",
+		DeviceID:   "dev-1",
+		AirKey:     "airkey-1",
+		AccessTok:  oldAccessTok,
+		HTTPClient: defaultHTTPClient(),
+		RSAPub:     &priv.PublicKey,
+		GateHost:   gslServer.URL,
+	}
+	result, err := DoCrossServerLogin(p)
+
+	slog.SetDefault(orig)
+
+	if err != nil {
+		t.Fatalf("DoCrossServerLogin: %v (an empty refreshed accessTok must fall back to the previous token, not fail the login)", err)
+	}
+	defer result.Conn.Close()
+
+	if result.AccessTok != oldAccessTok {
+		t.Errorf("AccessTok = %q, want %q (an empty refreshed token must never clobber the previous one)", result.AccessTok, oldAccessTok)
+	}
+
+	select {
+	case at := <-gotParamsAt:
+		if at != oldAccessTok {
+			t.Errorf("post-redirect Login params.at = %q, want %q (the stale, still-valid access token)", at, oldAccessTok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-redirect fake server never received a Login request")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "returned an empty access token; keeping the existing one") {
+		t.Errorf("expected a Warn about the empty refreshed accessTok, got:\n%s", logged)
+	}
+}
+
 // TestDoCrossServerLoginRedirectWrongTypedZoneIsWarned is the round-30 regression test for the
 // gate login.go's redirectZone helper closes: unlike its siblings redirectIP (hardened round 29
 // for exactly this "present but wrong-typed" gap) and port (hardened via getIntFlexible), the
@@ -1347,6 +1441,47 @@ func TestDoCrossServerLoginRejectsMissingPPayload(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "response had no p payload") {
 		t.Errorf("err = %v, want it to mention the missing p payload", err)
+	}
+}
+
+// TestDoCrossServerLoginRejectsAuthRejection is the round-53 regression test for the MAJOR finding
+// that the branch turning a server-sent "ec" field on the cross-server login response into
+// ErrAuthRejected -- the sole mechanism gating main.go's documented exit-code-2 behavior for this
+// path -- had zero test coverage, the DoCrossServerLogin sibling of login.go's identical gap (see
+// login_integration_test.go's TestLoginRejectsAuthRejection).
+func TestDoCrossServerLoginRejectsAuthRejection(t *testing.T) {
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := NewSFSObject()
+		resp.PutUtfString("ec", "28")
+		resp.PutUtfString("errorMsg", "E011")
+		_ = server.SendEnvelope(controllerSystem, actionLogin, resp)
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+	result, err := DoCrossServerLogin(p)
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("DoCrossServerLogin() error = nil, want an error for a response carrying an ec field")
+	}
+	if !errors.Is(err, ErrAuthRejected) {
+		t.Errorf("err = %v, want errors.Is(err, ErrAuthRejected) to hold", err)
+	}
+	if !strings.Contains(err.Error(), "CROSS-SERVER LOGIN FAILED") {
+		t.Errorf("err = %v, want it to mention CROSS-SERVER LOGIN FAILED", err)
 	}
 }
 

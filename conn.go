@@ -393,6 +393,7 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 	}
 	deadline := time.Now().Add(timeout)
 	consecutiveDecodeFailures := 0
+	nonMatchingEnvelopes := 0
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -453,6 +454,18 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 				return nil, fmt.Errorf("HANDSHAKE FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), ErrAuthRejected)
 			}
 			return env.Content, nil
+		}
+		// maxNonMatchingEnvelopesPerWait (login.go doc comment): bounds how many well-formed
+		// but non-matching envelopes this loop will tolerate before giving up -- checked BEFORE
+		// the StringRedacted() formatting/Info-log below so a peer flooding this loop with
+		// irrelevant traffic can't force unbounded formatting cost on the very iteration that
+		// finally gives up. Benign give-up (deadlineExceededError, matching this function's own
+		// wall-clock-deadline-elapsed branch above), not deadConnError -- a stream of
+		// well-formed-but-irrelevant traffic isn't itself evidence of a dead connection.
+		nonMatchingEnvelopes++
+		if nonMatchingEnvelopes > maxNonMatchingEnvelopesPerWait {
+			slog.Warn("DoHandshake: too many well-formed but non-matching envelopes processed, giving up", "nonMatchingEnvelopes", nonMatchingEnvelopes)
+			return nil, deadlineExceededError{}
 		}
 		// Anything else this early (unlikely, but be tolerant) is logged and skipped rather
 		// than treated as a protocol violation. Content may legitimately be nil here too.

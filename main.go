@@ -861,6 +861,14 @@ type crossServerTestOpts struct {
 func (o crossServerTestOpts) String() string   { return "[REDACTED crossServerTestOpts]" }
 func (o crossServerTestOpts) GoString() string { return o.String() }
 
+// LogValue makes crossServerTestOpts satisfy slog.LogValuer -- round-53 fix. The doc comment's own
+// hypothetical example just above (slog.Error("cross-server test failed", "opts", o)) is exactly
+// the shape String()/GoString() alone do NOT protect against: slog.NewJSONHandler (the only
+// handler main.go ever installs) never consults fmt.Stringer/fmt.GoStringer, only slog.LogValuer,
+// which slog resolves before handler dispatch. See gsl.go's LoginToken.LogValue for the fuller
+// rationale, shared across every credential-bearing type in this codebase.
+func (o crossServerTestOpts) LogValue() slog.Value { return slog.StringValue(o.String()) }
+
 // runCrossServerTest exercises DoCrossServerLogin directly, using an
 // already-known role's connection details (captured from a prior
 // account.login.new/push.account.login.new response) instead of running
@@ -968,7 +976,16 @@ func runCrossServerTest(o crossServerTestOpts) {
 			// ErrAuthRejected-gated exit-2 sites elsewhere in this function/file.
 			os.Exit(2)
 		}
-		if lsr.At != nil {
+		// lsr.At.Token.String() != "", not just lsr.At != nil -- round-53 fix: gsl.go's
+		// LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at" field
+		// (including "{}" or one with no/empty "token") as present via looksLikeJSONObject, so
+		// lsr.At != nil alone doesn't guarantee a usable token. Without this, an empty-token
+		// response used to take this success branch, log the misleadingly-normal-looking "fresh
+		// access token acquired tokenLen=0", and silently clobber accessTok with "" -- instead
+		// of falling through to the "no access token" warn branches below, which already handle
+		// this exact "refresh succeeded but no usable token" case correctly for the genuinely-
+		// absent-At shape.
+		if lsr.At != nil && lsr.At.Token.String() != "" {
 			if o.at != "" && o.atExplicit {
 				// Only warn when -cs-at was actually typed on the command line: an operator who
 				// explicitly passed -cs-at presumably wanted THAT token used, so silently

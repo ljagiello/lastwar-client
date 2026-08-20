@@ -377,6 +377,22 @@ func capDeadline(candidate, original time.Time) time.Time {
 	return candidate
 }
 
+// checkNonMatchingEnvelopeCap increments *nonMatchingEnvelopes and, once it exceeds
+// maxNonMatchingEnvelopesPerWait (login.go), returns a benign give-up error (deadlineExceededError
+// -- not deadConnError, since a stream of well-formed-but-irrelevant traffic isn't itself evidence
+// of a dead connection). Shared by FetchBuildings' four "this envelope didn't advance real state"
+// sites (non-extension, push.queue.add, push.build.queue.info, default/unrecognized cmd) --
+// login.go's waitFor/waitForInitPush and conn.go's DoHandshake each only have one such site, so
+// they inline the identical check rather than needing this helper.
+func checkNonMatchingEnvelopeCap(nonMatchingEnvelopes *int) error {
+	*nonMatchingEnvelopes++
+	if *nonMatchingEnvelopes > maxNonMatchingEnvelopesPerWait {
+		slog.Warn("read building list: too many well-formed but non-matching envelopes processed, giving up", "nonMatchingEnvelopes", *nonMatchingEnvelopes)
+		return deadlineExceededError{}
+	}
+	return nil
+}
+
 // FetchBuildings waits for the bare init push's building_new field (the
 // real post-login bootstrap source -- see the case "init" branch below and
 // ParseInitBuildings' doc comment; push.init.build is a rarely-fired
@@ -477,6 +493,7 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 	}
 
 	consecutiveDecodeFailures := 0
+	nonMatchingEnvelopes := 0
 	for {
 		// Round-36 fix: ParseInitVisitors/ParseInitBuildings and the two inline defaultBuilds/
 		// buildings loops above are each capped PER PUSH (maxVisitorsUpperBound=300,
@@ -532,9 +549,24 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			// skipping the one malformed push and continuing to read.
 			consecutiveDecodeFailures++
 			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
+				// deadConnError (packet.go): round-53 fix for the MAJOR finding that this
+				// give-up branch was the one sibling among the four independent
+				// maxConsecutiveDecodeFailures loops (login.go's waitFor/waitForInitPush,
+				// conn.go's DoHandshake -- all fixed in round 51) that never wrapped its
+				// give-up outcome in deadConnError, returning a silent nil error instead. That
+				// used to be indistinguishable from the genuinely benign timeout-break case two
+				// checks above (a connection that simply never sent the awaited push), even
+				// though 21+ consecutive undecodable frames is a much stronger, actively-hostile
+				// signal -- exactly the shape round 51 already established as fatal for the
+				// other three loops. Without this, callers (main.go's
+				// shouldAbortBeforeInteractive, both runMain and runCrossServerTest call sites)
+				// never learned the connection had just proven itself dead, so -interactive
+				// could launch directly against it, or -collect could burn a full battery of
+				// doomed requests against it, instead of aborting immediately.
+				err := deadConnError{err: fmt.Errorf("read building list: %d consecutive malformed/undecodable envelopes, giving up with whatever was already collected: %w", consecutiveDecodeFailures, err)}
 				slog.Warn("read building list: too many consecutive malformed/undecodable envelopes, giving up early with whatever was already collected",
 					"consecutiveDecodeFailures", consecutiveDecodeFailures)
-				break
+				return buildings, visitors, err
 			}
 			slog.Warn("read building list: failed to read/decode an envelope; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue
@@ -542,6 +574,13 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 		consecutiveDecodeFailures = 0
 		msg, ok := env.AsExtension()
 		if !ok {
+			// maxNonMatchingEnvelopesPerWait (login.go doc comment): a non-extension envelope
+			// (e.g. the client's own background heartbeat pong) costs a full
+			// ReadPacket/DecodeObject/AsExtension cycle just like a well-formed-but-irrelevant
+			// push does below, so it counts against the identical cap.
+			if err := checkNonMatchingEnvelopeCap(&nonMatchingEnvelopes); err != nil {
+				return buildings, visitors, err
+			}
 			continue
 		}
 		switch msg.Cmd {
@@ -661,6 +700,13 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 				}
 			}
 		case "push.queue.add":
+			// maxNonMatchingEnvelopesPerWait (login.go doc comment): checked BEFORE the
+			// StringRedacted() formatting/Info-log below so a peer flooding this loop with
+			// irrelevant push.queue.add traffic can't force unbounded formatting cost on the
+			// very iteration that finally gives up.
+			if err := checkNonMatchingEnvelopeCap(&nonMatchingEnvelopes); err != nil {
+				return buildings, visitors, err
+			}
 			// StringRedacted, not String(): this switch's default branch (and, in principle, any
 			// case here) sees whatever cmd the server sends while FetchBuildings is listening, and
 			// nothing in this function's control flow enforces that a credential-bearing push (e.g.
@@ -670,8 +716,14 @@ func FetchBuildings(conn *GameConn, timeout time.Duration) ([]Building, []Visito
 			// rely on it.
 			slog.Info("observed push.queue.add", "params", msg.Params.StringRedacted())
 		case "push.build.queue.info":
+			if err := checkNonMatchingEnvelopeCap(&nonMatchingEnvelopes); err != nil {
+				return buildings, visitors, err
+			}
 			slog.Info("observed push.build.queue.info", "params", msg.Params.StringRedacted())
 		default:
+			if err := checkNonMatchingEnvelopeCap(&nonMatchingEnvelopes); err != nil {
+				return buildings, visitors, err
+			}
 			slog.Info("observed other push", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
 		}
 	}

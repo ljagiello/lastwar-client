@@ -50,6 +50,13 @@ type CrossServerLoginResult struct {
 func (r CrossServerLoginResult) String() string   { return "[REDACTED CrossServerLoginResult]" }
 func (r CrossServerLoginResult) GoString() string { return r.String() }
 
+// LogValue makes CrossServerLoginResult satisfy slog.LogValuer -- round-53 fix, the same gap
+// String()/GoString() alone leaves open for every credential-bearing type in this codebase: those
+// two methods are invisible to slog.NewJSONHandler (the only handler main.go ever installs),
+// since encoding/json never consults fmt.Stringer/fmt.GoStringer, only slog.LogValuer. See
+// config.go's SessionConfig.LogValue for the full rationale.
+func (r CrossServerLoginResult) LogValue() slog.Value { return slog.StringValue(r.String()) }
+
 // CrossServerLoginParams mirrors the fields UIRoleLoginView:OnClickLogin
 // pulls off a role entry (ip/port/zone/gameUid) plus the deviceId/airKey
 // this device already presented.
@@ -84,6 +91,10 @@ type CrossServerLoginParams struct {
 // not the struct directly, so this is defense-in-depth, not an active leak fix.
 func (p CrossServerLoginParams) String() string   { return "[REDACTED CrossServerLoginParams]" }
 func (p CrossServerLoginParams) GoString() string { return p.String() }
+
+// LogValue makes CrossServerLoginParams satisfy slog.LogValuer -- see CrossServerLoginResult's
+// identical round-53 fix above for the full rationale.
+func (p CrossServerLoginParams) LogValue() slog.Value { return slog.StringValue(p.String()) }
 
 // DoCrossServerLogin reimplements the client's CrossServerLogin FSM state
 // (Assembly-CSharp.decompiled.cs:108752-108812): UIRoleLoginView.OnClickLogin
@@ -297,9 +308,23 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 				if err != nil {
 					slog.Error("GSL refresh failed; following redirect with stale access token anyway", "error", err)
 				} else {
+					// Only overwrite on a non-empty refreshed token -- mirrors the gameUid guard
+					// just below (same reasoning, and the identical round-53 fix login.go's
+					// matching redirect path also got): freshLsr.At can be non-nil with an empty
+					// Token (gsl.go's LoginServerListRespon.UnmarshalJSON treats any
+					// JSON-object-shaped "at" field, including "{}" or one with no/empty
+					// "token", as present via looksLikeJSONObject), and an empty token here is
+					// more likely an unpopulated/degraded refresh response than a real
+					// "clear the token" instruction. Clobbering the caller-supplied, already-
+					// working p.AccessTok with "" would break the very redial this refresh
+					// exists to support.
 					if freshLsr.At != nil {
-						p.AccessTok = capOversizedIdentityField("accessTok", freshLsr.At.Token.String(), p.AccessTok, "cross-server login serverInfo redirect GSL refresh")
-						slog.Info("fresh access token acquired", "tokenLen", len(p.AccessTok))
+						if newAccessTok := capOversizedIdentityField("accessTok", freshLsr.At.Token.String(), p.AccessTok, "cross-server login serverInfo redirect GSL refresh"); newAccessTok != "" {
+							p.AccessTok = newAccessTok
+							slog.Info("fresh access token acquired", "tokenLen", len(p.AccessTok))
+						} else {
+							slog.Warn("serverInfo redirect GSL refresh returned an empty access token; keeping the existing one", "tokenLen", len(p.AccessTok))
+						}
 					}
 					// The same refresh response also carries the account's current
 					// gameUid (serverList[0].gameUid) -- propagate it the same way as

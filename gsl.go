@@ -234,11 +234,26 @@ type LoginToken struct {
 // response (see login_integration_test.go's newFakeGSLServer and crossserver_test.go's inline GSL
 // fakes); a MarshalJSON override here would silently replace every such fixture's real token with
 // the redacted placeholder, breaking every test that asserts on propagated token content. The
-// concrete threat this closes (a String()/GoString()-checking call site) doesn't need it; a future
-// slog.Any("resp", lsr)-shaped leak via slog's JSON-handler-calls-json.Marshal path remains a
-// separate, currently latent gap this round leaves open rather than risk that regression.
+// concrete threat this closes (a String()/GoString()-checking call site) doesn't need it.
+//
+// Round-53 update: LogValue() below closes the specific gap this comment used to describe as
+// "left open" -- a LoginToken (or a *LoginServerListRespon whose At/Rt IS the LoginToken itself)
+// passed DIRECTLY as a raw slog attribute value, e.g. slog.Any("token", tok). slog resolves
+// LogValuer before ever reaching a handler's own formatting, so this protects every handler
+// (including slog.NewJSONHandler, the only one main.go installs, which never consults
+// fmt.Stringer/fmt.GoStringer at all). What remains open, unaffected by LogValue(): a LoginToken
+// NESTED inside a larger struct that is itself passed as the attribute (e.g.
+// slog.Any("resp", lsr) where lsr is a *LoginServerListRespon) -- json.Marshal recurses into
+// struct fields on its own terms and has no concept of slog.LogValuer, so a future call shaped
+// like that would still serialize Token/Time as plain JSON. Closing that would require
+// *LoginServerListRespon itself to implement LogValuer (or MarshalJSON, ruled out above for this
+// exact struct family) -- a larger, separate fix, not attempted here.
 func (t LoginToken) String() string   { return "[REDACTED LoginToken]" }
 func (t LoginToken) GoString() string { return t.String() }
+
+// LogValue makes LoginToken satisfy slog.LogValuer -- see this type's own doc comment above (the
+// "Round-53 update" paragraph) for what this does and does not close.
+func (t LoginToken) LogValue() slog.Value { return slog.StringValue(t.String()) }
 
 type LoginServerInfo struct {
 	// ID and Port are flexString, not a bare int, for the same reason as Status just below (see
@@ -612,6 +627,10 @@ type GSLOpt struct {
 // GetServerList call) rather than held across a whole multi-hundred-line flow.
 func (o GSLOpt) String() string   { return "[REDACTED GSLOpt]" }
 func (o GSLOpt) GoString() string { return o.String() }
+
+// LogValue makes GSLOpt satisfy slog.LogValuer -- see LoginToken's identical round-53 fix above
+// for the full rationale.
+func (o GSLOpt) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
 // GetServerList performs the RSA+AES-wrapped GSL POST and returns the
 // decrypted, parsed response.

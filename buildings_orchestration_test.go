@@ -98,10 +98,17 @@ func TestFetchBuildingsSurvivesCorruptPush(t *testing.T) {
 // before the caller-supplied wall-clock timeout eventually fired. Proves
 // maxConsecutiveDecodeFailures (login.go) is a strict `>` bound here too: exactly that many
 // corrupt frames in a row still lets the following valid init push be parsed, one more makes the
-// loop give up early (break, not an error -- mirroring the existing net.Error-timeout give-up
-// path) with whatever was collected so far (nothing, since it never reaches the init push).
+// loop give up early with whatever was collected so far (nothing, since it never reaches the init
+// push).
+//
+// Round-53 fix: the cap+1 case now expects a non-nil deadConnError, not the plain nil-error break
+// this test originally asserted -- FetchBuildings was the one sibling among the four independent
+// maxConsecutiveDecodeFailures loops (login.go's waitFor/waitForInitPush, conn.go's DoHandshake --
+// all fixed in round 51) that silently discarded this outcome instead of surfacing it as the
+// genuinely-dead-connection signal it represents, indistinguishable from the benign
+// silence-until-deadline timeout two checks above it.
 func TestFetchBuildingsConsecutiveDecodeFailuresBoundary(t *testing.T) {
-	sendCorruptThenInit := func(t *testing.T, n int) (buildings []Building, logged string) {
+	sendCorruptThenInit := func(t *testing.T, n int) (buildings []Building, logged string, err error) {
 		client, server := newPipeGameConnPair(t)
 		go func() {
 			for i := 0; i < n; i++ {
@@ -122,26 +129,100 @@ func TestFetchBuildingsConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		got, _, err := FetchBuildings(client, 300*time.Millisecond)
 		slog.SetDefault(orig)
 
-		if err != nil {
-			t.Fatalf("FetchBuildings() error = %v, want nil (giving up on too many consecutive decode failures is a graceful break, not an error)", err)
-		}
-		return got, buf.String()
+		return got, buf.String(), err
 	}
 
 	t.Run("exactly cap consecutive corrupt frames: init push still parsed", func(t *testing.T) {
-		buildings, _ := sendCorruptThenInit(t, maxConsecutiveDecodeFailures)
+		buildings, _, err := sendCorruptThenInit(t, maxConsecutiveDecodeFailures)
+		if err != nil {
+			t.Fatalf("FetchBuildings() error = %v, want nil (exactly the cap must still be tolerated)", err)
+		}
 		if len(buildings) != 1 || buildings[0].Uuid() != 111 {
 			t.Fatalf("buildings = %+v, want exactly one building with uuid 111 (the cap must still be tolerated)", buildings)
 		}
 	})
 
 	t.Run("cap+1 consecutive corrupt frames: gives up before reaching the init push", func(t *testing.T) {
-		buildings, logged := sendCorruptThenInit(t, maxConsecutiveDecodeFailures+1)
+		buildings, logged, err := sendCorruptThenInit(t, maxConsecutiveDecodeFailures+1)
+		if err == nil {
+			t.Fatal("FetchBuildings() error = nil, want a deadConnError once the consecutive-failure cap is exceeded")
+		}
+		var netErr net.Error
+		if !errors.As(err, &netErr) {
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadConnError's wrap)", err, err)
+		}
+		if netErr.Timeout() {
+			t.Errorf("netErr.Timeout() = true, want false -- this must be distinguishable from the benign silence-until-deadline timeout case")
+		}
+		if !containsNonTimeoutNetError(err) {
+			t.Errorf("containsNonTimeoutNetError(err) = false, want true -- every 'abort remaining work on a dead connection' check in this codebase (e.g. main.go's shouldAbortBeforeInteractive) uses this helper")
+		}
 		if len(buildings) != 0 {
 			t.Errorf("buildings = %+v, want none (must give up before the init push ever arrives)", buildings)
 		}
 		if !strings.Contains(logged, "too many consecutive malformed/undecodable envelopes") {
 			t.Errorf("expected a Warn about giving up on too many consecutive failures, got:\n%s", logged)
+		}
+	})
+}
+
+// TestFetchBuildingsNonMatchingEnvelopeCapBoundary is the round-53 regression test for the MAJOR
+// finding that maxConsecutiveDecodeFailures only ever bounded consecutive DECODE FAILURES, not a
+// stream of well-formed-but-irrelevant pushes -- see conn_wait_test.go's
+// TestWaitForNonMatchingEnvelopeCapBoundary for the full rationale (a hostile peer streaming
+// well-formed "push.queue.add"/"push.build.queue.info"/unrecognized-cmd pushes costs a full
+// ReadPacket/DecodeObject/AsExtension/StringRedacted/slog.Info cycle each, unconditionally at Info
+// level, with nothing previously bounding how many of them one wait call would process). Proves
+// maxNonMatchingEnvelopesPerWait (login.go) is a strict `>` bound here too, exercised via
+// checkNonMatchingEnvelopeCap's shared push.queue.add call site (buildings.go) -- the same helper
+// FetchBuildings' other three "didn't advance real state" sites (non-extension,
+// push.build.queue.info, default/unrecognized cmd) call identically.
+func TestFetchBuildingsNonMatchingEnvelopeCapBoundary(t *testing.T) {
+	sendNoiseThenInit := func(t *testing.T, n int) (buildings []Building, err error) {
+		client, server := newPipeGameConnPair(t)
+		go func() {
+			noise := NewSFSObject()
+			noise.PutUtfString("irrelevant", "noise")
+			for i := 0; i < n; i++ {
+				if err := server.SendExtension("push.queue.add", noise); err != nil {
+					return
+				}
+			}
+			params := NewSFSObject()
+			arr := NewSFSArray()
+			arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
+			params.PutSFSArray("building_new", arr)
+			_ = server.SendExtension("init", params)
+		}()
+
+		buildings, _, err = FetchBuildings(client, 5*time.Second)
+		return buildings, err
+	}
+
+	t.Run("exactly cap non-matching pushes: init push still parsed", func(t *testing.T) {
+		buildings, err := sendNoiseThenInit(t, maxNonMatchingEnvelopesPerWait)
+		if err != nil {
+			t.Fatalf("FetchBuildings() error = %v, want nil (exactly the cap must still be tolerated)", err)
+		}
+		if len(buildings) != 1 || buildings[0].Uuid() != 111 {
+			t.Fatalf("buildings = %+v, want exactly one building with uuid 111", buildings)
+		}
+	})
+
+	t.Run("cap+1 non-matching pushes: gives up benignly", func(t *testing.T) {
+		buildings, err := sendNoiseThenInit(t, maxNonMatchingEnvelopesPerWait+1)
+		if err == nil {
+			t.Fatal("FetchBuildings() error = nil, want a benign give-up error once the non-matching-envelope cap is exceeded")
+		}
+		var netErr net.Error
+		if !errors.As(err, &netErr) {
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadlineExceededError)", err, err)
+		}
+		if !netErr.Timeout() {
+			t.Errorf("netErr.Timeout() = true, want false -- this is a benign give-up (like a real timeout), not a genuine dead-connection error")
+		}
+		if len(buildings) != 0 {
+			t.Errorf("buildings = %+v, want none (must give up before the init push ever arrives)", buildings)
 		}
 	})
 }

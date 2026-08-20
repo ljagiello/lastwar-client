@@ -367,6 +367,57 @@ func TestDoHandshakeConsecutiveDecodeFailuresBoundary(t *testing.T) {
 	})
 }
 
+// TestDoHandshakeNonMatchingEnvelopeCapBoundary is the round-53 regression test for the MAJOR
+// finding that maxConsecutiveDecodeFailures only ever bounded consecutive DECODE FAILURES, not a
+// stream of well-formed-but-irrelevant envelopes -- see conn_wait_test.go's
+// TestWaitForNonMatchingEnvelopeCapBoundary for the full rationale. Proves
+// maxNonMatchingEnvelopesPerWait (login.go) is a strict `>` bound for DoHandshake too: exactly
+// that many non-matching envelopes in a row still lets the following real handshake response
+// succeed, one more makes it give up with a benign (Timeout()==true) error.
+func TestDoHandshakeNonMatchingEnvelopeCapBoundary(t *testing.T) {
+	sendNoiseThenRespond := func(t *testing.T, n int) (err error) {
+		client, server := newPipeGameConnPair(t)
+		go func() {
+			if _, rerr := server.ReadEnvelope(); rerr != nil {
+				return
+			}
+			noise := NewSFSObject()
+			noise.PutUtfString("irrelevant", "noise")
+			for i := 0; i < n; i++ {
+				if err := server.SendExtension("irrelevant.cmd", noise); err != nil {
+					return
+				}
+			}
+			resp := NewSFSObject()
+			resp.PutUtfString("sess", "abc123")
+			_ = server.SendEnvelope(controllerSystem, actionHandshake, resp)
+		}()
+
+		_, err = client.DoHandshake(5 * time.Second)
+		return err
+	}
+
+	t.Run("exactly cap non-matching envelopes: still succeeds", func(t *testing.T) {
+		if err := sendNoiseThenRespond(t, maxNonMatchingEnvelopesPerWait); err != nil {
+			t.Errorf("DoHandshake() error = %v, want nil (exactly the cap must still be tolerated)", err)
+		}
+	})
+
+	t.Run("cap+1 non-matching envelopes: gives up", func(t *testing.T) {
+		err := sendNoiseThenRespond(t, maxNonMatchingEnvelopesPerWait+1)
+		if err == nil {
+			t.Fatal("DoHandshake() error = nil, want an error once the non-matching-envelope cap is exceeded")
+		}
+		var netErr net.Error
+		if !errors.As(err, &netErr) {
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadlineExceededError)", err, err)
+		}
+		if !netErr.Timeout() {
+			t.Errorf("netErr.Timeout() = true, want false -- this is a benign give-up, not a genuine dead-connection error")
+		}
+	})
+}
+
 // TestDoHandshakeRejectsMissingPPayload is the round-50 regression test for DoHandshake's
 // `if env.Content == nil` guard (conn.go), the HANDSHAKE FAILED sibling of login.go's and
 // crossserver.go's identical guards: had zero test coverage, since every existing DoHandshake test

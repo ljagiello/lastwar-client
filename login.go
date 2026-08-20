@@ -45,6 +45,10 @@ type LoginOptions struct {
 func (o LoginOptions) String() string   { return "[REDACTED LoginOptions]" }
 func (o LoginOptions) GoString() string { return o.String() }
 
+// LogValue makes LoginOptions satisfy slog.LogValuer -- see gsl.go's LoginToken.LogValue for the
+// full round-53 rationale.
+func (o LoginOptions) LogValue() slog.Value { return slog.StringValue(o.String()) }
+
 // gslOptFor picks the GSL getserverlist opt for a device identity, per
 // dossier §02.2's opt table, refined empirically:
 //
@@ -464,9 +468,22 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			if err != nil {
 				slog.Error("GSL refresh failed; following redirect with stale token anyway", "error", err)
 			} else {
+				// Only overwrite on a non-empty refreshed token -- mirrors the gameUid guard
+				// just below (same reasoning): freshLsr.At can be non-nil with an empty Token
+				// (gsl.go's LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped
+				// "at" field, including "{}" or one with no/empty "token", as present via
+				// looksLikeJSONObject), and an empty token here is more likely an
+				// unpopulated/degraded refresh response than a real "clear the token"
+				// instruction. Clobbering a known-good, already-working accessTok with "" would
+				// break the very reconnect this refresh exists to support -- round-53 fix, the
+				// identical gap the gameUid guard below was already hardened against.
 				if freshLsr.At != nil {
-					accessTok = capOversizedIdentityField("accessTok", freshLsr.At.Token.String(), accessTok, "login serverInfo redirect GSL refresh")
-					slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
+					if newAccessTok := capOversizedIdentityField("accessTok", freshLsr.At.Token.String(), accessTok, "login serverInfo redirect GSL refresh"); newAccessTok != "" {
+						accessTok = newAccessTok
+						slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
+					} else {
+						slog.Warn("serverInfo redirect GSL refresh returned an empty access token; keeping the existing one", "tokenLen", len(accessTok))
+					}
 				}
 				// The same refresh response also carries the account's current
 				// gameUid (serverList[0].gameUid) -- propagate it the same way as
@@ -790,6 +807,7 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 	halfway := time.Now().Add(timeout / 2)
 	sentActivePull := false
 	consecutiveDecodeFailures := 0
+	nonMatchingEnvelopes := 0
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -880,13 +898,24 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 		}
 		consecutiveDecodeFailures = 0
 		msg, ok := env.AsExtension()
-		if !ok {
-			continue
-		}
-		if msg.Cmd == "init" {
+		if ok && msg.Cmd == "init" {
 			return dedupeBuildings(ParseInitBuildings(msg.Params)), dedupeVisitors(ParseInitVisitors(msg.Params)), true, nil
 		}
-		slog.Debug("skipped push while waiting for init", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
+		// maxNonMatchingEnvelopesPerWait (round-53 fix, doc comment above): a non-extension
+		// envelope (!ok, e.g. the client's own background heartbeat pong) and a well-formed but
+		// non-"init" push both count against this cap identically -- neither advances real
+		// state, and both cost a full ReadPacket/DecodeObject/AsExtension cycle regardless.
+		// Benign give-up, matching this function's own pre-existing silence-until-deadline
+		// convention (nil error) -- not deadConnError, since a stream of well-formed-but-
+		// irrelevant traffic isn't itself evidence of a dead connection.
+		nonMatchingEnvelopes++
+		if nonMatchingEnvelopes > maxNonMatchingEnvelopesPerWait {
+			slog.Warn("waitForInitPush: too many well-formed but non-matching envelopes processed, giving up", "nonMatchingEnvelopes", nonMatchingEnvelopes)
+			return nil, nil, false, nil
+		}
+		if ok {
+			slog.Debug("skipped push while waiting for init", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
+		}
 	}
 }
 
@@ -998,11 +1027,38 @@ func (deadlineExceededError) Temporary() bool { return false }
 // this was built for needs.
 const maxConsecutiveDecodeFailures = 20
 
+// maxNonMatchingEnvelopesPerWait bounds how many successfully-decoded but NOT-the-awaited-thing
+// envelopes any of this codebase's independent read loops will process in a single wait call
+// before giving up -- round-53 fix, closing a DoS gap the round-48/49/50/51 decode-error-survival
+// fixes never addressed: those fixes only bound consecutive DECODE FAILURES (maxConsecutiveDecodeFailures
+// above), but a hostile peer that streams well-formed, successfully-decoded, simply-irrelevant
+// pushes for the duration of a wait window resets that counter to 0 on every single one and is
+// never slowed down by it. Each such push still costs a full ReadPacket/DecodeObject/AsExtension
+// cycle, and several of these loops' own "observed/skipped" diagnostics (buildings.go's
+// FetchBuildings default/push.queue.add/push.build.queue.info cases, conn.go's DoHandshake)
+// unconditionally format and log the full decoded content at Info level -- not gated behind
+// -log-level=debug -- so an unbounded stream of them also produces an unbounded volume of
+// Info-level log lines and StringRedacted() formatting cost, for the full duration of every wait
+// window (up to 45s for waitForInitPush).
+//
+// Treated as benign (reuses deadlineExceededError's net.Error/Timeout()==true shape), not fatal
+// (unlike maxConsecutiveDecodeFailures' deadConnError): a long stream of well-formed-but-irrelevant
+// traffic is not, on its own, evidence the connection itself is dead the way a stream of
+// undecodable garbage is -- it might simply be a very busy connection that hasn't yet sent the
+// awaited response. Only incremented on envelopes that do NOT advance real state (a skipped/
+// unrecognized push, a non-extension envelope) -- legitimate, repeatedly-matching traffic (e.g.
+// buildings.go's own push.add.building/push.init.build cases, which can legitimately arrive many
+// times) is deliberately NOT counted against this cap, since counting it risked prematurely giving
+// up on a genuinely busy but healthy connection. Set high enough that no legitimate traffic
+// pattern this codebase has ever observed should plausibly reach it.
+const maxNonMatchingEnvelopesPerWait = 1000
+
 // waitFor reads envelopes until pred matches or timeout elapses, logging
 // everything it skips past along the way.
 func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (*Envelope, error) {
 	deadline := time.Now().Add(timeout)
 	consecutiveDecodeFailures := 0
+	nonMatchingEnvelopes := 0
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -1053,6 +1109,10 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 		consecutiveDecodeFailures = 0
 		if pred(env) {
 			return env, nil
+		}
+		nonMatchingEnvelopes++
+		if nonMatchingEnvelopes > maxNonMatchingEnvelopesPerWait {
+			return nil, fmt.Errorf("waitFor: %d well-formed but non-matching envelopes processed, giving up: %w", nonMatchingEnvelopes, deadlineExceededError{})
 		}
 		if msg, ok := env.AsExtension(); ok {
 			slog.Debug("skipped push while waiting", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())

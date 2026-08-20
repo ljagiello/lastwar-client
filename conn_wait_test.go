@@ -480,6 +480,61 @@ func TestWaitForConsecutiveDecodeFailuresBoundary(t *testing.T) {
 	})
 }
 
+// TestWaitForNonMatchingEnvelopeCapBoundary is the round-53 regression test for the MAJOR finding
+// that maxConsecutiveDecodeFailures only ever bounded consecutive DECODE FAILURES -- a hostile
+// peer streaming well-formed, successfully-decoded, simply-irrelevant extension pushes for the
+// duration of a wait window resets that counter to 0 on every single one and was never slowed down
+// by it, each one still costing a full ReadPacket/DecodeObject/AsExtension cycle for the entire
+// caller-supplied timeout. Proves maxNonMatchingEnvelopesPerWait (login.go) is a strict `>` bound:
+// exactly that many well-formed-but-irrelevant pushes in a row still lets the following matching
+// one succeed, one more makes waitForCmd give up with a benign (Timeout()==true) error instead of
+// continuing to tolerate them indefinitely.
+func TestWaitForNonMatchingEnvelopeCapBoundary(t *testing.T) {
+	sendNoiseThenMatch := func(t *testing.T, n int) (err error) {
+		client, server := newPipeGameConnPair(t)
+		// Deliberately not gated on the server goroutine finishing -- see
+		// TestWaitForConsecutiveDecodeFailuresBoundary's identical comment above for why.
+		go func() {
+			noise := NewSFSObject()
+			noise.PutUtfString("irrelevant", "noise")
+			for i := 0; i < n; i++ {
+				if err := server.SendExtension("irrelevant.cmd", noise); err != nil {
+					return
+				}
+			}
+			resp := NewSFSObject()
+			resp.PutBool("success", true)
+			_ = server.SendExtension("wanted.cmd", resp)
+		}()
+
+		_, err = waitForCmd(client, 5*time.Second, "wanted.cmd")
+		return err
+	}
+
+	t.Run("exactly cap non-matching envelopes: still succeeds", func(t *testing.T) {
+		if err := sendNoiseThenMatch(t, maxNonMatchingEnvelopesPerWait); err != nil {
+			t.Errorf("waitForCmd() error = %v, want nil (exactly the cap must still be tolerated)", err)
+		}
+	})
+
+	t.Run("cap+1 non-matching envelopes: gives up", func(t *testing.T) {
+		err := sendNoiseThenMatch(t, maxNonMatchingEnvelopesPerWait+1)
+		if err == nil {
+			t.Fatal("waitForCmd() error = nil, want an error once the non-matching-envelope cap is exceeded")
+		}
+		if !strings.Contains(err.Error(), "non-matching envelopes processed") {
+			t.Errorf("err = %v, want it to mention the non-matching-envelope cap being exceeded", err)
+		}
+		var netErr net.Error
+		if !errors.As(err, &netErr) {
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadlineExceededError)", err, err)
+		}
+		if !netErr.Timeout() {
+			t.Errorf("netErr.Timeout() = true, want false -- this is a benign give-up (like a real timeout), not a genuine dead-connection error (unlike the maxConsecutiveDecodeFailures give-up, which uses deadConnError with Timeout()==false)")
+		}
+	})
+}
+
 // TestWaitForCmdSkipRedactsCredentialFields is the round-11 regression test for waitFor's generic
 // "skipped push while waiting" Debug logger (login.go:513-515): if push.account.login.new --
 // which carries a live loginKey in cleartext -- arrives while a caller is waiting for a different
@@ -916,6 +971,61 @@ func TestWaitForInitPushConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		}
 		if !containsNonTimeoutNetError(err) {
 			t.Errorf("containsNonTimeoutNetError(err) = false, want true")
+		}
+	})
+}
+
+// TestWaitForInitPushNonMatchingEnvelopeCapBoundary is the round-53 regression test for the MAJOR
+// finding that maxConsecutiveDecodeFailures only ever bounded consecutive DECODE FAILURES, not a
+// stream of well-formed-but-irrelevant pushes -- see TestWaitForNonMatchingEnvelopeCapBoundary
+// above for the full rationale. Proves maxNonMatchingEnvelopesPerWait (login.go) is a strict `>`
+// bound for waitForInitPush too: exactly that many irrelevant pushes in a row still lets the
+// following init push be parsed, one more makes it give up -- benignly (gotInit=false, err=nil),
+// matching this function's own pre-existing silence-until-deadline convention, not a fatal error.
+func TestWaitForInitPushNonMatchingEnvelopeCapBoundary(t *testing.T) {
+	sendNoiseThenInit := func(t *testing.T, n int) (buildings []Building, gotInit bool, err error) {
+		client, server := newPipeGameConnPair(t)
+		go func() {
+			noise := NewSFSObject()
+			noise.PutUtfString("irrelevant", "noise")
+			for i := 0; i < n; i++ {
+				if err := server.SendExtension("irrelevant.cmd", noise); err != nil {
+					return
+				}
+			}
+			params := NewSFSObject()
+			arr := NewSFSArray()
+			arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
+			params.PutSFSArray("building_new", arr)
+			_ = server.SendExtension("init", params)
+		}()
+
+		// A window well short of the halfway-point active-pull fallback, matching this file's
+		// other waitForInitPush boundary test's own reasoning.
+		buildings, _, gotInit, err = waitForInitPush(client, 5*time.Second)
+		return buildings, gotInit, err
+	}
+
+	t.Run("exactly cap non-matching pushes: init push still parsed", func(t *testing.T) {
+		buildings, gotInit, err := sendNoiseThenInit(t, maxNonMatchingEnvelopesPerWait)
+		if err != nil {
+			t.Fatalf("waitForInitPush() error = %v, want nil (exactly the cap must still be tolerated)", err)
+		}
+		if !gotInit {
+			t.Fatal("gotInit = false, want true (the init push must still be reached and parsed)")
+		}
+		if len(buildings) != 1 || buildings[0].Uuid() != 111 {
+			t.Fatalf("buildings = %+v, want exactly one building with uuid 111", buildings)
+		}
+	})
+
+	t.Run("cap+1 non-matching pushes: gives up benignly", func(t *testing.T) {
+		buildings, gotInit, err := sendNoiseThenInit(t, maxNonMatchingEnvelopesPerWait+1)
+		if err != nil {
+			t.Errorf("waitForInitPush() error = %v, want nil (giving up on too many non-matching pushes is a benign give-up, not an error)", err)
+		}
+		if gotInit {
+			t.Errorf("gotInit = true, want false (buildings=%v)", buildings)
 		}
 	})
 }

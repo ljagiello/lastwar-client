@@ -45,6 +45,16 @@ type SessionConfig struct {
 func (c SessionConfig) String() string   { return "[REDACTED SessionConfig]" }
 func (c SessionConfig) GoString() string { return c.String() }
 
+// LogValue makes SessionConfig satisfy slog.LogValuer -- round-53 fix for the MAJOR finding that
+// String()/GoString() redaction is invisible to slog.NewJSONHandler (the only handler main.go
+// ever installs, with no ReplaceAttr hook): encoding/json never consults fmt.Stringer/
+// fmt.GoStringer, only slog.LogValuer, which slog resolves before handler dispatch -- so this
+// protects every handler, not just JSON. Passing cfg directly as a raw slog attribute value would
+// otherwise print AccessToken in clear text, bypassing String()/GoString() entirely. No current
+// call site does this (see the doc comment above), so this is defense-in-depth, matching this
+// type's own String()/GoString() rationale.
+func (c SessionConfig) LogValue() slog.Value { return slog.StringValue(c.String()) }
+
 func defaultSessionConfigPath() string {
 	return stateFilePath(".lastwar_goclient_session.json")
 }
