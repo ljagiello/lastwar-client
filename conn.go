@@ -428,7 +428,13 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*SFSObject, error) {
 			// a successfully-decoded-but-non-matching envelope a few lines below.
 			consecutiveDecodeFailures++
 			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
-				return nil, fmt.Errorf("DoHandshake: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err)
+				// deadConnError (packet.go): round-51 fix -- mirrors login.go's identical
+				// waitFor/waitForInitPush fix. This give-up error is never itself a net.Error
+				// by construction (reached only after both the Timeout()==true check and
+				// containsNonTimeoutNetError(err) above already ruled that out), so without
+				// this wrap it was silently misclassified as a benign failure by any caller
+				// checking containsNonTimeoutNetError/errors.As(&netErr)&&!netErr.Timeout().
+				return nil, deadConnError{err: fmt.Errorf("DoHandshake: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err)}
 			}
 			slog.Warn("DoHandshake: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue

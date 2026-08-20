@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"math"
 	mathrand "math/rand"
 	"testing"
 )
@@ -134,4 +135,31 @@ func TestEncodePacketCompressionThresholdExactBoundary(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestUint32CountExactBoundary is the round-51 regression test for the MINOR finding that
+// EncodePacket's big-sized length field used an unchecked uint32(len(encrypted)) conversion, which
+// would silently wrap modulo 2^32 for a payload of exactly 4GiB or more instead of erroring --
+// mirrors sfsobject_encode_error_test.go's TestInt32CountExactBoundary technique exactly: a true
+// end-to-end EncodePacket test would need a >4GiB payload to actually drive the wire count past
+// math.MaxUint32, impractically expensive to construct and run, so uint32Count (packet.go, this
+// check's own extracted helper, mirroring sfsobject.go's int16Count/int32Count) is called directly
+// here instead.
+func TestUint32CountExactBoundary(t *testing.T) {
+	t.Run("exactly math.MaxUint32: accepted", func(t *testing.T) {
+		got, err := uint32Count(math.MaxUint32, "x")
+		if err != nil {
+			t.Fatalf("uint32Count(math.MaxUint32, ...) error = %v, want nil", err)
+		}
+		if got != math.MaxUint32 {
+			t.Errorf("got %d, want %d", got, uint32(math.MaxUint32))
+		}
+	})
+
+	t.Run("math.MaxUint32 plus one: rejected", func(t *testing.T) {
+		_, err := uint32Count(math.MaxUint32+1, "x")
+		if err == nil {
+			t.Fatal("uint32Count(math.MaxUint32+1, ...) error = nil, want an overflow error")
+		}
+	})
 }

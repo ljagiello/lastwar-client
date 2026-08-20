@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -99,8 +100,22 @@ func EncodePacket(body []byte) ([]byte, error) {
 	var out bytes.Buffer
 	out.WriteByte(header)
 	if bigSized {
+		// Round-51 fix: len(encrypted) is an int (64-bit on every platform this codebase
+		// actually runs on), but the big-sized length field is a wire uint32 -- an unchecked
+		// conversion would silently wrap modulo 2^32 for a payload of exactly 4GiB or more,
+		// writing a length header that no longer matches the real body size written just below
+		// and permanently desyncing the receiving side's frame-boundary interpretation for the
+		// rest of the connection, the same failure class sfsobject.go's sibling int16Count/
+		// int32Count/writeUtfString helpers already guard against for their own wire counts.
+		// Not reachable via any current call site (SendEnvelope only ever builds small
+		// hand-built command envelopes), but defense-in-depth matching this codebase's existing
+		// convention of erroring rather than silently wrapping an oversized wire count.
+		n, err := uint32Count(len(encrypted), "encrypted payload bytes")
+		if err != nil {
+			return nil, err
+		}
 		var lb [4]byte
-		binary.BigEndian.PutUint32(lb[:], uint32(len(encrypted)))
+		binary.BigEndian.PutUint32(lb[:], n)
 		out.Write(lb[:])
 	} else {
 		var lb [2]byte
@@ -109,6 +124,16 @@ func EncodePacket(body []byte) ([]byte, error) {
 	}
 	out.Write(encrypted)
 	return out.Bytes(), nil
+}
+
+// uint32Count converts a length to uint32 for a wire count field, returning an error instead of
+// silently wrapping into a wrong count if the value is ever too large to represent -- this file's
+// own sibling of sfsobject.go's int16Count/int32Count, for EncodePacket's big-sized length field.
+func uint32Count(n int, what string) (uint32, error) {
+	if n > math.MaxUint32 {
+		return 0, fmt.Errorf("packet: too many %s to encode (%d, max %d)", what, n, uint32(math.MaxUint32))
+	}
+	return uint32(n), nil
 }
 
 // deadConnError wraps an error that is (or unwraps to) io.EOF or

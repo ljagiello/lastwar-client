@@ -25,6 +25,26 @@ func newTestVisitor(uid int64, eventId, visitorId int32) Visitor {
 	return Visitor{Raw: raw}
 }
 
+// TestVisitorStartTime is the round-51 regression test for Visitor.StartTime() (visitors.go),
+// which had zero test coverage and zero callers -- unlike its sibling accessors Uid()/EventId()/
+// VisitorId(), which are all exercised indirectly through GreetVisitors/ParseInitVisitors tests via
+// newTestVisitor above (deliberately built without a startTime field, since GreetVisitors itself
+// never reads it). StartTime's own doc comment explains it's kept for a future GreetVisitors
+// enhancement (skipping a still-arriving visitor_err_coming visitor before ever sending the doomed
+// operate call) -- pins down that it reads the "startTime" key specifically (not a typo like
+// "eventId", and via GetLong like its Uid() sibling, not GetInt) directly, since GetLong itself is
+// already well-tested elsewhere and the only thing worth proving here is this one-line wrapper's
+// own field-name/accessor choice.
+func TestVisitorStartTime(t *testing.T) {
+	raw := NewSFSObject()
+	raw.PutLong("startTime", 1234567890)
+	v := Visitor{Raw: raw}
+
+	if got := v.StartTime(); got != 1234567890 {
+		t.Errorf("StartTime() = %d, want %d", got, 1234567890)
+	}
+}
+
 // TestGreetVisitorsEmpty checks the len(visitors)==0 short-circuit: GreetVisitors must return nil
 // without sending anything. No fake server goroutine is started here at all -- if the
 // short-circuit were ever removed, GreetVisitors would block on sendAndWait's 8s timeout waiting

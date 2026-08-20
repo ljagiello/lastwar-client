@@ -861,7 +861,19 @@ func waitForInitPush(conn *GameConn, timeout time.Duration) ([]Building, []Visit
 			}
 			consecutiveDecodeFailures++
 			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
-				return nil, nil, false, fmt.Errorf("waitForInitPush: %d consecutive malformed/undecodable pushes, giving up: %w", consecutiveDecodeFailures, err)
+				// deadConnError (packet.go): round-51 fix for the MAJOR finding that this
+				// give-up error, by construction, is never itself a net.Error (this branch is
+				// only reached after both the Timeout()==true check and
+				// containsNonTimeoutNetError(err) above have already ruled that out for err),
+				// so every downstream containsNonTimeoutNetError/errors.As(&netErr)-based
+				// "abort remaining work on a genuinely dead connection" check (CollectAll,
+				// ClaimAllMail, GreetVisitors, ClaimAllianceGifts,
+				// shouldAbortBeforeInteractive, ...) silently treated it as a benign,
+				// non-fatal failure instead of the fatal one it actually represents -- a
+				// connection that just proved it cannot decode 20+ consecutive frames is, for
+				// every practical purpose, exactly as dead as one that failed with a genuine
+				// I/O error.
+				return nil, nil, false, deadConnError{err: fmt.Errorf("waitForInitPush: %d consecutive malformed/undecodable pushes, giving up: %w", consecutiveDecodeFailures, err)}
 			}
 			slog.Warn("waitForInitPush: failed to read/decode a push while waiting for init; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue
@@ -1025,7 +1037,15 @@ func waitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 			// awaited response/push might arrive on the very next read.
 			consecutiveDecodeFailures++
 			if consecutiveDecodeFailures > maxConsecutiveDecodeFailures {
-				return nil, fmt.Errorf("waitFor: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err)
+				// deadConnError (packet.go): round-51 fix -- see waitForInitPush's identical
+				// fix above for the full MAJOR-finding rationale. This give-up error is never
+				// itself a net.Error by construction (reached only after both the
+				// Timeout()==true check and containsNonTimeoutNetError(err) above already
+				// ruled that out), so without this wrap, every sendAndWait/waitForCmd caller's
+				// containsNonTimeoutNetError-based "abort on dead connection" check (mail.go's
+				// ClaimAllMail, buildings.go's CollectAll, main.go's
+				// shouldAbortBeforeInteractive, ...) silently misclassified it as benign.
+				return nil, deadConnError{err: fmt.Errorf("waitFor: %d consecutive malformed/undecodable envelopes, giving up: %w", consecutiveDecodeFailures, err)}
 			}
 			slog.Warn("waitFor: failed to read/decode an envelope while waiting; continuing to wait, not treating this as a dead connection", "error", err, "consecutiveDecodeFailures", consecutiveDecodeFailures)
 			continue

@@ -425,6 +425,25 @@ func TestWaitForConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		if !strings.Contains(err.Error(), "consecutive malformed/undecodable envelopes") {
 			t.Errorf("err = %v, want it to mention the consecutive-failure cap being exceeded", err)
 		}
+		// Round-51 regression assertion for the MAJOR finding that this give-up error, by
+		// construction, is never itself a net.Error (this branch is only reached after both
+		// the Timeout()==true check and containsNonTimeoutNetError(err) above have already
+		// ruled that out for the underlying corrupt-frame error) -- so without deadConnError's
+		// wrap (login.go), every containsNonTimeoutNetError/errors.As(&netErr)-based "abort on
+		// dead connection" check across the codebase (CollectAll, ClaimAllMail, GreetVisitors,
+		// shouldAbortBeforeInteractive, ...) would silently treat a connection that just proved
+		// it cannot decode 20+ consecutive frames as an ordinary, non-fatal failure instead of
+		// the fatal one it actually represents.
+		var netErr net.Error
+		if !errors.As(err, &netErr) {
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadConnError's wrap)", err, err)
+		}
+		if netErr.Timeout() {
+			t.Errorf("netErr.Timeout() = true, want false")
+		}
+		if !containsNonTimeoutNetError(err) {
+			t.Errorf("containsNonTimeoutNetError(err) = false, want true -- every downstream 'abort on dead connection' check in this codebase uses this helper")
+		}
 	})
 }
 
@@ -850,7 +869,57 @@ func TestWaitForInitPushConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		if !strings.Contains(err.Error(), "consecutive malformed/undecodable pushes") {
 			t.Errorf("err = %v, want it to mention the consecutive-failure cap being exceeded", err)
 		}
+		// Round-51 regression assertion: see TestWaitForConsecutiveDecodeFailuresBoundary's
+		// identical assertion above for the full MAJOR-finding rationale -- this give-up error
+		// must satisfy net.Error with Timeout()==false (via deadConnError, login.go), not just
+		// be a non-nil error, so Login()'s own containsNonTimeoutNetError-based callers treat
+		// it as the fatal, connection-is-dead condition it represents.
+		var netErr net.Error
+		if !errors.As(err, &netErr) {
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadConnError's wrap)", err, err)
+		}
+		if netErr.Timeout() {
+			t.Errorf("netErr.Timeout() = true, want false")
+		}
+		if !containsNonTimeoutNetError(err) {
+			t.Errorf("containsNonTimeoutNetError(err) = false, want true")
+		}
 	})
+}
+
+// TestWaitForInitPushSurvivesNonExtensionEnvelope is the round-51 regression test for the MAJOR
+// finding that waitForInitPush's `msg, ok := env.AsExtension(); if !ok { continue }` guard
+// (login.go) had zero test coverage -- the structurally identical sibling of buildings.go's
+// FetchBuildings guard (see TestFetchBuildingsSurvivesNonExtensionEnvelope,
+// buildings_orchestration_test.go, for the full rationale): no existing test ever sends a
+// non-extension (controllerSystem) envelope during waitForInitPush's wait window, even though the
+// client's own background heartbeat sends exactly this shape every ~4s once running. Sends a raw
+// controllerSystem envelope before a valid init push, proving waitForInitPush skips it silently
+// instead of panicking on a nil msg dereference.
+func TestWaitForInitPushSurvivesNonExtensionEnvelope(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	go func() {
+		if err := server.SendEnvelope(controllerSystem, actionPingPong, NewSFSObject()); err != nil {
+			return
+		}
+		params := NewSFSObject()
+		arr := NewSFSArray()
+		arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
+		params.PutSFSArray("building_new", arr)
+		_ = server.SendExtension("init", params)
+	}()
+
+	buildings, _, gotInit, err := waitForInitPush(client, 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("waitForInitPush() error = %v, want nil", err)
+	}
+	if !gotInit {
+		t.Fatal("gotInit = false, want true (the init push must still be reached and parsed)")
+	}
+	if len(buildings) != 1 || buildings[0].Uuid() != 111 {
+		t.Fatalf("buildings = %+v, want exactly one building with uuid 111 (the non-extension envelope must be skipped, not panic)", buildings)
+	}
 }
 
 // TestReadPacketGracefulCloseIsNonTimeoutNetError is the packet.go-level regression test for round

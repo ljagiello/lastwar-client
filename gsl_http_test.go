@@ -335,6 +335,74 @@ func TestGetServerListAgainstFakeServer(t *testing.T) {
 	}
 }
 
+// TestGetServerListSuccessfulEncryptedRoundTrip is the round-51 regression test for the MAJOR
+// finding that GetServerList's actual production code path -- a "bin" field present, non-empty,
+// and successfully AES-decrypted and JSON-decoded -- had zero test coverage (gsl.go's
+// "applyLoginServerFallback(&lsr, opt); return &lsr, nil" success return, reached only from inside
+// the bin-present-and-decodable branch). TestGetServerListAgainstFakeServer above deliberately
+// tests the PLAINTEXT-fallback path (no "bin" field at all); every "bin"-field test in
+// TestGetServerListDecodeFailuresDoNotLeakRawResponse below deliberately injects a decode/decrypt
+// failure; TestGSLCryptoRoundTrip (crypto_gsl_test.go) exercises the crypto primitives directly,
+// never through GetServerList's own wiring. Against a real game server, every single login attempt
+// goes through exactly this branch -- plays the server side of the real GSL crypto envelope (same
+// recipe as TestGSLCryptoRoundTrip and this file's own decode-failure subtests below: recover the
+// AES key from the client's RSA-encrypted uuid field, encrypt a well-formed reply with it), and
+// asserts GetServerList actually returns the decrypted ServerList content, not just a nil error.
+func TestGetServerListSuccessfulEncryptedRoundTrip(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse form: %v", err)
+			return
+		}
+		saltCT, err := urlSafeB64Decode(r.FormValue("uuid"))
+		if err != nil {
+			t.Errorf("decode uuid field: %v", err)
+			return
+		}
+		salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT)
+		if err != nil {
+			t.Errorf("rsa decrypt salt: %v", err)
+			return
+		}
+		key := md5HexKey(string(salt))
+		reply := LoginServerListRespon{
+			Code: "0",
+			ServerList: []LoginServerInfo{
+				{ID: flexPort(1), Name: "test-server", IP: "1.2.3.4", Port: flexPort(17783), Zone: "APS1", GameUid: "g1", Status: "0"},
+			},
+			At: &LoginToken{Token: "tok-encrypted-round-trip"},
+		}
+		plain, err := json.Marshal(reply)
+		if err != nil {
+			t.Errorf("marshal reply: %v", err)
+			return
+		}
+		encReply, err := aesECBEncryptPKCS7(plain, key)
+		if err != nil {
+			t.Errorf("aes encrypt reply: %v", err)
+			return
+		}
+		fmt.Fprintf(w, `{"bin":%q}`, urlSafeB64Encode(encReply))
+	}))
+	defer server.Close()
+
+	lsr, err := GetServerList(defaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
+	if err != nil {
+		t.Fatalf("GetServerList: %v", err)
+	}
+	if len(lsr.ServerList) != 1 || lsr.ServerList[0].IP.String() != "1.2.3.4" {
+		t.Fatalf("got %+v, want a single server with IP 1.2.3.4", lsr.ServerList)
+	}
+	if lsr.At == nil || lsr.At.Token.String() != "tok-encrypted-round-trip" {
+		t.Fatalf("got At = %+v, want Token %q", lsr.At, "tok-encrypted-round-trip")
+	}
+}
+
 // TestGetServerListFallsBackToLoginServerWhenServerListEmpty covers the opt=new fallback added to
 // applyLoginServerFallback (gsl.go): a fake GSL server returns an empty ServerList but a populated
 // LoginServer -- the field AccountServerInfo's own doc comment says exists specifically for a

@@ -859,6 +859,124 @@ func TestRunCrossServerTestExitsWhenGameUidExplicitlyEmpty(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling is the round-51 regression test for
+// the MINOR finding that runCrossServerTest's CheckVersion and RSA-pubkey-parse error branches
+// (main.go, right after the unconditional CheckVersion call, before the -cs-rt/-cs-* checks) had
+// zero test coverage of any kind: every other test in this file relies on newFakeGSLServer/
+// useFakeGSLServer, which always makes CheckVersion succeed with a valid pubkey, so neither the
+// check-version-itself-fails path nor the check-version-succeeds-but-the-returned-pubkey-doesn't-
+// parse path was ever exercised. Both branches share the identical o.rt-conditional shape (fatal
+// os.Exit(1) when -cs-rt is set, since the opt=refresh call below genuinely needs GSL capability;
+// a Warn-and-degrade otherwise, since every other path can proceed without it) -- this table drives
+// all four combinations.
+//
+// The rt-empty cases reuse TestRunCrossServerTestExitsWhenPortNotGiven's port=0 trick to force a
+// second, already-covered, fast and deterministic exit right after the warn fires, rather than
+// actually completing a cross-server login -- what's under test here is that stderr shows the Warn
+// (not the Error) and that the process does NOT exit inside the CheckVersion/RSA-parse block itself.
+func TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_CS_CV") == "1" {
+		t.Setenv("HOME", t.TempDir())
+
+		if os.Getenv("LASTWAR_TEST_CS_RSAPARSE_FAIL") == "1" {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(CheckVersionResponse{ResMsg: flexString("not-valid-base64-der!!!")})
+			}))
+			defer server.Close()
+			checkVersionHosts = []string{server.URL}
+		} else {
+			// A fast, deterministic connection-refused failure -- no live network access needed.
+			checkVersionHosts = []string{"http://127.0.0.1:1"}
+		}
+
+		rt := os.Getenv("LASTWAR_TEST_CS_RT")
+		opts := crossServerTestOpts{rt: rt}
+		if rt == "" {
+			// Port left at its zero value deliberately forces a second, unrelated, already-
+			// covered exit (TestRunCrossServerTestExitsWhenPortNotGiven) shortly after the
+			// CheckVersion/RSA-parse Warn fires, keeping this subprocess fast and deterministic
+			// instead of attempting a real cross-server login.
+			opts.ip = "1.2.3.4"
+		}
+		runCrossServerTest(opts)
+		return
+	}
+
+	tests := []struct {
+		name        string
+		rsaParse    bool
+		rt          string
+		wantExit    int
+		wantContain string
+		wantAbsent  string
+	}{
+		{
+			name:        "check-version fails, -cs-rt set: fatal",
+			rt:          "some-refresh-token",
+			wantExit:    1,
+			wantContain: "ERROR check-version failed",
+		},
+		{
+			name:        "check-version fails, -cs-rt empty: warns and continues",
+			rt:          "",
+			wantExit:    1, // from the unrelated port=0 check, not from CheckVersion itself
+			wantContain: "WARN check-version failed; proceeding without redirect-refresh capability",
+			wantAbsent:  "ERROR check-version failed",
+		},
+		{
+			name:        "RSA pubkey parse fails, -cs-rt set: fatal",
+			rsaParse:    true,
+			rt:          "some-refresh-token",
+			wantExit:    1,
+			wantContain: "ERROR parse RSA pubkey failed",
+		},
+		{
+			name:        "RSA pubkey parse fails, -cs-rt empty: warns and continues",
+			rsaParse:    true,
+			rt:          "",
+			wantExit:    1, // from the unrelated port=0 check, not from the RSA parse itself
+			wantContain: "WARN parse RSA pubkey failed; proceeding without redirect-refresh capability",
+			wantAbsent:  "ERROR parse RSA pubkey failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling$")
+			env := append(os.Environ(),
+				"LASTWAR_TEST_HELPER_PROCESS_CS_CV=1",
+				"LASTWAR_TEST_CS_RT="+tt.rt,
+			)
+			if tt.rsaParse {
+				env = append(env, "LASTWAR_TEST_CS_RSAPARSE_FAIL=1")
+			}
+			cmd.Env = env
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			runErr := cmd.Run()
+
+			gotExit := 0
+			if runErr != nil {
+				exitErr, ok := runErr.(*exec.ExitError)
+				if !ok {
+					t.Fatalf("subprocess did not run/exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+				}
+				gotExit = exitErr.ExitCode()
+			}
+			if gotExit != tt.wantExit {
+				t.Errorf("subprocess exit code = %d, want %d; stderr=%s", gotExit, tt.wantExit, stderr.String())
+			}
+			log := stderr.String()
+			if !strings.Contains(log, tt.wantContain) {
+				t.Errorf("subprocess stderr = %s\nwant it to contain %q", log, tt.wantContain)
+			}
+			if tt.wantAbsent != "" && strings.Contains(log, tt.wantAbsent) {
+				t.Errorf("subprocess stderr = %s\nwant it NOT to contain %q (that's the fatal-branch message, this case must take the warn-and-continue branch)", log, tt.wantAbsent)
+			}
+		})
+	}
+}
+
 // TestRunCrossServerTestExitsWhenGSLRefreshCallFails is the regression test for this round's Fix
 // 4: the -cs-rt GSL opt=refresh call itself failing (GetServerList returning a transport/HTTP
 // error, as distinct from a successful-but-unusable response -- already covered by

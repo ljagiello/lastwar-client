@@ -368,6 +368,54 @@ func TestLoginRejectsMissingPPayload(t *testing.T) {
 	}
 }
 
+// TestLoginBaseZoneResponseWaitConnectionFailure is the round-51 regression test for the MAJOR
+// finding that Login()'s base-zone login-response wait's own network-failure branch (the
+// `if err != nil { conn.Close(); return nil, err }` right after the base-zone waitFor call,
+// login.go) had zero test coverage: TestLoginConnectionFailureWhileWaitingForInit below
+// deliberately has its fake server send a full successful login response BEFORE closing the
+// connection, specifically to make THIS wait succeed and only fail the later init-push wait -- so
+// it never exercises this earlier branch. Here the fake server closes the connection immediately
+// after reading the login request, before ever sending a response, so the base-zone waitFor itself
+// (not the init-push wait) is what fails.
+func TestLoginBaseZoneResponseWaitConnectionFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		// Deliberately never send a login response at all -- close outright, so the base-zone
+		// waitFor sees a real read error (EOF/reset), not a silence-until-deadline timeout.
+		server.Close()
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	gsl := newFakeGSLServer(t, LoginServerListRespon{
+		Code:       "0",
+		ServerList: []LoginServerInfo{{IP: flexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &LoginToken{Token: "tok-1"},
+	})
+	useFakeGSLServer(t, gsl)
+
+	result, err := Login(LoginOptions{})
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("Login: expected a non-nil error when the connection fails while waiting for the base-zone login response, got nil")
+	}
+	if result != nil {
+		t.Errorf("Login: result = %+v, want nil *LoginResult alongside the error", result)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error (a genuine connection failure, not a benign timeout)", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false")
+	}
+}
+
 // TestLoginConnectionFailureWhileWaitingForInit is the integration-level regression test for
 // round 17's fix in Login() itself (the "if initErr != nil { ...; conn.Close(); return nil,
 // fmt.Errorf(...) }" block in step 5, right after the waitForInitPush call): a genuine connection

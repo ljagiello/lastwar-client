@@ -350,6 +350,20 @@ func TestDoHandshakeConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		if !strings.Contains(err.Error(), "consecutive malformed/undecodable envelopes") {
 			t.Errorf("err = %v, want it to mention the consecutive-failure cap being exceeded", err)
 		}
+		// Round-51 regression assertion: see conn_wait_test.go's
+		// TestWaitForConsecutiveDecodeFailuresBoundary for the full MAJOR-finding rationale --
+		// this give-up error must satisfy net.Error with Timeout()==false (via deadConnError,
+		// login.go), not just be a non-nil error.
+		var netErr net.Error
+		if !errors.As(err, &netErr) {
+			t.Fatalf("err = %v (%T), want it to satisfy net.Error (via deadConnError's wrap)", err, err)
+		}
+		if netErr.Timeout() {
+			t.Errorf("netErr.Timeout() = true, want false")
+		}
+		if !containsNonTimeoutNetError(err) {
+			t.Errorf("containsNonTimeoutNetError(err) = false, want true")
+		}
 	})
 }
 

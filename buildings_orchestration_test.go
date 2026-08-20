@@ -146,6 +146,40 @@ func TestFetchBuildingsConsecutiveDecodeFailuresBoundary(t *testing.T) {
 	})
 }
 
+// TestFetchBuildingsSurvivesNonExtensionEnvelope is the round-51 regression test for the MAJOR
+// finding that FetchBuildings' `msg, ok := env.AsExtension(); if !ok { continue }` guard
+// (buildings.go, right after the consecutive-decode-failures reset) had zero test coverage: no
+// existing test ever sends a non-extension (controllerSystem) envelope during FetchBuildings' wait
+// window, even though this is ordinary, non-adversarial production traffic -- the client's own
+// background heartbeat (conn.go's StartHeartbeat) sends exactly this shape every ~4s once running.
+// If a future refactor ever removed or reordered this guard (an easy mistake, given
+// waitForInitPush's structurally identical sibling guard sits right next to it in a different
+// file), the very next heartbeat pong arriving during a fetch would panic on a nil msg dereference.
+// Sends a raw controllerSystem envelope (mirroring a PingPongRequest reply) before a valid init
+// push, proving FetchBuildings skips it silently and still parses the init push that follows.
+func TestFetchBuildingsSurvivesNonExtensionEnvelope(t *testing.T) {
+	client, server := newPipeGameConnPair(t)
+
+	go func() {
+		if err := server.SendEnvelope(controllerSystem, actionPingPong, NewSFSObject()); err != nil {
+			return
+		}
+		params := NewSFSObject()
+		arr := NewSFSArray()
+		arr.AddSFSObject(newTestBuildingSFS(111, BuildingFarmland, 3))
+		params.PutSFSArray("building_new", arr)
+		_ = server.SendExtension("init", params)
+	}()
+
+	buildings, _, err := FetchBuildings(client, 300*time.Millisecond)
+	if err != nil {
+		t.Fatalf("FetchBuildings() error = %v, want nil", err)
+	}
+	if len(buildings) != 1 || buildings[0].Uuid() != 111 {
+		t.Fatalf("buildings = %+v, want exactly one building with uuid 111 (the non-extension envelope must be skipped, not panic)", buildings)
+	}
+}
+
 // TestFetchBuildingsInitPushParsesBuildingsAndVisitors covers FetchBuildings' main documented
 // path: a bare `init` bootstrap push carrying `building_new` and `visitor` -- ParseInitBuildings'
 // doc comment explains this, not push.init.build/defaultBuilds, is the field that actually

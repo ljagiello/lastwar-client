@@ -1349,3 +1349,50 @@ func TestDoCrossServerLoginRejectsMissingPPayload(t *testing.T) {
 		t.Errorf("err = %v, want it to mention the missing p payload", err)
 	}
 }
+
+// TestDoCrossServerLoginBaseZoneResponseWaitConnectionFailure is the round-51 regression test for
+// the MAJOR finding that DoCrossServerLogin's own login-response wait's network-failure branch
+// (the `if err != nil { conn.Close(); return nil, err }` right after its waitFor call,
+// crossserver.go) had zero test coverage -- the CROSS-SERVER LOGIN sibling of login.go's identical
+// gap (see login_integration_test.go's TestLoginBaseZoneResponseWaitConnectionFailure). The fake
+// server closes the connection immediately after reading the login request, before ever sending a
+// response, so the login-response waitFor itself is what fails.
+func TestDoCrossServerLoginBaseZoneResponseWaitConnectionFailure(t *testing.T) {
+	addr := startFakeGameServer(t, func(server *GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		// Deliberately never send a login response at all -- close outright, so the login-
+		// response waitFor sees a real read error (EOF/reset), not a silence-until-deadline
+		// timeout.
+		server.Close()
+	})
+	host, port := splitHostPortInt(t, addr)
+
+	p := CrossServerLoginParams{
+		IP:        host,
+		Port:      port,
+		Zone:      "APS1",
+		GameUid:   "uid-1",
+		DeviceID:  "dev-1",
+		AirKey:    "airkey-1",
+		AccessTok: "tok-1",
+	}
+	result, err := DoCrossServerLogin(p)
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			result.Conn.Close()
+		}
+		t.Fatal("DoCrossServerLogin: expected a non-nil error when the connection fails while waiting for the login response, got nil")
+	}
+	if result != nil {
+		t.Errorf("DoCrossServerLogin: result = %+v, want nil alongside the error", result)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("err = %v (%T), want it to satisfy net.Error (a genuine connection failure, not a benign timeout)", err, err)
+	}
+	if netErr.Timeout() {
+		t.Errorf("netErr.Timeout() = true, want false")
+	}
+}

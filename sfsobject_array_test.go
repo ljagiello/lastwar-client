@@ -397,6 +397,36 @@ func TestReadBytesRejectsNegativeCount(t *testing.T) {
 	}
 }
 
+// TestReadTaggedValuePropagatesReadByteError is the round-51 regression test for
+// sfsReader.readTaggedValue's error-propagation branch (sfsobject.go) -- the only decode path used
+// for reading each element inside an SFSArray container -- which had zero test coverage. Calls it
+// directly on an exhausted reader (no bytes remaining for the next item's tag byte), the one shape
+// that can only ever reach this specific guard.
+func TestReadTaggedValuePropagatesReadByteError(t *testing.T) {
+	r := &sfsReader{data: []byte{}}
+	if _, err := r.readTaggedValue(); err == nil {
+		t.Fatal("expected an error reading a tagged value with no bytes remaining, got nil")
+	}
+}
+
+// TestArrayTruncatedMidElementPropagatesError is the integration-level companion to
+// TestReadTaggedValuePropagatesReadByteError above: proves the guard is reachable through a real
+// array decode, not just directly. Builds a well-formed SFSArray header declaring 2 items, followed
+// by exactly one well-formed item and then nothing -- the second item's tag-byte read inside
+// readTaggedValue is what fails, reproducing a connection reset/truncated capture landing exactly
+// at an array element boundary (this project's own explicitly in-scope hostile -cs-ip threat model).
+func TestArrayTruncatedMidElementPropagatesError(t *testing.T) {
+	var buf []byte
+	buf = append(buf, 0, 2)       // declared item count = 2
+	buf = append(buf, sfsBool, 1) // item 0: a well-formed bool, tag+value
+	// item 1 is never written -- the array header promised 2 items but only 1 arrived.
+
+	r := &sfsReader{data: buf}
+	if _, err := r.readValuePayload(sfsArrayType); err == nil {
+		t.Fatal("expected an error decoding an array truncated mid-element, got nil")
+	}
+}
+
 func TestGetIntGetLongCoercion(t *testing.T) {
 	o := NewSFSObject()
 	o.PutByte("b", 7)
