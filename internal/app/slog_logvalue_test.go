@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"crypto/rsa"
+	"lastwar-client/internal/auth"
 	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"log/slog"
@@ -28,13 +29,12 @@ func TestCredentialTypesLogValueProtectsJSONHandler(t *testing.T) {
 		want  string
 	}{
 		{"SessionConfig", SessionConfig{AccessToken: marker}, "[REDACTED SessionConfig]"},
-		{"CrossServerLoginResult", CrossServerLoginResult{AccessTok: marker}, "[REDACTED CrossServerLoginResult]"},
-		{"CrossServerLoginParams", CrossServerLoginParams{AccessTok: marker}, "[REDACTED CrossServerLoginParams]"},
+		{"CrossServerLoginResult", auth.CrossServerLoginResult{AccessTok: marker}, "[REDACTED CrossServerLoginResult]"},
+		{"CrossServerLoginParams", auth.CrossServerLoginParams{AccessTok: marker}, "[REDACTED CrossServerLoginParams]"},
 		{"LoginToken", gsl.LoginToken{Token: marker}, "[REDACTED LoginToken]"},
 		{"GSLOpt", gsl.GSLOpt{LoginKey: marker}, "[REDACTED GSLOpt]"},
-		{"deviceIdentity", deviceIdentity{LoginKey: marker}, "[REDACTED deviceIdentity]"},
-		{"LoginParamsInput", LoginParamsInput{AccessTok: marker}, "[REDACTED LoginParamsInput]"},
-		{"LoginOptions", LoginOptions{Email: marker}, "[REDACTED LoginOptions]"},
+		{"LoginParamsInput", auth.LoginParamsInput{AccessTok: marker}, "[REDACTED LoginParamsInput]"},
+		{"LoginOptions", auth.LoginOptions{Email: marker}, "[REDACTED LoginOptions]"},
 		{"crossServerTestOpts", crossServerTestOpts{at: marker}, "[REDACTED crossServerTestOpts]"},
 		{"SFSValue", sfs.SFSValue{Type: sfs.SFSUtfString, Val: marker}, "[REDACTED SFSValue]"},
 	}
@@ -66,7 +66,7 @@ func TestCredentialTypesLogValueProtectsJSONHandler(t *testing.T) {
 func TestCrossServerLoginParamsLogValueWithGSLPlumbing(t *testing.T) {
 	const marker = "MUST-NOT-LEAK-cross-server-plumbing"
 
-	p := CrossServerLoginParams{
+	p := auth.CrossServerLoginParams{
 		AccessTok:  marker,
 		RSAPub:     &rsa.PublicKey{},
 		HTTPClient: nil,

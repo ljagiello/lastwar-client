@@ -3,8 +3,11 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"lastwar-client/internal/game"
 	"lastwar-client/internal/gsl"
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
+	"lastwar-client/internal/testutil"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -402,8 +405,8 @@ func TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback(t *testing
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
-		useFakeGSLServer(t, gsl)
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
+		testutil.UseFakeGSLServer(t, gsl)
 
 		cfgPath := filepath.Join(home, "session.json")
 		cfgJSON, err := json.Marshal(SessionConfig{
@@ -496,8 +499,8 @@ func TestMainConfigMergeCsIPExplicitlyEmptyWarns(t *testing.T) {
 		home := t.TempDir()
 		t.Setenv("HOME", home)
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
-		useFakeGSLServer(t, gsl)
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
+		testutil.UseFakeGSLServer(t, gsl)
 
 		cfgPath := filepath.Join(home, "session.json")
 		cfgJSON, err := json.Marshal(SessionConfig{IP: "9.9.9.9", Port: 9999, Zone: "APS9999", GameUid: "cfg-gameuid"})
@@ -632,8 +635,8 @@ func TestRunCrossServerTestPortExplicitButInvalidWording(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
-		useFakeGSLServer(t, gsl)
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
+		testutil.UseFakeGSLServer(t, gsl)
 
 		// ip is a valid, non-empty value -- this test targets the port-invalid wording
 		// specifically, not the ip check (TestRunCrossServerTestExitsWhenIPEmpty already covers
@@ -682,7 +685,7 @@ func TestRunCrossServerTestPortExplicitButInvalidWording(t *testing.T) {
 
 // mainCollectInteractiveFakeGameServer is the fake game-server handler for
 // TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogicError below: it
-// answers the base zone Login (mirroring login_integration_test.go's fakeInitPushServer, but with
+// answers the base zone Login (mirroring login_integration_test.go's session.FakeInitPushServer, but with
 // one non-collectible building in the init push's building_new field -- bId 0 never matches
 // collectCmdFor's switch in buildings.go -- so Run() sees a non-empty buildings list and skips
 // the extra push.init.build/FetchBuildings round trip entirely), then answers CollectAll's fixed
@@ -701,19 +704,19 @@ func TestRunCrossServerTestPortExplicitButInvalidWording(t *testing.T) {
 // ended up entirely error-free and never exercised the non-nil-error path at all. 999999 is
 // deliberately not a real, documented error code, matching the sibling test's own choice,
 // specifically so it can't accidentally collide with a benign one.
-func mainCollectInteractiveFakeGameServer() func(*GameConn) {
-	return func(server *GameConn) {
+func mainCollectInteractiveFakeGameServer() func(*session.GameConn) {
+	return func(server *session.GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
 		loginResp := sfs.NewSFSObject()
 		loginResp.PutBool("success", true)
-		if err := server.SendEnvelope(controllerSystem, actionLogin, loginResp); err != nil {
+		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, loginResp); err != nil {
 			return
 		}
 		initParams := sfs.NewSFSObject()
 		buildingArr := sfs.NewSFSArray()
-		buildingArr.AddSFSObject(newTestBuildingSFS(1, 0, 1)) // bId=0: present, but not collectible
+		buildingArr.AddSFSObject(game.NewTestBuildingSFS(1, 0, 1)) // bId=0: present, but not collectible
 		initParams.PutSFSArray("building_new", buildingArr)
 		if err := server.SendExtension("init", initParams); err != nil {
 			return
@@ -778,15 +781,15 @@ func TestMainCollectInteractiveCallSiteReachesRunInteractiveDespiteBusinessLogic
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		addr := startFakeGameServer(t, mainCollectInteractiveFakeGameServer())
-		host, port := splitHostPortInt(t, addr)
+		addr := session.StartFakeGameServer(t, mainCollectInteractiveFakeGameServer())
+		host, port := testutil.SplitHostPortInt(t, addr)
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: "APS1", GameUid: "uid-1"}},
 			At:         &gsl.LoginToken{Token: "tok-1"},
 		})
-		useFakeGSLServer(t, gsl)
+		testutil.UseFakeGSLServer(t, gsl)
 
 		os.Args = []string{"lastwar-client", "-collect", "-interactive", "/nonexistent/lastwar-test-control-pipe"}
 		Run()
@@ -858,12 +861,12 @@ func malformedZlibBombPacket() []byte {
 // net.Error-satisfying sfs.DeadConnError, so this is the round-43 replacement for
 // writeMalformedOversizedFrame at any call site that specifically needs shouldAbortBeforeInteractive
 // to take its non-fatal branch.
-func writeMalformedZlibBombFrame(server *GameConn) {
+func writeMalformedZlibBombFrame(server *session.GameConn) {
 	packet := malformedZlibBombPacket()
 	if packet == nil {
 		return
 	}
-	_, _ = server.conn.Write(packet)
+	_, _ = server.RawConn().Write(packet)
 }
 
 // mainFetchBuildingsFailureFakeGameServer answers the base zone Login normally, then sends an
@@ -875,14 +878,14 @@ func writeMalformedZlibBombFrame(server *GameConn) {
 // now fatal per packet.go's round-43 fix): FetchBuildings' fallback call reads this as its very
 // first envelope and returns a plain, non-net.Error decode failure immediately, instead of burning
 // the fallback's own 12s timeout.
-func mainFetchBuildingsFailureFakeGameServer() func(*GameConn) {
-	return func(server *GameConn) {
+func mainFetchBuildingsFailureFakeGameServer() func(*session.GameConn) {
+	return func(server *session.GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
 		loginResp := sfs.NewSFSObject()
 		loginResp.PutBool("success", true)
-		if err := server.SendEnvelope(controllerSystem, actionLogin, loginResp); err != nil {
+		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, loginResp); err != nil {
 			return
 		}
 		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
@@ -949,15 +952,15 @@ func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		addr := startFakeGameServer(t, mainFetchBuildingsFailureFakeGameServer())
-		host, port := splitHostPortInt(t, addr)
+		addr := session.StartFakeGameServer(t, mainFetchBuildingsFailureFakeGameServer())
+		host, port := testutil.SplitHostPortInt(t, addr)
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: "APS1", GameUid: "uid-1"}},
 			At:         &gsl.LoginToken{Token: "tok-1"},
 		})
-		useFakeGSLServer(t, gsl)
+		testutil.UseFakeGSLServer(t, gsl)
 
 		os.Args = []string{"lastwar-client", "-interactive", "/nonexistent/lastwar-test-control-pipe"}
 		Run()
@@ -1010,14 +1013,14 @@ func TestMainFetchBuildingsFallbackFailureWithInteractiveReachesRunInteractive(t
 // (mirroring mainCollectInteractiveFakeGameServer's own pattern), recording the uid any
 // "visitor.operate" request carries into gotVisitorUID so the test can confirm GreetVisitors
 // actually ran against the ORIGINAL visitor list, not the fallback's empty one.
-func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*GameConn) {
-	return func(server *GameConn) {
+func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*session.GameConn) {
+	return func(server *session.GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
 		loginResp := sfs.NewSFSObject()
 		loginResp.PutBool("success", true)
-		if err := server.SendEnvelope(controllerSystem, actionLogin, loginResp); err != nil {
+		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, loginResp); err != nil {
 			return
 		}
 
@@ -1042,7 +1045,7 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*GameCon
 		// one more here for GreetVisitors' single visitor.operate call, since this test's whole
 		// point is that the ORIGINAL non-empty visitors slice from Login() survives into CollectAll
 		// despite the fallback FetchBuildings call above returning 0 visitors of its own.
-		// Round-43 note: reads via readNextExtension (login_integration_test.go), not a bare
+		// Round-43 note: reads via session.ReadNextExtension (login_integration_test.go), not a bare
 		// ReadEnvelope+AsExtension pair that treats any non-extension envelope as reason to give
 		// up -- writeMalformedZlibBombFrame's compression step (the round-43 replacement for
 		// writeMalformedOversizedFrame) is genuinely CPU-heavy (several seconds under -race),
@@ -1054,7 +1057,7 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*GameCon
 		// the client's next real request instead of the benign push this actually was.
 		const wantRequests = 10
 		for i := 0; i < wantRequests; i++ {
-			msg, err := readNextExtension(server)
+			msg, err := session.ReadNextExtension(server)
 			if err != nil {
 				return
 			}
@@ -1099,15 +1102,15 @@ func TestMainZeroBuildingsFallbackPreservesNonEmptyVisitors(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
 
 		var gotVisitorUID int64
-		addr := startFakeGameServer(t, mainZeroBuildingsFallbackFakeGameServer(&gotVisitorUID))
-		host, port := splitHostPortInt(t, addr)
+		addr := session.StartFakeGameServer(t, mainZeroBuildingsFallbackFakeGameServer(&gotVisitorUID))
+		host, port := testutil.SplitHostPortInt(t, addr)
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: flexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: "APS1", GameUid: "uid-1"}},
 			At:         &gsl.LoginToken{Token: "tok-1"},
 		})
-		useFakeGSLServer(t, gsl)
+		testutil.UseFakeGSLServer(t, gsl)
 
 		os.Args = []string{"lastwar-client", "-collect", "-interactive", "/nonexistent/lastwar-test-control-pipe"}
 		Run()

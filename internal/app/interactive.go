@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
@@ -95,7 +96,7 @@ const maxControlPipeLineSize = 1024 * 1024
 // commands (see docs/military-battle.mdx's PutSFSArray usage). There is
 // no workaround via this control FIFO today; such commands cannot be
 // exercised through -interactive.
-func RunInteractive(conn *GameConn, controlPipe string) {
+func RunInteractive(conn *session.GameConn, controlPipe string) {
 	slog.Info("interactive mode: reading commands", "controlPipe", controlPipe)
 	slog.Info(`format: cmd.name {"key":"value"} (params optional)`)
 	slog.Info("example usage", "example", `echo 'building.production.collect {"uuid":123}' > `+controlPipe)
@@ -269,7 +270,7 @@ func openControlPipeWithRetry(controlPipe string) (*os.File, error) {
 	return nil, err
 }
 
-func handleInteractiveLine(conn *GameConn, line string) {
+func handleInteractiveLine(conn *session.GameConn, line string) {
 	cmd, rest, found := strings.Cut(line, " ")
 	rest = strings.TrimSpace(rest)
 
@@ -366,14 +367,14 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		// wrapped" true package-wide for any future caller that does inspect it (e.g. if this
 		// were ever changed to only fatally exit on a genuine non-timeout net.Error, mirroring
 		// the Timeout()-gated check the very next lines already apply to waitForCmd's error).
-		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", sendStageError{err: err})
+		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", session.SendStageError{Err: err})
 		// See RunInteractive's own round-41 fix doc comment: os.Exit skips the caller's `defer
 		// conn.Close()`, so close explicitly before exiting instead of relying on it.
 		_ = conn.Close()
 		os.Exit(1)
 	}
 
-	msg, err := waitForCmd(conn, defaultCmdTimeout, cmd, "push."+cmd)
+	msg, err := session.WaitForCmd(conn, session.DefaultCmdTimeout, cmd, "push."+cmd)
 	if err != nil {
 		// Same net.Error/Timeout() distinction round 21 applied at 6+ other call sites
 		// (buildings.go, mail.go, visitors.go, alliance.go) -- and that's already honored two
@@ -390,7 +391,7 @@ func handleInteractiveLine(conn *GameConn, line string) {
 		// the control FIFO once the connection -interactive exists to interact with is dead.
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			slog.Error("no matching response within "+defaultCmdTimeout.String(), "error", err)
+			slog.Error("no matching response within "+session.DefaultCmdTimeout.String(), "error", err)
 			return
 		}
 		// See interactiveShuttingDown's own doc comment above -- same reasoning as the adjacent

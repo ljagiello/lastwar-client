@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"lastwar-client/internal/auth"
 	"log/slog"
 	"os"
 )
@@ -56,7 +57,7 @@ func (c SessionConfig) GoString() string { return c.String() }
 func (c SessionConfig) LogValue() slog.Value { return slog.StringValue(c.String()) }
 
 func defaultSessionConfigPath() string {
-	return stateFilePath(".lastwar_goclient_session.json")
+	return auth.StateFilePath(".lastwar_goclient_session.json")
 }
 
 // LoadSessionConfig reads a SessionConfig from path.
@@ -113,7 +114,7 @@ func SaveSessionConfig(cfg *SessionConfig, path string) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteStateFile(path, string(data))
+	return auth.AtomicWriteStateFile(path, string(data))
 }
 
 // applyOverride returns override if it's non-zero, else base.

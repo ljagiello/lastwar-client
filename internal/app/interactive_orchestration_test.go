@@ -1,10 +1,11 @@
 package app
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
+	"lastwar-client/internal/testutil"
 	"log/slog"
 	"net"
 	"os"
@@ -17,7 +18,7 @@ import (
 
 // handleInteractiveLine's pure JSON-decoding piece (putJSONValue) is covered directly in
 // interactive_test.go. This file covers handleInteractiveLine itself over a net.Pipe-backed
-// GameConn (newPipeGameConnPair, conn_wait_test.go), the same pattern conn_wait_test.go and
+// GameConn (session.NewPipeGameConnPair, conn_wait_test.go), the same pattern conn_wait_test.go and
 // visitors_orchestration_test.go use for their sendAndWait/GreetVisitors coverage.
 
 // TestHandleInteractiveLineAbortsOnUnsupportedValue checks the "abort on unsupported JSON value"
@@ -29,7 +30,7 @@ import (
 // reading, and this test would hang instead of failing cleanly. Running it in a goroutine with a
 // bounded wait turns that hang into a clean timeout failure.
 func TestHandleInteractiveLineAbortsOnUnsupportedValue(t *testing.T) {
-	client, _ := newPipeGameConnPair(t)
+	client, _ := session.NewPipeGameConnPair(t)
 
 	done := make(chan struct{})
 	go func() {
@@ -50,7 +51,7 @@ func TestHandleInteractiveLineAbortsOnUnsupportedValue(t *testing.T) {
 // out (it just logs -- there's no return value to assert on, so we assert on what the fake server
 // on the other end of the pipe actually received).
 func TestHandleInteractiveLineSendsParsedCommand(t *testing.T) {
-	client, server := newPipeGameConnPair(t)
+	client, server := session.NewPipeGameConnPair(t)
 
 	type got struct {
 		cmd    string
@@ -108,7 +109,7 @@ func TestHandleInteractiveLineSendsParsedCommand(t *testing.T) {
 // command"/"received response" log lines must never dump a live credential in cleartext, on
 // either the outgoing params or the incoming response.
 func TestHandleInteractiveLineRedactsCredentialFields(t *testing.T) {
-	client, server := newPipeGameConnPair(t)
+	client, server := session.NewPipeGameConnPair(t)
 
 	const secretLoginKey = "sensitive-secret-loginkey-must-not-leak-1234567890"
 	const secretPw = "sensitive-secret-outgoing-pw-must-not-leak-abcdef"
@@ -164,7 +165,7 @@ func TestHandleInteractiveLineRedactsCredentialFields(t *testing.T) {
 // case, no .String()/.StringRedacted() call is involved for credential_leak_lint_test.go to catch,
 // so this has to be checked directly against the captured log output.
 func TestHandleInteractiveLineDoesNotLeakRawParamsOnJSONParseError(t *testing.T) {
-	client, _ := newPipeGameConnPair(t)
+	client, _ := session.NewPipeGameConnPair(t)
 
 	const secretPw = "secret-value-must-not-leak"
 
@@ -205,7 +206,7 @@ func TestHandleInteractiveLineDoesNotLeakRawParamsOnJSONParseError(t *testing.T)
 // over a net.Pipe-backed GameConn with nobody reading on the other end turns "did it still send
 // despite the trailing garbage" into a clean timeout failure instead of a hang.
 func TestHandleInteractiveLineAbortsOnTrailingGarbageAfterJSON(t *testing.T) {
-	client, _ := newPipeGameConnPair(t)
+	client, _ := session.NewPipeGameConnPair(t)
 
 	var buf bytes.Buffer
 	orig := slog.Default()
@@ -246,7 +247,7 @@ func TestHandleInteractiveLineAbortsOnTrailingGarbageAfterJSON(t *testing.T) {
 // with nobody reading on the other end turns "did it still send despite the bare null" into a
 // clean timeout failure instead of a hang.
 func TestHandleInteractiveLineRejectsBareNullParams(t *testing.T) {
-	client, _ := newPipeGameConnPair(t)
+	client, _ := session.NewPipeGameConnPair(t)
 
 	var buf bytes.Buffer
 	orig := slog.Default()
@@ -283,7 +284,7 @@ func TestHandleInteractiveLineRejectsBareNullParams(t *testing.T) {
 // running this over a net.Pipe-backed GameConn with nobody reading on the other end turns "did it
 // still send" into a clean timeout failure instead of a hang.
 func TestHandleInteractiveLineAbortsOnMissingSpaceBeforeJSON(t *testing.T) {
-	client, _ := newPipeGameConnPair(t)
+	client, _ := session.NewPipeGameConnPair(t)
 
 	var buf bytes.Buffer
 	orig := slog.Default()
@@ -319,7 +320,7 @@ func TestHandleInteractiveLineAbortsOnMissingSpaceBeforeJSON(t *testing.T) {
 // '{', per this tool's own documented flat-scalar-only command format where bare commands with
 // no params are legitimate and don't need a trailing space to be valid.
 func TestHandleInteractiveLineSendsBareCommandWithNoSpace(t *testing.T) {
-	client, server := newPipeGameConnPair(t)
+	client, server := session.NewPipeGameConnPair(t)
 
 	type got struct {
 		cmd    string
@@ -392,7 +393,7 @@ func TestHandleInteractiveLineSendsBareCommandWithNoSpace(t *testing.T) {
 // ever close.
 func TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit(t *testing.T) {
 	fake := &fakeNetErrConn{timeout: true}
-	conn := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+	conn := session.NewGameConnForTest(fake)
 
 	var buf bytes.Buffer
 	orig := slog.Default()
@@ -435,13 +436,13 @@ func TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit(t *testing.T) {
 // TestHandleInteractiveLineWaitForCmdTimeoutDoesNotExit's synthetic fakeNetErrConn) since the
 // corruption must survive actual packet framing/decoding to reproduce the bug.
 func TestHandleInteractiveLineSurvivesCorruptPushWhileWaitingForResponse(t *testing.T) {
-	client, server := newPipeGameConnPair(t)
+	client, server := session.NewPipeGameConnPair(t)
 
 	go func() {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		if _, err := server.conn.Write(mustEncodeCorruptPacket(t, "field", "value")); err != nil {
+		if _, err := server.RawConn().Write(testutil.MustEncodeCorruptPacket(t, "field", "value")); err != nil {
 			return
 		}
 		resp := sfs.NewSFSObject()
@@ -493,7 +494,7 @@ func TestHandleInteractiveLineSurvivesCorruptPushWhileWaitingForResponse(t *test
 func TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		fake := &fakeNetErrConn{}
-		conn := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+		conn := session.NewGameConnForTest(fake)
 		handleInteractiveLine(conn, `some.command`)
 		// Only reached if handleInteractiveLine fails to exit -- the outer assertions below will
 		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
@@ -537,7 +538,7 @@ func TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorExits(t *testing.T) {
 func TestHandleInteractiveLineWaitForCmdRealGracefulCloseExits(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		fake := &realEOFConn{}
-		conn := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+		conn := session.NewGameConnForTest(fake)
 		handleInteractiveLine(conn, `some.command`)
 		// Only reached if handleInteractiveLine fails to exit -- the outer assertions below will
 		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
@@ -580,7 +581,7 @@ func TestHandleInteractiveLineWaitForCmdNonTimeoutNetErrorDoesNotExitDuringShutd
 	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
 
 	fake := &fakeNetErrConn{}
-	conn := &GameConn{conn: fake, reader: bufio.NewReaderSize(fake, 4096)}
+	conn := session.NewGameConnForTest(fake)
 
 	done := make(chan struct{})
 	go func() {
@@ -610,7 +611,7 @@ func TestHandleInteractiveLineSendExtensionFailureExits(t *testing.T) {
 		c1, c2 := net.Pipe()
 		defer func() { _ = c2.Close() }()
 		failConn := &writeFailConn{Conn: c1, err: errors.New("simulated write failure")}
-		conn := &GameConn{conn: failConn, reader: bufio.NewReaderSize(failConn, 4096)}
+		conn := session.NewGameConnForTest(failConn)
 		handleInteractiveLine(conn, `some.command`)
 		// Only reached if handleInteractiveLine fails to exit -- the outer assertions below will
 		// then see a clean (non-error) subprocess exit and fail with a clear message instead of
@@ -650,7 +651,7 @@ func TestHandleInteractiveLineSendExtensionFailureDoesNotExitDuringShutdown(t *t
 	defer func() { _ = c1.Close() }()
 	defer func() { _ = c2.Close() }()
 	failConn := &writeFailConn{Conn: c1, err: errors.New("simulated write failure")}
-	conn := &GameConn{conn: failConn, reader: bufio.NewReaderSize(failConn, 4096)}
+	conn := session.NewGameConnForTest(failConn)
 
 	done := make(chan struct{})
 	go func() {
@@ -852,7 +853,7 @@ func TestOpenControlPipeWithRetryMakesExactlyRetriesPlusOneAttempts(t *testing.T
 func TestRunInteractivePersistentScanErrorGivesUpBounded(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		path := os.Getenv("LASTWAR_TEST_CONTROL_PIPE")
-		client, _ := newPipeGameConnPair(t)
+		client, _ := session.NewPipeGameConnPair(t)
 
 		go func() {
 			// Comfortably over maxControlPipeLineSize, and never containing a '\n' -- the scanner
@@ -927,7 +928,7 @@ func TestRunInteractiveStatFailureDoesNotExitDuringShutdown(t *testing.T) {
 	interactiveShuttingDown.Store(true)
 	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
 
-	client, _ := newPipeGameConnPair(t)
+	client, _ := session.NewPipeGameConnPair(t)
 	path := t.TempDir() + "/never-created"
 
 	done := make(chan struct{})
@@ -951,7 +952,7 @@ func TestRunInteractiveNotAFIFODoesNotExitDuringShutdown(t *testing.T) {
 	interactiveShuttingDown.Store(true)
 	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
 
-	client, _ := newPipeGameConnPair(t)
+	client, _ := session.NewPipeGameConnPair(t)
 	path := t.TempDir() + "/not-a-fifo"
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -979,7 +980,7 @@ func TestRunInteractivePersistentScanErrorDoesNotExitDuringShutdown(t *testing.T
 	interactiveShuttingDown.Store(true)
 	t.Cleanup(func() { interactiveShuttingDown.Store(false) })
 
-	client, _ := newPipeGameConnPair(t)
+	client, _ := session.NewPipeGameConnPair(t)
 	dir := t.TempDir()
 	path := dir + "/control.pipe"
 	if err := syscall.Mkfifo(path, 0o600); err != nil {
@@ -1026,7 +1027,7 @@ func TestRunInteractivePersistentScanErrorDoesNotExitDuringShutdown(t *testing.T
 // plain regular file instead of a FIFO.
 func TestRunInteractiveNotAFIFOExits(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_NOT_FIFO") == "1" {
-		client, _ := newPipeGameConnPair(t)
+		client, _ := session.NewPipeGameConnPair(t)
 		path := t.TempDir() + "/not-a-fifo"
 		if err := os.WriteFile(path, []byte("building.production.collect {\"uuid\":123}\n"), 0o600); err != nil {
 			t.Fatalf("WriteFile: %v", err)
@@ -1071,7 +1072,7 @@ func TestRunInteractiveNotAFIFOExits(t *testing.T) {
 // to fail persistently.
 func TestRunInteractiveOpenFailureExits(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_OPEN_FAIL") == "1" {
-		client, _ := newPipeGameConnPair(t)
+		client, _ := session.NewPipeGameConnPair(t)
 		path := t.TempDir() + "/control-pipe"
 		if err := syscall.Mkfifo(path, 0o600); err != nil {
 			t.Fatalf("Mkfifo: %v", err)

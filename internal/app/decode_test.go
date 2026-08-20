@@ -3,89 +3,14 @@ package app
 import (
 	"bytes"
 	"fmt"
-	"io"
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
+	"lastwar-client/internal/testutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// captureStdout redirects os.Stdout to a pipe for the duration of fn and
-// returns everything written to it. DecodeStreamFile writes directly via
-// fmt.Printf rather than accepting an io.Writer, so this is the only way to
-// observe its per-packet output (as opposed to just its returned error).
-//
-// The drain runs in a goroutine concurrently with fn, not after it: an
-// os.Pipe has a small fixed kernel buffer, and DecodeStreamFile can print
-// more than that fits, so a synchronous "run fn, then read" would deadlock
-// with fn blocked on a full pipe and nothing reading it yet.
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	orig := os.Stdout
-	os.Stdout = w
-	t.Cleanup(func() { os.Stdout = orig })
-
-	outCh := make(chan string, 1)
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, r)
-		outCh <- buf.String()
-	}()
-
-	fn()
-
-	os.Stdout = orig
-	if err := w.Close(); err != nil {
-		t.Fatalf("close pipe writer: %v", err)
-	}
-	out := <-outCh
-	_ = r.Close()
-	return out
-}
-
-// mustEncodePacket builds one on-wire framed packet from a plain key/value
-// pair, matching what a real capture of a simple server push looks like.
-func mustEncodePacket(t *testing.T, field, value string) []byte {
-	t.Helper()
-	o := sfs.NewSFSObject()
-	o.PutUtfString(field, value)
-	body, err := sfs.EncodeObject(o)
-	if err != nil {
-		t.Fatalf("sfs.EncodeObject: %v", err)
-	}
-	packet, err := sfs.EncodePacket(body)
-	if err != nil {
-		t.Fatalf("sfs.EncodePacket: %v", err)
-	}
-	return packet
-}
-
-// mustEncodeCorruptPacket builds a packet whose framing is entirely valid
-// (correct length prefix, correctly round-trips through sfs.ReadPacket) but
-// whose sfs.SFSObject body is not: the leading tag byte is overwritten so
-// DecodeObject's "expected top-level tag 18" check fails. This is the
-// packet-framing-succeeded-but-content-is-garbage case, as distinct from a
-// truncated/corrupt frame (which sfs.ReadPacket itself rejects).
-func mustEncodeCorruptPacket(t *testing.T, field, value string) []byte {
-	t.Helper()
-	o := sfs.NewSFSObject()
-	o.PutUtfString(field, value)
-	body, err := sfs.EncodeObject(o)
-	if err != nil {
-		t.Fatalf("sfs.EncodeObject: %v", err)
-	}
-	body[0] = 0xEE // not sfs.SFSObjectType (18) -> DecodeObject must error
-	packet, err := sfs.EncodePacket(body)
-	if err != nil {
-		t.Fatalf("sfs.EncodePacket: %v", err)
-	}
-	return packet
-}
 
 // TestDecodeStreamFile exercises DecodeStreamFile's three independently
 // observable branches against real sfs.EncodePacket(sfs.EncodeObject(...)) output
@@ -163,7 +88,7 @@ func TestDecodeStreamFile(t *testing.T) {
 			build: func(t *testing.T) []byte {
 				var stream []byte
 				stream = append(stream, mustEncodePacket(t, "packet", "first")...)
-				stream = append(stream, mustEncodeCorruptPacket(t, "packet", "second")...)
+				stream = append(stream, testutil.MustEncodeCorruptPacket(t, "packet", "second")...)
 				stream = append(stream, mustEncodePacket(t, "packet", "third")...)
 				return stream
 			},
@@ -196,44 +121,12 @@ func TestDecodeStreamFile(t *testing.T) {
 			}
 
 			var decodeErr error
-			stdout := captureStdout(t, func() {
+			stdout := testutil.CaptureStdout(t, func() {
 				decodeErr = DecodeStreamFile("test", path)
 			})
 			tc.check(t, decodeErr, stdout)
 		})
 	}
-}
-
-// mustEncodePushAccountLoginNewPacket builds one on-wire framed packet shaped like a real
-// server->client push.account.login.new (conn.go's SendEnvelope/SendExtension wire format:
-// outer {c,a,p}, with the extension content's own {c,r,p} carrying the cmd name and params) whose
-// params include a live loginKey, exactly the shape docs/capturing-and-decoding-traffic.mdx's
-// capture-a-real-login-and-decode-it workflow would hand to -decode-stream.
-func mustEncodePushAccountLoginNewPacket(t *testing.T, loginKey string) []byte {
-	t.Helper()
-	params := sfs.NewSFSObject()
-	params.PutUtfString("gameUid", "12345678")
-	params.PutUtfString("loginKey", loginKey)
-
-	extContent := sfs.NewSFSObject()
-	extContent.PutUtfString("c", "push.account.login.new")
-	extContent.PutInt("r", -1)
-	extContent.PutSFSObject("p", params)
-
-	outer := sfs.NewSFSObject()
-	outer.PutByte("c", controllerExtension)
-	outer.PutShort("a", actionCallExtension)
-	outer.PutSFSObject("p", extContent)
-
-	body, err := sfs.EncodeObject(outer)
-	if err != nil {
-		t.Fatalf("sfs.EncodeObject: %v", err)
-	}
-	packet, err := sfs.EncodePacket(body)
-	if err != nil {
-		t.Fatalf("sfs.EncodePacket: %v", err)
-	}
-	return packet
 }
 
 // TestDecodeStreamFileRedactsCredentialFields is a regression test for the finding that
@@ -253,7 +146,7 @@ func TestDecodeStreamFileRedactsCredentialFields(t *testing.T) {
 	}
 
 	var decodeErr error
-	stdout := captureStdout(t, func() {
+	stdout := testutil.CaptureStdout(t, func() {
 		decodeErr = DecodeStreamFile("test", path)
 	})
 	if decodeErr != nil {
@@ -275,15 +168,109 @@ func TestDecodeStreamFileRedactsCredentialFields(t *testing.T) {
 // value where the old buggy code would have dumped it -- not to reproduce the buggy behavior itself.
 const decodeStreamFileHexHeadWindow = 32
 
+// TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure is a regression test for the
+// finding that DecodeStreamFile's DecodeObject-failure branch printed a raw hex dump of up to the
+// first 32 bytes of the (undecoded) frame body -- completely bypassing sfs.SensitiveSFSKeys/
+// StringRedacted, which can only ever run on a *successfully* decoded sfs.SFSObject, never on the raw
+// pre-decode bytes. A real capture truncated deep into an otherwise well-formed object can still
+// have an intact sensitive field (here "tk", a session token per sfsobject.go's sfs.SensitiveSFSKeys)
+// sorted near the front of that same 32-byte window, so the old code printed the field name and the
+// live secret in cleartext hex even though decoding had failed. This builds exactly that shape via
+// mustEncodeTruncatedPacketWithLeadingSensitiveField (which itself self-checks that the secret
+// really does land inside the old hex-dump window, so this test cannot silently stop proving
+// anything if the fixture's byte layout ever shifts) and proves the secret appears nowhere in
+// stdout, neither as UTF-8 nor as its hex encoding. Reverting decode.go's fix back to hex-dumping
+// the body makes this test fail (confirmed by running it against the pre-fix code).
+func TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure(t *testing.T) {
+	const secretTk = "SUPERSECRETTOKEN12345" // short enough to land fully inside the 32-byte window
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stream.bin")
+	packet := mustEncodeTruncatedPacketWithLeadingSensitiveField(t, "tk", secretTk)
+	if err := os.WriteFile(path, packet, 0o600); err != nil {
+		t.Fatalf("write test stream: %v", err)
+	}
+
+	var decodeErr error
+	stdout := testutil.CaptureStdout(t, func() {
+		decodeErr = DecodeStreamFile("test", path)
+	})
+	if decodeErr != nil {
+		t.Fatalf("expected nil error (a bad packet is logged and skipped, not fatal), got: %v", decodeErr)
+	}
+	// Sanity: prove the packet actually reached and exercised the DecodeObject-failure path (not,
+	// say, silently skipped), so the absence of the secret below reflects the fix rather than the
+	// packet never being decoded/printed at all.
+	if !strings.Contains(stdout, "DecodeObject error") {
+		t.Fatalf("stdout missing DecodeObject error line -- packet may not have reached the failure path at all, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, secretTk) {
+		t.Errorf("DecodeStreamFile leaked the raw tk value in cleartext on the decode-failure path:\n%s", stdout)
+	}
+	secretHex := fmt.Sprintf("%x", []byte(secretTk))
+	if strings.Contains(strings.ToLower(stdout), secretHex) {
+		t.Errorf("DecodeStreamFile leaked the tk value hex-encoded on the decode-failure path:\n%s", stdout)
+	}
+}
+
+// mustEncodePacket builds one on-wire framed packet from a plain key/value
+// pair, matching what a real capture of a simple server push looks like.
+func mustEncodePacket(t *testing.T, field, value string) []byte {
+	t.Helper()
+	o := sfs.NewSFSObject()
+	o.PutUtfString(field, value)
+	body, err := sfs.EncodeObject(o)
+	if err != nil {
+		t.Fatalf("sfs.EncodeObject: %v", err)
+	}
+	packet, err := sfs.EncodePacket(body)
+	if err != nil {
+		t.Fatalf("sfs.EncodePacket: %v", err)
+	}
+	return packet
+}
+
+// mustEncodePushAccountLoginNewPacket builds one on-wire framed packet shaped like a real
+// server->client push.account.login.new (conn.go's SendEnvelope/SendExtension wire format:
+// outer {c,a,p}, with the extension content's own {c,r,p} carrying the cmd name and params) whose
+// params include a live loginKey, exactly the shape docs/capturing-and-decoding-traffic.mdx's
+// capture-a-real-login-and-decode-it workflow would hand to -decode-stream.
+func mustEncodePushAccountLoginNewPacket(t *testing.T, loginKey string) []byte {
+	t.Helper()
+	params := sfs.NewSFSObject()
+	params.PutUtfString("gameUid", "12345678")
+	params.PutUtfString("loginKey", loginKey)
+
+	extContent := sfs.NewSFSObject()
+	extContent.PutUtfString("c", "push.account.login.new")
+	extContent.PutInt("r", -1)
+	extContent.PutSFSObject("p", params)
+
+	outer := sfs.NewSFSObject()
+	outer.PutByte("c", session.ControllerExtension)
+	outer.PutShort("a", session.ActionCallExtension)
+	outer.PutSFSObject("p", extContent)
+
+	body, err := sfs.EncodeObject(outer)
+	if err != nil {
+		t.Fatalf("sfs.EncodeObject: %v", err)
+	}
+	packet, err := sfs.EncodePacket(body)
+	if err != nil {
+		t.Fatalf("sfs.EncodePacket: %v", err)
+	}
+	return packet
+}
+
 // mustEncodeTruncatedPacketWithLeadingSensitiveField builds a packet whose framing is entirely
 // valid (correct length prefix, round-trips through sfs.ReadPacket cleanly, same as
-// mustEncodeCorruptPacket) but whose sfs.SFSObject body is cut short mid-way through its *second*
+// MustEncodeCorruptPacket) but whose sfs.SFSObject body is cut short mid-way through its *second*
 // field's value -- not its first. The first field (sensitiveKey/sensitiveValue) is written first
 // and is left completely intact in the truncated bytes; only the trailing field is chopped, which
 // is what forces DecodeObject to fail (unexpected EOF reading the trailing field's value) while
 // leaving the sensitive field's bytes sitting undisturbed near the front of the body -- exactly
 // the "truncated deep into an otherwise well-formed object" shape from the finding this guards
-// against, as opposed to mustEncodeCorruptPacket's instant-fail-on-the-first-byte shape.
+// against, as opposed to MustEncodeCorruptPacket's instant-fail-on-the-first-byte shape.
 //
 // Fails the test outright (rather than silently building a fixture that doesn't prove anything) if
 // sensitiveValue doesn't land entirely inside the first decodeStreamFileHexHeadWindow bytes of the
@@ -317,49 +304,4 @@ func mustEncodeTruncatedPacketWithLeadingSensitiveField(t *testing.T, sensitiveK
 		t.Fatalf("sfs.EncodePacket: %v", err)
 	}
 	return packet
-}
-
-// TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure is a regression test for the
-// finding that DecodeStreamFile's DecodeObject-failure branch printed a raw hex dump of up to the
-// first 32 bytes of the (undecoded) frame body -- completely bypassing sfs.SensitiveSFSKeys/
-// StringRedacted, which can only ever run on a *successfully* decoded sfs.SFSObject, never on the raw
-// pre-decode bytes. A real capture truncated deep into an otherwise well-formed object can still
-// have an intact sensitive field (here "tk", a session token per sfsobject.go's sfs.SensitiveSFSKeys)
-// sorted near the front of that same 32-byte window, so the old code printed the field name and the
-// live secret in cleartext hex even though decoding had failed. This builds exactly that shape via
-// mustEncodeTruncatedPacketWithLeadingSensitiveField (which itself self-checks that the secret
-// really does land inside the old hex-dump window, so this test cannot silently stop proving
-// anything if the fixture's byte layout ever shifts) and proves the secret appears nowhere in
-// stdout, neither as UTF-8 nor as its hex encoding. Reverting decode.go's fix back to hex-dumping
-// the body makes this test fail (confirmed by running it against the pre-fix code).
-func TestDecodeStreamFileDoesNotLeakSensitiveFieldOnDecodeFailure(t *testing.T) {
-	const secretTk = "SUPERSECRETTOKEN12345" // short enough to land fully inside the 32-byte window
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "stream.bin")
-	packet := mustEncodeTruncatedPacketWithLeadingSensitiveField(t, "tk", secretTk)
-	if err := os.WriteFile(path, packet, 0o600); err != nil {
-		t.Fatalf("write test stream: %v", err)
-	}
-
-	var decodeErr error
-	stdout := captureStdout(t, func() {
-		decodeErr = DecodeStreamFile("test", path)
-	})
-	if decodeErr != nil {
-		t.Fatalf("expected nil error (a bad packet is logged and skipped, not fatal), got: %v", decodeErr)
-	}
-	// Sanity: prove the packet actually reached and exercised the DecodeObject-failure path (not,
-	// say, silently skipped), so the absence of the secret below reflects the fix rather than the
-	// packet never being decoded/printed at all.
-	if !strings.Contains(stdout, "DecodeObject error") {
-		t.Fatalf("stdout missing DecodeObject error line -- packet may not have reached the failure path at all, got:\n%s", stdout)
-	}
-	if strings.Contains(stdout, secretTk) {
-		t.Errorf("DecodeStreamFile leaked the raw tk value in cleartext on the decode-failure path:\n%s", stdout)
-	}
-	secretHex := fmt.Sprintf("%x", []byte(secretTk))
-	if strings.Contains(strings.ToLower(stdout), secretHex) {
-		t.Errorf("DecodeStreamFile leaked the tk value hex-encoded on the decode-failure path:\n%s", stdout)
-	}
 }

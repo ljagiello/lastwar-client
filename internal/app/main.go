@@ -6,8 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"lastwar-client/internal/auth"
 	"lastwar-client/internal/crypto"
+	"lastwar-client/internal/game"
 	"lastwar-client/internal/gsl"
+	"lastwar-client/internal/session"
 	"log/slog"
 	"net"
 	"net/http"
@@ -350,7 +353,7 @@ func Run() {
 		return
 	}
 
-	result, err := Login(LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake})
+	result, err := auth.Login(auth.LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake})
 	if err != nil {
 		slog.Error("login failed", "error", err)
 		// Exit code 2 (rather than the generic 1) specifically marks a
@@ -360,7 +363,7 @@ func Run() {
 		// distinguish it without parsing the JSON log body. A network/
 		// dial/local-I/O failure that never reached that point is just a
 		// generic failure (1): it may well clear up on its own.
-		if errors.Is(err, ErrAuthRejected) {
+		if errors.Is(err, session.ErrAuthRejected) {
 			os.Exit(2)
 		}
 		os.Exit(1)
@@ -376,7 +379,7 @@ func Run() {
 		// kept at a single attempt rather than a retry loop. This is just one
 		// last chance to catch a late `init` before giving up entirely.
 		slog.Info("fetching building list (push.init.build)")
-		fbBuildings, fbVisitors, fbErr := FetchBuildings(conn, 12*time.Second)
+		fbBuildings, fbVisitors, fbErr := game.FetchBuildings(conn, 12*time.Second)
 		buildings = fbBuildings
 		// Login()'s own init-push parse (ParseInitBuildings/ParseInitVisitors, buildings.go/
 		// visitors.go) can populate a non-empty visitors slice even when building_new comes back
@@ -413,12 +416,12 @@ func Run() {
 	slog.Info("got buildings", "count", len(buildings))
 
 	if *listBuildings || !*collect {
-		PrintBuildings(buildings)
+		game.PrintBuildings(buildings)
 	}
 
 	if *collect {
 		slog.Info("collecting resources")
-		if err := CollectAll(conn, buildings, visitors); err != nil {
+		if err := game.CollectAll(conn, buildings, visitors); err != nil {
 			slog.Error("collect run had failures", "error", err)
 			if shouldAbortBeforeInteractive(err, *interactive != "") {
 				// See the identical round-40 fix's doc comment on the sibling os.Exit(1) above.
@@ -495,7 +498,7 @@ func shouldAbortBeforeInteractive(err error, interactiveRequested bool) bool {
 	if err == nil {
 		return false
 	}
-	if containsNonTimeoutNetError(err) {
+	if session.ContainsNonTimeoutNetError(err) {
 		return true
 	}
 	return !interactiveRequested
@@ -882,7 +885,7 @@ func (o crossServerTestOpts) LogValue() slog.Value { return slog.StringValue(o.S
 // given, first refreshes the access token via GSL opt=refresh (using that
 // device identity) before attempting the SFS reconnect.
 func runCrossServerTest(o crossServerTestOpts) {
-	ident, err := loadOrCreateDeviceIdentity()
+	ident, err := auth.LoadOrCreateDeviceIdentity()
 	if err != nil {
 		slog.Error("load device identity failed", "error", err)
 		os.Exit(1)
@@ -1135,7 +1138,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		os.Exit(1)
 	}
 
-	result, err := DoCrossServerLogin(CrossServerLoginParams{
+	result, err := auth.DoCrossServerLogin(auth.CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
 		DeviceID: deviceID, AirKey: airKey,
 		AccessTok: accessTok, ShumeiBoxId: o.shumeiBoxId,
@@ -1147,7 +1150,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		// Exit code 2 marks a confirmed server-side auth rejection specifically -- see the
 		// matching comment in main() above. A bare TCP dial failure never reaches that point,
 		// so it falls through to the generic exit code 1.
-		if errors.Is(err, ErrAuthRejected) {
+		if errors.Is(err, session.ErrAuthRejected) {
 			os.Exit(2)
 		}
 		os.Exit(1)
@@ -1185,7 +1188,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 
 	slog.Info("fetching building list (push.init.build)")
-	buildings, visitors, err := FetchBuildings(conn, 15*time.Second)
+	buildings, visitors, err := game.FetchBuildings(conn, 15*time.Second)
 	if err != nil {
 		slog.Error("fetch buildings failed", "error", err)
 		// See shouldAbortBeforeInteractive's own doc comment: the exact same bug class round 25
@@ -1203,11 +1206,11 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 	slog.Info("got buildings", "count", len(buildings))
 	if o.listBuildings || !o.collect {
-		PrintBuildings(buildings)
+		game.PrintBuildings(buildings)
 	}
 	if o.collect {
 		slog.Info("collecting resources")
-		if err := CollectAll(conn, buildings, visitors); err != nil {
+		if err := game.CollectAll(conn, buildings, visitors); err != nil {
 			slog.Error("collect run had failures", "error", err)
 			if shouldAbortBeforeInteractive(err, o.interactive != "") {
 				// See the identical round-40 fix's doc comment on the sibling os.Exit(1) above.

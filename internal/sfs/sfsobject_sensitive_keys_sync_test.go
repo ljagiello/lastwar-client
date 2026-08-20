@@ -191,7 +191,7 @@ func scanPutKeysInRepo(t *testing.T, root string) map[string][]string {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, "testsupport.go") {
 			return nil
 		}
 		data, err := os.ReadFile(path)

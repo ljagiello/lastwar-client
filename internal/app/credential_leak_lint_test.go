@@ -102,12 +102,12 @@ func TestNoRawSFSObjectDumpInLogsOrErrors(t *testing.T) {
 	// (the Handshake-response entries) were WRONG -- the response does carry a session token
 	// (`tk`) -- so both call sites were switched to StringRedacted() instead of being re-allowlisted.
 	allowlist := map[string]string{
-		`buildings.go:slog.Warn("skipping "+context+" entry with no "+field+" field", "raw", o.String())`:                  "o.String() is now unconditionally safe (round 14: String() delegates to StringRedacted(), see sfsobject.go) regardless of what o contains -- kept in this allowlist rather than removed only because this guard still flags plain .String() generically for defense-in-depth (see the doc comment above), not because this specific line's data was re-verified safe",
+		`wire.go:slog.Warn("skipping "+context+" entry with no "+field+" field", "raw", o.String())`:                       "o.String() is now unconditionally safe (round 14: String() delegates to StringRedacted(), see sfsobject.go) regardless of what o contains -- kept in this allowlist rather than removed only because this guard still flags plain .String() generically for defense-in-depth (see the doc comment above), not because this specific line's data was re-verified safe. requirePresentField moved from buildings.go to session/wire.go in the package split.",
 		`conn.go:slog.Info(label, "cmd", msg.Cmd, "response", msg.Params.String())`:                                        "msg.Params.String() is now unconditionally safe (round 14: String() delegates to StringRedacted()) -- same reasoning as the buildings.go entry above",
 		`conn.go:slog.Warn(label+" no-op (expected)", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.String())`: "same reasoning as the conn.go entry above",
 		`conn.go:slog.Warn(label+" no-op (status=0, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.String())`:      "same reasoning as the conn.go entry above",
 		`interactive.go:slog.Info("shutting down", "signal", sig.String())`:                                                "sig is an os.Signal, not an sfs.SFSObject -- String() here is the standard library's, unrelated to this bug class",
-		`interactive.go:slog.Error("no matching response within "+defaultCmdTimeout.String(), "error", err)`:               "defaultCmdTimeout is a time.Duration (const defaultCmdTimeout = 8 * time.Second, conn.go) -- String() here is the standard library's Duration.String(), unrelated to this bug class, same as the sig/val entries immediately above",
+		`interactive.go:slog.Error("no matching response within "+session.DefaultCmdTimeout.String(), "error", err)`:       "session.DefaultCmdTimeout is a time.Duration (const DefaultCmdTimeout = 8 * time.Second, session/conn.go) -- String() here is the standard library's Duration.String(), unrelated to this bug class, same as the sig/val entries immediately above",
 	}
 
 	seen := map[string]bool{}

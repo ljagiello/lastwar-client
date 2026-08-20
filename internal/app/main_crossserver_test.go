@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"lastwar-client/internal/gsl"
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
+	"lastwar-client/internal/testutil"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -132,10 +134,10 @@ func TestCrossServerSaveBackNeeded(t *testing.T) {
 // Setup:
 //   - a fresh device identity under an isolated HOME (loadOrCreateDeviceIdentity's own state
 //     files -- no bearing on this test, just needs to succeed)
-//   - a fake GSL HTTP server (newFakeGSLServer, reused from login_integration_test.go) answering
+//   - a fake GSL HTTP server (testutil.NewFakeGSLServer, reused from login_integration_test.go) answering
 //     both gsl.CheckVersion's getlsu3dversion.php and the opt=refresh getserverlist.php call with a
 //     server list pointing at a real fake game server, plus a fresh access token
-//   - a fake game server (startFakeGameServer/fakeInitPushServer, reused from
+//   - a fake game server (session.StartFakeGameServer/session.FakeInitPushServer, reused from
 //     crossserver_test.go/login_integration_test.go) that accepts the Login with no serverInfo
 //     redirect and immediately sends the `init` bootstrap push, so FetchBuildings (which
 //     runCrossServerTest calls unconditionally after a successful login) returns quickly instead
@@ -155,17 +157,17 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 		freshGameUid   = "uid-real"
 	)
 
-	gameAddr := startFakeGameServer(t, fakeInitPushServer(nil))
-	gameHost, gamePort := splitHostPortInt(t, gameAddr)
+	gameAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
+	gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
 
-	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+	gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code: "0",
 		ServerList: []gsl.LoginServerInfo{
-			{IP: gsl.FlexString(gameHost), Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
+			{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
 		},
 		At: &gsl.LoginToken{Token: freshAccessTok},
 	})
-	useFakeGSLServer(t, gsl)
+	testutil.UseFakeGSLServer(t, gsl)
 
 	cfgPath := t.TempDir() + "/session.json"
 
@@ -223,17 +225,17 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 func TestRunCrossServerTestSaveBackFailureWarnsAndContinues(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	gameAddr := startFakeGameServer(t, fakeInitPushServer(nil))
-	gameHost, gamePort := splitHostPortInt(t, gameAddr)
+	gameAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
+	gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
 
-	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+	gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code: "0",
 		ServerList: []gsl.LoginServerInfo{
-			{IP: gsl.FlexString(gameHost), Port: flexPort(gamePort), Zone: "APS-REAL", GameUid: "uid-real"},
+			{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: "APS-REAL", GameUid: "uid-real"},
 		},
 		At: &gsl.LoginToken{Token: "fresh-access-token-from-refresh"},
 	})
-	useFakeGSLServer(t, gsl)
+	testutil.UseFakeGSLServer(t, gsl)
 
 	var buf bytes.Buffer
 	orig := slog.Default()
@@ -283,7 +285,7 @@ func TestRunCrossServerTestRtRefreshWithEmptyAccessTokenKeepsOldOne(t *testing.T
 	const oldAccessTok = "tok-1-good"
 
 	gotParamsAt := make(chan string, 1)
-	gameAddr := startFakeGameServer(t, func(server *GameConn) {
+	gameAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
 		env, err := server.ReadEnvelope()
 		if err != nil {
 			return
@@ -295,19 +297,19 @@ func TestRunCrossServerTestRtRefreshWithEmptyAccessTokenKeepsOldOne(t *testing.T
 		}
 		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
-		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp); err != nil {
 			return
 		}
 		_ = server.SendExtension("init", sfs.NewSFSObject())
 	})
-	gameHost, gamePort := splitHostPortInt(t, gameAddr)
+	gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
 
-	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+	gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(gameHost), Port: flexPort(gamePort), Zone: "APS1", GameUid: "uid-1"}},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: "APS1", GameUid: "uid-1"}},
 		At:         &gsl.LoginToken{Token: ""}, // present but empty -- the shape under test
 	})
-	useFakeGSLServer(t, gsl)
+	testutil.UseFakeGSLServer(t, gsl)
 
 	var buf bytes.Buffer
 	orig := slog.Default()
@@ -359,11 +361,11 @@ func TestRunCrossServerTestRtRefreshWithEmptyAccessTokenKeepsOldOne(t *testing.T
 func TestRunCrossServerTestWarnsOnExplicitlyEmptyInteractive(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	gameAddr := startFakeGameServer(t, fakeInitPushServer(nil))
-	gameHost, gamePort := splitHostPortInt(t, gameAddr)
+	gameAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
+	gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
 
-	gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
-	useFakeGSLServer(t, gsl)
+	gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
+	testutil.UseFakeGSLServer(t, gsl)
 
 	var buf bytes.Buffer
 	orig := slog.Default()
@@ -413,12 +415,12 @@ func TestRunCrossServerTestExitsWhenIPEmpty(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code:       "0",
 			ServerList: nil, // deliberately empty -- the exact case this test targets
 			At:         &gsl.LoginToken{Token: "fresh-token-but-no-server-list"},
 		})
-		useFakeGSLServer(t, gsl)
+		testutil.UseFakeGSLServer(t, gsl)
 
 		// ip is deliberately left unset, as if -cs-rt were passed alone with no -cs-ip and no
 		// session config supplying one.
@@ -472,8 +474,8 @@ func TestRunCrossServerTestExitsWhenIPExplicitlyEmpty(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
-		useFakeGSLServer(t, gsl)
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
+		testutil.UseFakeGSLServer(t, gsl)
 
 		// ip is left empty, but ipExplicit is true -- as if -cs-ip "" were actually typed on the
 		// command line. No -cs-rt is set, so this never reaches the GSL-refresh block; the fake GSL
@@ -530,12 +532,12 @@ func TestRunCrossServerTestExitsCode2WhenRefreshHasNoUsableData(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code:       "0",
 			ServerList: nil, // deliberately empty...
 			At:         nil, // ...and no fresh access token: refreshHasUsableData(lsr) == false
 		})
-		useFakeGSLServer(t, gsl)
+		testutil.UseFakeGSLServer(t, gsl)
 
 		runCrossServerTest(crossServerTestOpts{
 			ip:   "1.2.3.4", // present so this fails on the refresh-data check, not the ip check
@@ -584,17 +586,17 @@ func TestRunCrossServerTestServerListOverrideLogging(t *testing.T) {
 	run := func(t *testing.T, explicit bool) string {
 		t.Setenv("HOME", t.TempDir())
 
-		gameAddr := startFakeGameServer(t, fakeInitPushServer(nil))
-		gameHost, gamePort := splitHostPortInt(t, gameAddr)
+		gameAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
+		gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code: "0",
 			ServerList: []gsl.LoginServerInfo{
-				{IP: gsl.FlexString(gameHost), Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
+				{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
 			},
 			At: &gsl.LoginToken{Token: "fresh-token"},
 		})
-		useFakeGSLServer(t, gsl)
+		testutil.UseFakeGSLServer(t, gsl)
 
 		var buf bytes.Buffer
 		orig := slog.Default()
@@ -653,22 +655,22 @@ func TestRunCrossServerTestAtWarningAttribution(t *testing.T) {
 	run := func(t *testing.T, atExplicit, withFreshToken bool) string {
 		t.Setenv("HOME", t.TempDir())
 
-		gameAddr := startFakeGameServer(t, fakeInitPushServer(nil))
-		gameHost, gamePort := splitHostPortInt(t, gameAddr)
+		gameAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
+		gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
 
 		lsr := gsl.LoginServerListRespon{
 			Code: "0",
 			// A non-empty server list keeps refreshHasUsableData true even in the
 			// withFreshToken=false cases below, where At is left nil.
 			ServerList: []gsl.LoginServerInfo{
-				{IP: gsl.FlexString(gameHost), Port: flexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
+				{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
 			},
 		}
 		if withFreshToken {
 			lsr.At = &gsl.LoginToken{Token: "fresh-token"}
 		}
-		gsl := newFakeGSLServer(t, lsr)
-		useFakeGSLServer(t, gsl)
+		gsl := testutil.NewFakeGSLServer(t, lsr)
+		testutil.UseFakeGSLServer(t, gsl)
 
 		var buf bytes.Buffer
 		orig := slog.Default()
@@ -738,18 +740,18 @@ func TestRunCrossServerTestNoAccessTokenAtAllWarning(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code: "0",
 			// A non-empty server list keeps refreshHasUsableData true even though At is left nil
 			// below -- this is the exact shape that reaches the "no access token" branch without
 			// failing earlier on refreshHasUsableData's own check. The IP/port are placeholders:
 			// DoCrossServerLogin's AccessTok=="" check rejects before ever dialing this address.
 			ServerList: []gsl.LoginServerInfo{
-				{IP: "192.0.2.1", Port: flexPort(12345), Zone: "APS-REAL", GameUid: "uid-real"},
+				{IP: "192.0.2.1", Port: testutil.FlexPort(12345), Zone: "APS-REAL", GameUid: "uid-real"},
 			},
 			At: nil,
 		})
-		useFakeGSLServer(t, gsl)
+		testutil.UseFakeGSLServer(t, gsl)
 
 		runCrossServerTest(crossServerTestOpts{
 			// o.at deliberately left empty -- no -cs-at flag, no session-config access token either.
@@ -809,8 +811,8 @@ func TestRunCrossServerTestExitsWhenPortNotGiven(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
-		useFakeGSLServer(t, gsl)
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
+		testutil.UseFakeGSLServer(t, gsl)
 
 		port := 0
 		if raw := os.Getenv("LASTWAR_TEST_CS_PORT"); raw != "" {
@@ -891,12 +893,12 @@ func TestRunCrossServerTestExitsWhenGameUidEmpty(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
 			Code:       "0",
 			ServerList: nil, // deliberately empty -- the exact case this test targets
 			At:         &gsl.LoginToken{Token: "fresh-token-but-no-server-list"},
 		})
-		useFakeGSLServer(t, gsl)
+		testutil.UseFakeGSLServer(t, gsl)
 
 		// gameUid is deliberately left unset, as if -cs-gameuid were never passed and no session
 		// config supplied one either; ip/port are valid so this isolates the gameUid check.
@@ -953,8 +955,8 @@ func TestRunCrossServerTestExitsWhenGameUidExplicitlyEmpty(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
-		useFakeGSLServer(t, gsl)
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
+		testutil.UseFakeGSLServer(t, gsl)
 
 		// gameUid is left empty, but gameUidExplicit is true -- as if -cs-gameuid "" were actually
 		// typed on the command line. No -cs-rt is set, so this never reaches the GSL-refresh block;
@@ -999,8 +1001,8 @@ func TestRunCrossServerTestExitsWhenGameUidExplicitlyEmpty(t *testing.T) {
 // TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling is the round-51 regression test for
 // the MINOR finding that runCrossServerTest's gsl.CheckVersion and RSA-pubkey-parse error branches
 // (main.go, right after the unconditional gsl.CheckVersion call, before the -cs-rt/-cs-* checks) had
-// zero test coverage of any kind: every other test in this file relies on newFakeGSLServer/
-// useFakeGSLServer, which always makes gsl.CheckVersion succeed with a valid pubkey, so neither the
+// zero test coverage of any kind: every other test in this file relies on testutil.NewFakeGSLServer/
+// testutil.UseFakeGSLServer, which always makes gsl.CheckVersion succeed with a valid pubkey, so neither the
 // check-version-itself-fails path nor the check-version-succeeds-but-the-returned-pubkey-doesn't-
 // parse path was ever exercised. Both branches share the identical o.rt-conditional shape (fatal
 // os.Exit(1) when -cs-rt is set, since the opt=refresh call below genuinely needs GSL capability;
@@ -1131,18 +1133,18 @@ func TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling(t *testing.T) 
 // HTTP 500 for getserverlist.php (the opt=refresh call) must exit 1 with the "GSL refresh failed"
 // message.
 //
-// Uses a hand-built fake HTTP server (rather than newFakeGSLServer, which always answers
+// Uses a hand-built fake HTTP server (rather than testutil.NewFakeGSLServer, which always answers
 // getserverlist.php successfully) so getlsu3dversion.php can keep succeeding -- gsl.CheckVersion must
 // succeed first, or runCrossServerTest exits fatally there instead, before ever reaching the
 // opt=refresh call this test targets. Mirrors gsl_http_test.go's own
 // TestGetServerListDecodeFailuresDoNotLeakRawResponse "HTTP status error" subtest for the
-// getserverlist.php handler shape, combined with newFakeGSLServer's own getlsu3dversion.php
+// getserverlist.php handler shape, combined with testutil.NewFakeGSLServer's own getlsu3dversion.php
 // handling.
 func TestRunCrossServerTestExitsWhenGSLRefreshCallFails(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		pub := testRSAPubKeyDER(t)
+		pub := testutil.RSAPubKeyDER(t)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case strings.HasSuffix(r.URL.Path, "getlsu3dversion.php"):
@@ -1155,7 +1157,7 @@ func TestRunCrossServerTestExitsWhenGSLRefreshCallFails(t *testing.T) {
 			}
 		}))
 		defer server.Close()
-		useFakeGSLServer(t, server)
+		testutil.UseFakeGSLServer(t, server)
 
 		runCrossServerTest(crossServerTestOpts{
 			ip:   "1.2.3.4",
@@ -1188,12 +1190,12 @@ func TestRunCrossServerTestExitsWhenGSLRefreshCallFails(t *testing.T) {
 }
 
 // fakeInitPushThenFailAllServer behaves exactly like login_integration_test.go's
-// fakeInitPushServer for the login/init handshake (plain success Login response, then the bare
-// `init` push), but -- unlike fakeInitPushServer, whose handler goroutine returns right after
+// session.FakeInitPushServer for the login/init handshake (plain success Login response, then the bare
+// `init` push), but -- unlike session.FakeInitPushServer, whose handler goroutine returns right after
 // sending `init` and stops reading -- keeps the connection open afterward and answers EVERY
 // subsequent request generically with a plain decoded, non-benign errorCode failure: it reads one
 // envelope, echoes back whatever cmd it carried (same trick as conn_wait_test.go's
-// readAndReply(server, "", ...)) with an errorCode no cmd's benignErrorCodes entry recognizes, and
+// session.ReadAndReply(server, "", ...)) with an errorCode no cmd's benignErrorCodes entry recognizes, and
 // loops until the connection closes.
 //
 // Built for TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive below: CollectAll
@@ -1205,14 +1207,14 @@ func TestRunCrossServerTestExitsWhenGSLRefreshCallFails(t *testing.T) {
 // ordinary per-item timeout does for containsNonTimeoutNetError's purposes (buildings.go: both are
 // "ordinary business-logic/benign-timeout failures", not evidence of a dead connection) -- fast and
 // deterministic instead of slow.
-func fakeInitPushThenFailAllServer() func(*GameConn) {
-	return func(server *GameConn) {
+func fakeInitPushThenFailAllServer() func(*session.GameConn) {
+	return func(server *session.GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
 		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
-		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp); err != nil {
 			return
 		}
 		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
@@ -1287,11 +1289,11 @@ func TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive(t *testing
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gameAddr := startFakeGameServer(t, fakeInitPushThenFailAllServer())
-		gameHost, gamePort := splitHostPortInt(t, gameAddr)
+		gameAddr := session.StartFakeGameServer(t, fakeInitPushThenFailAllServer())
+		gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
-		useFakeGSLServer(t, gsl)
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
+		testutil.UseFakeGSLServer(t, gsl)
 
 		runCrossServerTest(crossServerTestOpts{
 			ip: gameHost, port: gamePort, zone: "APS1", gameUid: "uid-1", at: "tok-1",
@@ -1335,14 +1337,14 @@ func TestRunCrossServerTestCollectBenignFailuresDoNotBlockInteractive(t *testing
 // FetchBuildings call is the very first read this malformed frame can reach -- it errors
 // immediately with a plain, non-net.Error decode failure instead of burning FetchBuildings' own
 // 15s timeout.
-func crossServerFetchBuildingsFailureServer() func(*GameConn) {
-	return func(server *GameConn) {
+func crossServerFetchBuildingsFailureServer() func(*session.GameConn) {
+	return func(server *session.GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
 		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
-		if err := server.SendEnvelope(controllerSystem, actionLogin, resp); err != nil {
+		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp); err != nil {
 			return
 		}
 		writeMalformedZlibBombFrame(server)
@@ -1409,11 +1411,11 @@ func TestRunCrossServerTestFetchBuildingsFailureWithInteractiveReachesRunInterac
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 
-		gameAddr := startFakeGameServer(t, crossServerFetchBuildingsFailureServer())
-		gameHost, gamePort := splitHostPortInt(t, gameAddr)
+		gameAddr := session.StartFakeGameServer(t, crossServerFetchBuildingsFailureServer())
+		gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
 
-		gsl := newFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
-		useFakeGSLServer(t, gsl)
+		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"})
+		testutil.UseFakeGSLServer(t, gsl)
 
 		runCrossServerTest(crossServerTestOpts{
 			ip: gameHost, port: gamePort, zone: "APS1", gameUid: "uid-1", at: "tok-1",
