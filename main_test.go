@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -197,6 +198,103 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback is the round-34 regression test
+// for the MAJOR finding that round 33's explicit-vs-config merge fix (mergeExplicitOrConfigString/
+// mergeExplicitOrConfigPort, config.go) was applied only to -cs-ip/-cs-port/-cs-gameuid inside
+// main()'s config-merge block -- -cs-zone/-cs-deviceid/-cs-shumei/-cs-at were left on the old bare
+// applyOverride pattern, which cannot distinguish "flag never mentioned" from "flag explicitly
+// passed as empty" and silently backfills from the session config either way, with zero
+// diagnostic. For -cs-at specifically this also defeated DoCrossServerLogin's own fatal
+// "no access token given" guard (crossserver.go) on the common plain-reconnect path.
+//
+// This doubles as the regression test for the sibling MAJOR finding that main()'s actual
+// config-merge call site (as opposed to the extracted pure helper functions, already unit-tested
+// in isolation by TestMergeExplicitOrConfigString/TestMergeExplicitOrConfigPort in config_test.go)
+// had zero test coverage of its own: every existing main_crossserver_test.go test constructs a
+// crossServerTestOpts struct directly, bypassing main()'s own config-loading and merge code
+// entirely.
+//
+// Drives a real main() invocation (like TestMainFlagParseExitCodes) with a temp session config
+// file on disk holding non-empty Zone/DeviceID/ShumeiBoxId/AccessToken, and -cs-zone/-cs-deviceid/
+// -cs-shumei/-cs-at each explicitly passed as empty on the command line. -cs-port is also
+// explicitly passed as 0 (already covered on its own by round 33, reused here purely as a
+// deterministic, pre-dial exit point: runCrossServerTest's port<=0 check fires and os.Exit(1)s
+// right after the unconditional CheckVersion call, before ever attempting a real TCP dial -- see
+// TestRunCrossServerTestPortExplicitButInvalidWording for the same technique). A fake GSL server
+// satisfies that CheckVersion call. Asserts every new explicitly-empty warning fired, and that
+// -cs-gameuid (left non-empty here, not part of this round's fix) did NOT warn, proving the new
+// checks are scoped correctly rather than firing indiscriminately.
+func TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_CONFIG_MERGE") == "1" {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		gsl := newFakeGSLServer(t, LoginServerListRespon{Code: "0"})
+		useFakeGSLServer(t, gsl)
+
+		cfgPath := filepath.Join(home, "session.json")
+		cfgJSON, err := json.Marshal(SessionConfig{
+			IP: "9.9.9.9", Port: 9999, Zone: "APS9999", GameUid: "cfg-gameuid",
+			DeviceID: "cfg-deviceid", ShumeiBoxId: "cfg-shumei", AccessToken: "cfg-at",
+		})
+		if err != nil {
+			t.Fatalf("marshal session config: %v", err)
+		}
+		if err := os.WriteFile(cfgPath, cfgJSON, 0600); err != nil {
+			t.Fatalf("write session config: %v", err)
+		}
+
+		os.Args = []string{
+			"lastwar-client",
+			"-config", cfgPath,
+			"-cs-ip", "1.2.3.4",
+			"-cs-port", "0",
+			"-cs-zone", "",
+			"-cs-deviceid", "",
+			"-cs-shumei", "",
+			"-cs-at", "",
+			"-cs-gameuid", "explicit-gameuid",
+		}
+		main()
+		// Only reached if main() fails to exit -- the outer assertions below will then see a clean
+		// (non-error) subprocess exit and fail with a clear message instead of this silently passing.
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMainConfigMergeExplicitlyEmptyFlagsWarnAndSkipConfigFallback$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS_CONFIG_MERGE=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	gotCode := 0
+	if runErr != nil {
+		exitErr, ok := runErr.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("subprocess did not run/exit as expected: err=%v, stderr=%s", runErr, stderr.String())
+		}
+		gotCode = exitErr.ExitCode()
+	}
+	if gotCode != 1 {
+		t.Errorf("subprocess exit code = %d, want 1 (the port<=0 pre-dial guard); stderr=%s", gotCode, stderr.String())
+	}
+
+	out := stderr.String()
+	for _, want := range []string{
+		"-cs-zone was explicitly given as empty",
+		"-cs-deviceid was explicitly given as empty",
+		"-cs-shumei was explicitly given as empty",
+		"-cs-at was explicitly given as empty",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("subprocess stderr missing expected warning %q; stderr=%s", want, out)
+		}
+	}
+	if strings.Contains(out, "-cs-gameuid was explicitly given as empty") {
+		t.Errorf("subprocess stderr unexpectedly warned about -cs-gameuid, which was passed non-empty in this test; stderr=%s", out)
 	}
 }
 

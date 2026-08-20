@@ -146,18 +146,24 @@ func main() {
 
 	csIOSSetExplicitly := false
 	// csIPSetExplicitly/csPortSetExplicitly/csZoneSetExplicitly/csGameUidSetExplicitly/
-	// csAtSetExplicitly mirror csIOSSetExplicitly's own pattern, for the same reason: they record
-	// whether the corresponding -cs-* flag was actually typed on the command line, as distinct from
-	// ending up non-empty purely because a loaded session config's field is merged into it further
-	// below (the "*csAt = applyOverride(cfg.AccessToken, *csAt)" style merge). Threaded into
-	// crossServerTestOpts so runCrossServerTest's GSL-refresh flag-vs-config log-wording distinction
-	// can reuse this same visitedFlags mechanism instead of inventing a new one -- see
-	// crossServerTestOpts' doc comment.
+	// csAtSetExplicitly/csDeviceIDSetExplicitly/csShumeiSetExplicitly mirror csIOSSetExplicitly's
+	// own pattern, for the same reason: they record whether the corresponding -cs-* flag was
+	// actually typed on the command line, as distinct from ending up non-empty purely because a
+	// loaded session config's field is merged into it further below (the
+	// mergeExplicitOrConfigString-based merge just below). Threaded into crossServerTestOpts so
+	// runCrossServerTest's GSL-refresh flag-vs-config log-wording distinction can reuse this same
+	// visitedFlags mechanism instead of inventing a new one -- see crossServerTestOpts' doc
+	// comment. csDeviceIDSetExplicitly/csShumeiSetExplicitly are round-34 additions: -cs-deviceid
+	// and -cs-shumei previously had no explicit-tracking at all, unlike every other -cs-* flag,
+	// which is exactly why their config-merge (below) was still on the old bare applyOverride
+	// pattern after round 33 fixed ip/port/gameuid.
 	csIPSetExplicitly := false
 	csPortSetExplicitly := false
 	csZoneSetExplicitly := false
 	csGameUidSetExplicitly := false
 	csAtSetExplicitly := false
+	csDeviceIDSetExplicitly := false
+	csShumeiSetExplicitly := false
 	// interactiveSetExplicitly mirrors the csXSetExplicitly bools above, for -interactive
 	// specifically -- see warnIfInteractiveExplicitlyEmpty's own doc comment for why this needs the
 	// identical "was it actually typed" tracking despite -interactive not being a -cs-* flag itself.
@@ -187,6 +193,10 @@ func main() {
 			csGameUidSetExplicitly = true
 		case "cs-at":
 			csAtSetExplicitly = true
+		case "cs-deviceid":
+			csDeviceIDSetExplicitly = true
+		case "cs-shumei":
+			csShumeiSetExplicitly = true
 		case "interactive":
 			interactiveSetExplicitly = true
 		}
@@ -244,19 +254,21 @@ func main() {
 	}
 	if cfg != nil {
 		slog.Info("loaded session config", "path", cfgSource)
-		// Round 33 fix: -cs-ip/-cs-port/-cs-gameuid explicitly passed but empty/zero used to be
-		// silently replaced by the config's value here regardless -- directly contradicting
-		// -config's own documented contract ("Explicit -cs-* flags override individual config
-		// fields", this file's -config help text and README.md). Worse, it defeated the dedicated
-		// "-cs-ip was given but empty" diagnostics further below entirely: by the time those run,
-		// ip/port/gameUid already hold the config's non-empty/non-zero values, so the
-		// o.ipExplicit/o.portExplicit/o.gameUidExplicit-gated branches that exist specifically to
-		// catch this never fire, even though *Explicit itself is correctly true. Now routed
-		// through mergeExplicitOrConfigString/mergeExplicitOrConfigPort (config.go), which skip
-		// the config fallback (and report explicitlyEmpty/explicitlyZero for the Warn below)
-		// when the flag was explicitly visited but left empty/zero, instead of only checking "is
-		// it currently empty" with no memory of how it got that way.
-		var ipExplicitlyEmpty, portExplicitlyZero, gameUidExplicitlyEmpty bool
+		// Round 33 fix (originally scoped to -cs-ip/-cs-port/-cs-gameuid only; round 34 extends it
+		// to -cs-zone/-cs-deviceid/-cs-shumei/-cs-at, the four siblings round 33 missed):
+		// explicitly passed but empty/zero used to be silently replaced by the config's value
+		// here regardless -- directly contradicting -config's own documented contract ("Explicit
+		// -cs-* flags override individual config fields", this file's -config help text and
+		// README.md). For -cs-at specifically this also defeated DoCrossServerLogin's own fatal
+		// "no access token given" guard (crossserver.go): an operator explicitly clearing -cs-at
+		// to force a fresh token would instead silently keep authenticating with the config's
+		// stale one, with zero diagnostic either way. Now routed through
+		// mergeExplicitOrConfigString/mergeExplicitOrConfigPort (config.go), which skip the
+		// config fallback (and report explicitlyEmpty/explicitlyZero for the Warn below) when the
+		// flag was explicitly visited but left empty/zero, instead of only checking "is it
+		// currently empty" with no memory of how it got that way.
+		var ipExplicitlyEmpty, portExplicitlyZero, zoneExplicitlyEmpty, gameUidExplicitlyEmpty bool
+		var deviceIDExplicitlyEmpty, shumeiExplicitlyEmpty, atExplicitlyEmpty bool
 		*csIP, ipExplicitlyEmpty = mergeExplicitOrConfigString(*csIP, csIPSetExplicitly, cfg.IP)
 		if ipExplicitlyEmpty {
 			slog.Warn("-cs-ip was explicitly given as empty; not falling back to the session config's ip (pass a non-empty -cs-ip, or omit the flag entirely to use the config's value)")
@@ -265,14 +277,26 @@ func main() {
 		if portExplicitlyZero {
 			slog.Warn("-cs-port was explicitly given as 0; not falling back to the session config's port (pass a positive -cs-port, or omit the flag entirely to use the config's value)")
 		}
-		*csZone = applyOverride(cfg.Zone, *csZone)
+		*csZone, zoneExplicitlyEmpty = mergeExplicitOrConfigString(*csZone, csZoneSetExplicitly, cfg.Zone)
+		if zoneExplicitlyEmpty {
+			slog.Warn("-cs-zone was explicitly given as empty; not falling back to the session config's zone (pass a non-empty -cs-zone, or omit the flag entirely to use the config's value)")
+		}
 		*csGameUid, gameUidExplicitlyEmpty = mergeExplicitOrConfigString(*csGameUid, csGameUidSetExplicitly, cfg.GameUid)
 		if gameUidExplicitlyEmpty {
 			slog.Warn("-cs-gameuid was explicitly given as empty; not falling back to the session config's gameUid (pass a non-empty -cs-gameuid, or omit the flag entirely to use the config's value)")
 		}
-		*csDeviceID = applyOverride(cfg.DeviceID, *csDeviceID)
-		*csShumei = applyOverride(cfg.ShumeiBoxId, *csShumei)
-		*csAt = applyOverride(cfg.AccessToken, *csAt)
+		*csDeviceID, deviceIDExplicitlyEmpty = mergeExplicitOrConfigString(*csDeviceID, csDeviceIDSetExplicitly, cfg.DeviceID)
+		if deviceIDExplicitlyEmpty {
+			slog.Warn("-cs-deviceid was explicitly given as empty; not falling back to the session config's deviceId (pass a non-empty -cs-deviceid, or omit the flag entirely to use the config's value)")
+		}
+		*csShumei, shumeiExplicitlyEmpty = mergeExplicitOrConfigString(*csShumei, csShumeiSetExplicitly, cfg.ShumeiBoxId)
+		if shumeiExplicitlyEmpty {
+			slog.Warn("-cs-shumei was explicitly given as empty; not falling back to the session config's shumeiBoxId (pass a non-empty -cs-shumei, or omit the flag entirely to use the config's value)")
+		}
+		*csAt, atExplicitlyEmpty = mergeExplicitOrConfigString(*csAt, csAtSetExplicitly, cfg.AccessToken)
+		if atExplicitlyEmpty {
+			slog.Warn("-cs-at was explicitly given as empty; not falling back to the session config's access token (pass a non-empty -cs-at, or omit the flag entirely to use the config's value)")
+		}
 		if !csIOSSetExplicitly {
 			*csIOS = cfg.IOSMode
 		}

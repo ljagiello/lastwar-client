@@ -162,6 +162,53 @@ func TestStringRedactedMasksAllPrimitiveArrayTypes(t *testing.T) {
 	}
 }
 
+// TestStringRedactedFormatsAllPrimitiveArrayTypesForNonSensitiveFields is the round-34 regression
+// test for the MINOR finding: primitiveArrayPrefix (sfsobject.go), which formats a primitive
+// array's actual elements for a NON-sensitive field (formatSFSValueRedacted's default case calls it
+// directly, unlike redactSFSValue's sensitive-key masking path, which only ever calls the separate
+// primitiveArrayLen for a bare count), had 7 of its 8 type-switch cases with zero test coverage --
+// confirmed via mutation testing (deleting the []byte case outright still left the full suite
+// passing). TestStringRedactedMasksAllPrimitiveArrayTypes above exercises all 8 wire types too, but
+// only ever under a sensitive "loginKey" field, which never reaches primitiveArrayPrefix at all.
+// This mirrors that table but puts each array under an ordinary, non-sensitive field name instead,
+// and asserts the real formatted elements actually appear in the output -- proving each type-switch
+// case does its job instead of silently falling through to the function's empty-string default.
+func TestStringRedactedFormatsAllPrimitiveArrayTypesForNonSensitiveFields(t *testing.T) {
+	cases := []struct {
+		name     string
+		sfsType  byte
+		val      interface{}
+		wantSubs []string // substrings that MUST appear in the (non-redacted) output
+	}{
+		{"BoolArray", sfsBoolArray, []bool{true, false, true}, []string{"true", "false"}},
+		{"ByteArray", sfsByteArray, []byte{0xDE, 0xAD, 0xBE, 0xEF}, []string{"222", "173", "190", "239"}},
+		{"ShortArray", sfsShortArray, []int16{-12345, 6789}, []string{"-12345", "6789"}},
+		{"IntArray", sfsIntArray, []int32{918273645, 192837465}, []string{"918273645", "192837465"}},
+		{"LongArray", sfsLongArray, []int64{1234567890123, 9876543210987}, []string{"1234567890123", "9876543210987"}},
+		{"FloatArray", sfsFloatArray, []float32{3.14159, 2.71828}, []string{"3.14159", "2.71828"}},
+		{"DoubleArray", sfsDoubleArray, []float64{1.6180339887, 1.4142135623}, []string{"1.618033", "1.414213"}},
+		{"StringArray", sfsUtfStringArray, []string{"plain-item-alpha", "plain-item-beta"}, []string{"plain-item-alpha", "plain-item-beta"}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := NewSFSObject()
+			o.put("scoreHistory", SFSValue{c.sfsType, c.val}) // an ordinary, non-sensitive field name
+
+			got := o.StringRedacted()
+
+			for _, sub := range c.wantSubs {
+				if !strings.Contains(got, sub) {
+					t.Errorf("StringRedacted() on a non-sensitive %s field is missing expected formatted element %q -- want primitiveArrayPrefix's %s case to actually format it, got: %s", c.name, sub, c.name, got)
+				}
+			}
+			if strings.Contains(got, "REDACTED") {
+				t.Errorf("StringRedacted() should not mask a non-sensitive %s array, got: %s", c.name, got)
+			}
+		})
+	}
+}
+
 // TestBuildLoginParamsIOSModeDoesNotLeakSecretsInAnalyticsBlob is the round-13 regression test for
 // the credential leak the round-13 audit found: BuildLoginParams' IOSMode branch built the "ta"
 // analytics blob's LwDeviceID/LwShumeiID/LwAirKey fields directly from the real live
