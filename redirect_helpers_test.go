@@ -178,6 +178,18 @@ func TestGetIntFlexibleWarnsOnWrongTypedField(t *testing.T) {
 			t.Errorf("expected a Warn mentioning the out-of-range numeric string, got:\n%s", logged)
 		}
 	})
+	// Round-33 regression: the fourth anomaly shape found after a final exhaustive re-check --
+	// a present, CORRECTLY-typed int64 Long whose value simply doesn't fit in int32's range. This
+	// is distinct from the string case above (which round 30 already guarded the VALUE against,
+	// round 31/32 added the Warn for) -- here the field is a native Long on the wire, not a
+	// string, so GetString never even sees it, and sfsFieldKindAccepts(sfsFieldKindInt, ...)
+	// accepts any int64 by design (a pure type check, not a value-range check).
+	t.Run("out-of-range native Long warns", func(t *testing.T) {
+		logged := run(t, func(o *SFSObject) { o.PutLong("port", int64(math.MaxInt32)+12345) })
+		if !strings.Contains(logged, "out-of-int32-range") {
+			t.Errorf("expected a Warn mentioning the out-of-range Long, got:\n%s", logged)
+		}
+	})
 	t.Run("wrong Go type warns", func(t *testing.T) {
 		logged := run(t, func(o *SFSObject) { o.PutBool("port", true) })
 		if !strings.Contains(logged, "wrong-typed") {

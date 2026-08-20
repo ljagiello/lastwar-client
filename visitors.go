@@ -150,6 +150,16 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 	// fail-safe (the more conservative maxVisitorsDefensiveCeiling always wins over trusting a
 	// wrong-typed value), but with zero diagnostic signal that the field was actually malformed
 	// rather than simply omitted. See TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning.
+	//
+	// Round 33 fix: a present, CORRECTLY-typed maxNum that's <= 0 (most notably negative -- 0
+	// could at least plausibly mean a feature-locked account, but a visitor-capacity field can
+	// never legitimately be negative) used to fall through this whole if/else-if chain with zero
+	// diagnostic, identical treatment to the genuinely-and-expectedly-absent case that's silent by
+	// design -- the exact same "still-uncovered anomaly branch" bug shape flagged repeatedly for
+	// gsl.go's getIntFlexible in rounds 30-32. Still fails safe either way (limit stays at
+	// maxVisitorsDefensiveCeiling), so this is diagnostic-only, but a negative maxNum is a genuine
+	// malformed/hostile-peer signal now worth surfacing like its wrong-typed and too-large
+	// siblings already are.
 	if maxNumV, ok := visitorObj.Get("maxNum"); ok && maxNumV.Val != nil {
 		if !sfsFieldKindAccepts(sfsFieldKindInt, maxNumV.Val) {
 			slog.Warn("visitor.maxNum field is present but wrong-typed; falling back to defensive ceiling",
@@ -161,6 +171,9 @@ func ParseInitVisitors(initParams *SFSObject) []Visitor {
 					"maxNum", maxNum, "cap", maxVisitorsUpperBound)
 				limit = maxVisitorsUpperBound
 			}
+		} else {
+			slog.Warn("visitor.maxNum field is present and correctly-typed but not positive; falling back to defensive ceiling",
+				"maxNum", maxNum, "cap", maxVisitorsDefensiveCeiling)
 		}
 	}
 	if len(arr.items) > limit {

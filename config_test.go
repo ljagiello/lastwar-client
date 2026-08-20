@@ -19,6 +19,70 @@ func TestApplyOverride(t *testing.T) {
 	}
 }
 
+// TestMergeExplicitOrConfigString is the round-33 regression test for the MAJOR finding that
+// main()'s -cs-ip/-cs-gameuid config-merge used to silently replace an explicitly-passed-but-empty
+// flag with the session config's value, with zero diagnostic -- contradicting -config's own
+// documented override contract and defeating the dedicated "given but empty" diagnostics further
+// down in runCrossServerTest entirely (by the time those ran, the flag already held the config's
+// non-empty value). mergeExplicitOrConfigString is the extracted, directly-testable decision logic
+// behind that fix.
+func TestMergeExplicitOrConfigString(t *testing.T) {
+	cases := []struct {
+		name                string
+		flagVal             string
+		explicit            bool
+		cfgVal              string
+		wantEffective       string
+		wantExplicitlyEmpty bool
+	}{
+		{"never mentioned, empty, config has a value: falls back to config", "", false, "cfg-ip", "cfg-ip", false},
+		{"never mentioned, empty, config also empty: stays empty", "", false, "", "", false},
+		{"explicitly set to a real value: kept, config ignored", "flag-ip", true, "cfg-ip", "flag-ip", false},
+		{"explicitly set but empty: stays empty, does NOT fall back to config", "", true, "cfg-ip", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotEffective, gotExplicitlyEmpty := mergeExplicitOrConfigString(c.flagVal, c.explicit, c.cfgVal)
+			if gotEffective != c.wantEffective {
+				t.Errorf("effective = %q, want %q", gotEffective, c.wantEffective)
+			}
+			if gotExplicitlyEmpty != c.wantExplicitlyEmpty {
+				t.Errorf("explicitlyEmpty = %v, want %v", gotExplicitlyEmpty, c.wantExplicitlyEmpty)
+			}
+		})
+	}
+}
+
+// TestMergeExplicitOrConfigPort is mergeExplicitOrConfigPort's TestMergeExplicitOrConfigString
+// counterpart -- same round-33 finding, same fix, applied to -cs-port's int-vs-"not given" shape
+// instead of a string's empty-vs-"not given" shape.
+func TestMergeExplicitOrConfigPort(t *testing.T) {
+	cases := []struct {
+		name               string
+		flagVal            int
+		explicit           bool
+		cfgVal             int
+		wantEffective      int
+		wantExplicitlyZero bool
+	}{
+		{"never mentioned, zero, config has a value: falls back to config", 0, false, 9999, 9999, false},
+		{"never mentioned, zero, config also zero: stays zero", 0, false, 0, 0, false},
+		{"explicitly set to a real value: kept, config ignored", 1234, true, 9999, 1234, false},
+		{"explicitly set to 0: stays zero, does NOT fall back to config", 0, true, 9999, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotEffective, gotExplicitlyZero := mergeExplicitOrConfigPort(c.flagVal, c.explicit, c.cfgVal)
+			if gotEffective != c.wantEffective {
+				t.Errorf("effective = %d, want %d", gotEffective, c.wantEffective)
+			}
+			if gotExplicitlyZero != c.wantExplicitlyZero {
+				t.Errorf("explicitlyZero = %v, want %v", gotExplicitlyZero, c.wantExplicitlyZero)
+			}
+		})
+	}
+}
+
 func TestLoadEffectiveConfigExplicitPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.json")

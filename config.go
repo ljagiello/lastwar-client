@@ -97,6 +97,41 @@ func applyOverride(base, override string) string {
 	return base
 }
 
+// mergeExplicitOrConfigString decides the effective value for a session-config-overridable string
+// flag (-cs-ip/-cs-gameuid), given whether it was explicitly typed on the command line -- even as
+// an empty string. Plain applyOverride(cfgVal, flagVal) can't make this distinction: it only ever
+// sees the CURRENT value of flagVal, with no memory of whether that empty string came from the
+// flag's own zero-value default (never mentioned at all) or from an operator deliberately typing
+// -cs-ip with an explicit empty value to force a run that ignores the config's ip. Round 33 fix: main()'s config-merge
+// block used to call applyOverride directly here, so an explicitly-empty flag was silently
+// replaced by the config's value with zero diagnostic -- directly contradicting -config's own
+// documented "Explicit -cs-* flags override individual config fields" contract, and additionally
+// defeating the dedicated "-cs-ip was given but empty" diagnostics further down in
+// runCrossServerTest entirely, since by the time those ran, the flag already held the config's
+// non-empty value. Returns (effectiveValue, explicitlyEmpty) -- the caller logs a Warn and skips
+// the override when explicitlyEmpty is true, instead of silently falling back to cfgVal.
+func mergeExplicitOrConfigString(flagVal string, explicit bool, cfgVal string) (effective string, explicitlyEmpty bool) {
+	if explicit && flagVal == "" {
+		return "", true
+	}
+	return applyOverride(cfgVal, flagVal), false
+}
+
+// mergeExplicitOrConfigPort is mergeExplicitOrConfigString's sibling for -cs-port, whose "not
+// given" zero value (0) and "given but genuinely zero/invalid" both look identical as a bare int
+// -- same underlying gap, same round-33 fix, same reasoning; see mergeExplicitOrConfigString's own
+// doc comment for the full rationale, which applies here unchanged except for the int-vs-string
+// shape of the flag itself. Returns (effectivePort, explicitlyZero).
+func mergeExplicitOrConfigPort(flagVal int, explicit bool, cfgVal int) (effective int, explicitlyZero bool) {
+	if explicit && flagVal == 0 {
+		return 0, true
+	}
+	if flagVal == 0 {
+		return cfgVal, false
+	}
+	return flagVal, false
+}
+
 // loadEffectiveConfig resolves which session config file (if any) to use:
 // an explicit -config path if given, else the default path. Returns (nil,
 // "") when the resolved path genuinely has no file yet -- not an error,

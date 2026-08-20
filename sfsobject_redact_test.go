@@ -940,6 +940,28 @@ func TestStringRedactedSanitizesTerminalEscapeSequences(t *testing.T) {
 			t.Errorf("sanitizeForTerminal should leave plain newline/tab bytes alone for readability, got: %q", got)
 		}
 	})
+
+	// Round-33 regression: DEL (0x7f) is escaped by a separate clause in sanitizeForTerminal
+	// (sfsobject.go) from the general C0-control-byte range (< 0x20) the other subtests above
+	// exercise -- it sits outside that range entirely, so a regression dropping only the DEL
+	// clause would not be caught by any of them.
+	t.Run("DEL byte is escaped", func(t *testing.T) {
+		o := NewSFSObject()
+		o.PutUtfString("motd", "before\x7fafter")
+		o.PutUtfString("nickname", "player-one")
+
+		got := o.StringRedacted()
+
+		if strings.Contains(got, "\x7f") {
+			t.Errorf("StringRedacted lets a raw DEL (0x7f) byte through: %q", got)
+		}
+		if !strings.Contains(got, `\x7f`) {
+			t.Errorf("expected DEL to be escaped as the literal text \\x7f, got: %q", got)
+		}
+		if !strings.Contains(got, "before") || !strings.Contains(got, "after") {
+			t.Errorf("sanitization must not eat the surrounding non-control text, got: %q", got)
+		}
+	})
 }
 
 // TestEncodeObjectNilTopLevelReturnsErrorNotPanic is the round-19 regression test for Fix 2:

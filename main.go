@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -44,6 +45,21 @@ func main() {
 	// usage message prints as "Usage of X:" -- a stable program name there reads as intentional
 	// documentation, not an accident of $0.
 	fs := flag.NewFlagSet(filepath.Base(os.Args[0]), flag.ContinueOnError)
+	// Suppress flag.FlagSet's own built-in stderr output entirely -- both its failf()-then-usage
+	// dump on a genuine parse error (unknown flag, bad value, missing argument) and its Usage()
+	// call on -h/-help -- so neither can print a raw plain-text line into the otherwise all-JSON
+	// log stream the placeholder handler above exists to guarantee. Round 33 fix: this was the
+	// one remaining case, after round 32 covered every explicit slog.Error/slog.Warn call site in
+	// this file, that this file's own JSON-log-stream invariant didn't actually cover -- flag's
+	// internal output happens INSIDE fs.Parse, before this function ever sees the returned error,
+	// so no error-handling branch here could intercept it. Both suppressed cases are handled
+	// explicitly below instead: -h/-help re-enables output and calls fs.Usage() itself, byte-for-
+	// byte reproducing the original human-readable text (still not JSON -- this is intentional,
+	// documented help output for a human, not a machine-log diagnostic; see wantJSON:false on the
+	// help-flag cases in TestMainFlagParseExitCodes for why this line is deliberately drawn here
+	// and not extended to hide -h/-help's own text too); a real parse error instead logs the
+	// error's own message via slog.Error, structured like every other fatal diagnostic in main().
+	fs.SetOutput(io.Discard)
 	email := fs.String("email", "", "account email to bind the guest identity to via email verification; if omitted and no loginKey is on file yet, the run silently stays on a fresh guest identity (no account binding, no error)")
 	codePipe := fs.String("code-pipe", "", "path to a FIFO to read the verification code from (blocks open until a writer connects); if empty, reads from stdin")
 	collect := fs.Bool("collect", false, "collect resources from every confirmed building type, plus the Armed Truck/Overlord idle rewards, greeting city visitors, helping alliance members, claiming all mail and alliance gifts, donating to the recommended alliance tech, and both once-a-day VIP claims, after login")
@@ -67,18 +83,24 @@ func main() {
 	logLevel := fs.String("log-level", "info", "log verbosity: debug, info, warn (or its alias warning), or error")
 	version := fs.Bool("version", false, "print build info and exit")
 	if err := fs.Parse(os.Args[1:]); err != nil {
-		// flag.ContinueOnError still runs the same failf/usage path flag.ExitOnError does (it
-		// prints the error and the usage text to stderr internally on every parse failure) -- it
-		// only differs in returning the error here instead of calling os.Exit itself, which is
-		// the whole point: it lets us pick the exit code instead of colliding with our own
-		// contract below. -h/-help isn't a usage error, just an explicit request for that same
-		// usage text, so it keeps exiting 0 as it always did with the default FlagSet. Any real
-		// parse error (unknown flag, bad value, missing argument) exits 1 rather than the
-		// colliding 2, keeping the exit-code contract binary: 2 means confirmed auth rejection,
-		// everything else means "look at the log".
+		// flag.ContinueOnError still runs the same failf/usage path flag.ExitOnError does
+		// internally -- it only differs in returning the error here instead of calling os.Exit
+		// itself, which is the whole point: it lets us pick the exit code instead of colliding
+		// with our own contract below. -h/-help isn't a usage error, just an explicit request for
+		// that same usage text, so it keeps exiting 0 as it always did with the default FlagSet --
+		// fs.SetOutput(io.Discard) above suppressed flag's own automatic Usage() call for this
+		// case too, so it's reproduced explicitly here. Any real parse error (unknown flag, bad
+		// value, missing argument) exits 1 rather than the colliding 2, keeping the exit-code
+		// contract binary: 2 means confirmed auth rejection, everything else means "look at the
+		// log" -- and, as of round 33, "the log" now actually means the log: err's own message
+		// (e.g. "flag provided but not defined: -bogus") goes through slog.Error instead of the
+		// plain-text dump fs.SetOutput(io.Discard) suppressed.
 		if errors.Is(err, flag.ErrHelp) {
+			fs.SetOutput(os.Stderr)
+			fs.Usage()
 			os.Exit(0)
 		}
+		slog.Error("flag parse failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -222,12 +244,32 @@ func main() {
 	}
 	if cfg != nil {
 		slog.Info("loaded session config", "path", cfgSource)
-		*csIP = applyOverride(cfg.IP, *csIP)
-		if *csPort == 0 {
-			*csPort = cfg.Port
+		// Round 33 fix: -cs-ip/-cs-port/-cs-gameuid explicitly passed but empty/zero used to be
+		// silently replaced by the config's value here regardless -- directly contradicting
+		// -config's own documented contract ("Explicit -cs-* flags override individual config
+		// fields", this file's -config help text and README.md). Worse, it defeated the dedicated
+		// "-cs-ip was given but empty" diagnostics further below entirely: by the time those run,
+		// ip/port/gameUid already hold the config's non-empty/non-zero values, so the
+		// o.ipExplicit/o.portExplicit/o.gameUidExplicit-gated branches that exist specifically to
+		// catch this never fire, even though *Explicit itself is correctly true. Now routed
+		// through mergeExplicitOrConfigString/mergeExplicitOrConfigPort (config.go), which skip
+		// the config fallback (and report explicitlyEmpty/explicitlyZero for the Warn below)
+		// when the flag was explicitly visited but left empty/zero, instead of only checking "is
+		// it currently empty" with no memory of how it got that way.
+		var ipExplicitlyEmpty, portExplicitlyZero, gameUidExplicitlyEmpty bool
+		*csIP, ipExplicitlyEmpty = mergeExplicitOrConfigString(*csIP, csIPSetExplicitly, cfg.IP)
+		if ipExplicitlyEmpty {
+			slog.Warn("-cs-ip was explicitly given as empty; not falling back to the session config's ip (pass a non-empty -cs-ip, or omit the flag entirely to use the config's value)")
+		}
+		*csPort, portExplicitlyZero = mergeExplicitOrConfigPort(*csPort, csPortSetExplicitly, cfg.Port)
+		if portExplicitlyZero {
+			slog.Warn("-cs-port was explicitly given as 0; not falling back to the session config's port (pass a positive -cs-port, or omit the flag entirely to use the config's value)")
 		}
 		*csZone = applyOverride(cfg.Zone, *csZone)
-		*csGameUid = applyOverride(cfg.GameUid, *csGameUid)
+		*csGameUid, gameUidExplicitlyEmpty = mergeExplicitOrConfigString(*csGameUid, csGameUidSetExplicitly, cfg.GameUid)
+		if gameUidExplicitlyEmpty {
+			slog.Warn("-cs-gameuid was explicitly given as empty; not falling back to the session config's gameUid (pass a non-empty -cs-gameuid, or omit the flag entirely to use the config's value)")
+		}
 		*csDeviceID = applyOverride(cfg.DeviceID, *csDeviceID)
 		*csShumei = applyOverride(cfg.ShumeiBoxId, *csShumei)
 		*csAt = applyOverride(cfg.AccessToken, *csAt)

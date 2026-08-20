@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +100,32 @@ func TestEncodeFormSortedRejectsUnknownFormKey(t *testing.T) {
 	got, err := encodeFormSorted(form)
 	if err == nil {
 		t.Fatalf("encodeFormSorted: expected an error for a form key absent from `order`, got nil (encoded = %q)", got)
+	}
+}
+
+// TestEncodeFormSortedRejectsAmpersandInValue is the round-33 regression test for encodeFormSorted's
+// `&`-injection guard, which had zero prior test coverage -- confirmed by round 33's own audit via
+// mutation testing (temporarily disabling the `strings.Contains(v[0], "&")` check in gsl.go left the
+// full `go test ./...` suite passing with zero failures, proving nothing exercised this branch).
+//
+// encodeFormSorted hand-builds the request body with a bare "&"-joined string.Builder, not
+// url.Values.Encode() (which would percent-escape "&" in a value automatically) -- so an
+// unescaped "&" inside a field's own value would inject a bogus extra key=value pair into the
+// outgoing GSL request, corrupting it in a way the receiving server would parse as attacker-
+// controlled additional fields. This proves the guard actually fires instead of silently writing
+// the corrupting value through.
+func TestEncodeFormSortedRejectsAmpersandInValue(t *testing.T) {
+	form := url.Values{}
+	form.Set("uuid", "malicious&injected=value")
+
+	got, err := encodeFormSorted(form)
+	if err == nil {
+		t.Fatalf("encodeFormSorted: expected an error for a value containing '&', got nil (encoded = %q)", got)
+	}
+	if !strings.Contains(err.Error(), "uuid") {
+		t.Errorf("encodeFormSorted error = %q, want it to name the offending field (%q)", err.Error(), "uuid")
+	}
+	if !strings.Contains(err.Error(), "&") {
+		t.Errorf("encodeFormSorted error = %q, want it to mention the offending character ('&')", err.Error())
 	}
 }

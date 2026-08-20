@@ -697,6 +697,47 @@ func TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning(t *testing.T) {
 	}
 }
 
+// TestParseInitVisitorsNegativeMaxNumFallsBackWithWarning is the round-33 regression test for the
+// MINOR finding that a present, CORRECTLY-typed but non-positive (especially negative) maxNum fell
+// through ParseInitVisitors' whole if/else-if chain with zero diagnostic -- identical silent
+// treatment to the genuinely-and-expectedly-absent case, unlike its wrong-typed
+// (TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning above) and too-large
+// (maxVisitorsUpperBound clamp test) siblings, which both warn. A negative maxNum can never be a
+// legitimate value for a visitor-capacity field, so it's a genuine malformed/hostile-peer signal
+// worth surfacing, even though the fallback behavior itself (the defensive ceiling) was already
+// correct either way.
+func TestParseInitVisitorsNegativeMaxNumFallsBackWithWarning(t *testing.T) {
+	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
+
+	list := NewSFSArray()
+	for i := 0; i < wantListLen; i++ {
+		v := NewSFSObject()
+		v.PutLong("uid", int64(9000+i))
+		v.PutInt("eventId", 3000+int32(i))
+		list.AddSFSObject(v)
+	}
+	visitor := NewSFSObject()
+	visitor.PutInt("maxNum", -5) // correctly-typed, but never a legitimate value
+	visitor.PutSFSArray("list", list)
+	params := NewSFSObject()
+	params.PutSFSObject("visitor", visitor)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	got := ParseInitVisitors(params)
+	slog.SetDefault(orig)
+
+	if len(got) != maxVisitorsDefensiveCeiling {
+		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (a negative maxNum must fall back to the defensive ceiling, not be treated as 0 visitors or unbounded)", len(got), maxVisitorsDefensiveCeiling)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "visitor.maxNum field is present and correctly-typed but not positive") {
+		t.Errorf("expected a not-positive-maxNum warning, got log:\n%s", logged)
+	}
+}
+
 // eofConnWithWrites is a minimal net.Conn whose every Read returns bare io.EOF -- like
 // conn_wait_test.go's eofConn, simulating a peer's graceful close at the live-connection level -- but
 // unlike eofConn (which embeds a nil net.Conn and would panic if any other method were called), Write

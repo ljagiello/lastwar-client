@@ -55,6 +55,14 @@ func TestRedact(t *testing.T) {
 		{"empty string", "", ""},
 		{"short string (<=8 chars)", "abcd1234", "***"},
 		{"exactly 8 chars", "12345678", "***"},
+		// Round-33 regression: the ASCII "exactly 8 chars" case above has byte length == rune
+		// count == 8, so it can't distinguish the outer len(s)<=8 byte-length prefilter from the
+		// inner n<=8 rune-count check a few lines into redact()'s body -- a regression loosening
+		// either one to "< 8" would still pass it. An exactly-8-rune, all-multi-byte CJK string
+		// has byte length 24 (> 8, so it clears the outer prefilter) but rune count exactly 8,
+		// isolating the inner rune-count check specifically: it must still fully redact to "***",
+		// not fall through to the general k=n/8 formula (which would reveal 1 rune from each end).
+		{"exactly 8 runes, all multi-byte (byte length 24)", "田中太郎鈴木一郎", "***"},
 		// 16 runes: k = n/8 = 2, so this reveals 2 runes from each end, not the
 		// old flat 4/4 (see the scaling-formula regression cases below for why).
 		{"longer than 8 chars", "abcdefghijklmnop", "ab...op"},

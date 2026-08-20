@@ -106,8 +106,14 @@ func TestMainFlagParseExitCodes(t *testing.T) {
 	}{
 		{"long help flag exits 0", []string{"-help"}, 0, "", false},
 		{"short help flag exits 0", []string{"-h"}, 0, "", false},
-		{"unrecognized flag exits 1", []string{"-this-flag-does-not-exist"}, 1, "", false},
-		{"malformed flag value exits 1", []string{"-cs-port=not-a-number"}, 1, "", false},
+		// wantJSON: true is the round-33 regression assertion for both of these -- flag.FlagSet's
+		// own built-in failf()-then-usage output used to print a raw plain-text line straight to
+		// stderr from INSIDE fs.Parse, before main() ever saw the returned error, so no
+		// error-handling branch in main() could have intercepted it even after round 32's fix.
+		// fs.SetOutput(io.Discard) (main.go) now suppresses that, and the error's own message goes
+		// through slog.Error instead.
+		{"unrecognized flag exits 1", []string{"-this-flag-does-not-exist"}, 1, "", true},
+		{"malformed flag value exits 1", []string{"-cs-port=not-a-number"}, 1, "", true},
 		{
 			// This is the regression case for this round's Fix 1: Go's flag package stops parsing
 			// at the first non-'-'-prefixed token and silently stashes everything after it as
