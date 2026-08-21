@@ -47,18 +47,22 @@ Two transports carry traffic to FunPlus's servers:
 ### Layer diagram
 
 ```mermaid
+%%{init: {'flowchart': {'wrappingWidth': 440, 'nodeSpacing': 55, 'rankSpacing': 48, 'padding': 14}}}%%
 flowchart TB
-    lua["<b>Lua layer</b> · 18,514 modules<br/>UI, DataCenter, Scene<br/>Net/Msgs: 3,047 commands + Chat: 131 (3,178 total)"]
-    cs["<b>Hot-update C#</b> · 117 assemblies<br/>NetworkManager, AESHelper, BestHttp<br/>SmartFox2X wire types, SDK glue"]
-    core["<b>Static IL2CPP core</b> · libil2cpp.so<br/>Unity engine runtime, HybridCLR native interpreter<br/>libxlua.so (no gameplay code)"]
+    lua("<b>Lua layer</b><br/>18,514 hot-updated modules<br/>UI, gameplay, all 3,178 commands")
+    cs("<b>Hot-update C#</b><br/>117 HybridCLR assemblies<br/>network stack, crypto, SFS2X wire types")
+    core("<b>Static IL2CPP core</b><br/>libil2cpp.so, no gameplay code<br/>Unity runtime + native interpreters")
 
-    lua -->|"xLua bridge · CS.* reflection · custom require() loader"| cs
-    cs -->|"HybridCLR interpreter, loaded from AssetBundle"| core
+    lua -- "xLua bridge, CS.* reflection" --> cs
+    cs -- "HybridCLR interpreter, from AssetBundle" --> core
 
-    classDef gameplay fill:#16A34A,stroke:#15803D,color:#ffffff;
-    classDef native fill:#334155,stroke:#1e293b,color:#ffffff;
-    class lua gameplay;
-    class core native;
+    classDef top fill:#475569,stroke:#94a3b8,stroke-width:1px,color:#ffffff;
+    classDef key fill:#334155,stroke:#22c55e,stroke-width:2px,color:#ffffff;
+    classDef base fill:#1e293b,stroke:#475569,stroke-width:1px,color:#e2e8f0;
+    class lua top;
+    class cs key;
+    class core base;
+    linkStyle default stroke:#64748b,stroke-width:1.5px;
 ```
 
 ### What a Go client actually needs
