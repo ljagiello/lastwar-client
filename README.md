@@ -22,13 +22,17 @@ picture. Preview the docs locally with `mint dev` from inside `docs/`.
   automations: the "Armed Truck"/"Overlord" idle rewards, greeting city visitors, bulk-helping alliance
   members, claiming all mail and alliance gifts, donating to the alliance's currently-recommended
   tech, and both once-a-day VIP claims.
-- **Open question, not currently confirmed:** reconnecting into an *established* real account's
-  live game state. This was proven working end-to-end at the time it was captured — but that
-  capture used the `ta` analytics blob's real device/anti-fraud sub-fields, which a later security
-  fix (round 13) replaced with empty-string placeholders to close a credential-leak vector. Whether
-  reconnect still succeeds against the code as it ships today hasn't been re-tested against
-  production; see `docs/live-validation.mdx` for the full methodology and the current state of this
-  open question.
+- **Confirmed live (previously an open question):** reconnecting into an *established* real
+  account's live game state, with the code exactly as it ships today — i.e. with the `ta` analytics
+  blob's device/anti-fraud sub-fields (`LwDeviceID`/`LwShumeiID`/`LwAirKey`) sent as the empty
+  placeholders a round-13 security fix put in. This was the dossier's biggest open question (the
+  original reconnect proof used `ta`'s *real* captured sub-fields, and it was unknown whether the
+  placeholders would still be accepted). It's now settled: an unattended cron running this
+  from-scratch Go client reconnected and collected real resources over multiple days (August 2026),
+  and it was re-verified after a live zone-server migration. So the server does **not** require
+  `ta`'s real device sub-fields for reconnect. Still open: the *minimal* required `ta` content
+  hasn't been isolated, and a fully from-scratch login (no captured access token) hasn't been tried
+  — see the next bullet. See `docs/live-validation.mdx` for the full methodology.
 - The earlier "reconnect blocked" / "init push never arrives" problems were never protocol-level
   gates — they were a token-identity mismatch (the client claimed Android while replaying an
   iOS-issued token) and an unimplemented Zstd decoder, respectively. A real server merge later
