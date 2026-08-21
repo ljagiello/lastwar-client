@@ -3,10 +3,6 @@ title: "Native binaries & security posture"
 description: "Symbol/string survey of the game's native libraries and an assessment of whether anything below the protocol layer blocks a clean-room Go client."
 ---
 
-import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
-
-<LiveVerificationStatus />
-
 Best-effort symbol/string survey of the 7 most relevant native libraries — no disassembly, no Ghidra, beyond one targeted ARM64 disassembly of `libxlua.so`'s `CalcChatSign` helper performed in a later research pass to close an open question (see the feasibility table below and [Open-questions research pass](/research-pass)). The question that matters: does anything below the protocol layer block a clean-room Go client? For the one existing account tested against production, the answer is no — see the Warning below for the full scope.
 
 ## `libil2cpp.so` confirms the hot-update architecture

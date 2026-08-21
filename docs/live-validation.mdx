@@ -3,10 +3,6 @@ title: "Live validation against production"
 description: "Live packet-capture testing against real production servers and a real account confirms the protocol and codec work end-to-end, and traces the root cause of the Zstd decompression bug, the SFSObject array-decode bugs, and the token-identity-mismatch reconnect fix."
 ---
 
-import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
-
-<LiveVerificationStatus />
-
 Everything documented elsewhere in this dossier up to this point was static analysis of a client the researcher owns — accurate, but unverified against a real server. This section documents what happened when the roadmap in [Go client implementation roadmap](/go-client-roadmap) was actually built (source at the repository root, a from-scratch Go reimplementation) and driven against the real production servers for a real account. It corrects a few static-analysis guesses, confirms most of them exactly, and documents one open problem static analysis alone could never have found.
 
 ## What's proven end-to-end

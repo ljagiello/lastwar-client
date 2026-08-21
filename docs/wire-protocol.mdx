@@ -3,10 +3,6 @@ title: "SFS2X wire protocol"
 description: "How the game's hand-rolled SmartFoxServer 2X packet envelope, header flags, XOR obfuscation, and binary SFSObject codec work on the wire, validated against the official SmartFoxServer JS SDK."
 ---
 
-import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
-
-<LiveVerificationStatus />
-
 The client bundles the real SmartFoxServer 2X SDK but never actually uses its socket layer. Every byte on the wire is written by a hand-rolled reimplementation that only reuses SFS2X's data model — and the "encryption" bit is a length-derived XOR, not a cipher.
 
 ## Transport

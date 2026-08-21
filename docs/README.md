@@ -39,10 +39,6 @@ mint broken-links
 This documents a live, third-party production service that can change its behavior at any time
 without notice. A few things matter for keeping it trustworthy over time:
 
-- Pages that make "confirmed live" / "Resolved" claims about production behavior include the
-  `<LiveVerificationStatus />` snippet (`snippets/live-verification-status.mdx`) near the top,
-  which states the date and client version those claims were last verified against. If you
-  re-verify something, update that one snippet file rather than hunting down every page.
 - Keep "confirmed live" / "live-tested" claims distinct from "static-analysis-only" claims — see
   `AGENTS.md`'s Terminology section. Don't upgrade a static-analysis guess into unqualified
   "confirmed" language just because it sounds more authoritative.

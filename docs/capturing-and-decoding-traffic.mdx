@@ -3,10 +3,6 @@ title: "Capturing and decoding traffic"
 description: "The exact, reproducible pipeline behind every live-confirmed finding in this dossier: capture real client traffic, find the right TCP stream, reassemble it, and decode it with the same codec the Go client runs on its own connection."
 ---
 
-import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
-
-<LiveVerificationStatus />
-
 Every "confirmed live via a real packet capture" claim in [Live validation against production](/live-validation) and elsewhere in this dossier was produced by the same four-step pipeline. This page is that pipeline, written down once, so reproducing or extending any of those findings doesn't require re-deriving it from scratch.
 
 It works at all because the SFS2X game socket is **plain TCP with no TLS**. Capturing it is exactly as simple as capturing any other unencrypted traffic — no certificate pinning to defeat, no interception proxy, no MITM setup. `tcpdump` against the real app while it plays through the same network interface as the analysis machine is sufficient.

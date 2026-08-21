@@ -3,10 +3,6 @@ title: "Lua scripting architecture"
 description: "How the C# hot-update tier hands off to xLua, the module tree, boot sequence, require() resolution, and the BaseClass OOP convention used across the codebase."
 ---
 
-import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
-
-<LiveVerificationStatus />
-
 The C# tier's only job, once it finishes booting, is to spin up xLua and get out of the way. Nearly everything a player experiences — city, army, hero, world map, chat, every one of the 3,178 commands — is Lua.
 
 ## Module tree

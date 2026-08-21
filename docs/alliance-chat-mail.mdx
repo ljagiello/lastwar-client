@@ -3,10 +3,6 @@ title: "Alliance, chat & mail"
 description: "How alliance management and mail ride the main SFS2X socket while real-time chat text runs over a separate, independently-authenticated JSON WebSocket."
 ---
 
-import LiveVerificationStatus from '/snippets/live-verification-status.mdx';
-
-<LiveVerificationStatus />
-
 "Chat" is actually two independent subsystems. Real-time message text never touches the main game socket at all — it rides a second, JSON-over-WebSocket connection with its own auth, its own server discovery, and its own message-signing scheme.
 
 ## Two chat channels

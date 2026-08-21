@@ -4,12 +4,13 @@ A from-scratch Go reimplementation of the *Last War: Survival Game* (`com.fun.la
 client's network layer: GSL RSA+AES bootstrap crypto, SFS2X wire protocol, and SFSObject binary
 codec — enough to log in and drive a real game session over TCP without the Unity client.
 
-Built by reverse-engineering the decompiled APK; see [`docs/`](docs/) for the full protocol
-dossier — a [Mintlify](https://mintlify.com) site covering the wire format, crypto, the
-~3,178-command catalog, entity IDs, and a running log of what's confirmed live against real
-production servers versus what's still static analysis. Start with
-[`docs/live-validation.mdx`](docs/live-validation.mdx) for the current confirmed-vs-unconfirmed
-picture. Preview the docs locally with `mint dev` from inside `docs/`.
+Built by reverse-engineering the decompiled APK; the full protocol dossier is published at
+**[lastwar.tech](https://lastwar.tech)** (source in [`docs/`](docs/)) — a [Mintlify](https://mintlify.com)
+site covering the wire format, crypto, the ~3,178-command catalog, entity IDs, and a running log of
+what's confirmed live against real production servers versus what's still static analysis. Start with
+[live-validation](https://lastwar.tech/live-validation) ([`docs/live-validation.mdx`](docs/live-validation.mdx))
+for the current confirmed-vs-unconfirmed picture. Preview the docs locally with `mint dev` from inside
+`docs/`.
 
 ## Status
 

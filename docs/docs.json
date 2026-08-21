@@ -80,6 +80,17 @@
       "vscode"
     ]
   },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/ljagiello/lastwar-client"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/ljagiello/lastwar-client"
+    }
+  },
   "integrations": {
     "ga4": {
       "measurementId": "G-905X2BN6YZ"
