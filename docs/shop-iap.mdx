@@ -33,10 +33,10 @@ The full purchase flow, Google Play to server credit, traced end to end, includi
 | `pay.refund.request` / `.list` | Player-initiated refund flow |
 | `get.week.card.info` / `receive.week.card.reward` | Subscription ("week card") claims |
 
-## Non-IAP economy, no cryptography involved
+## Non-IAP economy: no cryptography involved
 
 Trading Center (`get.r.exchange.info`, `money.buy.resource`, `resource.sell.money`), the item shop (`item.buy`, `user.shop.buy.new`), and the player-to-player Storage Shop marketplace are plain request/response RPCs gated only by server-side currency balances, no receipts, no signing, directly drivable once authenticated.
 
 <Note>
-**Naming trap.** `purchase.order.refresh`/`.finish`/`.delete` is **not** IAP despite the name, it's an unrelated production-queue feature (grocery store / resident orders). Only the `pay*`/`Pay.*`-namespaced commands above are real-money purchases.
+**Naming trap.** `purchase.order.refresh`/`.finish`/`.delete` is **not** IAP despite the name; it's an unrelated production-queue feature (grocery store / resident orders). Only the `pay*`/`Pay.*`-namespaced commands above are real-money purchases.
 </Note>

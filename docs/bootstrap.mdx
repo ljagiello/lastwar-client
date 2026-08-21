@@ -11,15 +11,15 @@ Cold start walks an 18-state machine from splash screen to a live game connectio
 |---|-------|------|
 | 1 | `Logo` | Splash screen |
 | 2 | `Permission` | OS permission + jailbreak checks |
-| 3 | `CheckResVersion` | **Version check**, races N hosts in parallel, first success wins |
+| 3 | `CheckResVersion` | **Version check**: races N hosts in parallel, first success wins |
 | 4–5 | `DownloadManifest` / `DownloadUpdate` | Downloads/patches asset bundles, table data, and the Lua bundle |
 | 6 | `LoadDataTable` | Loads config tables + localization into memory |
-| 7 | `GetServerList` | **GSL request**, RSA+AES hybrid handshake ([Gate-server RSA+AES handshake](/gate-server-crypto)), only if no cached server |
+| 7 | `GetServerList` | **GSL request**: RSA+AES hybrid handshake ([Gate-server RSA+AES handshake](/gate-server-crypto)), only if no cached server |
 | 9 | `ConnectGame` | Opens the SFS2X TCP/WS connection to the chosen `ip:port` |
 | 10 | `Login` | SFS2X `Login` request (see [Identity, login & session](/auth)) |
 | 12 | `LoadScene` → `EnterGame` | Loads the actual game scene |
 
-A returning user with a cached, still-valid `ip/port/zone` skips straight from step 6 to step 9, the RSA+AES GSL dance only runs on first launch or when the cache is stale/rejected.
+A returning user with a cached, still-valid `ip/port/zone` skips straight from step 6 to step 9; the RSA+AES GSL dance only runs on first launch or when the cache is stale/rejected.
 
 ## Check-version endpoint
 
@@ -38,7 +38,7 @@ https://lastwar-serverlist-us-aws-ali.lastwargame.com
 https://lastwar-serverlist-us-gcp-ali.lastwargame.com
 ```
 
-Whichever host answers becomes the base URL for every subsequent call in this bootstrap (`getserverlist.php`, `getnotice.php`, `probe.php`), there is no separate "gate server" discovery step.
+Whichever host answers becomes the base URL for every subsequent call in this bootstrap (`getserverlist.php`, `getnotice.php`, `probe.php`); there is no separate "gate server" discovery step.
 
 | Response field | Meaning |
 |---|---|
@@ -53,9 +53,9 @@ Whichever host answers becomes the base URL for every subsequent call in this bo
 
 Three independently-versioned payloads, compared via the fields above and patched separately:
 
-- **Asset bundles** (incl. C# `.mdl` assemblies), standard Unity `AssetBundle`, tracked by the `dllres` manifest.
-- **Lua bundle**, one flat `LWLF` file, not wrapped in an AssetBundle at all.
-- **Data tables**, the plain-ZIP `table_*.data` archive.
+- **Asset bundles** (incl. C# `.mdl` assemblies): standard Unity `AssetBundle`, tracked by the `dllres` manifest.
+- **Lua bundle**: one flat `LWLF` file, not wrapped in an AssetBundle at all.
+- **Data tables**: the plain-ZIP `table_*.data` archive.
 
 Downloaded patches/replacements may be wrapped in a lightweight on-disk XOR obfuscation (not real confidentiality, key material is hardcoded client-side) built on a **reduced-round ChaCha** stream cipher: 8 rounds (4 double-rounds) instead of standard ChaCha20, IETF layout, detected by a short (3–6 byte) magic-prefix swap:
 

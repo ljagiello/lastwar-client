@@ -16,7 +16,7 @@ The C# tier's only job, once it finishes booting, is to spin up xLua and get out
 | `Chat/` | 169 | The dedicated chat subsystem (see [Alliance, chat & mail](/alliance-chat-mail)) |
 | `Framework/` | 112 | The actual engine: base classes, event system, logger, loaded first |
 
-\* `UI/`, `Net/`, and `DataCenter/` counts are undercounts (a manifest path-truncation artifact affects a subset of entries in these three trees), true counts are somewhat higher. See [Extraction methodology](/methodology) for the extraction methodology.
+\* `UI/`, `Net/`, and `DataCenter/` counts are undercounts (a manifest path-truncation artifact affects a subset of entries in these three trees); true counts are somewhat higher. See [Extraction methodology](/methodology) for the extraction methodology.
 
 ## Boot sequence
 
@@ -32,7 +32,7 @@ GameEntry.Lua.StartGame()
       ~90 × DataCenter.<Manager>:Startup()      // one per gameplay system
 ```
 
-## `require()` resolution, how a module path finds its bytes
+## `require()` resolution: how a module path finds its bytes
 
 A single custom loader, layered under stock xLua's searcher chain, resolves `"DataCenter.Global.LuaEntry"` in order: a dev-only local override → a table-config ZIP lookup (if the path contains `LuaDatatable`) → raw disk read in the Unity Editor → **the `LWLF` bundle** (production path, confirms and refines [Extraction methodology](/methodology)'s reverse-engineered format exactly) → a TextAsset fallback.
 
@@ -54,4 +54,4 @@ return MailGetMessage
 
 ## Relationship to the C# hot-update layer
 
-Three independently-versioned payloads, confirmed by reading the version-check parser directly: asset bundles (covers the C# `.mdl` assemblies), the Lua bundle, and the data tables each carry their own version field and can update independently. They are *not* fully independent, though, the Lua bootstrap itself (`XLuaManager`, the custom loader) lives inside the hot-update C# tier, so a broken C# release could in principle break the Lua loader before any Lua code runs.
+Three independently-versioned payloads, confirmed by reading the version-check parser directly: asset bundles (covers the C# `.mdl` assemblies), the Lua bundle, and the data tables each carry their own version field and can update independently. They are *not* fully independent, though; the Lua bootstrap itself (`XLuaManager`, the custom loader) lives inside the hot-update C# tier, so a broken C# release could in principle break the Lua loader before any Lua code runs.

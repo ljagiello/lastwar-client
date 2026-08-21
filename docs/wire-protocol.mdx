@@ -9,10 +9,10 @@ The client bundles the real SmartFoxServer 2X SDK but never actually uses its so
 
 Plain TCP socket, **no TLS**. Host/port/zone/connection-type arrive dynamically from the GSL response. Two connection types exist:
 
-- `connectionType 0`, raw TCP, straight into the packet framing below.
-- `connectionType 1`, a one-shot literal HTTP/1.1 `Upgrade: websocket` preamble (with a **hardcoded, non-random** `Sec-WebSocket-Key`; only the HTTP status line is checked on response, the `Sec-WebSocket-Accept` challenge/response is never validated) is sent first, purely to satisfy load balancers that require a valid HTTP handshake, then the exact same raw SFS2X binary framing runs on the same socket. **This is not a real WebSocket**: there's no RFC 6455 frame masking anywhere in the read/write path. A Go client can dial TCP directly, or replay the literal handshake bytes if a load balancer demands them.
+- `connectionType 0`: raw TCP, straight into the packet framing below.
+- `connectionType 1`: a one-shot literal HTTP/1.1 `Upgrade: websocket` preamble (with a **hardcoded, non-random** `Sec-WebSocket-Key`; only the HTTP status line is checked on response, the `Sec-WebSocket-Accept` challenge/response is never validated) is sent first, purely to satisfy load balancers that require a valid HTTP handshake, then the exact same raw SFS2X binary framing runs on the same socket. **This is not a real WebSocket**: there's no RFC 6455 frame masking anywhere in the read/write path. A Go client can dial TCP directly, or replay the literal handshake bytes if a load balancer demands them.
 
-## Packet envelope, three nested layers
+## Packet envelope: three nested layers
 
 ```text
 [1-byte header][2/4-byte length][ optional zlib compress → XOR "encrypt" ]
@@ -42,7 +42,7 @@ So a full `mail.read` request is schematically `{c:1, a:13, p:{c:"mail.read", r:
 | `0x80` | binary | always set |
 | `0x40` | encrypted | always set, see XOR "encryption" below |
 | `0x20` | compressed | set iff serialized payload > 1024 bytes (zlib deflate, level 9) |
-| `0x10` | useLZ4 (repurposed) | dead on send in this build; on receive the "LZ4" bit actually triggers **Zstandard** decompression, not LZ4, leftover naming from a migration. **Implemented**, `ReadPacket` (`packet.go`) previously detected this branch correctly but just returned an error instead of decompressing, which read as connection-closed; now decodes via `github.com/klauspost/compress/zstd`, confirmed live against the server's ~313KB Zstd-compressed init bootstrap push |
+| `0x10` | useLZ4 (repurposed) | dead on send in this build; on receive the "LZ4" bit actually triggers **Zstandard** decompression, not LZ4, leftover naming from a migration. **Implemented**: `ReadPacket` (`packet.go`) previously detected this branch correctly but just returned an error instead of decompressing, which read as connection-closed; now decodes via `github.com/klauspost/compress/zstd`, confirmed live against the server's ~313KB Zstd-compressed init bootstrap push |
 | `0x08` | bigSized | set iff payload > 65535 bytes → 4-byte length instead of 2 (`BitSwarmManager.WriteBinaryData`, `Smartfox2xLw.decompiled.cs:13563`, the Unity SFS2X SDK this game actually embeds; see the correction note below) |
 | `0x04` | forward | off by default; appends a 2-byte source-shard id |
 
@@ -86,7 +86,7 @@ Big-endian throughout. A standalone serialized object is self-describing, it sta
 
 *`BIG_NUM`, present in some SFS2X SDK builds, doesn't exist in this game's enum at all, no gap in the numbering. Not needed.*
 
-## Validated against the official client, `sfs2x-api` (npm)
+## Validated against the official client: `sfs2x-api` (npm)
 
 SmartFoxServer publishes its own JS client SDK (`npm install sfs2x-api`, the official reference implementation, not a third-party reimplementation). Pulling it and diffing its packet/codec internals against everything above turned into a genuinely useful correctness check:
 
@@ -95,11 +95,11 @@ SmartFoxServer publishes its own JS client SDK (`npm install sfs2x-api`, the off
 <tbody>
 <tr><td>SFSObject type tags (0 NULL … 20 TEXT, full range)</td><td><strong>Exact match</strong></td></tr>
 <tr><td>Envelope shape <code>\{c: BYTE, a: SHORT, p: SFS_OBJECT\}</code></td><td><strong>Exact match</strong></td></tr>
-<tr><td>Action ids, <code>Login=1</code>, <code>PingPong=29</code></td><td><strong>Exact match</strong></td></tr>
+<tr><td>Action ids: <code>Login=1</code>, <code>PingPong=29</code></td><td><strong>Exact match</strong></td></tr>
 <tr><td>zlib compression, header bits <code>0x80</code>/<code>0x20</code>/<code>0x08</code></td><td><strong>Exact match</strong></td></tr>
-<tr><td>bigSized threshold specifically</td><td><strong>Correction, not a match</strong>, the JS SDK's own <code>IoHandler.onPacketWrite</code> uses <code>65335</code>, which this dossier briefly (and wrongly) adopted as a "fix." The <em>actual</em> reference for this game is the Unity SFS2X SDK it embeds (<code>Smartfox2xLw.decompiled.cs:13563</code>), which uses the standard <code>65535</code>, the JS client's <code>65335</code> is an idiosyncratic quirk of that specific (different) implementation, not a shared protocol constant. Reverted after a later audit pass caught the discrepancy; a good reminder that "official" only means authoritative for the exact client it ships with.</td></tr>
+<tr><td>bigSized threshold specifically</td><td><strong>Correction, not a match</strong>: the JS SDK's own <code>IoHandler.onPacketWrite</code> uses <code>65335</code>, which this dossier briefly (and wrongly) adopted as a "fix." The <em>actual</em> reference for this game is the Unity SFS2X SDK it embeds (<code>Smartfox2xLw.decompiled.cs:13563</code>), which uses the standard <code>65535</code>, the JS client's <code>65335</code> is an idiosyncratic quirk of that specific (different) implementation, not a shared protocol constant. Reverted after a later audit pass caught the discrepancy; a good reminder that "official" only means authoritative for the exact client it ships with.</td></tr>
 <tr><td>Encryption flag (<code>0x40</code>) / XOR obfuscation</td><td><strong>Refined</strong>, the bit itself is real vanilla SFS2X: the Unity SDK sets it exactly when a session-negotiated <code>CryptoKey</code> (a real AES key+IV pair, via <code>Handshake</code>) is present (<code>bitSwarm.CryptoKey != null</code>, <code>Smartfox2xLw.decompiled.cs:13557</code>). This game never negotiates a <code>CryptoKey</code> at all, yet the server always sets <code>0x40</code> anyway and expects the length-derived XOR instead of real AES, a deliberate server-side override of the vanilla semantics, not evidence the bit is undocumented. The JS SDK's read/write path (which never sets or checks this bit) simply never implements the CryptoKey path at all, consistent with this reading.</td></tr>
-<tr><td><code>0x10</code> LZ4-repurposed-as-Zstandard flag</td><td><strong>Confirmed game-specific</strong>, same story, absent from the official client entirely</td></tr>
+<tr><td><code>0x10</code> LZ4-repurposed-as-Zstandard flag</td><td><strong>Confirmed game-specific</strong>: same story, absent from the official client entirely</td></tr>
 </tbody>
 </table>
 
@@ -107,7 +107,7 @@ The official SDK's connection sequence also revealed a real gap: it sends a `Han
 
 ## Heartbeat & reconnect
 
-A `PingPongRequest` (system controller, action 29, payload `{clientTime}`) fires every **4000 ms**. Client-perceived timeout is **12s** since the last pong, at which point the client disconnects and re-runs the entire connect→login sequence, there is no lightweight session-resume. No exponential backoff was found; retry cadence is a fixed timer.
+A `PingPongRequest` (system controller, action 29, payload `{clientTime}`) fires every **4000 ms**. Client-perceived timeout is **12s** since the last pong, at which point the client disconnects and re-runs the entire connect→login sequence; there is no lightweight session-resume. No exponential backoff was found; retry cadence is a fixed timer.
 
 <Check>
 **What's genuinely unused, partially revised, see above**

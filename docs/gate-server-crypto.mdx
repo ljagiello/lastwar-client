@@ -24,7 +24,7 @@ The "GSL" (Gate Server List) HTTP exchange is wrapped in a hybrid RSA+AES scheme
 | AES algorithm | AES-256 (RijndaelManaged, effective 256-bit key) |
 | AES mode / padding | **ECB** / PKCS7, not CBC |
 | AES key derivation | `ASCII(hex(MD5(salt)))`, 32 ASCII bytes used directly as the key |
-| AES IV | None, ECB has no IV concept |
+| AES IV | None: ECB has no IV concept |
 | Encoding | base64 → URL-safe (`+`→`-`, `/`→`_`, strip `=`) |
 
 ## Go implementation

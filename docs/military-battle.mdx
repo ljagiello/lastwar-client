@@ -5,7 +5,7 @@ description: "Combat resolution is server-authoritative everywhere except one sc
 
 Combat resolution is server-authoritative everywhere except one scripted PVE minigame, the client sends only identity references (hero uuids, formation ids), never stats or an outcome, and the server ships back a full protobuf-encoded action-by-action combat log.
 
-## Server authority, proven
+## Server authority: proven
 
 ```lua
 -- StartArenaBattleMessage.OnCreate, the entire request:
@@ -21,7 +21,7 @@ The client cannot send hero level, rank, skill, or equipment, only uuids the ser
 **One confirmed exception**: The scripted "story stage" PVE minigame (`Net.Msgs.Battle.*`) renders a real-time 3D scene locally and then **self-reports the outcome**: `lw.save.pve.record` sends `isWin` directly, `user.finish.pve.level` sends `isSuccess` directly, no server-computed combat log accompanies either. If building a server (not just a client), this is the one subsystem needing its own out-of-band validation.
 </Warning>
 
-## Combat report delivery, two channels
+## Combat report delivery: two channels
 
 - **Inline** (arena, PVE monster fights): a base64 `battleContent` field on the SFS response itself, chunked into `battleContentArr` if oversized. Decode: base64 → raw protobuf bytes → `protobuf.BattleReport`.
 - **Out-of-band** (world combat, city sieges): the response carries only a `uuid`. Fetch separately:
@@ -32,7 +32,7 @@ The client cannot send hero level, rank, skill, or equipment, only uuids the ser
 
   Check `Content-Encoding: zstd`, BestHTTP doesn't auto-decompress it, the client does it manually. Decode as `protobuf.LwBattleReport` (the richer, per-action-log schema, inferred by naming/structural convention; the exact CDN→proto-type pairing wasn't directly confirmed against a call site).
 
-## `BattleReport.proto`, recovered in full
+## `BattleReport.proto`: recovered in full
 
 ```proto
 message ArmyUnitInfo { repeated SoldierProto soldiers=1; repeated HeroInfoProto heroes=2; string name=3; ... }
@@ -76,5 +76,5 @@ message LwBattleReport {
 | `hero.exp` / `hero.star.up` / `upgrade.hero.rank` | Hero leveling, star-up, rank-up |
 
 <Note>
-**Duplicate-cmd gotcha**: `MsgDefines.HeroRankUpgrade` and `MsgDefines.UpgradeHeroRank` both resolve to the wire string `"upgrade.hero.rank"`, `MsgMap` is a plain table literal, so the **later** assignment in file order silently wins at runtime. `command_catalog.json` preserves both entries since it's a mechanical dump, not a resolved map, when duplicates collide, trust whichever handler class appears last in `MsgMap.lua`.
+**Duplicate-cmd gotcha**: `MsgDefines.HeroRankUpgrade` and `MsgDefines.UpgradeHeroRank` both resolve to the wire string `"upgrade.hero.rank"`, `MsgMap` is a plain table literal, so the **later** assignment in file order silently wins at runtime. `command_catalog.json` preserves both entries since it's a mechanical dump, not a resolved map; when duplicates collide, trust whichever handler class appears last in `MsgMap.lua`.
 </Note>

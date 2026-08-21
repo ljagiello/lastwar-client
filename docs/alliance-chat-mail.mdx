@@ -3,7 +3,7 @@ title: "Alliance, chat & mail"
 description: "How alliance management and mail ride the main SFS2X socket while real-time chat text runs over a separate, independently-authenticated JSON WebSocket."
 ---
 
-"Chat" is actually two independent subsystems. Real-time message text never touches the main game socket at all, it rides a second, JSON-over-WebSocket connection with its own auth, its own server discovery, and its own message-signing scheme.
+"Chat" is actually two independent subsystems. Real-time message text never touches the main game socket at all; it rides a second, JSON-over-WebSocket connection with its own auth, its own server discovery, and its own message-signing scheme.
 
 ## Two chat channels
 
@@ -21,7 +21,7 @@ sign = MD5(uid + json(sortedRecursively(params)) + sendTime + connectionSign)
 frame = {"cmd": cmd, "params": params, "sendTime": sendTime, "sign": sign}
 ```
 
-The alliance room id is **not** a deterministic function of the alliance id, it must be fetched via `common.chat.room.id` on the main SFS socket before you can `room.joinMulti` on the WebSocket.
+The alliance room id is **not** a deterministic function of the alliance id; it must be fetched via `common.chat.room.id` on the main SFS socket before you can `room.joinMulti` on the WebSocket.
 
 ## Core Alliance commands
 
@@ -36,8 +36,8 @@ The alliance room id is **not** a deterministic function of the alliance id, it 
 | `al.help.all` | Bulk-completes every pending member help request in one call, **confirmed live**, only field on the wire is `cmdBaseTime` (a Long, current epoch-ms; everything else the UI passes locally never reaches the server). Safe to call with nothing pending, a no-op success, not an error. See [Live validation against production](/live-validation#alliance-automation-help-all-and-gift-claiming-both-true-bulk-commands). |
 | `alliance.reward.list` / `alliance.reward.allreceive` | Alliance Gifts panel: list, and "Claim All" for one `type` (`1` = Premium, `2` = Regular, both need claiming separately, **confirmed live** for both), needs only `type`, no per-gift uids. See [Live validation against production](/live-validation#alliance-automation-help-all-and-gift-claiming-both-true-bulk-commands). |
 | `science.data.refresh` | Returns the account's *entire* alliance tech tree in one no-parameter call, every `scienceId` with donation progress and a `state` field. **Confirmed live**: exactly one entry had `state=1` (every other had `0`), matching the real UI's thumbs-up-badged "Recommended" tech via its progress numbers. See [Live validation against production](/live-validation#alliance-tech-donation-bulk-tree-discovery-then-one-targeted-donate). |
-| `al.science.donate` / `al.science.donate.gold` | Donate to one alliance tech's research, `.donate` costs a resource (**confirmed live**, rate-limited to `maxNum=30`/day per `al.science.refreshNum`, plus a separate per-donation cooldown confirmed live via a real `errorCode=120471` response, its exact duration is unconfirmed; `refreshTimeBlock=1200000`/20min was the original guess, but two `-collect` runs ~3 minutes apart both donated successfully, so it hasn't been independently re-measured), `.donate.gold` costs gems with no cooldown (`useGoldNum`/`maxGoldNum` both `999999999`). Neither has a batch/count field, "hold to donate repeatedly" is a client-side auto-repeat of single-donation calls, not a server-side multiplier. |
-| `al.science.recommend` | Alliance-officer action: marks/unmarks one `scienceId` as the alliance's currently-Recommended tech (the "Cancel Recommend" button). Read the current value via `science.data.refresh`'s `state` field instead, there's no dedicated "get recommended" request. |
+| `al.science.donate` / `al.science.donate.gold` | Donate to one alliance tech's research, `.donate` costs a resource (**confirmed live**, rate-limited to `maxNum=30`/day per `al.science.refreshNum`, plus a separate per-donation cooldown confirmed live via a real `errorCode=120471` response, its exact duration is unconfirmed; `refreshTimeBlock=1200000`/20min was the original guess, but two `-collect` runs ~3 minutes apart both donated successfully, so it hasn't been independently re-measured), `.donate.gold` costs gems with no cooldown (`useGoldNum`/`maxGoldNum` both `999999999`). Neither has a batch/count field; "hold to donate repeatedly" is a client-side auto-repeat of single-donation calls, not a server-side multiplier. |
+| `al.science.recommend` | Alliance-officer action: marks/unmarks one `scienceId` as the alliance's currently-Recommended tech (the "Cancel Recommend" button). Read the current value via `science.data.refresh`'s `state` field instead; there's no dedicated "get recommended" request. |
 
 ## Core Mail commands
 
@@ -49,7 +49,7 @@ The alliance room id is **not** a deterministic function of the alliance id, it 
 | `mail.read.status.betch` | Mark mail read, needs only `uids` (comma-separated string GUIDs), no `type`, so it's global across every mailbox category in one call. **Confirmed live**, and genuinely independent of whether the mail has a reward: a real capture showed the actual client sending this with no matching `mail.reward.batch` call at all for a reward-less category (battle reports). Don't gate this on reward status, see the note in [Live validation against production](/live-validation#mail-claimable-but-scoped-per-category-with-string-guid-uids). |
 | `mail.reward` / `.batch` | Claim attachment reward. Gotcha, **confirmed live**: mail uids are string GUIDs, not the int64s every other uuid in this project uses, and the batch claim is scoped per mailbox category (`type`), one call per category, not one global call. See [Live validation against production](/live-validation#mail-claimable-but-scoped-per-category-with-string-guid-uids). |
 | `mail.send` | Send mail (1:1 or alliance-wide) |
-| `get.fight.report.detail` | Pull a full battle report, mail is the delivery mechanism for combat reports |
+| `get.fight.report.detail` | Pull a full battle report; mail is the delivery mechanism for combat reports |
 
 ## Government ("Kingdom") system
 

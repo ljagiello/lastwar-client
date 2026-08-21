@@ -3,7 +3,7 @@ title: "Game data tables"
 description: "The shape, container format, and categorized index of the 1,279 balance/config Lua data tables shipped alongside the client."
 ---
 
-1,279 balance/config tables, each a data-only Lua module compiled from what is clearly a spreadsheet pipeline, positional row arrays, a column-index descriptor, and a string-interning pool for repeated values.
+1,279 balance/config tables, each a data-only Lua module compiled from what is clearly a spreadsheet pipeline: positional row arrays, a column-index descriptor, and a string-interning pool for repeated values.
 
 ## Table shape
 
@@ -24,9 +24,9 @@ A plain ZIP, one flat-namespace entry per table name, the odd `.data` extension 
 
 | Group | Count | Examples |
 | --- | ---: | --- |
-| `lw_*`, core "live" gameplay tables | 601 | heroes, army, monsters, buildings, seasons (dominated by `lw_monster*` split-table fan-out, 304 files) |
-| `activity_*`, live-ops events | 124 | boxopen, hunter, easter_egg, dig |
-| `aps_*`, A/B variant family | 52 | factory, pve waves, heroes rank |
+| `lw_*`: core "live" gameplay tables | 601 | heroes, army, monsters, buildings, seasons (dominated by `lw_monster*` split-table fan-out, 304 files) |
+| `activity_*`: live-ops events | 124 | boxopen, hunter, easter_egg, dig |
+| `aps_*`: A/B variant family | 52 | factory, pve waves, heroes rank |
 | `season*` (non-`lw_`) | 46 | landmine, pass, reward_group |
 | `build*`/`city*`/`scene*` | 38 | building, city_car, construction_queue |
 | `monster`/`pve`/`battle` related | 63 | boss_stage_reward, monster_refresh |
@@ -34,4 +34,4 @@ A plain ZIP, one flat-namespace entry per table name, the odd `.data` extension 
 | alliance\* | 26 | alliance_resource, alliance_task |
 | misc / long tail | 257 | daily_quest, government, chat_room, calendar, and a profanity-filter word list |
 
-These rows sum to 1,230, not the full 1,279, they're the dominant categories, not an exhaustive partition. The remaining ~49 tables (hero/troop/army data, resource/economy, rank/leaderboard, guide/novice-flow, item/artifact, and a few UI/language tables) weren't individually bucketed.
+These rows sum to 1,230, not the full 1,279; they're the dominant categories, not an exhaustive partition. The remaining ~49 tables (hero/troop/army data, resource/economy, rank/leaderboard, guide/novice-flow, item/artifact, and a few UI/language tables) weren't individually bucketed.

@@ -42,7 +42,7 @@ without notice. A few things matter for keeping it trustworthy over time:
 - Keep "confirmed live" / "live-tested" claims distinct from "static-analysis-only" claims, see
   `AGENTS.md`'s Terminology section. Don't upgrade a static-analysis guess into unqualified
   "confirmed" language just because it sounds more authoritative.
-- Avoid session-relative language ("tonight," "this pass," "just tried"), write as if a reader
+- Avoid session-relative language ("tonight," "this pass," "just tried"); write as if a reader
   is opening the page months later with no idea when it was authored.
 - When a fix in the Go client (repository root) changes what's true (a new confirmed building type, a corrected
   command, a newly-resolved open question), update the relevant page(s) *and* check

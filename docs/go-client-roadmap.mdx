@@ -5,7 +5,7 @@ description: "The recommended build order for a from-scratch Go client, plus a s
 
 Everything documented elsewhere in this dossier translated into a build order. Bootstrap first, core loop second, everything else is additive.
 
-## Phase 1, Bootstrap (nothing else works without this)
+## Phase 1: Bootstrap (nothing else works without this)
 
 1. `GET getlsu3dversion.php`, extract `resMsg` (RSA pubkey) and the answering host.
 2. Implement the GSL RSA-PKCS1v15 + AES-256-ECB-PKCS7 envelope ([Gate-server RSA+AES handshake](/gate-server-crypto)), Go has no stdlib ECB mode, write the trivial 16-byte-block loop.
@@ -15,11 +15,11 @@ Everything documented elsewhere in this dossier translated into a build order. B
 6. Wait for `init.before` → `init` → `init.after`. Capture `chatToken` if chat is needed later.
 7. Start a 4-second `PingPongRequest` heartbeat.
 
-## Phase 2, Core loop
+## Phase 2: Core loop
 
 Build the command dispatch table directly from the extracted `cmd-data` catalog (see [Command reference](/command-reference) for the row schema and how to regenerate it, don't hand-transcribe the ~3,178 rows by hand). Implement, in order: **City/Building** → **Military/Army** (the base-building + troop loop) → **World Map** (needed for march/PVE) → **Alliance + Chat + Mail** (high command-count payoff) → **Hero** → **Shop/Economy**.
 
-## Phase 3, Defer
+## Phase 3: Defer
 
 Season (754 cmds) and Activity (900 cmds) are recurring/time-limited live-ops content, 54% of the entire protocol surface by command count, and it churns every patch. Implement only if a specific feature is explicitly wanted; treating either as a monolith is not advisable given how fragmented each sub-feature's schema is.
 

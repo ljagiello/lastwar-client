@@ -3,7 +3,7 @@ title: "Identity, login & session"
 description: "How device identity, SFS2X zone login, the MD5 integrity fields, post-login init sequence, and the separate chat channel authenticate a client against the game's servers."
 ---
 
-The SFS2X username/password fields are vestigial, the password is always sent empty. Real authentication rides in ~50 fields on a custom SFSObject payload, most of them device fingerprints, three of them opaque MD5-based "integrity" tokens.
+The SFS2X username/password fields are vestigial; the password is always sent empty. Real authentication rides in ~50 fields on a custom SFSObject payload, most of them device fingerprints, three of them opaque MD5-based "integrity" tokens.
 
 ## Device ID
 
@@ -14,7 +14,7 @@ deviceId += CommonUtils.IsDebug() ? "_3d" : "_n3d"
 airKey    = "lwDid_" + base64(utf8(deviceId))          // sent alongside deviceId everywhere
 ```
 
-Persisted to `PlayerPrefs["DEVICE_ID"]`; on iOS additionally mirrored to the Keychain (survives uninstall). The `assets/deviceId.txt` file present in the install package contains a single byte, `"1"`, no code reads it anywhere; it does not appear to be the device id source.
+Persisted to `PlayerPrefs["DEVICE_ID"]`; on iOS additionally mirrored to the Keychain (survives uninstall). The `assets/deviceId.txt` file present in the install package contains a single byte, `"1"`; no code reads it anywhere; it does not appear to be the device id source.
 
 ## SFS zone login
 

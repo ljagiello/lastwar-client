@@ -20,12 +20,12 @@ worldX  = (x + 0.5) * TileSize
 worldPos = uint64(serverId) << 32 | uint64(pointId)
 ```
 
-## Query model, four patterns, no viewport scanning
+## Query model: four patterns, no viewport scanning
 
-1. **Single-point pull**, `world.get.detail.new`, given a `pointId` the client already computed or learned elsewhere.
-2. **Server-side "find nearest"**, `find.resource`, `find.enemy.point`: the client sends criteria only (level, type), **no coordinates at all**; the server searches from the player's context and returns a single point id. `find.monster` is the same family but (unusually) also sends a `pointId` alongside its criteria.
-3. **Bulk per-server/per-alliance push**, `world.get.alliance.city.info`, `lw.req.world.occupy.info`: the entire dataset for a server, no pagination. Pushes are invalidate-then-refetch, not deltas.
-4. **Batch pull by uuid list**, radar/detect-event lookups, pipe-delimited uuid lists.
+1. **Single-point pull**: `world.get.detail.new`, given a `pointId` the client already computed or learned elsewhere.
+2. **Server-side "find nearest"**: `find.resource`, `find.enemy.point`: the client sends criteria only (level, type), **no coordinates at all**; the server searches from the player's context and returns a single point id. `find.monster` is the same family but (unusually) also sends a `pointId` alongside its criteria.
+3. **Bulk per-server/per-alliance push**: `world.get.alliance.city.info`, `lw.req.world.occupy.info`: the entire dataset for a server, no pagination. Pushes are invalidate-then-refetch, not deltas.
+4. **Batch pull by uuid list**: radar/detect-event lookups, pipe-delimited uuid lists.
 
 The one genuine coordinate-pair query found anywhere: `world.get.march.infos` (`x,y`), used to find marches passing near a raw tile coordinate.
 

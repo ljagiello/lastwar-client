@@ -7,7 +7,7 @@ Every "confirmed live via a real packet capture" claim in [Live validation again
 
 It works at all because the SFS2X game socket is **plain TCP with no TLS**. Capturing it is exactly as simple as capturing any other unencrypted traffic, no certificate pinning to defeat, no interception proxy, no MITM setup. `tcpdump` against the real app while it plays through the same network interface as the analysis machine is sufficient.
 
-## Step 1, capture
+## Step 1: capture
 
 Run `tcpdump` against the known game/CDN hosts and the SFS2X port, then launch and use the real app (`/Applications/Last War.app` on macOS, or the equivalent iOS/Android install) while it's running:
 
@@ -18,7 +18,7 @@ sudo tcpdump -i any -w capture.pcap \
    port 19292 or port 17783 or port 6088 or port 25092'
 ```
 
-The host list is every server IP this project has seen the client actually talk to (GSL HTTP endpoints, CDN, and SFS2X game servers); the port list catches every SFS2X game port seen across captures so far. Keep the filter broad, a capture with some irrelevant traffic in it costs nothing at the decode step, but a filter that's too narrow silently drops the packets you actually need.
+The host list is every server IP this project has seen the client actually talk to (GSL HTTP endpoints, CDN, and SFS2X game servers); the port list catches every SFS2X game port seen across captures so far. Keep the filter broad; a capture with some irrelevant traffic in it costs nothing at the decode step, but a filter that's too narrow silently drops the packets you actually need.
 
 <Info>
   **Why the host list has held up better than the port list.** An account can get moved to a different zone server-side, confirmed live via a real server merge that moved this project's account from zone `APS783` to `APS8092` with an entirely different port (`17783` → `25092`) mid-session (see [Live validation against production](/live-validation#a-real-server-merge-exposed-three-real-redirect-following-bugs) for the client-side fix this required). The *port* is zone-specific and will drift every time this happens, there's no way to keep it current in a static list. The *host* IPs above turned out to be shared CDN/infra-level addresses rather than zone-specific ones: the post-merge zone's actual game-server host (`lastwar-game-cf.lastwarapp.net`) resolved to `172.65.210.24`, already on this list. Since the filter is a flat OR, `host 172.65.210.24` alone captured the new zone's traffic on its new port without the port list needing to know about it. That's not guaranteed to hold forever, if you're capturing after your own account has moved zones and traffic isn't showing up, re-resolve the current game-server hostnames (they're in a login response's `serverInfo` field, or already-resolved in your session config after a redirect) and add any genuinely new IP to the host list.
@@ -26,7 +26,7 @@ The host list is every server IP this project has seen the client actually talk 
 
 **Give it real time.** A rushed capture is the single most common failure mode: the real client's own SFS2X connection can churn through its login/bootstrap burst in under a second, so if you start `tcpdump`, immediately open the app, do one thing, and stop, you'll likely capture only the bootstrap burst and miss the actual action you were trying to observe. Let the app fully settle into its main screen (10–15 seconds after login) before doing anything you actually want captured, and let it sit a few seconds after before closing.
 
-## Step 2, find the game socket
+## Step 2: find the game socket
 
 A single capture typically contains several TCP streams: the real game session, a handful of short-lived "losing" connection attempts (the client races several GSL-provided candidate hosts and keeps only one), and unrelated TLS side-channels (chat, logging, CDN). The `pcap` tool lists them, decodable **plain** streams first, then encrypted **tls** ones:
 
@@ -48,7 +48,7 @@ The game socket is the **plain** stream to the game server's host and port, port
   If the game-socket stream has only a handful of segments and well under a second of activity, the capture likely caught only a "losing" race candidate or missed the real session, see Step 1's timing note. Re-capture with more time around the action.
 </Warning>
 
-## Step 3, reassemble and decode
+## Step 3: reassemble and decode
 
 One command reassembles the chosen stream **by TCP sequence number** (so out-of-order and retransmitted segments land correctly, rather than corrupting the stream the way arrival-order reassembly can) and decodes every SFS2X packet in both directions:
 
@@ -71,12 +71,12 @@ go build -o lastwar-client ./cmd/lastwar-client
 Pass `-client <ip>` to `pcap` to override the auto-detected client side if the heuristic ever picks wrong.
 
 <Tip>
-  **The whole pipeline is one Go module, so nothing can drift out of sync.** Both the reassembler (`internal/pcap`) and the decoder are pure Go with no external dependencies, `pcap -decode` and `-decode-stream` frame and decode using the exact same `ReadPacket` (`packet.go`) and `DecodeObject` (`sfsobject.go`) the client uses on its own live connection. Any fix or extension to the real codec is reflected the next time you decode a capture, with no manual sync step.
+  **The whole pipeline is one Go module, so nothing can drift out of sync.** Both the reassembler (`internal/pcap`) and the decoder are pure Go with no external dependencies; `pcap -decode` and `-decode-stream` frame and decode using the exact same `ReadPacket` (`packet.go`) and `DecodeObject` (`sfsobject.go`) the client uses on its own live connection. Any fix or extension to the real codec is reflected the next time you decode a capture, with no manual sync step.
 </Tip>
 
 ## Reading the output
 
-Each decoded line is one SFS2X extension-call envelope: `c` is the SFSObject's top-level wrapper (`1` = extension call, `0` = system/heartbeat), `a` is the sub-action, and `p` holds the actual payload, for extension calls, `p.c` is the command name and `p.p` is its params object. Client→server calls almost always carry `_id`, an ever-incrementing per-connection request id; the matching server response echoes the same `_id`. See [Wire protocol](/wire-protocol) for the full packet-envelope and SFSObject binary format this output is decoded from, and [Command reference](/command-reference) for what a given `p.c` command name actually does.
+Each decoded line is one SFS2X extension-call envelope: `c` is the SFSObject's top-level wrapper (`1` = extension call, `0` = system/heartbeat), `a` is the sub-action, and `p` holds the actual payload; for extension calls, `p.c` is the command name and `p.p` is its params object. Client→server calls almost always carry `_id`, an ever-incrementing per-connection request id; the matching server response echoes the same `_id`. See [Wire protocol](/wire-protocol) for the full packet-envelope and SFSObject binary format this output is decoded from, and [Command reference](/command-reference) for what a given `p.c` command name actually does.
 
 ## Known limitation: some captures stop decoding partway through
 
