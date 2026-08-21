@@ -49,7 +49,7 @@ anything that reads as a cheating/exploit guide rather than protocol documentati
 ## Build
 
 ```
-go build -o lastwar-client .
+go build -o lastwar-client ./cmd/lastwar-client
 go test ./...
 ```
 

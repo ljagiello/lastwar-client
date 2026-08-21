@@ -67,7 +67,7 @@ This is deliberately not `tshark -z follow,tcp`, which reassembles by arrival or
 The Go client itself can decode a reassembled stream file directly, via `-decode-stream`:
 
 ```bash
-go build -o lastwar-client .
+go build -o lastwar-client ./cmd/lastwar-client
 ./lastwar-client -decode-stream stream5_c2s.bin -decode-label c2s
 ./lastwar-client -decode-stream stream5_s2c.bin -decode-label s2c
 ```

@@ -55,7 +55,7 @@ This section walks through going from a clean checkout to a working `-collect` r
 <Steps>
   <Step title="Build">
     ```bash
-    go build -o lastwar-client .
+    go build -o lastwar-client ./cmd/lastwar-client
     go test ./...
     ```
   </Step>
@@ -134,8 +134,8 @@ or read the flag definitions directly in `main.go`. A duplicated table here has 
 out of sync with the real flags more than once; the root `README.md`'s Usage section covers the
 common cases with a live-tested example for each.
 
-### Files
+### Project layout
 
-See the `README.md`'s Files table at the repository root for the full, current file-by-file
-breakdown — keeping a second copy here is exactly what caused it to drift out of sync (it was
-missing six real files before this rewrite).
+See the `README.md`'s "Project layout" section at the repository root for the current package map
+(`internal/{sfs,crypto,gsl,session,game,auth,app}` plus the `cmd/lastwar-client` entry point) —
+keeping a second copy here is exactly what caused it to drift out of sync.
