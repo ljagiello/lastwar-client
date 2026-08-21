@@ -51,7 +51,14 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: go test ./... -race -cover
+      # -p 1 runs one package's test binary at a time. The GitHub runner has only 2 vCPUs, and a few
+      # app-package tests drive the CLI's cross-server/interactive flows in-process -- functions that
+      # os.Exit(1) on a "connection appears dead" timeout. With several -race binaries running at once
+      # (default -p = GOMAXPROCS = 2), the app test's in-memory fake-server goroutine can be starved
+      # long enough to trip that timeout, which os.Exits the whole binary (a bare "FAIL" with no
+      # --- FAIL line). App tests use no t.Parallel(), so serializing packages removes the contention
+      # without hiding any real failure.
+      - run: go test ./... -race -cover -p 1
 
   fuzz:
     name: fuzz (short)
