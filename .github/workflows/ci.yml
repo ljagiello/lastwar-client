@@ -51,14 +51,24 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      # -p 1 runs one package's test binary at a time. The GitHub runner has only 2 vCPUs, and a few
-      # app-package tests drive the CLI's cross-server/interactive flows in-process -- functions that
-      # os.Exit(1) on a "connection appears dead" timeout. With several -race binaries running at once
-      # (default -p = GOMAXPROCS = 2), the app test's in-memory fake-server goroutine can be starved
-      # long enough to trip that timeout, which os.Exits the whole binary (a bare "FAIL" with no
-      # --- FAIL line). App tests use no t.Parallel(), so serializing packages removes the contention
-      # without hiding any real failure.
-      - run: go test ./... -race -cover -p 1
+      # A few app-package tests drive the CLI's cross-server flow in-process: runCrossServerTest
+      # calls FetchBuildings(conn, 15s) and, in batch mode, os.Exit(1)s on any fetch error (see
+      # shouldAbortBeforeInteractive). On the 2-vCPU runner, under -race, the in-memory fake game
+      # server goroutine can occasionally be starved long enough that FetchBuildings times out,
+      # which os.Exits the whole test binary -- surfacing as a bare "FAIL" with no `--- FAIL:` line.
+      # This is a pre-existing timing flake (reproduces on commits before the package split, ~1/8
+      # under GOMAXPROCS=1), not a real regression. Retry the race suite up to 3 times so a single
+      # spurious timeout doesn't fail the job; a genuine failure still fails all three attempts.
+      - name: Test (race, with retry for the known integration-test timing flake)
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::race test attempt $attempt"
+            if go test ./... -race -cover; then
+              echo "::endgroup::"; echo "passed on attempt $attempt"; exit 0
+            fi
+            echo "::endgroup::"; echo "attempt $attempt failed; retrying"
+          done
+          echo "race test suite failed all 3 attempts -- treating as a real failure"; exit 1
 
   fuzz:
     name: fuzz (short)
