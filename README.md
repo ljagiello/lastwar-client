@@ -197,7 +197,9 @@ Two things worth checking after setup, not just once but as ongoing habits:
 ## Project layout
 
 ```text
-cmd/lastwar-client/   thin CLI entry point (main -> app.Run)
+cmd/
+  lastwar-client/     thin CLI entry point (main -> app.Run)
+  pcap/               decode a capture: list TCP conversations, reassemble + decode a stream
 internal/
   sfs/                SFS2X packet framing (incl. Zstd) + SFSObject binary codec, with redaction
   crypto/             GSL RSA-PKCS1v15 + AES-256-ECB-PKCS7 request/response envelope
@@ -206,9 +208,9 @@ internal/
   game/               Building/Visitor/Mail domain types + actions (buildings, mail, alliance, VIP, visitors)
   auth/               login, device identity, cross-server reconnect
   app/                CLI orchestration, interactive REPL, session config
+  pcap/               pure-Go pcap + pcapng reader and TCP stream reassembler (used by cmd/pcap)
   testutil/           test helpers shared across packages
 docs/                 Mintlify protocol dossier -- start at docs/live-validation.mdx
-tools/                pcap -> -decode-stream reassembly helper (see docs/capturing-and-decoding-traffic.mdx)
 ```
 
 Packages are layered so the dependency graph stays acyclic: `sfs`/`crypto` are leaves, and each

@@ -30,56 +30,52 @@ The host list is every server IP this project has seen the client actually talk 
 
 **Give it real time.** A rushed capture is the single most common failure mode: the real client's own SFS2X connection can churn through its login/bootstrap burst in under a second, so if you start `tcpdump`, immediately open the app, do one thing, and stop — you'll likely capture only the bootstrap burst and miss the actual action you were trying to observe. Let the app fully settle into its main screen (10–15 seconds after login) before doing anything you actually want captured, and let it sit a few seconds after before closing.
 
-## Step 2 — find the right TCP stream
+## Step 2 — find the game socket
 
-A single capture typically contains several TCP streams: the real game session, plus a handful of short-lived "losing" connection attempts (the client races several GSL-provided candidate hosts and keeps only one). List them by duration and packet count:
+A single capture typically contains several TCP streams: the real game session, a handful of short-lived "losing" connection attempts (the client races several GSL-provided candidate hosts and keeps only one), and unrelated TLS side-channels (chat, logging, CDN). The `pcap` tool lists them, decodable **plain** streams first, then encrypted **tls** ones:
 
 ```bash
-tshark -r capture.pcap -q -z conv,tcp
+go build -o pcap ./cmd/pcap
+./pcap -in capture.pcap -list
 ```
 
-Look for the entry to port `17783` with the longest duration and the most frames — that's the real session. The "losing" race candidates are easy to spot: they show up as ~10-12 total frames and well under a second of duration. Note that entry's:
+```text
+idx  kind  endpoint A                     endpoint B                     bytes
+0    plain 192.168.1.80:8883              192.168.1.182:49202               546032  (378 segments)
+1    plain 136.107.113.253:10783          192.168.1.182:61637               308125  (620 segments)
+2    plain [2001:4860:4860::8888]:443     [2600:1700:...:2920]:64063         66034  (329 segments)
+```
 
-- **TCP stream index** — get it with:
-  ```bash
-  tshark -r capture.pcap -Y "tcp.port==17783 && ip.addr==<server-ip>" -T fields -e tcp.stream | sort -u
-  # (use ipv6.addr instead of ip.addr if the session went over IPv6, which is common)
-  ```
-- **Client IP** — the *other* address in that conversation (not the server's). Both change on every capture — a device on Wi-Fi commonly gets a fresh IPv6 address each session — so this step can't be skipped or cached from a previous run.
+The game socket is the **plain** stream to the game server's host and port — port `17783`, or whatever the current zone's port has drifted to (see the port note above). Note its index (`1` above). That's all you need: the tool auto-detects the client side (the connection initiator, or the private-address endpoint) and both directions, so there's no separate stream-index or client-IP lookup to do — and it reads both classic pcap and pcapng, with no `tshark` in the loop.
 
 <Warning>
-  If the real session's duration looks suspiciously short (a handful of seconds), the capture likely missed the actual action — see Step 1's timing note. Re-capture with more time before and after the action rather than trying to work with a too-short stream.
+  If the game-socket stream has only a handful of segments and well under a second of activity, the capture likely caught only a "losing" race candidate or missed the real session — see Step 1's timing note. Re-capture with more time around the action.
 </Warning>
 
-## Step 3 — reassemble
+## Step 3 — reassemble and decode
 
-TCP delivers a byte stream, not discrete application messages, and packets can arrive out of order or get retransmitted — so the two directions need reassembling by sequence number before they're decodable. `tools/reassemble_stream.py` does this:
-
-```bash
-python3 tools/reassemble_stream.py capture.pcap <tcp-stream-index> <client-ip> stream5
-# writes stream5_c2s.bin and stream5_s2c.bin
-```
-
-This is deliberately not `tshark -z follow,tcp`, which reassembles by arrival order rather than sequence number — a real capture's out-of-order and retransmitted segments can silently corrupt that reassembly. Reassembling by sequence number and de-overlapping retransmitted segments avoids that.
-
-## Step 4 — decode
-
-The Go client itself can decode a reassembled stream file directly, via `-decode-stream`:
+One command reassembles the chosen stream **by TCP sequence number** (so out-of-order and retransmitted segments land correctly, rather than corrupting the stream the way arrival-order reassembly can) and decodes every SFS2X packet in both directions:
 
 ```bash
-go build -o lastwar-client ./cmd/lastwar-client
-./lastwar-client -decode-stream stream5_c2s.bin -decode-label c2s
-./lastwar-client -decode-stream stream5_s2c.bin -decode-label s2c
+./pcap -in capture.pcap -stream 1 -decode
 ```
-
-This prints every SFS2X packet in the stream, one line per packet:
 
 ```text
 [c2s] #233 @offset 25561: {c=1, a=13, p={c=al.science.donate, r=-1, p={scienceId=10011900, option=1, _id=229}}}
 ```
 
+To keep the raw reassembled bytes (e.g. to re-run the client's own `-decode-stream`), use `-out` instead of `-decode`:
+
+```bash
+./pcap -in capture.pcap -stream 1 -out stream          # writes stream_c2s.bin / stream_s2c.bin
+go build -o lastwar-client ./cmd/lastwar-client
+./lastwar-client -decode-stream stream_c2s.bin -decode-label c2s
+```
+
+Pass `-client <ip>` to `pcap` to override the auto-detected client side if the heuristic ever picks wrong.
+
 <Tip>
-  **Why this can't drift out of sync.** `-decode-stream` isn't a separate tool with its own copy of the codec — it's a thin wrapper (`decode.go`) around the exact same `ReadPacket` (`packet.go`) and `DecodeObject` (`sfsobject.go`) the client uses on its own live connection. Any fix or extension to the real codec is automatically reflected the next time you decode a capture, with no manual sync step and no risk of the decoder quietly reading stale logic.
+  **The whole pipeline is one Go module, so nothing can drift out of sync.** Both the reassembler (`internal/pcap`) and the decoder are pure Go with no external dependencies — `pcap -decode` and `-decode-stream` frame and decode using the exact same `ReadPacket` (`packet.go`) and `DecodeObject` (`sfsobject.go`) the client uses on its own live connection. Any fix or extension to the real codec is reflected the next time you decode a capture, with no manual sync step.
 </Tip>
 
 ## Reading the output
@@ -92,4 +88,4 @@ Server→client decoding has, on several real captures to date, hit either a `De
 
 These two error kinds behave differently, and only one of them actually stops the decode. A `DecodeObject` error is non-fatal: `-decode-stream` logs it inline for that one packet and continues decoding every packet that follows in the stream (see `decode_test.go`'s "DecodeObject error on one packet continues to the next" regression test). A `zstd decode` error, by contrast, comes from a lower layer (packet framing/decompression, not the SFSObject decoder) and is fatal — it halts the rest of the stream, so only what was decoded before that point is usable.
 
-This has not been root-caused. The working theory is a rare edge case in Step 3's reassembly (a reordering or overlap pattern the current de-overlap logic doesn't handle correctly) rather than a bug in the decoder itself, since `-decode-stream` uses the identical codec the live Go client relies on for its own connection, and that connection has not shown equivalent corruption. When a `DecodeObject` error hits an isolated packet, everything else in the capture — before and after that one packet — is still valid and usable, which has been enough, in every case so far, to confirm a request's exact shape from the client→server side even when the matching server→client response for that specific packet was corrupt. Confirming that one response's exact shape instead requires replaying the same request live through the Go client itself (e.g. via `-interactive`) and reading its response directly, which sidesteps the capture-decode path entirely. When a `zstd decode` error hits instead, the same replay approach applies to everything after the cutoff, not just one packet.
+The working theory was always that this is a reassembly edge case (a reordering/overlap pattern) rather than a decoder bug, since `-decode-stream` uses the identical codec the live Go client relies on and that connection has never shown equivalent corruption. Replacing the old `tshark`-fed Python reassembler with the pure-Go `internal/pcap` (Step 3 above) supports that theory: on a real August-2026 capture whose server→client stream the old path decoded only partway, the Go reassembler decoded the **entire** stream cleanly — every byte consumed as valid framed packets, ~35 more server→client packets than the old path recovered. The Go reassembler places each segment by its exact sequence offset (rather than relying on `tshark`'s own stream-reassembly opinion), which is what makes it more robust to the out-of-order/retransmit patterns that tripped the old pipeline. It's plausible this closes the limitation outright, but it hasn't been re-tested across enough captures to declare it gone. If a decode still stops partway: a `DecodeObject` error is isolated (that one packet is skipped, everything before and after is valid) — enough to confirm a client→server request's exact shape even when its matching response is the corrupt one; confirming that one response instead means replaying the request live through the Go client (e.g. via `-interactive`) and reading its response directly. A `zstd decode` error is fatal to the rest of the stream, and the same live-replay approach then applies to everything after the cutoff.
