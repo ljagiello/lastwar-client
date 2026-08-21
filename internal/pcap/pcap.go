@@ -243,7 +243,7 @@ func decodeIPv6(p []byte) (Packet, bool) {
 	next := p[6]
 	rest := p[40:]
 	// Walk the common extension headers until we reach TCP or give up.
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		switch next {
 		case protoTCP:
 			return decodeTCP(src, dst, rest)

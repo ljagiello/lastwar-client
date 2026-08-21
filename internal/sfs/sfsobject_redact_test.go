@@ -126,7 +126,7 @@ func TestStringRedactedMasksAllPrimitiveArrayTypes(t *testing.T) {
 	cases := []struct {
 		name     string
 		sfsType  byte
-		val      interface{}
+		val      any
 		wantSubs []string // substrings that must not appear in the redacted output
 	}{
 		{"BoolArray", sfsBoolArray, []bool{true, false, true}, nil},
@@ -177,7 +177,7 @@ func TestStringRedactedFormatsAllPrimitiveArrayTypesForNonSensitiveFields(t *tes
 	cases := []struct {
 		name     string
 		sfsType  byte
-		val      interface{}
+		val      any
 		wantSubs []string // substrings that MUST appear in the (non-redacted) output
 	}{
 		{"BoolArray", sfsBoolArray, []bool{true, false, true}, []string{"true", "false"}},
@@ -1115,7 +1115,7 @@ func TestStringRedactedFormatBudgetBoundsLargeArray(t *testing.T) {
 	const itemCount = 200_000 // comfortably more than maxFormattedNodes (50_000)
 
 	arr := NewSFSArray()
-	for i := 0; i < itemCount; i++ {
+	for i := range itemCount {
 		arr.AddInt(int32(i))
 	}
 
@@ -1158,7 +1158,7 @@ func TestStringRedactedFormatBudgetBoundsManyTopLevelKeys(t *testing.T) {
 	const keyCount = 200_000
 
 	o := NewSFSObject()
-	for i := 0; i < keyCount; i++ {
+	for i := range keyCount {
 		o.PutInt(fmt.Sprintf("k%06d", i), int32(i))
 	}
 
@@ -1245,7 +1245,7 @@ func TestStringRedactedTruncationMarkerAppearsOnlyOnce(t *testing.T) {
 	const innerCount = maxFormattedNodes + 10 // ample to exhaust the shared budget deep inside a nested array
 
 	innerArr := NewSFSArray()
-	for i := 0; i < innerCount; i++ {
+	for i := range innerCount {
 		innerArr.AddInt(int32(i))
 	}
 
@@ -1291,7 +1291,7 @@ func TestStringRedactedTruncationMarkerAppearsOnlyOnce(t *testing.T) {
 // the sibling key after it would print normally too.
 func TestStringRedactedFormatBudgetSharedAcrossNestingLevels(t *testing.T) {
 	nested := NewSFSObject()
-	for i := 0; i < maxFormattedNodes; i++ {
+	for i := range maxFormattedNodes {
 		nested.PutInt(fmt.Sprintf("n%06d", i), int32(i))
 	}
 
@@ -1342,7 +1342,7 @@ func TestStringRedactedFormatBudgetSharedAcrossNestingLevels(t *testing.T) {
 func TestStringRedactedFormatBudgetBoundary(t *testing.T) {
 	buildObject := func(n int) *SFSObject {
 		o := NewSFSObject()
-		for i := 0; i < n; i++ {
+		for i := range n {
 			o.PutInt(fmt.Sprintf("k%06d", i), int32(i))
 		}
 		return o
@@ -1484,7 +1484,7 @@ func TestFormatSFSValueRedactedBareStringWithExhaustedBudget(t *testing.T) {
 	// before any array item is processed, leaving maxFormattedNodes-1 for the items themselves --
 	// maxFormattedNodes-2 filler items exactly drains the last remaining unit on the item
 	// immediately before the string, so the string item's own charge() call is what hits 0.
-	for i := 0; i < maxFormattedNodes-2; i++ {
+	for i := range maxFormattedNodes - 2 {
 		arr.AddInt(int32(i))
 	}
 	arr.add(SFSValue{SFSUtfString, "nonempty-string-value-that-must-not-appear"})

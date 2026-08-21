@@ -98,7 +98,7 @@ func TestFetchBuildingsConsecutiveDecodeFailuresBoundary(t *testing.T) {
 	sendCorruptThenInit := func(t *testing.T, n int) (buildings []Building, logged string, err error) {
 		client, server := session.NewPipeGameConnPair(t)
 		go func() {
-			for i := 0; i < n; i++ {
+			for range n {
 				if _, werr := server.RawConn().Write(testutil.MustEncodeCorruptPacket(t, "field", "value")); werr != nil {
 					return
 				}
@@ -170,7 +170,7 @@ func TestFetchBuildingsNonMatchingEnvelopeCapBoundary(t *testing.T) {
 		go func() {
 			noise := sfs.NewSFSObject()
 			noise.PutUtfString("irrelevant", "noise")
-			for i := 0; i < n; i++ {
+			for range n {
 				if err := server.SendExtension("push.queue.add", noise); err != nil {
 					return
 				}
@@ -700,7 +700,7 @@ func TestFetchBuildingsDeadlineCappedAgainstRepeatedInitPushes(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < numPushes; i++ {
+		for i := range numPushes {
 			if i > 0 {
 				time.Sleep(pushSpacing)
 			}
@@ -768,10 +768,10 @@ func TestFetchBuildingsAggregateVisitorCeilingAcrossManyPushes(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for p := 0; p < numPushes; p++ {
+		for p := range numPushes {
 			params := sfs.NewSFSObject()
 			visitorList := sfs.NewSFSArray()
-			for i := 0; i < visitorsPerPush; i++ {
+			for i := range visitorsPerPush {
 				v := sfs.NewSFSObject()
 				v.PutLong("uid", int64(p*visitorsPerPush+i+1)) // distinct uid every push -- defeats dedup
 				v.PutInt("eventId", 2000)
@@ -833,7 +833,7 @@ func TestFetchBuildingsSinglePushNearCapVisitorsDoesNotOvershootAggregateCeiling
 		sendInitVisitorsPush := func(count int, uidOffset int) error {
 			params := sfs.NewSFSObject()
 			visitorList := sfs.NewSFSArray()
-			for i := 0; i < count; i++ {
+			for i := range count {
 				v := sfs.NewSFSObject()
 				v.PutLong("uid", int64(uidOffset+i+1)) // distinct uid across both pushes -- defeats dedup
 				v.PutInt("eventId", 2000)
@@ -893,10 +893,10 @@ func TestFetchBuildingsAggregateBuildingCeilingAcrossManyPushes(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for p := 0; p < numPushes; p++ {
+		for p := range numPushes {
 			params := sfs.NewSFSObject()
 			arr := sfs.NewSFSArray()
-			for i := 0; i < buildingsPerPush; i++ {
+			for i := range buildingsPerPush {
 				uuid := int64(p*buildingsPerPush + i + 1) // distinct uuid every push -- defeats dedup
 				arr.AddSFSObject(NewTestBuildingSFS(uuid, BuildingFarmland, 1))
 			}
@@ -953,7 +953,7 @@ func TestFetchBuildingsSinglePushNearRawItemCapDoesNotOvershootAggregateCeiling(
 		defer close(done)
 		params := sfs.NewSFSObject()
 		arr := sfs.NewSFSArray()
-		for i := 0; i < maxRawBuildingItemsPerPush; i++ {
+		for i := range maxRawBuildingItemsPerPush {
 			arr.AddSFSObject(NewTestBuildingSFS(int64(i+1), BuildingFarmland, 1))
 		}
 		params.PutSFSArray("buildings", arr)
@@ -1029,7 +1029,7 @@ func TestCollectIdleRewardSuccess(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				return
@@ -1093,7 +1093,7 @@ func TestCollectAllAggregatesErrorsWithoutShortCircuiting(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < wantRequests; i++ {
+		for i := range wantRequests {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("request %d: ReadEnvelope: %v", i, err)
@@ -1200,7 +1200,7 @@ func TestCollectAllCapsCollectibleBuildingsAndLogsWarning(t *testing.T) {
 
 	const numBuildings = maxCollectibleBuildingsPerRun + 50
 	buildings := make([]Building, 0, numBuildings)
-	for i := 0; i < numBuildings; i++ {
+	for i := range numBuildings {
 		buildings = append(buildings, NewTestBuilding(int64(10000+i), BuildingFarmland, 1))
 	}
 
@@ -1214,7 +1214,7 @@ func TestCollectAllCapsCollectibleBuildingsAndLogsWarning(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < wantRequests; i++ {
+		for i := range wantRequests {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("request %d: ReadEnvelope: %v", i, err)
@@ -1300,7 +1300,7 @@ func TestCollectAllExactlyAtCapDoesNotTruncate(t *testing.T) {
 
 	const numBuildings = maxCollectibleBuildingsPerRun // exactly at the cap -- must NOT be truncated
 	buildings := make([]Building, 0, numBuildings)
-	for i := 0; i < numBuildings; i++ {
+	for i := range numBuildings {
 		buildings = append(buildings, NewTestBuilding(int64(10000+i), BuildingFarmland, 1))
 	}
 
@@ -1311,7 +1311,7 @@ func TestCollectAllExactlyAtCapDoesNotTruncate(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < wantRequests; i++ {
+		for i := range wantRequests {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("request %d: ReadEnvelope: %v", i, err)
@@ -1464,8 +1464,7 @@ func TestCollectAllAbortsRemainingActionsOnNetError(t *testing.T) {
 	if err == nil {
 		t.Fatal("CollectAll() = nil, want a non-nil error (the fake connection's every Read fails)")
 	}
-	var netErr net.Error
-	if !errors.As(err, &netErr) {
+	if _, ok := errors.AsType[net.Error](err); !ok {
 		t.Errorf("CollectAll() error = %v, want it to wrap a net.Error (the failure that triggered the break)", err)
 	}
 	if got := fake.writeCount(); got != 1 {

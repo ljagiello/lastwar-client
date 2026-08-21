@@ -515,7 +515,6 @@ func TestDoCrossServerLoginExactlyMaxRedirectsSucceeds(t *testing.T) {
 		addrs[i] = addr
 	}
 	for i, ln := range lns {
-		i := i
 		session.ServeFakeGameServer(ln, func(server *session.GameConn) {
 			if _, err := server.ReadEnvelope(); err != nil {
 				return

@@ -379,7 +379,7 @@ func TestWaitForConsecutiveDecodeFailuresBoundary(t *testing.T) {
 		// which unblocks that pending write with an error and lets the goroutine exit; there's
 		// nothing else worth synchronizing on here.
 		go func() {
-			for i := 0; i < n; i++ {
+			for range n {
 				if _, werr := server.conn.Write(testutil.MustEncodeCorruptPacket(t, "field", "value")); werr != nil {
 					return
 				}
@@ -446,7 +446,7 @@ func TestWaitForNonMatchingEnvelopeCapBoundary(t *testing.T) {
 		go func() {
 			noise := sfs.NewSFSObject()
 			noise.PutUtfString("irrelevant", "noise")
-			for i := 0; i < n; i++ {
+			for range n {
 				if err := server.SendExtension("irrelevant.cmd", noise); err != nil {
 					return
 				}

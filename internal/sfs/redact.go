@@ -95,9 +95,6 @@ func Redact(s string) string {
 	// more than that fixed 4/4 prefix/suffix for even longer tokens, keeping
 	// the shape useful for visually correlating "is this the same token as
 	// before" across log lines.
-	k := n / 8
-	if k > 4 {
-		k = 4
-	}
+	k := min(n/8, 4)
 	return string(r[:k]) + "..." + string(r[n-k:])
 }

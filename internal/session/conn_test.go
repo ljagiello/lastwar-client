@@ -489,7 +489,7 @@ func TestSendEnvelopeIsSafeForConcurrentUse(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(n)
 	sendErrs := make(chan error, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func(i int) {
 			defer wg.Done()
 			params := sfs.NewSFSObject()
@@ -505,7 +505,7 @@ func TestSendEnvelopeIsSafeForConcurrentUse(t *testing.T) {
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("ReadEnvelope %d: %v", i, err)
@@ -537,7 +537,7 @@ func TestSendEnvelopeIsSafeForConcurrentUse(t *testing.T) {
 	if len(gotCmds) != n {
 		t.Fatalf("server decoded %d distinct, well-formed envelopes, want %d", len(gotCmds), n)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		cmd := fmt.Sprintf("test.cmd.%d", i)
 		got, ok := gotCmds[cmd]
 		if !ok {
@@ -621,7 +621,7 @@ func TestCloseIsIdempotentConcurrent(t *testing.T) {
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = c.Close()

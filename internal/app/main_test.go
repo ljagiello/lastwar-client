@@ -723,7 +723,7 @@ func mainCollectInteractiveFakeGameServer() func(*session.GameConn) {
 		}
 
 		const wantRequests = 9
-		for i := 0; i < wantRequests; i++ {
+		for range wantRequests {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				return
@@ -1056,7 +1056,7 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*session
 		// leaving the connection to eventually read as a genuine EOF/dead-connection failure to
 		// the client's next real request instead of the benign push this actually was.
 		const wantRequests = 10
-		for i := 0; i < wantRequests; i++ {
+		for range wantRequests {
 			msg, err := session.ReadNextExtension(server)
 			if err != nil {
 				return

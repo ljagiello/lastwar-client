@@ -183,7 +183,7 @@ func TestParseInitBuildingsCapsRawItemsExaminedNotJustValidOutput(t *testing.T) 
 	const wantMalformed = maxRawBuildingItemsPerPush + 500 // far more malformed entries than the cap
 
 	arr := sfs.NewSFSArray()
-	for i := 0; i < wantMalformed; i++ {
+	for range wantMalformed {
 		bad := sfs.NewSFSObject()
 		bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
 		arr.AddSFSObject(bad)
@@ -229,7 +229,7 @@ func TestFetchBuildingsPushAddBuildingCapsRawItemsExamined(t *testing.T) {
 		defer close(done)
 		params := sfs.NewSFSObject()
 		arr := sfs.NewSFSArray()
-		for i := 0; i < wantMalformed; i++ {
+		for range wantMalformed {
 			bad := sfs.NewSFSObject()
 			bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
 			arr.AddSFSObject(bad)
@@ -300,7 +300,7 @@ func TestFetchBuildingsPushInitBuildCapsRawItemsExamined(t *testing.T) {
 		defer close(done)
 		params := sfs.NewSFSObject()
 		arr := sfs.NewSFSArray()
-		for i := 0; i < wantMalformed; i++ {
+		for range wantMalformed {
 			bad := sfs.NewSFSObject()
 			bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
 			wrapper := sfs.NewSFSObject()
@@ -359,7 +359,7 @@ func TestFetchBuildingsPushInitBuildCapBoundary(t *testing.T) {
 			defer close(done)
 			params := sfs.NewSFSObject()
 			arr := sfs.NewSFSArray()
-			for i := 0; i < n; i++ {
+			for range n {
 				bad := sfs.NewSFSObject()
 				bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
 				wrapper := sfs.NewSFSObject()
@@ -423,7 +423,7 @@ func TestFetchBuildingsPushAddBuildingCapBoundary(t *testing.T) {
 			defer close(done)
 			params := sfs.NewSFSObject()
 			arr := sfs.NewSFSArray()
-			for i := 0; i < n; i++ {
+			for range n {
 				bad := sfs.NewSFSObject()
 				bad.PutInt("bId", BuildingFarmland) // deliberately no "uuid" field
 				arr.AddSFSObject(bad)
@@ -760,7 +760,7 @@ func TestParseInitBuildingsRejectsNonObjectArrayElement(t *testing.T) {
 func TestParseInitBuildingsRawItemCapBoundary(t *testing.T) {
 	buildParams := func(n int) *sfs.SFSObject {
 		arr := sfs.NewSFSArray()
-		for i := 0; i < n; i++ {
+		for i := range n {
 			arr.AddSFSObject(NewTestBuildingSFS(int64(i), BuildingFarmland, 1))
 		}
 		params := sfs.NewSFSObject()
@@ -1137,10 +1137,10 @@ func TestSfsFieldKindAccepts(t *testing.T) {
 	// wrongTyped is shared across all three kinds below: bool and float64 are not in ANY
 	// accessor's accepted set (sfsobject.go's GetLong/GetInt/GetString), so both must be rejected
 	// by every kind, not just the one under test.
-	wrongTyped := []interface{}{true, float64(3.14)}
+	wrongTyped := []any{true, float64(3.14)}
 
 	t.Run("sfsFieldKindLong", func(t *testing.T) {
-		for _, v := range []interface{}{int64(1), int32(1), int16(1), byte(1)} {
+		for _, v := range []any{int64(1), int32(1), int16(1), byte(1)} {
 			if !session.SFSFieldKindAccepts(session.SFSFieldKindLong, v) {
 				t.Errorf("sfsFieldKindAccepts(sfsFieldKindLong, %#v) = false, want true (%T is in GetLong's accepted set)", v, v)
 			}
@@ -1153,7 +1153,7 @@ func TestSfsFieldKindAccepts(t *testing.T) {
 	})
 
 	t.Run("sfsFieldKindInt", func(t *testing.T) {
-		for _, v := range []interface{}{int64(1), int32(1), int16(1), byte(1)} {
+		for _, v := range []any{int64(1), int32(1), int16(1), byte(1)} {
 			if !session.SFSFieldKindAccepts(session.SFSFieldKindInt, v) {
 				t.Errorf("sfsFieldKindAccepts(sfsFieldKindInt, %#v) = false, want true (%T is in GetInt's accepted set)", v, v)
 			}
@@ -1171,7 +1171,7 @@ func TestSfsFieldKindAccepts(t *testing.T) {
 		}
 		// int64 stands in for the numeric kinds' own accepted types here, proving
 		// sfsFieldKindString doesn't accidentally accept what sfsFieldKindLong/sfsFieldKindInt do.
-		for _, v := range append([]interface{}{int64(1)}, wrongTyped...) {
+		for _, v := range append([]any{int64(1)}, wrongTyped...) {
 			if session.SFSFieldKindAccepts(session.SFSFieldKindString, v) {
 				t.Errorf("sfsFieldKindAccepts(sfsFieldKindString, %#v) = true, want false (%T is not in GetString's accepted set)", v, v)
 			}

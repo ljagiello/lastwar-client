@@ -563,7 +563,7 @@ func TestOsExitInReadCodeFromCallsCloseConnBeforeExitFirst(t *testing.T) {
 func TestDedupeBuildingsCapsAggregateCount(t *testing.T) {
 	t.Run("exactly cap distinct uuids: all kept, no truncation warning", func(t *testing.T) {
 		var in []game.Building
-		for i := 0; i < game.MaxAggregateBuildingsPerFetch; i++ {
+		for i := range game.MaxAggregateBuildingsPerFetch {
 			in = append(in, game.NewTestBuilding(int64(i), game.BuildingFarmland, 1))
 		}
 		var buf bytes.Buffer
@@ -582,7 +582,7 @@ func TestDedupeBuildingsCapsAggregateCount(t *testing.T) {
 
 	t.Run("cap+1 distinct uuids: truncated to cap, warning fires", func(t *testing.T) {
 		var in []game.Building
-		for i := 0; i < game.MaxAggregateBuildingsPerFetch+1; i++ {
+		for i := range game.MaxAggregateBuildingsPerFetch + 1 {
 			in = append(in, game.NewTestBuilding(int64(i), game.BuildingFarmland, 1))
 		}
 		var buf bytes.Buffer
@@ -605,7 +605,7 @@ func TestDedupeBuildingsCapsAggregateCount(t *testing.T) {
 func TestDedupeVisitorsCapsAggregateCount(t *testing.T) {
 	t.Run("exactly cap distinct uids: all kept, no truncation warning", func(t *testing.T) {
 		var in []game.Visitor
-		for i := 0; i < game.MaxVisitorsUpperBound; i++ {
+		for i := range game.MaxVisitorsUpperBound {
 			in = append(in, game.NewTestVisitor(int64(i), 1, 1))
 		}
 		var buf bytes.Buffer
@@ -624,7 +624,7 @@ func TestDedupeVisitorsCapsAggregateCount(t *testing.T) {
 
 	t.Run("cap+1 distinct uids: truncated to cap, warning fires", func(t *testing.T) {
 		var in []game.Visitor
-		for i := 0; i < game.MaxVisitorsUpperBound+1; i++ {
+		for i := range game.MaxVisitorsUpperBound + 1 {
 			in = append(in, game.NewTestVisitor(int64(i), 1, 1))
 		}
 		var buf bytes.Buffer

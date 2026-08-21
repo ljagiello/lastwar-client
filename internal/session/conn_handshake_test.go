@@ -323,7 +323,7 @@ func TestDoHandshakeConsecutiveDecodeFailuresBoundary(t *testing.T) {
 			if _, rerr := server.ReadEnvelope(); rerr != nil {
 				return
 			}
-			for i := 0; i < n; i++ {
+			for range n {
 				if _, werr := server.conn.Write(testutil.MustEncodeCorruptPacket(t, "field", "value")); werr != nil {
 					return
 				}
@@ -384,7 +384,7 @@ func TestDoHandshakeNonMatchingEnvelopeCapBoundary(t *testing.T) {
 			}
 			noise := sfs.NewSFSObject()
 			noise.PutUtfString("irrelevant", "noise")
-			for i := 0; i < n; i++ {
+			for range n {
 				if err := server.SendExtension("irrelevant.cmd", noise); err != nil {
 					return
 				}
@@ -529,7 +529,7 @@ func TestStartHeartbeatSendsPeriodicPingsAndStopsOnClose(t *testing.T) {
 
 	const wantPings = 4
 	var times []time.Time
-	for i := 0; i < wantPings; i++ {
+	for range wantPings {
 		select {
 		case ts := <-pings:
 			times = append(times, ts)
@@ -626,7 +626,7 @@ func TestCloseRacesWithLiveHeartbeatGoroutine(t *testing.T) {
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = client.Close()

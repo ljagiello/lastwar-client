@@ -38,7 +38,7 @@ const (
 // SFSValue is a single tagged field value.
 type SFSValue struct {
 	Type byte
-	Val  interface{}
+	Val  any
 }
 
 // String makes SFSValue satisfy fmt.Stringer safely, mirroring *SFSObject/*SFSArray's own
@@ -859,7 +859,7 @@ func RedactSFSValue(v SFSValue) string {
 // types readValuePayload's array-tag cases (sfsBoolArray..sfsUtfStringArray) decode into -- plain
 // unwrapped Go slices, as opposed to the *SFSArray wrapper type. Used by RedactSFSValue to mask a
 // sensitive key's array value without dumping its raw contents.
-func primitiveArrayLen(val interface{}) (int, bool) {
+func primitiveArrayLen(val any) (int, bool) {
 	switch a := val.(type) {
 	case []bool:
 		return len(a), true
@@ -912,7 +912,7 @@ func truncateAtRuneBoundary(s string, maxBytes int) string {
 // size doesn't fit in full -- n is always <= the value's real length (formatSFSValueRedacted only
 // ever passes chargeUpTo's own `allowed` return, which is capped at the value's real length), so the
 // slice expression below can never panic.
-func primitiveArrayPrefix(val interface{}, n int) string {
+func primitiveArrayPrefix(val any, n int) string {
 	switch a := val.(type) {
 	case []bool:
 		return fmt.Sprintf("%v", a[:n])
@@ -1599,7 +1599,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 			return SFSValue{}, fmt.Errorf("sfsobject: nesting depth exceeds %d", MaxNestDepth)
 		}
 		arr := NewSFSArray()
-		for i := int16(0); i < n; i++ {
+		for range n {
 			v, err := r.readTaggedValue()
 			if err != nil {
 				return SFSValue{}, err
@@ -1618,7 +1618,7 @@ func (r *sfsReader) readValuePayload(tag byte) (SFSValue, error) {
 			return SFSValue{}, fmt.Errorf("sfsobject: nesting depth exceeds %d", MaxNestDepth)
 		}
 		obj := NewSFSObject()
-		for i := int16(0); i < n; i++ {
+		for range n {
 			key, err := r.readUtfString()
 			if err != nil {
 				return SFSValue{}, err

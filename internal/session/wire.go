@@ -75,7 +75,7 @@ const (
 // SFSFieldKindAccepts reports whether val's concrete Go type is one kind's corresponding
 // GetLong/GetInt/GetString accessor actually reads, rather than silently coercing to a zero
 // value.
-func SFSFieldKindAccepts(kind SFSFieldKind, val interface{}) bool {
+func SFSFieldKindAccepts(kind SFSFieldKind, val any) bool {
 	switch kind {
 	case SFSFieldKindLong, SFSFieldKindInt:
 		switch val.(type) {
@@ -154,12 +154,7 @@ func ContainsNonTimeoutNetError(err error) bool {
 		}
 		switch x := err.(type) {
 		case interface{ Unwrap() []error }:
-			for _, sub := range x.Unwrap() {
-				if ContainsNonTimeoutNetError(sub) {
-					return true
-				}
-			}
-			return false
+			return slices.ContainsFunc(x.Unwrap(), ContainsNonTimeoutNetError)
 		case interface{ Unwrap() error }:
 			err = x.Unwrap()
 		default:

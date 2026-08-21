@@ -686,7 +686,6 @@ func TestLoginExactlyMaxRedirectHopsSucceeds(t *testing.T) {
 		addrs[i] = addr
 	}
 	for i, ln := range lns {
-		i := i
 		session.ServeFakeGameServer(ln, func(server *session.GameConn) {
 			if _, err := server.ReadEnvelope(); err != nil {
 				return
@@ -1219,7 +1218,7 @@ func TestLoginEmailVerificationPathWarnsOnPersistFailure(t *testing.T) {
 	// Confirm the fake server's own Mkdir calls actually succeeded (test setup), so a failure
 	// below is known to come from the SaveGameUid/SaveUsername warnings under test, not from the
 	// directories never having been put in place at all.
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case mkErr := <-mkdirResults:
 			if mkErr != nil {

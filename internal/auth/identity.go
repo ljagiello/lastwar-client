@@ -67,7 +67,7 @@ func securityCode(cmdBaseTime, gameUid string) string {
 // digit characters, not full alphanumeric.
 func randomDigitString(n int) string {
 	var b strings.Builder
-	for i := 0; i < n; i++ {
+	for range n {
 		d, _ := rand.Int(rand.Reader, big.NewInt(10))
 		b.WriteString(d.String())
 	}
@@ -81,7 +81,7 @@ func oneCodeAndCoreV() (oneCode, coreV string) {
 	md5Rand := md5Hex(rand32)
 
 	oneBytes := make([]byte, 0, 64)
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		oneBytes = append(oneBytes, md5Rand[i], rand32[i])
 	}
 	oneCode = string(oneBytes)
@@ -92,7 +92,7 @@ func oneCodeAndCoreV() (oneCode, coreV string) {
 	md3 := md5Hex(md2 + rand32)
 
 	coreBytes := make([]byte, 0, 64)
-	for j := 0; j < 32; j++ {
+	for j := range 32 {
 		coreBytes = append(coreBytes, md3[j], md2[j])
 	}
 	coreV = string(coreBytes)
@@ -327,7 +327,7 @@ func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 				// between attempts: a real concurrent writer's content shows up well within that
 				// window, while a stale empty leftover stays empty across every attempt.
 				var reread string
-				for attempt := 0; attempt < deviceIDEmptyRetryAttempts; attempt++ {
+				for attempt := range deviceIDEmptyRetryAttempts {
 					if attempt > 0 {
 						time.Sleep(deviceIDEmptyRetryDelay)
 					}

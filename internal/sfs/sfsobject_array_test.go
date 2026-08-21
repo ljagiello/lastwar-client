@@ -271,7 +271,7 @@ func TestNestingDepthRejected(t *testing.T) {
 	const levels = 200
 	var buf []byte
 	buf = append(buf, 0, 1) // outermost array's count = 1 (no leading tag -- readValuePayload takes tag as a parameter, not read from the stream)
-	for i := 0; i < levels-1; i++ {
+	for range levels - 1 {
 		buf = append(buf, sfsArrayType, 0, 1) // one more nested array: tag byte + count=1
 	}
 	buf = append(buf, SFSBool, 1) // innermost leaf value: tag=bool, value=true
@@ -294,7 +294,7 @@ func TestNestingDepthExactlyAtCapSucceeds(t *testing.T) {
 	const levels = MaxNestDepth
 	var buf []byte
 	buf = append(buf, 0, 1) // outermost array's count = 1 (tag passed as a parameter, not read from the stream)
-	for i := 0; i < levels-1; i++ {
+	for range levels - 1 {
 		buf = append(buf, sfsArrayType, 0, 1) // one more nested array: tag byte + count=1
 	}
 	buf = append(buf, SFSBool, 1) // innermost leaf value: tag=bool, value=true
@@ -315,7 +315,7 @@ func TestNestingDepthRejectedSFSObject(t *testing.T) {
 	const levels = 200
 	var buf []byte
 	buf = append(buf, 0, 1) // outermost object's count = 1 (tag passed as a parameter, not read from the stream)
-	for i := 0; i < levels-1; i++ {
+	for range levels - 1 {
 		buf = append(buf, 0, 0)          // key: empty string (2-byte length = 0)
 		buf = append(buf, SFSObjectType) // one more nested object: tag byte
 		buf = append(buf, 0, 1)          // nested object's own count = 1
@@ -338,7 +338,7 @@ func TestNestingDepthExactlyAtCapSucceedsSFSObject(t *testing.T) {
 	const levels = MaxNestDepth
 	var buf []byte
 	buf = append(buf, 0, 1) // outermost object's count = 1
-	for i := 0; i < levels-1; i++ {
+	for range levels - 1 {
 		buf = append(buf, 0, 0)
 		buf = append(buf, SFSObjectType)
 		buf = append(buf, 0, 1)
@@ -627,10 +627,10 @@ func TestDecodedNodeCountRejected(t *testing.T) {
 
 	var buf []byte
 	buf = binary.BigEndian.AppendUint16(buf, outerCount)
-	for i := 0; i < outerCount; i++ {
+	for range outerCount {
 		buf = append(buf, sfsArrayType)
 		buf = binary.BigEndian.AppendUint16(buf, innerCount)
-		for j := 0; j < innerCount; j++ {
+		for range innerCount {
 			buf = append(buf, SFSNull)
 		}
 	}
@@ -671,7 +671,7 @@ func TestDecodedNodeCountExactlyAtCapSucceeds(t *testing.T) {
 	for _, innerCount := range innerCounts {
 		buf = append(buf, sfsArrayType)
 		buf = binary.BigEndian.AppendUint16(buf, uint16(innerCount))
-		for j := 0; j < innerCount; j++ {
+		for range innerCount {
 			buf = append(buf, SFSNull)
 		}
 	}
@@ -701,7 +701,7 @@ func TestDecodedNodeCountRejectedForPrimitiveArrays(t *testing.T) {
 
 	var buf []byte
 	buf = binary.BigEndian.AppendUint16(buf, outerCount) // SFSObject key count
-	for i := 0; i < outerCount; i++ {
+	for i := range outerCount {
 		key := []byte{'k', byte('0' + i)}
 		buf = binary.BigEndian.AppendUint16(buf, uint16(len(key)))
 		buf = append(buf, key...)

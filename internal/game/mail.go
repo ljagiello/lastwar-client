@@ -7,7 +7,7 @@ import (
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -235,7 +235,7 @@ func ListMail(conn *session.GameConn) ([]Mail, error) {
 	// happened while the server still had more mail to give (see the warning after the loop).
 	truncated := false
 
-	for page := 0; page < maxPages; page++ {
+	for page := range maxPages {
 		// Round-40 fix: stop pagination entirely once the aggregate ceiling is reached, instead
 		// of continuing to request (and immediately discard) further pages -- see
 		// maxAggregateMailPerFetch's own doc comment for the full threat this closes.
@@ -567,7 +567,7 @@ func ClaimAllMail(conn *session.GameConn) error {
 	for mailType := range byType {
 		mailTypes = append(mailTypes, mailType)
 	}
-	sort.Slice(mailTypes, func(i, j int) bool { return mailTypes[i] < mailTypes[j] })
+	slices.Sort(mailTypes)
 	// Round-41 fix: mailTypes was previously unbounded, unlike every sibling sequential
 	// network-call loop in this codebase (buildings.go's CollectAll, capped at
 	// maxCollectibleBuildingsPerRun=300; visitors.go's GreetVisitors, capped at

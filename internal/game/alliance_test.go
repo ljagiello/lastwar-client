@@ -38,7 +38,7 @@ func TestClaimAllianceGiftsSendsBothTypes(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 2; i++ {
+		for range 2 {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				return
@@ -102,8 +102,7 @@ func TestClaimAllianceGiftsAbortsRemainingTypesOnNetError(t *testing.T) {
 	if err == nil {
 		t.Fatal("ClaimAllianceGifts() = nil, want a non-nil error (the fake connection's every Read fails)")
 	}
-	var netErr net.Error
-	if !errors.As(err, &netErr) {
+	if netErr, ok := errors.AsType[net.Error](err); !ok {
 		t.Errorf("ClaimAllianceGifts() error = %v, want it to wrap a net.Error (the failure that triggered the break)", err)
 	} else if netErr.Timeout() {
 		t.Errorf("ClaimAllianceGifts() error's net.Error has Timeout()==true, want false (this test simulates a genuine dead connection, not an ordinary timeout)")
@@ -172,8 +171,7 @@ func TestClaimAllianceGiftsContinuesAfterNetErrorTimeoutOnFirstType(t *testing.T
 	if err == nil {
 		t.Fatal("ClaimAllianceGifts() = nil, want a non-nil error (the fake connection's every Read fails)")
 	}
-	var netErr net.Error
-	if !errors.As(err, &netErr) {
+	if netErr, ok := errors.AsType[net.Error](err); !ok {
 		t.Errorf("ClaimAllianceGifts() error = %v, want it to wrap a net.Error (the timeout that must still be recorded)", err)
 	} else if !netErr.Timeout() {
 		t.Errorf("ClaimAllianceGifts() error's net.Error has Timeout()==false, want true (this test simulates an ordinary per-request timeout)")
@@ -195,7 +193,7 @@ func TestClaimAllianceGiftsContinuesAfterBusinessErrorOnFirstType(t *testing.T) 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				return
@@ -384,7 +382,7 @@ func TestFindRecommendedTechCapsRawItemsExamined(t *testing.T) {
 	wantMalformed := allianceScienceRawItemCap * 5 // far more malformed entries than the cap
 
 	arr := sfs.NewSFSArray()
-	for i := 0; i < wantMalformed; i++ {
+	for range wantMalformed {
 		bad := sfs.NewSFSObject()
 		bad.PutInt("state", 1) // recommended, but deliberately no scienceId field
 		arr.AddSFSObject(bad)
@@ -498,7 +496,7 @@ func TestFindRecommendedTechWrongTypedStateIsRejected(t *testing.T) {
 func TestFindRecommendedTechRawItemCapBoundary(t *testing.T) {
 	buildArr := func(n, recommendedAt int) *sfs.SFSArray {
 		arr := sfs.NewSFSArray()
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if i == recommendedAt {
 				arr.AddSFSObject(allianceScienceEntry(999, 1))
 			} else {

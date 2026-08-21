@@ -211,8 +211,7 @@ func TestGreetVisitorsAbortsRemainingVisitorsOnNetError(t *testing.T) {
 	if err == nil {
 		t.Fatal("GreetVisitors() = nil, want a non-nil error (the fake connection's every Read fails)")
 	}
-	var netErr net.Error
-	if !errors.As(err, &netErr) {
+	if netErr, ok := errors.AsType[net.Error](err); !ok {
 		t.Errorf("GreetVisitors() error = %v, want it to wrap a net.Error (the failure that triggered the break)", err)
 	} else if netErr.Timeout() {
 		t.Errorf("GreetVisitors() error wraps a net.Error with Timeout()==true, want the non-timeout fake used by this test")
@@ -251,8 +250,7 @@ func TestGreetVisitorsDoesNotAbortOnTimeoutNetError(t *testing.T) {
 	if err == nil {
 		t.Fatal("GreetVisitors() = nil, want a non-nil error (the fake connection's every Read fails)")
 	}
-	var netErr net.Error
-	if !errors.As(err, &netErr) {
+	if netErr, ok := errors.AsType[net.Error](err); !ok {
 		t.Errorf("GreetVisitors() error = %v, want it to wrap a net.Error", err)
 	} else if !netErr.Timeout() {
 		t.Errorf("GreetVisitors() error wraps a net.Error with Timeout()==false, want the Timeout()==true fake used by this test")
@@ -295,7 +293,7 @@ func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T
 	go func() {
 		defer close(initDone)
 		list := sfs.NewSFSArray()
-		for i := 0; i < wantVisitors; i++ {
+		for i := range wantVisitors {
 			v := sfs.NewSFSObject()
 			v.PutLong("uid", int64(5000+i))
 			v.PutInt("eventId", 2000+int32(i))
@@ -351,7 +349,7 @@ func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T
 	greetDone := make(chan struct{})
 	go func() {
 		defer close(greetDone)
-		for i := 0; i < maxNum; i++ {
+		for range maxNum {
 			env, err := greetServer.ReadEnvelope()
 			if err != nil {
 				return
@@ -393,7 +391,7 @@ func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T
 // maxVisitorsDefensiveCeiling fallback path exactly like a real push that never sends the field.
 func newVisitorInitParams(hasMaxNum bool, maxNum int32, listLen int) *sfs.SFSObject {
 	list := sfs.NewSFSArray()
-	for i := 0; i < listLen; i++ {
+	for i := range listLen {
 		v := sfs.NewSFSObject()
 		v.PutLong("uid", int64(9000+i))
 		v.PutInt("eventId", 3000+int32(i))
@@ -549,7 +547,7 @@ func TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput(t *testing.T) {
 	)
 
 	list := sfs.NewSFSArray()
-	for i := 0; i < wantMalformed; i++ {
+	for i := range wantMalformed {
 		v := sfs.NewSFSObject()
 		v.PutInt("eventId", 3000+int32(i)) // deliberately no "uid" field
 		v.PutInt("visitorId", 6)
@@ -704,7 +702,7 @@ func TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning(t *testing.T) {
 	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
 
 	list := sfs.NewSFSArray()
-	for i := 0; i < wantListLen; i++ {
+	for i := range wantListLen {
 		v := sfs.NewSFSObject()
 		v.PutLong("uid", int64(9000+i))
 		v.PutInt("eventId", 3000+int32(i))
@@ -748,7 +746,7 @@ func TestParseInitVisitorsNegativeMaxNumFallsBackWithWarning(t *testing.T) {
 	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
 
 	list := sfs.NewSFSArray()
-	for i := 0; i < wantListLen; i++ {
+	for i := range wantListLen {
 		v := sfs.NewSFSObject()
 		v.PutLong("uid", int64(9000+i))
 		v.PutInt("eventId", 3000+int32(i))
@@ -791,7 +789,7 @@ func TestParseInitVisitorsOutOfRangeLongMaxNumFallsBackWithWarning(t *testing.T)
 	const hugeMaxNum = int64(math.MaxInt32) + 5000000000
 
 	list := sfs.NewSFSArray()
-	for i := 0; i < wantListLen; i++ {
+	for i := range wantListLen {
 		v := sfs.NewSFSObject()
 		v.PutLong("uid", int64(9000+i))
 		v.PutInt("eventId", 3000+int32(i))

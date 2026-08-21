@@ -86,7 +86,7 @@ func TestEncodeObjectTooManyKeysReturnsError(t *testing.T) {
 	}()
 
 	arr := NewSFSArray()
-	for i := 0; i < 32768; i++ {
+	for i := range 32768 {
 		arr.AddInt(int32(i))
 	}
 	o := NewSFSObject()
@@ -108,7 +108,7 @@ func TestEncodeObjectTooManyKeysReturnsError(t *testing.T) {
 // that rejected the last legitimate item.
 func TestEncodeObjectExactlyMaxArrayLengthSucceeds(t *testing.T) {
 	arr := NewSFSArray()
-	for i := 0; i < 32767; i++ {
+	for i := range 32767 {
 		arr.AddInt(int32(i))
 	}
 	o := NewSFSObject()

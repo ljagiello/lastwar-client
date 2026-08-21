@@ -22,7 +22,7 @@ func randomSalt(n int) (string, error) {
 	// alphabet character has exactly equal probability -- a plain %-mod on a uniform byte would
 	// otherwise be a few percent biased toward the first (256 mod len(saltAlphabet)) characters.
 	limit := 256 - (256 % len(saltAlphabet))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		for {
 			if _, err := rand.Read(buf); err != nil {
 				return "", err

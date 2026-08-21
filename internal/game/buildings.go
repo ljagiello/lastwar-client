@@ -7,7 +7,7 @@ import (
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -645,7 +645,7 @@ func PrintBuildings(buildings []Building) {
 	for bId := range byType {
 		bIds = append(bIds, bId)
 	}
-	sort.Slice(bIds, func(i, j int) bool { return bIds[i] < bIds[j] })
+	slices.Sort(bIds)
 
 	fmt.Printf("building summary: distinctTypes=%d totalInstances=%d\n", len(byType), len(buildings))
 	for _, bId := range bIds {

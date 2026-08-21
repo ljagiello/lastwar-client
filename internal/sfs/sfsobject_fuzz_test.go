@@ -91,7 +91,7 @@ func seedDeepNestBomb() []byte {
 	var val []byte
 	val = append(val, sfsArrayType)
 	val = binary.BigEndian.AppendUint16(val, 1) // count = 1
-	for i := 0; i < levels-1; i++ {
+	for range levels - 1 {
 		val = append(val, sfsArrayType)
 		val = binary.BigEndian.AppendUint16(val, 1)
 	}
@@ -109,10 +109,10 @@ func seedWideFanoutBomb() []byte {
 	var val []byte
 	val = append(val, sfsArrayType)
 	val = binary.BigEndian.AppendUint16(val, outerCount)
-	for i := 0; i < outerCount; i++ {
+	for range outerCount {
 		val = append(val, sfsArrayType)
 		val = binary.BigEndian.AppendUint16(val, innerCount)
-		for j := 0; j < innerCount; j++ {
+		for range innerCount {
 			val = append(val, SFSNull)
 		}
 	}

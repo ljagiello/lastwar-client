@@ -640,7 +640,7 @@ func TestListMailWarnsOnMaxPagesTruncation(t *testing.T) {
 	serverDone := make(chan struct{})
 	go func() {
 		defer close(serverDone)
-		for page := 0; page < maxPages; page++ {
+		for page := range maxPages {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				return
@@ -737,7 +737,7 @@ func TestListMailAggregateCeilingStopsAcrossPages(t *testing.T) {
 	serverDone := make(chan struct{})
 	go func() {
 		defer close(serverDone)
-		for page := 0; page < pagesNeeded; page++ {
+		for page := range pagesNeeded {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				return
@@ -752,7 +752,7 @@ func TestListMailAggregateCeilingStopsAcrossPages(t *testing.T) {
 			reqCount++
 			resp := sfs.NewSFSObject()
 			arr := sfs.NewSFSArray()
-			for i := 0; i < mailListRawItemCap; i++ {
+			for i := range mailListRawItemCap {
 				arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-p%d-%d", page, i), 3, 0))
 			}
 			resp.PutSFSArray("msg", arr)
@@ -847,7 +847,7 @@ func TestListMailAggregateCeilingSinglePageOvershootDoesNotExceedCap(t *testing.
 			reqCount++
 			resp := sfs.NewSFSObject()
 			arr := sfs.NewSFSArray()
-			for i := 0; i < size; i++ {
+			for i := range size {
 				arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-p%d-%d", page, i), 3, 0))
 			}
 			resp.PutSFSArray("msg", arr)
@@ -1012,7 +1012,7 @@ func TestListMailCapsRawItemsExaminedPerPage(t *testing.T) {
 		}
 		resp := sfs.NewSFSObject()
 		arr := sfs.NewSFSArray()
-		for i := 0; i < wantMalformed; i++ {
+		for range wantMalformed {
 			mo := sfs.NewSFSObject()
 			mo.PutInt("type", 3) // deliberately no "uid" field
 			arr.AddSFSObject(mo)
@@ -1078,7 +1078,7 @@ func TestListMailRawItemCapBoundary(t *testing.T) {
 			}
 			resp := sfs.NewSFSObject()
 			arr := sfs.NewSFSArray()
-			for i := 0; i < n; i++ {
+			for i := range n {
 				arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-%d", i), 3, 0))
 			}
 			resp.PutSFSArray("msg", arr)
@@ -1424,10 +1424,10 @@ func mailBatchServer(t *testing.T, server *session.GameConn, mails []*sfs.SFSObj
 		return strings.Split(uids, ",")
 	}
 
-	for i := 0; i < wantReadBatches; i++ {
+	for range wantReadBatches {
 		readBatches = append(readBatches, readUids("mail.read.status.betch"))
 	}
-	for i := 0; i < wantRewardBatches; i++ {
+	for range wantRewardBatches {
 		env, err := server.ReadEnvelope()
 		if err != nil {
 			t.Errorf("read mail.reward.batch request: %v", err)
@@ -1494,7 +1494,7 @@ func TestClaimAllMailItemCountBatching(t *testing.T) {
 	const mailType = int32(7)
 	var wantUids []string
 	var mails []*sfs.SFSObject
-	for i := 0; i < total; i++ {
+	for i := range total {
 		uid := fmt.Sprintf("uid-%03d", i)
 		wantUids = append(wantUids, uid)
 		mails = append(mails, newTestMailObj(uid, mailType, 0)) // rewardStatus=0: unclaimed
@@ -1539,7 +1539,7 @@ func TestClaimAllMailByteLengthBatching(t *testing.T) {
 	const mailType = int32(5)
 	var wantUids []string
 	var mails []*sfs.SFSObject
-	for i := 0; i < total; i++ {
+	for i := range total {
 		prefix := fmt.Sprintf("%05d-", i)
 		uid := prefix + strings.Repeat("x", uidLen-len(prefix))
 		if len(uid) != uidLen {
@@ -2026,7 +2026,7 @@ func TestClaimAllMailAbortsRemainingBatchesOnNetError(t *testing.T) {
 	const mailType = int32(3)
 	listResp := sfs.NewSFSObject()
 	arr := sfs.NewSFSArray()
-	for i := 0; i < total; i++ {
+	for i := range total {
 		arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
 	}
 	listResp.PutSFSArray("msg", arr)
@@ -2074,7 +2074,7 @@ func TestClaimAllMailAbortsRemainingBatchesOnRealGracefulClose(t *testing.T) {
 	const mailType = int32(3)
 	listResp := sfs.NewSFSObject()
 	arr := sfs.NewSFSArray()
-	for i := 0; i < total; i++ {
+	for i := range total {
 		arr.AddSFSObject(newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
 	}
 	listResp.PutSFSArray("msg", arr)
@@ -2312,7 +2312,7 @@ func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
 	const readBatchSize = 100                       // must match ClaimAllMail's own unexported readBatchSize constant
 
 	mails := make([]*sfs.SFSObject, totalTypes)
-	for i := 0; i < totalTypes; i++ {
+	for i := range totalTypes {
 		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), int32(i), 0)
 	}
 
@@ -2343,7 +2343,7 @@ func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
 		}
 
 		numReadBatches := (totalTypes + readBatchSize - 1) / readBatchSize
-		for i := 0; i < numReadBatches; i++ {
+		for i := range numReadBatches {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read read-status request %d: %v", i, err)
@@ -2363,7 +2363,7 @@ func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
 		// Exactly maxMailRewardTypesPerRun expected -- the 301st type must never even be sent,
 		// since truncation happens client-side before the loop starts, not as an early-abort
 		// mid-loop.
-		for i := 0; i < maxMailRewardTypesPerRun; i++ {
+		for i := range maxMailRewardTypesPerRun {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read mail.reward.batch request %d: %v", i, err)
@@ -2423,7 +2423,7 @@ func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
 	const readBatchSize = 100                   // must match ClaimAllMail's own unexported readBatchSize constant
 
 	mails := make([]*sfs.SFSObject, totalTypes)
-	for i := 0; i < totalTypes; i++ {
+	for i := range totalTypes {
 		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), int32(i), 0)
 	}
 
@@ -2454,7 +2454,7 @@ func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
 		}
 
 		numReadBatches := (totalTypes + readBatchSize - 1) / readBatchSize
-		for i := 0; i < numReadBatches; i++ {
+		for i := range numReadBatches {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read read-status request %d: %v", i, err)
@@ -2471,7 +2471,7 @@ func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
 			}
 		}
 
-		for i := 0; i < totalTypes; i++ {
+		for i := range totalTypes {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read mail.reward.batch request %d: %v", i, err)
@@ -2535,7 +2535,7 @@ func TestClaimAllMailReadStatusLoopCapsBatchCount(t *testing.T) {
 	const oversizedUIDLen = 30001                // > maxUIDsBytes/2, forces singleton batches
 
 	mails := make([]*sfs.SFSObject, totalMails)
-	for i := 0; i < totalMails; i++ {
+	for i := range totalMails {
 		uid := fmt.Sprintf("%0*d", oversizedUIDLen, i) // unique, fixed-length oversized uid
 		mails[i] = newTestMailObj(uid, 0, 1)           // rewardStatus=1: already claimed
 	}
@@ -2568,7 +2568,7 @@ func TestClaimAllMailReadStatusLoopCapsBatchCount(t *testing.T) {
 
 		// Exactly maxMailBatchesPerLoop expected -- the 301st batch must never even be sent, since
 		// truncation happens client-side before the loop starts, not as an early-abort mid-loop.
-		for i := 0; i < maxMailBatchesPerLoop; i++ {
+		for i := range maxMailBatchesPerLoop {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read read-status request %d: %v", i, err)
@@ -2625,7 +2625,7 @@ func TestClaimAllMailReadStatusLoopBatchCountExactlyAtCapDoesNotTruncate(t *test
 	const oversizedUIDLen = 30001
 
 	mails := make([]*sfs.SFSObject, totalMails)
-	for i := 0; i < totalMails; i++ {
+	for i := range totalMails {
 		uid := fmt.Sprintf("%0*d", oversizedUIDLen, i)
 		mails[i] = newTestMailObj(uid, 0, 1)
 	}
@@ -2656,7 +2656,7 @@ func TestClaimAllMailReadStatusLoopBatchCountExactlyAtCapDoesNotTruncate(t *test
 			return
 		}
 
-		for i := 0; i < totalMails; i++ {
+		for i := range totalMails {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read read-status request %d: %v", i, err)
@@ -2725,8 +2725,8 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 
 	mails := make([]*sfs.SFSObject, 0, totalMails)
 	uidCounter := 0
-	for typ := 0; typ < numTypes; typ++ {
-		for i := 0; i < entriesPerType; i++ {
+	for typ := range numTypes {
+		for range entriesPerType {
 			uid := fmt.Sprintf("%0*d", oversizedUIDLen, uidCounter)
 			uidCounter++
 			mails = append(mails, newTestMailObj(uid, int32(typ), 0)) // rewardStatus=0: unclaimed
@@ -2764,7 +2764,7 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 		// separately-tested behavior (TestClaimAllMailReadStatusLoopCapsBatchCount), not what this
 		// test is about, but the fake server must still answer this many for ClaimAllMail to reach
 		// the reward-claim loop at all.
-		for i := 0; i < maxMailBatchesPerLoop; i++ {
+		for i := range maxMailBatchesPerLoop {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read read-status request %d: %v", i, err)
@@ -2785,7 +2785,7 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 		// Reward-claim loop: exactly maxMailRewardBatchesPerRun expected, summed across all 43
 		// types -- the 301st batch must never even be sent, since truncation happens mid-loop as
 		// soon as the running total hits the cap, not as a post-hoc discard.
-		for i := 0; i < maxMailRewardBatchesPerRun; i++ {
+		for i := range maxMailRewardBatchesPerRun {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read mail.reward.batch request %d: %v", i, err)
@@ -2849,8 +2849,8 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 
 	mails := make([]*sfs.SFSObject, 0, totalMails)
 	uidCounter := 0
-	for typ := 0; typ < numTypes; typ++ {
-		for i := 0; i < entriesPerType; i++ {
+	for typ := range numTypes {
+		for range entriesPerType {
 			uid := fmt.Sprintf("%0*d", oversizedUIDLen, uidCounter)
 			uidCounter++
 			mails = append(mails, newTestMailObj(uid, int32(typ), 0))
@@ -2883,7 +2883,7 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 			return
 		}
 
-		for i := 0; i < maxMailBatchesPerLoop; i++ {
+		for i := range maxMailBatchesPerLoop {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read read-status request %d: %v", i, err)
@@ -2901,7 +2901,7 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 			}
 		}
 
-		for i := 0; i < totalMails; i++ {
+		for i := range totalMails {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read mail.reward.batch request %d: %v", i, err)
@@ -3004,7 +3004,7 @@ func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing
 			return
 		}
 
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			env, err := server.ReadEnvelope()
 			if err != nil {
 				t.Errorf("read mail.reward.batch request %d: %v", i, err)
@@ -3211,7 +3211,7 @@ func TestClaimAllMailReadStatusContinuesAfterTimeout(t *testing.T) {
 	const total = 101
 	const mailType = int32(7)
 	var mails []*sfs.SFSObject
-	for i := 0; i < total; i++ {
+	for i := range total {
 		mails = append(mails, newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
 	}
 	listResp := sfs.NewSFSObject()
