@@ -151,7 +151,7 @@ copying two files:
 
 ```bash
 # Build for the target machine (adjust GOOS/GOARCH -- this example is Linux x86_64):
-GOOS=linux GOARCH=amd64 go build -o lastwar-client-linux-amd64 .
+GOOS=linux GOARCH=amd64 go build -o lastwar-client-linux-amd64 ./cmd/lastwar-client
 
 # Copy the binary and the session config (the binary is useless without it):
 scp lastwar-client-linux-amd64 user@host:~/lastwar-client/lastwar-client

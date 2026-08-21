@@ -130,7 +130,12 @@ func EncodePacket(body []byte) ([]byte, error) {
 // silently wrapping into a wrong count if the value is ever too large to represent -- this file's
 // own sibling of sfsobject.go's int16Count/int32Count, for EncodePacket's big-sized length field.
 func uint32Count(n int, what string) (uint32, error) {
-	if n > math.MaxUint32 {
+	// uint64(n) > math.MaxUint32 rather than n > math.MaxUint32: on 32-bit platforms `int` is
+	// 32-bit, so the untyped constant math.MaxUint32 (4294967295) doesn't fit in an int and the
+	// bare comparison fails to compile. Converting to uint64 first keeps the check valid (and
+	// correct) on both 32- and 64-bit builds; the n < 0 guard both documents that a length is
+	// never negative and avoids uint64() wrapping a stray negative into a huge value.
+	if n < 0 || uint64(n) > math.MaxUint32 {
 		return 0, fmt.Errorf("packet: too many %s to encode (%d, max %d)", what, n, uint32(math.MaxUint32))
 	}
 	return uint32(n), nil
