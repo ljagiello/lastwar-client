@@ -5,9 +5,9 @@ client's network layer: GSL RSA+AES bootstrap crypto, SFS2X wire protocol, and S
 codec — enough to log in and drive a real game session over TCP without the Unity client.
 
 Built by reverse-engineering the decompiled APK; the full protocol dossier is published at
-**[lastwar.tech](https://lastwar.tech)** (source in [`docs/`](docs/)) — a [Mintlify](https://mintlify.com)
-site covering the wire format, crypto, the ~3,178-command catalog, entity IDs, and a running log of
-what's confirmed live against real production servers versus what's still static analysis. Start with
+**[lastwar.tech](https://lastwar.tech)** (source in [`docs/`](docs/)), covering the wire format,
+crypto, the ~3,178-command catalog, entity IDs, and a running log of what's confirmed live against
+real production servers versus what's still static analysis. Start with
 [live-validation](https://lastwar.tech/live-validation) ([`docs/live-validation.mdx`](docs/live-validation.mdx))
 for the current confirmed-vs-unconfirmed picture. Preview the docs locally with `mint dev` from inside
 `docs/`.
