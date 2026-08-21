@@ -86,6 +86,14 @@ type CrossServerLoginParams struct {
 	HTTPClient *http.Client
 	RSAPub     *rsa.PublicKey
 	GateHost   string
+
+	// DialGame, if non-nil, replaces the package-level dialGame (ultimately session.DialGame) used
+	// to open the game socket -- and is used for every redial in the serverInfo-redirect loop, not
+	// just the first dial. It exists purely so a test can substitute an in-memory net.Pipe transport
+	// for the real TCP dial, which is what lets the whole login round-trip run deterministically under
+	// virtual time inside a testing/synctest bubble (a real socket blocks in the netpoller, which
+	// synctest cannot virtualize). Production always leaves this nil.
+	DialGame func(addr string, timeout time.Duration) (*session.GameConn, error)
 }
 
 // String/GoString are CrossServerLoginResult's sibling for CrossServerLoginParams -- which
@@ -180,7 +188,11 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			slog.Info("cross-server login: following serverInfo redirect", "hop", hop, "addr", addr, "zone", zone)
 		}
 		slog.Info("cross-server login: dialing directly (no GSL call)", "addr", addr)
-		conn, err := dialGame(addr, 10*time.Second)
+		dial := dialGame
+		if p.DialGame != nil {
+			dial = p.DialGame
+		}
+		conn, err := dial(addr, 10*time.Second)
 		if err != nil {
 			return nil, err
 		}

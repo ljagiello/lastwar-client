@@ -140,11 +140,22 @@ func SplitHostPortInt(t *testing.T, addr string) (string, int) {
 // opt=new/fix/login call and, separately, any mid-redirect opt=fix refresh call).
 func NewFakeGSLServer(t *testing.T, gslResponses ...gsl.LoginServerListRespon) *httptest.Server {
 	t.Helper()
-	pub := RSAPubKeyDER(t)
+	server := httptest.NewServer(gslHandler(t, gslResponses))
+	t.Cleanup(server.Close)
+	return server
+}
 
+// gslHandler is the shared request handler behind both NewFakeGSLServer (over a real httptest.Server)
+// and UseInMemoryGSL (over an in-memory RoundTripper): it answers gsl.CheckVersion's
+// getlsu3dversion.php with a canned throwaway RSA pubkey and gsl.GetServerList's getserverlist.php
+// with the next gslResponses entry (repeating the last once exhausted -- see NewFakeGSLServer's doc
+// comment for the per-call semantics).
+func gslHandler(t *testing.T, gslResponses []gsl.LoginServerListRespon) http.HandlerFunc {
+	t.Helper()
+	pub := RSAPubKeyDER(t)
 	var mu sync.Mutex
 	call := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "getlsu3dversion.php"):
 			_ = json.NewEncoder(w).Encode(gsl.CheckVersionResponse{ResMsg: gsl.FlexString(pub)})
@@ -160,9 +171,7 @@ func NewFakeGSLServer(t *testing.T, gslResponses ...gsl.LoginServerListRespon) *
 		default:
 			http.NotFound(w, r)
 		}
-	}))
-	t.Cleanup(server.Close)
-	return server
+	}
 }
 
 // UseFakeGSLServer points gsl.CheckVersionHosts at server for the duration of the test, restoring the
@@ -172,4 +181,33 @@ func UseFakeGSLServer(t *testing.T, server *httptest.Server) {
 	orig := gsl.CheckVersionHosts
 	gsl.CheckVersionHosts = []string{server.URL}
 	t.Cleanup(func() { gsl.CheckVersionHosts = orig })
+}
+
+// recorderRoundTripper serves each request synchronously by replaying it through an http.Handler and
+// recording the response, with NO real socket and NO background goroutines -- unlike httptest.Server,
+// which is a real loopback listener whose http.Transport client pool leaves keep-alive reader
+// goroutines parked in the netpoller. That difference is what makes this usable inside a
+// testing/synctest bubble: a plain RoundTripper call is an ordinary function call the bubble can run
+// deterministically, whereas real HTTP would block in the netpoller (never durably, so time can't
+// advance) and strand Transport goroutines that trip synctest's end-of-bubble "still running" check.
+type recorderRoundTripper struct{ h http.Handler }
+
+func (rt recorderRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	rt.h.ServeHTTP(rec, r)
+	return rec.Result(), nil
+}
+
+// UseInMemoryGSL is the synctest-friendly sibling of NewFakeGSLServer+UseFakeGSLServer: it points
+// gsl.CheckVersionHosts at a dummy URL (the RoundTripper ignores the host, dispatching purely on the
+// request path) and returns an *http.Client whose transport answers CheckVersion/GetServerList
+// entirely in memory -- same canned responses, no real network, no goroutines, no client Timeout
+// (so no timer goroutine either). Pass the returned client as crossServerTestOpts.httpClient so a
+// runCrossServerTest test's GSL round-trips run inside a synctest bubble under virtual time.
+func UseInMemoryGSL(t *testing.T, gslResponses ...gsl.LoginServerListRespon) *http.Client {
+	t.Helper()
+	orig := gsl.CheckVersionHosts
+	gsl.CheckVersionHosts = []string{"http://gsl.invalid"}
+	t.Cleanup(func() { gsl.CheckVersionHosts = orig })
+	return &http.Client{Transport: recorderRoundTripper{h: gslHandler(t, gslResponses)}}
 }

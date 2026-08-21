@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -153,36 +154,45 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 	const (
 		staleAccessTok = "stale-access-token-from-old-config"
 		freshAccessTok = "fresh-access-token-from-refresh"
+		freshHost      = "10.9.8.7"
+		freshPort      = 20443
 		freshZone      = "APS-REAL"
 		freshGameUid   = "uid-real"
 	)
 
-	gameAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
-	gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
-
-	gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
+	// In-memory GSL + net.Pipe game socket so the whole runCrossServerTest round-trip runs under
+	// virtual time inside the synctest bubble below (deterministic, no real sockets, immune to the
+	// CPU-starvation-under-GOMAXPROCS=1 flake the real-TCP version had). The refreshed server-list
+	// host/port are canned values the dial ignores; the test asserts they're what gets persisted.
+	client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{
 		Code: "0",
 		ServerList: []gsl.LoginServerInfo{
-			{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
+			{IP: gsl.FlexString(freshHost), Port: testutil.FlexPort(freshPort), Zone: freshZone, GameUid: freshGameUid},
 		},
 		At: &gsl.LoginToken{Token: freshAccessTok},
 	})
-	testutil.UseFakeGSLServer(t, gsl)
 
 	cfgPath := t.TempDir() + "/session.json"
 
-	runCrossServerTest(crossServerTestOpts{
-		// Stale placeholders, standing in for what would have been loaded from an old session
-		// config or passed on the command line -- deliberately different from the fake GSL
-		// server's refresh response in every field, including the access token.
-		ip:      "stale-placeholder-host",
-		port:    1,
-		zone:    "APS-STALE",
-		gameUid: "uid-stale",
-		at:      staleAccessTok,
-		rt:      "some-refresh-token",
+	synctest.Test(t, func(t *testing.T) {
+		runCrossServerTest(crossServerTestOpts{
+			// Stale placeholders, standing in for what would have been loaded from an old session
+			// config or passed on the command line -- deliberately different from the fake GSL
+			// server's refresh response in every field, including the access token.
+			ip:      "stale-placeholder-host",
+			port:    1,
+			zone:    "APS-STALE",
+			gameUid: "uid-stale",
+			at:      staleAccessTok,
+			rt:      "some-refresh-token",
 
-		configSavePath: cfgPath,
+			configSavePath: cfgPath,
+			httpClient:     client,
+			dialGame:       session.NewInMemoryGameDial(session.FakeInitPushServer(nil)),
+		})
+		// Let the drained fake-server goroutine and the client's heartbeat goroutine (both unblocked
+		// by runCrossServerTest's deferred conn.Close) finish before the bubble ends.
+		synctest.Wait()
 	})
 
 	data, err := os.ReadFile(cfgPath)
@@ -197,11 +207,11 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 	if got.AccessToken != freshAccessTok {
 		t.Errorf("persisted AccessToken = %q, want %q (the fresh -cs-rt token, not %q)", got.AccessToken, freshAccessTok, staleAccessTok)
 	}
-	if got.IP != gameHost {
-		t.Errorf("persisted IP = %q, want %q (the refreshed server list's host)", got.IP, gameHost)
+	if got.IP != freshHost {
+		t.Errorf("persisted IP = %q, want %q (the refreshed server list's host)", got.IP, freshHost)
 	}
-	if got.Port != gamePort {
-		t.Errorf("persisted Port = %d, want %d (the refreshed server list's port)", got.Port, gamePort)
+	if got.Port != freshPort {
+		t.Errorf("persisted Port = %d, want %d (the refreshed server list's port)", got.Port, freshPort)
 	}
 	if got.Zone != freshZone {
 		t.Errorf("persisted Zone = %q, want %q (the refreshed server list's zone)", got.Zone, freshZone)
@@ -225,38 +235,41 @@ func TestRunCrossServerTestRtRefreshPersistsFreshAccessToken(t *testing.T) {
 func TestRunCrossServerTestSaveBackFailureWarnsAndContinues(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	gameAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
-	gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
-
-	gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
+	// In-memory GSL + net.Pipe game socket so the round-trip runs deterministically under virtual
+	// time in the synctest bubble below (no real sockets, no CPU-starvation flake).
+	client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{
 		Code: "0",
 		ServerList: []gsl.LoginServerInfo{
-			{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: "APS-REAL", GameUid: "uid-real"},
+			{IP: gsl.FlexString("10.9.8.7"), Port: testutil.FlexPort(20443), Zone: "APS-REAL", GameUid: "uid-real"},
 		},
 		At: &gsl.LoginToken{Token: "fresh-access-token-from-refresh"},
 	})
-	testutil.UseFakeGSLServer(t, gsl)
 
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
 
-	runCrossServerTest(crossServerTestOpts{
-		// Stale placeholders, deliberately different from the refresh response in every field so
-		// crossServerSaveBackNeeded fires and the SaveSessionConfig call is actually reached.
-		ip:      "stale-placeholder-host",
-		port:    1,
-		zone:    "APS-STALE",
-		gameUid: "uid-stale",
-		at:      "stale-access-token",
-		rt:      "some-refresh-token",
+	synctest.Test(t, func(t *testing.T) {
+		runCrossServerTest(crossServerTestOpts{
+			// Stale placeholders, deliberately different from the refresh response in every field so
+			// crossServerSaveBackNeeded fires and the SaveSessionConfig call is actually reached.
+			ip:      "stale-placeholder-host",
+			port:    1,
+			zone:    "APS-STALE",
+			gameUid: "uid-stale",
+			at:      "stale-access-token",
+			rt:      "some-refresh-token",
 
-		// Parent directory does not exist -- the one shape that makes SaveSessionConfig's
-		// underlying os.CreateTemp fail deterministically without any injection seam.
-		configSavePath: t.TempDir() + "/no-such-subdir/session.json",
+			// Parent directory does not exist -- the one shape that makes SaveSessionConfig's
+			// underlying os.CreateTemp fail deterministically without any injection seam.
+			configSavePath: t.TempDir() + "/no-such-subdir/session.json",
+			httpClient:     client,
+			dialGame:       session.NewInMemoryGameDial(session.FakeInitPushServer(nil)),
+		})
+		synctest.Wait()
 	})
 
-	slog.SetDefault(orig)
 	logged := buf.String()
 
 	if !strings.Contains(logged, "failed to persist redirected server address to session config") {
@@ -285,7 +298,7 @@ func TestRunCrossServerTestRtRefreshWithEmptyAccessTokenKeepsOldOne(t *testing.T
 	const oldAccessTok = "tok-1-good"
 
 	gotParamsAt := make(chan string, 1)
-	gameAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+	gameHandler := func(server *session.GameConn) {
 		env, err := server.ReadEnvelope()
 		if err != nil {
 			return
@@ -301,31 +314,35 @@ func TestRunCrossServerTestRtRefreshWithEmptyAccessTokenKeepsOldOne(t *testing.T
 			return
 		}
 		_ = server.SendExtension("init", sfs.NewSFSObject())
-	})
-	gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
+	}
 
-	gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
+	// In-memory GSL + net.Pipe game socket (canned ip/port the dial ignores) so the redial runs
+	// deterministically under virtual time in the synctest bubble below.
+	client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{
 		Code:       "0",
-		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: "APS1", GameUid: "uid-1"}},
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString("10.0.0.1"), Port: testutil.FlexPort(12345), Zone: "APS1", GameUid: "uid-1"}},
 		At:         &gsl.LoginToken{Token: ""}, // present but empty -- the shape under test
 	})
-	testutil.UseFakeGSLServer(t, gsl)
 
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
 
-	runCrossServerTest(crossServerTestOpts{
-		ip:         gameHost,
-		port:       gamePort,
-		zone:       "APS1",
-		gameUid:    "uid-1",
-		at:         oldAccessTok,
-		atExplicit: true,
-		rt:         "some-refresh-token",
+	synctest.Test(t, func(t *testing.T) {
+		runCrossServerTest(crossServerTestOpts{
+			ip:         "10.0.0.1",
+			port:       12345,
+			zone:       "APS1",
+			gameUid:    "uid-1",
+			at:         oldAccessTok,
+			atExplicit: true,
+			rt:         "some-refresh-token",
+			httpClient: client,
+			dialGame:   session.NewInMemoryGameDial(gameHandler),
+		})
+		synctest.Wait()
 	})
-
-	slog.SetDefault(orig)
 
 	select {
 	case at := <-gotParamsAt:
@@ -586,29 +603,32 @@ func TestRunCrossServerTestServerListOverrideLogging(t *testing.T) {
 	run := func(t *testing.T, explicit bool) string {
 		t.Setenv("HOME", t.TempDir())
 
-		gameAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
-		gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
-
-		gsl := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
+		// In-memory GSL + net.Pipe game socket (canned host/port the dial ignores) so the round-trip
+		// runs deterministically under virtual time in the synctest bubble below.
+		client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{
 			Code: "0",
 			ServerList: []gsl.LoginServerInfo{
-				{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
+				{IP: gsl.FlexString("10.9.8.7"), Port: testutil.FlexPort(20443), Zone: freshZone, GameUid: freshGameUid},
 			},
 			At: &gsl.LoginToken{Token: "fresh-token"},
 		})
-		testutil.UseFakeGSLServer(t, gsl)
 
 		var buf bytes.Buffer
 		orig := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 		defer slog.SetDefault(orig)
 
-		// Stale placeholders, deliberately different from the fake GSL server's refresh response
-		// in every field, mirroring an old session config or explicit -cs-* flags being overridden.
-		runCrossServerTest(crossServerTestOpts{
-			ip: "stale-placeholder-host", port: 1, zone: "APS-STALE", gameUid: "uid-stale",
-			rt:         "some-refresh-token",
-			ipExplicit: explicit, portExplicit: explicit, zoneExplicit: explicit, gameUidExplicit: explicit,
+		synctest.Test(t, func(t *testing.T) {
+			// Stale placeholders, deliberately different from the fake GSL server's refresh response
+			// in every field, mirroring an old session config or explicit -cs-* flags being overridden.
+			runCrossServerTest(crossServerTestOpts{
+				ip: "stale-placeholder-host", port: 1, zone: "APS-STALE", gameUid: "uid-stale",
+				rt:         "some-refresh-token",
+				ipExplicit: explicit, portExplicit: explicit, zoneExplicit: explicit, gameUidExplicit: explicit,
+				httpClient: client,
+				dialGame:   session.NewInMemoryGameDial(session.FakeInitPushServer(nil)),
+			})
+			synctest.Wait()
 		})
 		return buf.String()
 	}
@@ -655,31 +675,33 @@ func TestRunCrossServerTestAtWarningAttribution(t *testing.T) {
 	run := func(t *testing.T, atExplicit, withFreshToken bool) string {
 		t.Setenv("HOME", t.TempDir())
 
-		gameAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
-		gameHost, gamePort := testutil.SplitHostPortInt(t, gameAddr)
-
 		lsr := gsl.LoginServerListRespon{
 			Code: "0",
 			// A non-empty server list keeps refreshHasUsableData true even in the
-			// withFreshToken=false cases below, where At is left nil.
+			// withFreshToken=false cases below, where At is left nil. Canned host/port the
+			// in-memory dial ignores.
 			ServerList: []gsl.LoginServerInfo{
-				{IP: gsl.FlexString(gameHost), Port: testutil.FlexPort(gamePort), Zone: freshZone, GameUid: freshGameUid},
+				{IP: gsl.FlexString("10.9.8.7"), Port: testutil.FlexPort(20443), Zone: freshZone, GameUid: freshGameUid},
 			},
 		}
 		if withFreshToken {
 			lsr.At = &gsl.LoginToken{Token: "fresh-token"}
 		}
-		gsl := testutil.NewFakeGSLServer(t, lsr)
-		testutil.UseFakeGSLServer(t, gsl)
+		client := testutil.UseInMemoryGSL(t, lsr)
 
 		var buf bytes.Buffer
 		orig := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 		defer slog.SetDefault(orig)
 
-		runCrossServerTest(crossServerTestOpts{
-			at: "some-access-token", rt: "some-refresh-token",
-			atExplicit: atExplicit,
+		synctest.Test(t, func(t *testing.T) {
+			runCrossServerTest(crossServerTestOpts{
+				at: "some-access-token", rt: "some-refresh-token",
+				atExplicit: atExplicit,
+				httpClient: client,
+				dialGame:   session.NewInMemoryGameDial(session.FakeInitPushServer(nil)),
+			})
+			synctest.Wait()
 		})
 		return buf.String()
 	}

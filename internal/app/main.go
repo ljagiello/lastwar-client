@@ -831,6 +831,15 @@ type crossServerTestOpts struct {
 	handshake, iosMode, collect, listBuildings                    bool
 	configSavePath                                                string // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
 
+	// httpClient/dialGame are OPTIONAL test seams (both nil in production). httpClient overrides the
+	// GSL HTTP client (default gsl.DefaultHTTPClient()); dialGame overrides the game-socket dial,
+	// threaded into CrossServerLoginParams.DialGame. A test sets both to in-memory transports (an
+	// httptest-recorder RoundTripper for GSL, a net.Pipe dial for the game socket) so this whole
+	// function's login round-trip runs deterministically under virtual time inside a testing/synctest
+	// bubble -- the real HTTP + TCP transports block in the netpoller, which synctest cannot virtualize.
+	httpClient *http.Client
+	dialGame   func(addr string, timeout time.Duration) (*session.GameConn, error)
+
 	// ipExplicit/portExplicit/zoneExplicit/gameUidExplicit/atExplicit record whether the
 	// corresponding -cs-ip/-cs-port/-cs-zone/-cs-gameuid/-cs-at flag was actually typed on the
 	// command line (populated via fs.Visit in main(), the same visitedFlags mechanism
@@ -925,7 +934,10 @@ func runCrossServerTest(o crossServerTestOpts) {
 	var gslRSAPub *rsa.PublicKey
 	var gslGateHost string
 	{
-		httpClient := gsl.DefaultHTTPClient()
+		httpClient := o.httpClient
+		if httpClient == nil {
+			httpClient = gsl.DefaultHTTPClient()
+		}
 		cv, gateHost, err := gsl.CheckVersion(httpClient)
 		if err != nil {
 			if o.rt != "" {
@@ -1144,6 +1156,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		AccessTok: accessTok, ShumeiBoxId: o.shumeiBoxId,
 		Handshake: o.handshake, IOSMode: o.iosMode,
 		HTTPClient: gslHTTPClient, RSAPub: gslRSAPub, GateHost: gslGateHost,
+		DialGame: o.dialGame,
 	})
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)

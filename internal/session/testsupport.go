@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"net"
 	"testing"
+	"time"
 
 	"lastwar-client/internal/sfs"
 )
@@ -83,6 +84,37 @@ func StartFakeGameServer(t *testing.T, handler func(*GameConn)) string {
 	ln, addr := NewFakeGameListener(t)
 	ServeFakeGameServer(ln, handler)
 	return addr
+}
+
+// NewInMemoryGameDial returns a dial function with DialGame's signature, suitable for
+// CrossServerLoginParams.DialGame / crossServerTestOpts.dialGame, that opens the game socket over an
+// in-memory net.Pipe instead of a real TCP connection. On each call (the serverInfo-redirect loop
+// redials, so this can run more than once per login) it wires a fresh pipe, runs handler on the
+// server end, and returns the client end wrapped as a GameConn -- ignoring addr/timeout entirely.
+//
+// After handler returns, the server goroutine DRAINS the pipe (reading and discarding envelopes)
+// until the client closes its end. This is essential under net.Pipe, which is synchronous: the
+// client's StartHeartbeat goroutine writes a pingpong every few seconds, and with nothing reading
+// them those writes would block forever -- and inside a synctest bubble, every goroutine being
+// blocked with time unable to advance is a deadlock panic. Draining absorbs the heartbeats so the
+// client side proceeds normally; the drain (and handler) unblock and exit when the caller's
+// deferred conn.Close() closes the client end. Intended to be called from inside a synctest bubble,
+// where net.Pipe's channel-based reads/writes and time.Timer-based deadlines are all virtualized.
+func NewInMemoryGameDial(handler func(*GameConn)) func(addr string, timeout time.Duration) (*GameConn, error) {
+	return func(string, time.Duration) (*GameConn, error) {
+		c1, c2 := net.Pipe()
+		go func() {
+			srv := NewGameConnForTest(c2)
+			defer func() { _ = srv.Close() }()
+			handler(srv)
+			for {
+				if _, err := srv.ReadEnvelope(); err != nil {
+					return
+				}
+			}
+		}()
+		return NewGameConnForTest(c1), nil
+	}
 }
 
 // FakeInitPushServer replies to a base zone Login (whatever content it receives) with a plain
