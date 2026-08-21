@@ -5,34 +5,34 @@ description: "The recommended build order for a from-scratch Go client, plus a s
 
 Everything documented elsewhere in this dossier translated into a build order. Bootstrap first, core loop second, everything else is additive.
 
-## Phase 1 — Bootstrap (nothing else works without this)
+## Phase 1, Bootstrap (nothing else works without this)
 
 1. `GET getlsu3dversion.php`, extract `resMsg` (RSA pubkey) and the answering host.
-2. Implement the GSL RSA-PKCS1v15 + AES-256-ECB-PKCS7 envelope ([Gate-server RSA+AES handshake](/gate-server-crypto)) — Go has no stdlib ECB mode, write the trivial 16-byte-block loop.
+2. Implement the GSL RSA-PKCS1v15 + AES-256-ECB-PKCS7 envelope ([Gate-server RSA+AES handshake](/gate-server-crypto)), Go has no stdlib ECB mode, write the trivial 16-byte-block loop.
 3. `POST getserverlist.php`, parse `serverList[]`, pick a server, persist `at`/`rt` tokens.
 4. Open a plain TCP socket to `ip:port`. Implement the packet envelope, the length-derived XOR "encryption," zlib compression, and the `SFSObject` codec ([SFS2X wire protocol](/wire-protocol)).
 5. Send SFS `Login` with the ~50-field parameter object ([Identity, login & session](/auth)), including the `SecurityCode`/`OneCode`/`CoreV` MD5 constructions.
 6. Wait for `init.before` → `init` → `init.after`. Capture `chatToken` if chat is needed later.
 7. Start a 4-second `PingPongRequest` heartbeat.
 
-## Phase 2 — Core loop
+## Phase 2, Core loop
 
-Build the command dispatch table directly from the extracted `cmd-data` catalog (see [Command reference](/command-reference) for the row schema and how to regenerate it — don't hand-transcribe the ~3,178 rows by hand). Implement, in order: **City/Building** → **Military/Army** (the base-building + troop loop) → **World Map** (needed for march/PVE) → **Alliance + Chat + Mail** (high command-count payoff) → **Hero** → **Shop/Economy**.
+Build the command dispatch table directly from the extracted `cmd-data` catalog (see [Command reference](/command-reference) for the row schema and how to regenerate it, don't hand-transcribe the ~3,178 rows by hand). Implement, in order: **City/Building** → **Military/Army** (the base-building + troop loop) → **World Map** (needed for march/PVE) → **Alliance + Chat + Mail** (high command-count payoff) → **Hero** → **Shop/Economy**.
 
-## Phase 3 — Defer
+## Phase 3, Defer
 
-Season (754 cmds) and Activity (900 cmds) are recurring/time-limited live-ops content — 54% of the entire protocol surface by command count, and it churns every patch. Implement only if a specific feature is explicitly wanted; treating either as a monolith is not advisable given how fragmented each sub-feature's schema is.
+Season (754 cmds) and Activity (900 cmds) are recurring/time-limited live-ops content, 54% of the entire protocol surface by command count, and it churns every patch. Implement only if a specific feature is explicitly wanted; treating either as a monolith is not advisable given how fragmented each sub-feature's schema is.
 
 ## Crypto primitives checklist
 
 | Primitive | Go path |
 |---|---|
-| RSA PKCS1v15 encrypt | `crypto/rsa.EncryptPKCS1v15` — drop-in |
+| RSA PKCS1v15 encrypt | `crypto/rsa.EncryptPKCS1v15`, drop-in |
 | AES-256-ECB-PKCS7 | `crypto/aes` + hand-rolled block loop (stdlib omits ECB deliberately) |
-| MD5-hex-as-key | `hex.EncodeToString(md5.Sum(...))` — exact match |
+| MD5-hex-as-key | `hex.EncodeToString(md5.Sum(...))`, exact match |
 | URL-safe base64, no padding | `base64.URLEncoding.WithPadding(base64.NoPadding)` |
-| ChaCha8 (patch obfuscation) | hand-rolled — `x/crypto/chacha20` is hardcoded to 20 rounds |
-| zlib inflate/deflate | `compress/zlib` — stdlib |
+| ChaCha8 (patch obfuscation) | hand-rolled, `x/crypto/chacha20` is hardcoded to 20 rounds |
+| zlib inflate/deflate | `compress/zlib`, stdlib |
 | Zstandard (battle reports, LZ4-flagged packets) | `github.com/klauspost/compress/zstd` |
 | bsdiff/bspatch (table/asset patches) | `github.com/gabstv/go-bsdiff` or similar |
 
@@ -40,7 +40,7 @@ Season (754 cmds) and Activity (900 cmds) are recurring/time-limited live-ops co
 
 ## Running the Go client
 
-The roadmap above was actually built — the repository root is a from-scratch Go reimplementation of this protocol, live-tested against production (see [Live validation against production](/live-validation) for the full writeup of what's confirmed against live production servers). It's **fully working and live-confirmed** for GSL crypto, SFS2X packet framing (including Zstandard decompression), the SFSObject codec, brand-new-guest-account login, email-verification account binding, resource collection across 13 confirmed building types (Farmland, Iron Mine, Gold Mine, Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, and the four Season 6 Spore Factory tiers — 7 more building types are wired in but still unconfirmed, see the building-type table), and a growing set of account-level automations, none of which are building-`uuid`-scoped: the "Armed Truck"/"Overlord" idle rewards (`lw.pve.idle.reward`), greeting city visitors (`visitor.operate`), bulk-helping alliance members (`al.help.all`), claiming all alliance gifts (`alliance.reward.allreceive`), claiming all mail (`chat.get.system.mails` + `mail.reward.batch`), donating to the alliance's currently-recommended tech (`science.data.refresh` + `al.science.donate`), and both once-a-day VIP claims (`vip.add.login.score`, `vip.get.every.day.reward`) — see [Live validation against production](/live-validation) for the full writeup of each. Reconnecting into an *established* real account's live game state was proven working end-to-end when first captured; that capture used the `ta` analytics blob's real device/anti-fraud sub-fields, which a later security fix replaced with empty-string placeholders — and reconnect is now **re-confirmed still working with those placeholders** (an unattended cron reconnected and collected real resources over multiple days, August 2026). What remains open is the *minimal* required `ta` content and a fully from-scratch login without a captured token; see [Live validation against production](/live-validation) for the current state.
+The roadmap above was actually built, the repository root is a from-scratch Go reimplementation of this protocol, live-tested against production (see [Live validation against production](/live-validation) for the full writeup of what's confirmed against live production servers). It's **fully working and live-confirmed** for GSL crypto, SFS2X packet framing (including Zstandard decompression), the SFSObject codec, brand-new-guest-account login, email-verification account binding, resource collection across 13 confirmed building types (Farmland, Iron Mine, Gold Mine, Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, and the four Season 6 Spore Factory tiers, 7 more building types are wired in but still unconfirmed, see the building-type table), and a growing set of account-level automations, none of which are building-`uuid`-scoped: the "Armed Truck"/"Overlord" idle rewards (`lw.pve.idle.reward`), greeting city visitors (`visitor.operate`), bulk-helping alliance members (`al.help.all`), claiming all alliance gifts (`alliance.reward.allreceive`), claiming all mail (`chat.get.system.mails` + `mail.reward.batch`), donating to the alliance's currently-recommended tech (`science.data.refresh` + `al.science.donate`), and both once-a-day VIP claims (`vip.add.login.score`, `vip.get.every.day.reward`), see [Live validation against production](/live-validation) for the full writeup of each. Reconnecting into an *established* real account's live game state was proven working end-to-end when first captured; that capture used the `ta` analytics blob's real device/anti-fraud sub-fields, which a later security fix replaced with empty-string placeholders, and reconnect is now **re-confirmed still working with those placeholders** (an unattended cron reconnected and collected real resources over multiple days, August 2026). What remains open is the *minimal* required `ta` content and a fully from-scratch login without a captured token; see [Live validation against production](/live-validation) for the current state.
 
 <Note>
   **Not yet general-purpose.** The reconnect path currently needs a session config captured from a real client login (see below) rather than deriving one from scratch. A from-scratch login using `-cs-ios`-equivalent identity from the very first GSL call hasn't been tried yet.
@@ -64,7 +64,7 @@ This section walks through going from a clean checkout to a working `-collect` r
     # then edit it with your own real values
     ```
 
-    `~/.lastwar_goclient_session.json` is auto-loaded on every run if present — no flag needed. To use a different file, pass `-config /path/to/file.json`. Individual `-cs-*` flags still override whatever the config file says, for one-off tests.
+    `~/.lastwar_goclient_session.json` is auto-loaded on every run if present, no flag needed. To use a different file, pass `-config /path/to/file.json`. Individual `-cs-*` flags still override whatever the config file says, for one-off tests.
 
     ```json
     {
@@ -79,10 +79,10 @@ This section walks through going from a clean checkout to a working `-collect` r
     }
     ```
 
-    **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in, since the SFS2X game socket is plain TCP with no TLS) and decode the `Login` request — see [Capturing and decoding traffic](/capturing-and-decoding-traffic) for the exact, reproducible pipeline. `gameUid`/`ip`/`port`/`zone` also show up in a GSL `getserverlist` response's `serverList[]` entries. The access token is not single-use, but it *is* bound to the platform identity (`iosMode`) it was issued under, and it will eventually need refreshing from a fresh capture.
+    **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in, since the SFS2X game socket is plain TCP with no TLS) and decode the `Login` request, see [Capturing and decoding traffic](/capturing-and-decoding-traffic) for the exact, reproducible pipeline. `gameUid`/`ip`/`port`/`zone` also show up in a GSL `getserverlist` response's `serverList[]` entries. The access token is not single-use, but it *is* bound to the platform identity (`iosMode`) it was issued under, and it will eventually need refreshing from a fresh capture.
 
     <Warning>
-      This file contains live credentials for a real account — keep it out of version control. It's already outside the repo, in your home directory, and `chmod 600`'d above; don't move it into this repo or commit it anywhere.
+      This file contains live credentials for a real account, keep it out of version control. It's already outside the repo, in your home directory, and `chmod 600`'d above; don't move it into this repo or commit it anywhere.
     </Warning>
   </Step>
   <Step title="Run a collection pass">
@@ -125,7 +125,7 @@ Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, 
 
 ### Flags reference
 
-The definitive, always-current flag list lives in the code itself — run `./lastwar-client -h`,
+The definitive, always-current flag list lives in the code itself, run `./lastwar-client -h`,
 or read the flag definitions directly in `main.go`. A duplicated table here has already drifted
 out of sync with the real flags more than once; the root `README.md`'s Usage section covers the
 common cases with a live-tested example for each.
@@ -133,5 +133,5 @@ common cases with a live-tested example for each.
 ### Project layout
 
 See the `README.md`'s "Project layout" section at the repository root for the current package map
-(`internal/{sfs,crypto,gsl,session,game,auth,app}` plus the `cmd/lastwar-client` entry point) —
+(`internal/{sfs,crypto,gsl,session,game,auth,app}` plus the `cmd/lastwar-client` entry point), 
 keeping a second copy here is exactly what caused it to drift out of sync.

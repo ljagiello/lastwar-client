@@ -5,10 +5,10 @@ description: "The base-building loop: two distinct queue systems, the building-i
 
 The base-building loop: two architecturally distinct "queue" systems that share a confusing name, a building-id encoding worth knowing, and a resource economy that's really two separate systems.
 
-## Two "queues" — don't conflate them
+## Two "queues", don't conflate them
 
-- **Build-queue slots** (`BuildQueueManager`) — the small number of concurrent construction slots a player has. A building upgrade occupies one until it finishes.
-- **Production queue** (`QueueDataManager`) — a generic per-item timer reused by farming, pasture barns, troop training, hospital healing, and research alike. Same wire schema across all of them.
+- **Build-queue slots** (`BuildQueueManager`), the small number of concurrent construction slots a player has. A building upgrade occupies one until it finishes.
+- **Production queue** (`QueueDataManager`), a generic per-item timer reused by farming, pasture barns, troop training, hospital healing, and research alike. Same wire schema across all of them.
 
 ## Building ID encoding
 
@@ -48,12 +48,12 @@ Game-data rows are keyed `id = base_type_id + level`, where `base_type_id` is al
     </tr>
     <tr>
       <td><code>building.camp.collect</code></td>
-      <td>Collect finished camp output (Military Camp, Smith Shop, Tactical Chip Factory — NOT Training Base, despite the name)</td>
+      <td>Collect finished camp output (Military Camp, Smith Shop, Tactical Chip Factory, NOT Training Base, despite the name)</td>
       <td><code>uuid</code></td>
     </tr>
     <tr>
       <td><code>building.production.collect</code></td>
-      <td>Collect finished production-line building output — 13 confirmed building types live with real resource collection (Farmland, Iron Mine, Gold Mine, Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, and the four Season 6 Spore Factory tiers), plus 7 more (Tactical Center, Armament Institute, Tactical Institute, and 4 Truck Station tiers) wired in but still unconfirmed — see [Live validation against production](/live-validation). Not to be confused with account-level (non-building, no building `uuid`) commands also documented there: `lw.pve.idle.reward` (collects both the "Armed Truck" and "Overlord" idle/AFK tracks in one call), `visitor.operate` (greets city visitors), `al.help.all`, `alliance.reward.allreceive`, and mail claiming.</td>
+      <td>Collect finished production-line building output, 13 confirmed building types live with real resource collection (Farmland, Iron Mine, Gold Mine, Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, and the four Season 6 Spore Factory tiers), plus 7 more (Tactical Center, Armament Institute, Tactical Institute, and 4 Truck Station tiers) wired in but still unconfirmed, see [Live validation against production](/live-validation). Not to be confused with account-level (non-building, no building `uuid`) commands also documented there: `lw.pve.idle.reward` (collects both the "Armed Truck" and "Overlord" idle/AFK tracks in one call), `visitor.operate` (greets city visitors), `al.help.all`, `alliance.reward.allreceive`, and mail claiming.</td>
       <td><code>uuid</code></td>
     </tr>
     <tr>
@@ -69,6 +69,6 @@ Game-data rows are keyed `id = base_type_id + level`, where `base_type_id` is al
   </tbody>
 </table>
 
-## Resource economy — two systems
+## Resource economy, two systems
 
-**12 base resources** (`oil, metal, money, electricity, water, pvePoint, wood, people, dragonHonorScore, obsidian, flint, petroleum`) arrive embedded in most responses and standalone via `push.resource.info`. Separately, **"resource items"** — a keyed bag of stackable goods (soldiers-as-items, crafting materials) — sync via `push.resource.item.update` / `user.get.all.resource.items`. There is no `get.storage.info` command; storage capacity is a client-computed sum over a stream of server-pushed effect deltas (`push.effect.change`), not a directly queryable value.
+**12 base resources** (`oil, metal, money, electricity, water, pvePoint, wood, people, dragonHonorScore, obsidian, flint, petroleum`) arrive embedded in most responses and standalone via `push.resource.info`. Separately, **"resource items"**, a keyed bag of stackable goods (soldiers-as-items, crafting materials), sync via `push.resource.item.update` / `user.get.all.resource.items`. There is no `get.storage.info` command; storage capacity is a client-computed sum over a stream of server-pushed effect deltas (`push.effect.change`), not a directly queryable value.

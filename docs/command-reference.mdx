@@ -3,11 +3,11 @@ title: "Command reference"
 description: "How the client's ~3,178 dispatch commands break down by gameplay domain and transport channel, and where the full searchable catalog lives."
 ---
 
-Every command is dispatched off one flat string — there's no numeric opcode layer above SFS2X's own framing. 3,047 commands were mechanically extracted from the client's own dispatch tables (`MsgDefines`/`MsgMap`); 131 more live on the dedicated chat channel's parallel table. This page summarizes how they're organized; the full row-level catalog is described below rather than reproduced as a giant static table.
+Every command is dispatched off one flat string, there's no numeric opcode layer above SFS2X's own framing. 3,047 commands were mechanically extracted from the client's own dispatch tables (`MsgDefines`/`MsgMap`); 131 more live on the dedicated chat channel's parallel table. This page summarizes how they're organized; the full row-level catalog is described below rather than reproduced as a giant static table.
 
 ## By functional domain
 
-Two independent axes describe every command: which gameplay system it belongs to, and whether it's a client request or a server-initiated push (roughly a fifth of all commands are pushes — 22%, by the `push.*` naming convention).
+Two independent axes describe every command: which gameplay system it belongs to, and whether it's a client request or a server-initiated push (roughly a fifth of all commands are pushes, 22%, by the `push.*` naming convention).
 
 | Domain | Count | Priority | Covers |
 |---|---:|---|---|
@@ -33,10 +33,10 @@ These rows sum to 3,057, not the 3,047 mechanically-extracted main-table figure 
 
 ## Search the full catalog
 
-3,178 commands total: 3,047 from the main dispatch table (`Net.Msgs.*`, over the primary SFS socket) plus 131 from the dedicated chat subsystem's own table (`Chat.WebMessage.*` / `Chat.NetMessage.*`, split across the chat WebSocket and the primary socket — see the **WS** / **SFS** tags).
+3,178 commands total: 3,047 from the main dispatch table (`Net.Msgs.*`, over the primary SFS socket) plus 131 from the dedicated chat subsystem's own table (`Chat.WebMessage.*` / `Chat.NetMessage.*`, split across the chat WebSocket and the primary socket, see the **WS** / **SFS** tags).
 
 <Note>
-The source dossier this page is derived from ships the full catalog as an interactive, client-side search tool (a search box filtering on key/wire-cmd/handler-class, plus a channel dropdown for **All channels** / **SFS socket** / **Chat WebSocket**, rendering up to the first 300 matches at a time). That live widget isn't reproduced here — hand-transcribing ~3,178 rows into a static Markdown table would be both unwieldy and error-prone. The underlying data is not lost, though: it's the same `cmd-data` JSON data island (one row per command, `[key, wire cmd, handler class, channel]`) backing the dossier's search tool, and it is regenerable directly from the client's own dispatch tables using the same mechanical extraction that produced it in the first place.
+The source dossier this page is derived from ships the full catalog as an interactive, client-side search tool (a search box filtering on key/wire-cmd/handler-class, plus a channel dropdown for **All channels** / **SFS socket** / **Chat WebSocket**, rendering up to the first 300 matches at a time). That live widget isn't reproduced here, hand-transcribing ~3,178 rows into a static Markdown table would be both unwieldy and error-prone. The underlying data is not lost, though: it's the same `cmd-data` JSON data island (one row per command, `[key, wire cmd, handler class, channel]`) backing the dossier's search tool, and it is regenerable directly from the client's own dispatch tables using the same mechanical extraction that produced it in the first place.
 </Note>
 
 Each row in the full catalog carries four fields:
@@ -48,8 +48,8 @@ Each row in the full catalog carries four fields:
 | `Handler class` | The fully-qualified decompiled handler/message class (for example `Net.Msgs.ShowStatusItemMessage`, `Net.Msgs.PushItemAddMessage`) |
 | `Channel` | `SFS` (primary SFS2X socket) or `WS` (dedicated chat WebSocket) |
 
-Commands whose `Key` is prefixed `Push` (wire cmd prefixed `push.*`) are server-initiated pushes rather than client requests — this is the 22% figure cited above.
+Commands whose `Key` is prefixed `Push` (wire cmd prefixed `push.*`) are server-initiated pushes rather than client requests, this is the 22% figure cited above.
 
 The full 3,178-row dataset (extracted from `MsgDefines`/`MsgMap` for the main table, and the chat subsystem's parallel table for the 131 `Chat.WebMessage.*`/`Chat.NetMessage.*` entries) is available in the extracted reports produced alongside this dossier, and can be regenerated from the client using the extraction methodology described in [Extraction methodology](/methodology).
 
-Field-level request/response schemas for the structurally central commands in each domain are documented in the gameplay-domain pages, not here — reading a command's own `OnCreate`/`HandleMessage` pair in the decompiled Lua is the authoritative source for anything not covered there. (See [City & building](/city-building), [Military, hero & battle](/military-battle), [Alliance, chat & mail](/alliance-chat-mail), [Shop, trading & real-money IAP](/shop-iap), and [World map](/world-map).)
+Field-level request/response schemas for the structurally central commands in each domain are documented in the gameplay-domain pages, not here, reading a command's own `OnCreate`/`HandleMessage` pair in the decompiled Lua is the authoritative source for anything not covered there. (See [City & building](/city-building), [Military, hero & battle](/military-battle), [Alliance, chat & mail](/alliance-chat-mail), [Shop, trading & real-money IAP](/shop-iap), and [World map](/world-map).)

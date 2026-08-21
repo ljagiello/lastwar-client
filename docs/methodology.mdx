@@ -5,20 +5,20 @@ description: "How three custom, undocumented file formats were reverse-engineere
 
 Three custom, undocumented formats stood between "an `.xapk` file" and readable source. All three were cracked from first principles, without any prior tooling built for this game.
 
-### 1 — HybridCLR assembly de-obfuscation
+### 1, HybridCLR assembly de-obfuscation
 
-The 117 hot-update C# assemblies ship as `assets/Assemblies/*.mdl` — renamed, single-byte-XOR-obfuscated `.dll` files. The header is deliberately corrupted just enough to defeat naive static scanners:
+The 117 hot-update C# assemblies ship as `assets/Assemblies/*.mdl`, renamed, single-byte-XOR-obfuscated `.dll` files. The header is deliberately corrupted just enough to defeat naive static scanners:
 
 ```python
 key = raw_bytes[3]          # the XOR key is stored in the file itself
 n   = key                    # and doubles as the run length
 for i in range(n):
-    raw_bytes[i] ^= key       # XOR only the first `key` bytes — the rest is untouched
+    raw_bytes[i] ^= key       # XOR only the first `key` bytes, the rest is untouched
 ```
 
 All 117 files decoded cleanly to valid PE/.NET assemblies on the first pass; 9 of the most relevant (`Assembly-CSharp.dll`, `SmartFox2X.dll`, `BestHttp.dll`, and friends) were decompiled to C# with [ILSpy](https://github.com/icsharpcode/ILSpy).
 
-### 2 — The `LWLF` Lua bundle container
+### 2, The `LWLF` Lua bundle container
 
 The 105 MB `assets/lwScripts/LWScripts.data` is a custom archive bundling all 18,514 compiled Lua modules. Format, reverse-engineered by scanning for Lua's bytecode signature and reading backward:
 
@@ -30,21 +30,21 @@ per entry:
   data       byte_len raw bytes (Lua 5.3 bytecode, itself self-delimiting)
 ```
 
-(Later corroborated exactly against the C# reader, `LWLuaFile._Load` — see [Lua architecture](/lua-architecture).)
+(Later corroborated exactly against the C# reader, `LWLuaFile._Load`, see [Lua architecture](/lua-architecture).)
 
-### 3 — A deliberately non-standard Lua 5.3 bytecode header
+### 3, A deliberately non-standard Lua 5.3 bytecode header
 
-Every compiled chunk sets the Lua chunk header's `format` byte to `1` instead of the standard `0`, and — the actual obfuscation — **omits the 1-byte "instruction size" field** that stock Lua 5.3 headers always include. Every other header field (int/size_t/integer/float sizes, the `LUAC_INT`/`LUAC_NUM` sanity values) is stock. This is enough to make every off-the-shelf Lua decompiler reject the file outright.
+Every compiled chunk sets the Lua chunk header's `format` byte to `1` instead of the standard `0`, and, the actual obfuscation, **omits the 1-byte "instruction size" field** that stock Lua 5.3 headers always include. Every other header field (int/size_t/integer/float sizes, the `LUAC_INT`/`LUAC_NUM` sanity values) is stock. This is enough to make every off-the-shelf Lua decompiler reject the file outright.
 
 <Info>
-  **Fix**: A two-line patch to [unluac](https://github.com/HansWessels/unluac)'s `LHeaderType.java` — accept `format == 1`, and skip the instruction-size read when it's set — was enough to decompile all 18,514 chunks with a stock unluac release otherwise unmodified. Instruction encoding itself is completely standard Lua 5.1+, so nothing past the header needed touching.
+  **Fix**: A two-line patch to [unluac](https://github.com/HansWessels/unluac)'s `LHeaderType.java`, accept `format == 1`, and skip the instruction-size read when it's set, was enough to decompile all 18,514 chunks with a stock unluac release otherwise unmodified. Instruction encoding itself is completely standard Lua 5.1+, so nothing past the header needed touching.
 </Info>
 
-Once patched, this recovered readable Lua source for all 2,855 `Net/`+`Common/` modules (all 2,777 network command classes, the dispatch core, and the protobuf schemas) and all 1,279 game-data tables — the entire raw material for everything documented below.
+Once patched, this recovered readable Lua source for all 2,855 `Net/`+`Common/` modules (all 2,777 network command classes, the dispatch core, and the protobuf schemas) and all 1,279 game-data tables, the entire raw material for everything documented below.
 
-### 4 — Game data tables
+### 4, Game data tables
 
-`assets/table/table_*.data` is, despite the odd filename, a plain ZIP archive (magic `PK\x03\x04`) — 1,279 entries, each itself Lua 5.3 bytecode encoding a data-only module (building costs, hero stats, activity config, etc). No new format needed; unluac with the same header patch handled these too.
+`assets/table/table_*.data` is, despite the odd filename, a plain ZIP archive (magic `PK\x03\x04`), 1,279 entries, each itself Lua 5.3 bytecode encoding a data-only module (building costs, hero stats, activity config, etc). No new format needed; unluac with the same header patch handled these too.
 
 | Artifact | Raw size | Decoded to |
 |---|---|---|
@@ -52,4 +52,4 @@ Once patched, this recovered readable Lua source for all 2,855 `Net/`+`Common/` 
 | `assets/lwScripts/LWScripts.data` | 105 MB | 18,514 raw `.luac` chunks; 2,855 decompiled (Net/Common) |
 | `assets/table/table_*.data` | 18.6 MB | 1,279 decompiled Lua data tables |
 | base APK Java/Kotlin (dex) | ~42.3 MB | 16,867 files via jadx |
-| native libs, `lib/arm64-v8a/` | 7 relevant of 23 | Symbol/string survey only — no disassembly |
+| native libs, `lib/arm64-v8a/` | 7 relevant of 23 | Symbol/string survey only, no disassembly |

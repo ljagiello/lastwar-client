@@ -3,11 +3,11 @@ title: "Native binaries & security posture"
 description: "Symbol/string survey of the game's native libraries and an assessment of whether anything below the protocol layer blocks a clean-room Go client."
 ---
 
-Best-effort symbol/string survey of the 7 most relevant native libraries — no disassembly, no Ghidra, beyond one targeted ARM64 disassembly of `libxlua.so`'s `CalcChatSign` helper performed in a later research pass to close an open question (see the feasibility table below and [Open-questions research pass](/research-pass)). The question that matters: does anything below the protocol layer block a clean-room Go client? For the one existing account tested against production, the answer is no — see the Warning below for the full scope.
+Best-effort symbol/string survey of the 7 most relevant native libraries, no disassembly, no Ghidra, beyond one targeted ARM64 disassembly of `libxlua.so`'s `CalcChatSign` helper performed in a later research pass to close an open question (see the feasibility table below and [Open-questions research pass](/research-pass)). The question that matters: does anything below the protocol layer block a clean-room Go client? For the one existing account tested against production, the answer is no, see the Warning below for the full scope.
 
 ## `libil2cpp.so` confirms the hot-update architecture
 
-Only 1.8 MB — small for a Unity IL2CPP binary, and for good reason: it contains **zero** strings for `AESHelper`, `NetworkManager`, `SendLuaMessage`, or even generic Unity type names. Assembly-CSharp is never AOT-compiled here at all — everything gameplay-relevant genuinely lives in the hot-update `.mdl` tier, interpreted via HybridCLR. This is a clean, non-ambiguous confirmation, not an absence of evidence.
+Only 1.8 MB, small for a Unity IL2CPP binary, and for good reason: it contains **zero** strings for `AESHelper`, `NetworkManager`, `SendLuaMessage`, or even generic Unity type names. Assembly-CSharp is never AOT-compiled here at all, everything gameplay-relevant genuinely lives in the hot-update `.mdl` tier, interpreted via HybridCLR. This is a clean, non-ambiguous confirmation, not an absence of evidence.
 
 ## Feasibility table
 
@@ -24,34 +24,34 @@ Only 1.8 MB — small for a Unity IL2CPP binary, and for good reason: it contain
       <td>ShuMei device fingerprint (<code>boxId</code>)</td>
       <td><code>login</code> field <code>shumeiBoxId</code></td>
       <td>
-        <strong>None identified</strong> — <strong>live-tested (see [Live validation against production](/live-validation)):</strong>
+        <strong>None identified</strong>, <strong>live-tested (see [Live validation against production](/live-validation)):</strong>
         empty/synthetic values are accepted without issue for a brand-new guest account; reconnecting into an
         <em> established</em> account initially looked ShuMei-gated but turned out to be an unrelated
         <code>packageName</code>/<code>platform</code>/<code>appVersion</code> identity mismatch against the access
-        token — fixed, reconnect worked at the time against the code as it then shipped (a later security fix
+        token, fixed, reconnect worked at the time against the code as it then shipped (a later security fix
         replaced part of the request with placeholders, and whether reconnect still succeeds is now an open
-        question — see [Live validation against production](/live-validation)), and no ShuMei-specific block was
+        question, see [Live validation against production](/live-validation)), and no ShuMei-specific block was
         ever found
       </td>
     </tr>
     <tr>
       <td>Tencent ACE anti-cheat report</td>
-      <td>Not found on the game-server protocol at all — local IPC to Tencent's own backend</td>
+      <td>Not found on the game-server protocol at all, local IPC to Tencent's own backend</td>
       <td><strong>None identified</strong></td>
     </tr>
     <tr>
       <td><code>SecurityCode</code>/<code>OneCode</code>/<code>CoreV</code></td>
       <td><code>login</code> request, ~3 fields</td>
-      <td><strong>None</strong> — plain MD5 with a hardcoded salt, fully reproducible</td>
+      <td><strong>None</strong>, plain MD5 with a hardcoded salt, fully reproducible</td>
     </tr>
     <tr>
-      <td><code>packageSign</code> (despite the name, <em>not</em> a cert hash — see [Open questions](/open-questions))</td>
+      <td><code>packageSign</code> (despite the name, <em>not</em> a cert hash, see [Open questions](/open-questions))</td>
       <td><code>login</code> request</td>
       <td>
-        <strong>None</strong> — actually <code>SHA1(packageName)</code>, a constant public string; trivially
+        <strong>None</strong>, actually <code>SHA1(packageName)</code>, a constant public string; trivially
         reproducible without touching the APK's real signature. The field that genuinely depends on the signing
         cert is <code>psh</code> (see [Identity, login & session](/auth)), and the Go client reproduces it correctly
-        for the Android identity — under iOS mode it still sends the Android-derived value, since no live iOS
+        for the Android identity, under iOS mode it still sends the Android-derived value, since no live iOS
         capture of this field exists to confirm what a real iOS client would send instead.
       </td>
     </tr>
@@ -59,7 +59,7 @@ Only 1.8 MB — small for a Unity IL2CPP binary, and for good reason: it contain
       <td><code>libxlua.so</code> <code>CalcChatSign</code>/AES/MD5 helpers</td>
       <td>Lua-native crypto call from <code>ChatNetManager:InitWebSocketInst</code> (alternate chat transport)</td>
       <td>
-        <strong>None</strong> — resolved via direct ARM64 disassembly (see [Open questions](/open-questions) / [Open-questions research pass](/research-pass)):
+        <strong>None</strong>, resolved via direct ARM64 disassembly (see [Open questions](/open-questions) / [Open-questions research pass](/research-pass)):
         plain unkeyed <code>MD5(MD5(appId+uid)+timestamp)</code>, byte-identical to the known C# formula, no custom
         key material
       </td>
@@ -67,16 +67,16 @@ Only 1.8 MB — small for a Unity IL2CPP binary, and for good reason: it contain
     <tr>
       <td>TLS / certificate validation</td>
       <td>All HTTPS traffic</td>
-      <td><strong>None</strong> — standard chain validation, no pinning evidence found anywhere</td>
+      <td><strong>None</strong>, standard chain validation, no pinning evidence found anywhere</td>
     </tr>
     <tr>
       <td>Google Play Integrity / SafetyNet</td>
-      <td>—</td>
+      <td>, </td>
       <td><strong>Not used at all</strong> in this build</td>
     </tr>
   </tbody>
 </table>
 
 <Warning>
-**Bottom line — updated after live testing, see [Live validation against production](/live-validation).** Static analysis alone said nothing here blocks impersonation, and live testing against production confirms it fully for guest accounts: nothing blocks a pure Go client from **creating and driving new guest accounts** or from **completing the email-verification bind** of a guest session to a real account — both work end-to-end, repeatedly, against the real account used for testing. **Reconnecting into an already-established account's live game state** also worked end-to-end at the time it was tested, but that test used the `ta` analytics blob's real captured device/anti-fraud sub-fields; a later security fix (see [Live validation against production](/live-validation)) replaced those sub-fields with placeholders, and reconnect is now **re-confirmed still working with those placeholders** — an unattended cron reconnected and collected real resources over multiple days (August 2026), so the server does not require `ta`'s real device sub-fields. The reconnect step initially looked like a genuine protocol-level session gate (reproducibly rejected, even replaying that account's own genuine device credentials from a real prior login), but turned out to be a `packageName`/`platform`/`appVersion`/`versionCode` identity mismatch against the access token, not a security check — see [Live validation against production](/live-validation) for the full methodology, test matrix, and the current state of the reconnect open question.
+**Bottom line, updated after live testing, see [Live validation against production](/live-validation).** Static analysis alone said nothing here blocks impersonation, and live testing against production confirms it fully for guest accounts: nothing blocks a pure Go client from **creating and driving new guest accounts** or from **completing the email-verification bind** of a guest session to a real account, both work end-to-end, repeatedly, against the real account used for testing. **Reconnecting into an already-established account's live game state** also worked end-to-end at the time it was tested, but that test used the `ta` analytics blob's real captured device/anti-fraud sub-fields; a later security fix (see [Live validation against production](/live-validation)) replaced those sub-fields with placeholders, and reconnect is now **re-confirmed still working with those placeholders**, an unattended cron reconnected and collected real resources over multiple days (August 2026), so the server does not require `ta`'s real device sub-fields. The reconnect step initially looked like a genuine protocol-level session gate (reproducibly rejected, even replaying that account's own genuine device credentials from a real prior login), but turned out to be a `packageName`/`platform`/`appVersion`/`versionCode` identity mismatch against the access token, not a security check, see [Live validation against production](/live-validation) for the full methodology, test matrix, and the current state of the reconnect open question.
 </Warning>

@@ -1,14 +1,14 @@
 ---
 title: "Shop, trading & real-money IAP"
-description: "The full purchase flow, Google Play to server credit, traced end to end — including how the client smuggles its own order-correlation id through Google's generic obfuscated account id field."
+description: "The full purchase flow, Google Play to server credit, traced end to end, including how the client smuggles its own order-correlation id through Google's generic obfuscated account id field."
 ---
 
-The full purchase flow, Google Play to server credit, traced end to end — including the exact trick the client uses to smuggle its own order-correlation id through Google's generic "obfuscated account id" field.
+The full purchase flow, Google Play to server credit, traced end to end, including the exact trick the client uses to smuggle its own order-correlation id through Google's generic "obfuscated account id" field.
 
 ## Purchase flow (Google Play, Android)
 
 1. Lua UI sends `pay.action` (analytics), then `pay.before.check` with the internal product id + detected currency.
-2. Server returns a fresh `selfOrderId` — a server-issued correlation token — plus a confirmed `productId`.
+2. Server returns a fresh `selfOrderId`, a server-issued correlation token, plus a confirmed `productId`.
 3. Client calls into native code with `{skuId, itemId: selfOrderId, uid}`. Billing Library's `launchBillingFlow` is built with:
 
    ```text
@@ -16,16 +16,16 @@ The full purchase flow, Google Play to server credit, traced end to end — incl
    setObfuscatedProfileId(currencyCode + "_" + priceMicros)
    ```
 
-   — the game smuggles its own order id and the exact price/currency through Google's two generic "obfuscated id" fields, since Play Billing doesn't support custom purchase metadata otherwise.
+ , the game smuggles its own order id and the exact price/currency through Google's two generic "obfuscated id" fields, since Play Billing doesn't support custom purchase metadata otherwise.
 4. Google Play handles the actual purchase UI entirely outside game code. On success, the client reads its smuggled values back out of the completed `Purchase` object.
-5. Client sends the SFS command `pay`: `{orderId, productId, purchaseTime, signData (raw receipt JSON), signature, itemId: selfOrderId, pay_closingCurrency, pay_PriceOfClosingCurrency}` — this is the actual receipt-verification call. The server independently validates `signData`/`signature` against Google's purchase-verification API server-side; **the client-submitted receipt is untrusted input from the server's perspective and not forgeable without a genuine Google Play receipt.**
+5. Client sends the SFS command `pay`: `{orderId, productId, purchaseTime, signData (raw receipt JSON), signature, itemId: selfOrderId, pay_closingCurrency, pay_PriceOfClosingCurrency}`, this is the actual receipt-verification call. The server independently validates `signData`/`signature` against Google's purchase-verification API server-side; **the client-submitted receipt is untrusted input from the server's perspective and not forgeable without a genuine Google Play receipt.**
 6. Only after server confirmation does the client call `ConsumeProduct` on Google Play, making a consumable product re-purchasable.
 
 ## Full command family
 
 | cmd | Platform / purpose |
 | --- | --- |
-| `pay.before.check` | Pre-flight — always first, all platforms |
+| `pay.before.check` | Pre-flight, always first, all platforms |
 | `pay` | Google Play receipt submission |
 | `pay.ios` | App Store (StoreKit) receipt submission |
 | `pay.amazon` / `pay.tstore` | Amazon Appstore / Korean OneStore |
@@ -33,10 +33,10 @@ The full purchase flow, Google Play to server credit, traced end to end — incl
 | `pay.refund.request` / `.list` | Player-initiated refund flow |
 | `get.week.card.info` / `receive.week.card.reward` | Subscription ("week card") claims |
 
-## Non-IAP economy — no cryptography involved
+## Non-IAP economy, no cryptography involved
 
-Trading Center (`get.r.exchange.info`, `money.buy.resource`, `resource.sell.money`), the item shop (`item.buy`, `user.shop.buy.new`), and the player-to-player Storage Shop marketplace are plain request/response RPCs gated only by server-side currency balances — no receipts, no signing, directly drivable once authenticated.
+Trading Center (`get.r.exchange.info`, `money.buy.resource`, `resource.sell.money`), the item shop (`item.buy`, `user.shop.buy.new`), and the player-to-player Storage Shop marketplace are plain request/response RPCs gated only by server-side currency balances, no receipts, no signing, directly drivable once authenticated.
 
 <Note>
-**Naming trap.** `purchase.order.refresh`/`.finish`/`.delete` is **not** IAP despite the name — it's an unrelated production-queue feature (grocery store / resident orders). Only the `pay*`/`Pay.*`-namespaced commands above are real-money purchases.
+**Naming trap.** `purchase.order.refresh`/`.finish`/`.delete` is **not** IAP despite the name, it's an unrelated production-queue feature (grocery store / resident orders). Only the `pay*`/`Pay.*`-namespaced commands above are real-money purchases.
 </Note>

@@ -3,7 +3,7 @@ title: "Identity, login & session"
 description: "How device identity, SFS2X zone login, the MD5 integrity fields, post-login init sequence, and the separate chat channel authenticate a client against the game's servers."
 ---
 
-The SFS2X username/password fields are vestigial — the password is always sent empty. Real authentication rides in ~50 fields on a custom SFSObject payload, most of them device fingerprints, three of them opaque MD5-based "integrity" tokens.
+The SFS2X username/password fields are vestigial, the password is always sent empty. Real authentication rides in ~50 fields on a custom SFSObject payload, most of them device fingerprints, three of them opaque MD5-based "integrity" tokens.
 
 ## Device ID
 
@@ -14,11 +14,11 @@ deviceId += CommonUtils.IsDebug() ? "_3d" : "_n3d"
 airKey    = "lwDid_" + base64(utf8(deviceId))          // sent alongside deviceId everywhere
 ```
 
-Persisted to `PlayerPrefs["DEVICE_ID"]`; on iOS additionally mirrored to the Keychain (survives uninstall). The `assets/deviceId.txt` file present in the install package contains a single byte, `"1"` — no code reads it anywhere; it does not appear to be the device id source.
+Persisted to `PlayerPrefs["DEVICE_ID"]`; on iOS additionally mirrored to the Keychain (survives uninstall). The `assets/deviceId.txt` file present in the install package contains a single byte, `"1"`, no code reads it anywhere; it does not appear to be the device id source.
 
 ## SFS zone login
 
-A stock SFS2X `LoginRequest` (`action=1`, system controller) — but every call site passes an **empty password**. Real auth material is entirely inside the `parameters` SFSObject:
+A stock SFS2X `LoginRequest` (`action=1`, system controller), but every call site passes an **empty password**. Real auth material is entirely inside the `parameters` SFSObject:
 
 | Field | Value / derivation |
 |---|---|
@@ -26,23 +26,23 @@ A stock SFS2X `LoginRequest` (`action=1`, system controller) — but every call 
 | `gameUid` | server-assigned account id (also used as the SFS username) |
 | `serverId` | `zone` string minus its `"APS"` prefix |
 | `at` | the HTTP-obtained access token, only if non-empty |
-| `SecurityCode` | `MD5(cmdBaseTime + "4d1c383ccbedf3d98320d6ea06d8dedc" + gameUid)` — hardcoded salt |
+| `SecurityCode` | `MD5(cmdBaseTime + "4d1c383ccbedf3d98320d6ea06d8dedc" + gameUid)`, hardcoded salt |
 | `OneCode` | char-interleave of `MD5(rand32)` and `rand32` itself |
 | `CoreV` | hash chain: `MD5(reverse(base64(rand32)))` then `MD5(that + rand32)`, interleaved |
-| `packageSign` | despite the name, *not* a certificate check — just `SHA1(packageName)`, a constant public string, trivially reproducible without touching the APK's real signature. The field that actually depends on the real signing cert is `psh`, below. |
-| `psh` | `MD5(cmdBaseTime + hex(signing-cert DER bytes))` — the one field genuinely tied to the APK's real signing certificate; confirmed directly in the decompiled Android SDK source, `SdkManager.LW_PSH()`, which concatenates `cmdBaseTime` with each `PackageInfo.signatures[i].toCharsString()` and MD5s the result |
-| `shumeiBoxId` | ShuMei anti-fraud device fingerprint — **empty string is a first-class, non-error client path** on SDK-init failure |
+| `packageSign` | despite the name, *not* a certificate check, just `SHA1(packageName)`, a constant public string, trivially reproducible without touching the APK's real signature. The field that actually depends on the real signing cert is `psh`, below. |
+| `psh` | `MD5(cmdBaseTime + hex(signing-cert DER bytes))`, the one field genuinely tied to the APK's real signing certificate; confirmed directly in the decompiled Android SDK source, `SdkManager.LW_PSH()`, which concatenates `cmdBaseTime` with each `PackageInfo.signatures[i].toCharsString()` and MD5s the result |
+| `shumeiBoxId` | ShuMei anti-fraud device fingerprint, **empty string is a first-class, non-error client path** on SDK-init failure |
 | `androidDid`, `IMEI`, `gaid`, `afuid`, `firebaseId`… | ~15 more device/ad identifiers, all static/spoofable strings |
 
-All three integrity fields (`SecurityCode`/`OneCode`/`CoreV`) are ordinary client-side MD5 constructions with a hardcoded salt — fully reproducible in Go, no native dependency. [Native binaries & security posture](/native-binaries) found no evidence the server treats them as a hard gate versus a fingerprint for offline analysis, but a Go client should send them anyway (they cost nothing to compute).
+All three integrity fields (`SecurityCode`/`OneCode`/`CoreV`) are ordinary client-side MD5 constructions with a hardcoded salt, fully reproducible in Go, no native dependency. [Native binaries & security posture](/native-binaries) found no evidence the server treats them as a hard gate versus a fingerprint for offline analysis, but a Go client should send them anyway (they cost nothing to compute).
 
 ## Post-login sequence
 
-The server pushes, unsolicited, in order: `init.before` → `init` (the big state snapshot: `user.uid`, account-bind status, and critically `chatToken` for the separate chat WebSocket) → `init.after` (or `init.error`). A Go client does not send `init` itself — just wait for it. Immediately after, the real client fires `check.device.change` (empty payload) — worth mimicking.
+The server pushes, unsolicited, in order: `init.before` → `init` (the big state snapshot: `user.uid`, account-bind status, and critically `chatToken` for the separate chat WebSocket) → `init.after` (or `init.error`). A Go client does not send `init` itself, just wait for it. Immediately after, the real client fires `check.device.change` (empty payload), worth mimicking.
 
 ## Guest identity is sufficient
 
-No OAuth is required to play: `account.login.new` with `type=1` and only `deviceId`/`airKey`/`pf` is the full "no external provider" path. Social binding (Google Sign-In `type=2`, Apple Game Center `type=4`, Play Games `type=5`) requires obtaining a provider token yourself — out of scope for a headless client, and optional.
+No OAuth is required to play: `account.login.new` with `type=1` and only `deviceId`/`airKey`/`pf` is the full "no external provider" path. Social binding (Google Sign-In `type=2`, Apple Game Center `type=4`, Play Games `type=5`) requires obtaining a provider token yourself, out of scope for a headless client, and optional.
 
 ## Session persistence
 
@@ -55,4 +55,4 @@ No OAuth is required to play: `account.login.new` with `type=1` and only `device
 
 ## A second, optional channel: chat
 
-Real-time chat text runs over a **separate WebSocket** (JSON frames, not SFSObject), authenticated with the `chatToken` from the `init` push. Server discovery is its own HTTP bootstrap (`chat_server_links.php`, signed with an MD5 formula keyed on a fixed app id `100017`). Every outbound message is signed: `MD5(uid + json(sortedParams) + sendTime + connectionSign)`. This channel is optional — skip it entirely if the Go client doesn't need real-time chat; "share to chat" and moderation commands still work over the plain SFS socket regardless (see [Alliance, chat & mail](/alliance-chat-mail)).
+Real-time chat text runs over a **separate WebSocket** (JSON frames, not SFSObject), authenticated with the `chatToken` from the `init` push. Server discovery is its own HTTP bootstrap (`chat_server_links.php`, signed with an MD5 formula keyed on a fixed app id `100017`). Every outbound message is signed: `MD5(uid + json(sortedParams) + sendTime + connectionSign)`. This channel is optional, skip it entirely if the Go client doesn't need real-time chat; "share to chat" and moderation commands still work over the plain SFS socket regardless (see [Alliance, chat & mail](/alliance-chat-mail)).

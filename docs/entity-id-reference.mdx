@@ -3,28 +3,28 @@ title: "Entity ID reference"
 description: "Numeric ID catalog for every building, monster, hero, troop line, resource, and item/equipment type the client can reference, extracted from Global_EnumType.lua and the table_decompiled data tables."
 ---
 
-Every building, monster, troop, hero, resource, and equipment type the client can reference by numeric ID, extracted by a 6-agent parallel pass over `Global_EnumType.lua` (the master Lua enum repository — hundreds of small category tables) and the relevant `table_decompiled/*.lua` data tables, cross-referenced against the English locale strings for display names where a lookup path exists.
+Every building, monster, troop, hero, resource, and equipment type the client can reference by numeric ID, extracted by a 6-agent parallel pass over `Global_EnumType.lua` (the master Lua enum repository, hundreds of small category tables) and the relevant `table_decompiled/*.lua` data tables, cross-referenced against the English locale strings for display names where a lookup path exists.
 
 ## By domain
 
 | Domain | Entries | Primary source | Notable finding |
 |---|---:|---|---|
-| Building | 299 | `Global_EnumType.lua` `BuildingTypes` + `DragonBuildingTypes` (complete enums) | 5 sub-families: core city, legacy-named but still active (`FUN_BUILD`/`APS_BUILD` prefix — includes the main city-hall building `FUN_BUILD_MAIN` and farm/pasture/wormhole mechanics `APS_BUILD_*`), alliance territory, season-event, cross-server dragon |
+| Building | 299 | `Global_EnumType.lua` `BuildingTypes` + `DragonBuildingTypes` (complete enums) | 5 sub-families: core city, legacy-named but still active (`FUN_BUILD`/`APS_BUILD` prefix, includes the main city-hall building `FUN_BUILD_MAIN` and farm/pasture/wormhole mechanics `APS_BUILD_*`), alliance territory, season-event, cross-server dragon |
 | Monster | 170 | `LWWorldMonsterType` + `WorldMonsterSpecialType` enums, sampled from `lw_world_monster.lua` | Confirms world-map monsters are organized by resource-node type (`ResMetal`/`ResFood`/`ResGold`/...) with `Boss` as the single largest distinct-kind category |
-| Resource | 155 | `Global_EnumType.lua` `ResourceType` + `RewardType` + 6 supporting mapping tables (complete) | `RewardType` is broader than currencies alone — includes `HOUSE`/`HOSPITAL`/`HERO`/`WORKER` as grantable "reward" categories |
-| Item/Equip | 108 | `Global_EnumType.lua` item enums (complete) + equipment tier/slot catalog with real names | `item.lua` is NOT an item catalog (it's a generic config table) — named equipment instead sourced from a tiered weapon/armor/core/radar catalog (M3→M6-A progression) |
+| Resource | 155 | `Global_EnumType.lua` `ResourceType` + `RewardType` + 6 supporting mapping tables (complete) | `RewardType` is broader than currencies alone, includes `HOUSE`/`HOSPITAL`/`HERO`/`WORKER` as grantable "reward" categories |
+| Item/Equip | 108 | `Global_EnumType.lua` item enums (complete) + equipment tier/slot catalog with real names | `item.lua` is NOT an item catalog (it's a generic config table), named equipment instead sourced from a tiered weapon/armor/core/radar catalog (M3→M6-A progression) |
 | Hero | 66 | `table_decompiled/lw_hero.lua` filtered to `type=1` (real heroes) + category enums | 393 raw rows dedupe to ~43 real collectible heroes once PVP-dummy/skirmish-soldier/dominator stat-block rows are filtered out |
-| Unit/Troop | 32 | `table_decompiled/lw_soldier.lua` + `soldier_eleven.lua` + category enums | Only 4 real troop "lines" exist, each a T1–T11 tier progression — no Infantry/Lancer/Marksman class split, unlike similar games |
+| Unit/Troop | 32 | `table_decompiled/lw_soldier.lua` + `soldier_eleven.lua` + category enums | Only 4 real troop "lines" exist, each a T1–T11 tier progression, no Infantry/Lancer/Marksman class split, unlike similar games |
 
 <Info>
-**Reading this table**: Not every domain's numbers work the same way. **Buildings**, **resources**, and most of **items/equipment** come straight from small, complete category enums — high confidence. **Monsters** mixes 2 complete category enums with a sample of the actual per-monster catalog (a 12,115-row per-level table deduped down to distinct kinds — not exhaustive by monster instance, but every distinct monster *kind* the sampling found is included). **Heroes** is a deduped, type-filtered view of a 393-row table that mixes real collectible heroes with reused stat-blocks for other game modes (PVP dummies, skirmish soldiers) — only `type=1` (real heroes) plus category enums are included. **Units/Troops** is genuinely small: the player's own army has exactly 4 troop "lines" (each a T1–T11 tier progression), not a branching class system — see the table below for confirmation that Infantry/Lancer/Marksman-style class splits don't exist in this game's actual data.
+**Reading this table**: Not every domain's numbers work the same way. **Buildings**, **resources**, and most of **items/equipment** come straight from small, complete category enums, high confidence. **Monsters** mixes 2 complete category enums with a sample of the actual per-monster catalog (a 12,115-row per-level table deduped down to distinct kinds, not exhaustive by monster instance, but every distinct monster *kind* the sampling found is included). **Heroes** is a deduped, type-filtered view of a 393-row table that mixes real collectible heroes with reused stat-blocks for other game modes (PVP dummies, skirmish soldiers), only `type=1` (real heroes) plus category enums are included. **Units/Troops** is genuinely small: the player's own army has exactly 4 troop "lines" (each a T1–T11 tier progression), not a branching class system, see the table below for confirmation that Infantry/Lancer/Marksman-style class splits don't exist in this game's actual data.
 </Info>
 
 ## Full entity catalog (830 entries)
 
-The source dossier ships this catalog as an interactive, client-side search tool (a search box filtering on ID/name/category, plus a domain dropdown, rendering up to the first 300 matches at a time). That live widget isn't reproduced here. Instead, the full 830-row dataset — the same `ent-data` JSON data island backing the dossier's search tool — is broken out below as one Markdown table per domain, in full, since even the largest individual domain (Buildings, 299 rows) is far more readable as a static table than the combined set would be.
+The source dossier ships this catalog as an interactive, client-side search tool (a search box filtering on ID/name/category, plus a domain dropdown, rendering up to the first 300 matches at a time). That live widget isn't reproduced here. Instead, the full 830-row dataset, the same `ent-data` JSON data island backing the dossier's search tool, is broken out below as one Markdown table per domain, in full, since even the largest individual domain (Buildings, 299 rows) is far more readable as a static table than the combined set would be.
 
-Each row carries four fields: **ID** (the numeric value used on the wire or in data tables), **Internal name** (the Lua enum member or internal string), **Display name** (the English locale string, where a lookup path exists — `—` where none was found), and **Category** (the specific enum table or data-table column the row traces back to).
+Each row carries four fields: **ID** (the numeric value used on the wire or in data tables), **Internal name** (the Lua enum member or internal string), **Display name** (the English locale string, where a lookup path exists, `-` where none was found), and **Category** (the specific enum table or data-table column the row traces back to).
 
 ### Buildings (299)
 
@@ -32,84 +32,84 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 
 | ID | Internal name | Display name | Category |
 |---|---|---|---|
-| `10100000` | `FUN_BUILD_MAIN` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `401000` | `FUN_BUILD_BUSINESS_CENTER` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `10100000` | `FUN_BUILD_MAIN` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `401000` | `FUN_BUILD_BUSINESS_CENTER` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
 | `10123000` | `FUN_BUILD_SCIENE` | 1st Tech Center | legacy/prototype building (FUN_BUILD/APS_BUILD) |
 | `10106000` | `FUN_BUILD_SMITHY` | Alliance Support Hub | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `409000` | `FUN_BUILD_CONDOMINIUM` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `411000` | `FUN_BUILD_HOSPITAL` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `412000` | `FUN_BUILD_STONE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `413000` | `FUN_BUILD_OIL` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `409000` | `FUN_BUILD_CONDOMINIUM` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `411000` | `FUN_BUILD_HOSPITAL` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `412000` | `FUN_BUILD_STONE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `413000` | `FUN_BUILD_OIL` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
 | `10113000` | `FUN_BUILD_RADAR_CENTER` | Recon Plane | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `418000` | `FUN_BUILD_ARROW_TOWER` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `423000` | `FUN_BUILD_CAR_BARRACK` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `424000` | `FUN_BUILD_INFANTRY_BARRACK` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `425000` | `FUN_BUILD_AIRCRAFT_BARRACK` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `427000` | `FUN_BUILD_TRAINFIELD_1` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `793000` | `FUN_BUILD_TRAINFIELD_2` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `794000` | `FUN_BUILD_TRAINFIELD_3` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `795000` | `FUN_BUILD_TRAINFIELD_4` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `432000` | `FUN_BUILD_WATER` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `435000` | `FUN_BUILD_MARKET` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `418000` | `FUN_BUILD_ARROW_TOWER` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `423000` | `FUN_BUILD_CAR_BARRACK` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `424000` | `FUN_BUILD_INFANTRY_BARRACK` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `425000` | `FUN_BUILD_AIRCRAFT_BARRACK` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `427000` | `FUN_BUILD_TRAINFIELD_1` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `793000` | `FUN_BUILD_TRAINFIELD_2` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `794000` | `FUN_BUILD_TRAINFIELD_3` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `795000` | `FUN_BUILD_TRAINFIELD_4` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `432000` | `FUN_BUILD_WATER` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `435000` | `FUN_BUILD_MARKET` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
 | `436000` | `FUN_BUILD_ROAD` | Road | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `437000` | `FUN_BUILD_ELECTRICITY_STORAGE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `438000` | `FUN_BUILD_WATER_STORAGE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `439000` | `FUN_BUILD_OIL_STORAGE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `441000` | `FUN_BUILD_IRON_STORAGE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `444000` | `FUN_BUILD_WIND_TURBINE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `447000` | `FUN_BUILD_SOLAR_POWER_STATION` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `477000` | `FUN_BUILD_DRONE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `700000` | `FUN_BUILD_VILLA` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `701000` | `APS_BUILD_FARM` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `702000` | `APS_BUILD_FARM_FIELD` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `703000` | `APS_BUILD_PASTURE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `704000` | `APS_BUILD_PASTURE_FIELD` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `705000` | `FUN_BUILD_FACTORY_STONE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `706000` | `FUN_BUILD_METALLURGY` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `707000` | `FUN_BUILD_FOOD` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `708000` | `FUN_BUILD_OIL_REFINERY` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `709000` | `FUN_BUILD_INTEGRATED_FACTORY` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `710000` | `FUN_BUILD_TRADING_CENTER` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `711000` | `FUN_BUILD_FOODSHOP` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `712000` | `FUN_BUILD_PRINT_FACTORY` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `713000` | `FUN_BUILD_INFORMATION_CENTER` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `714000` | `FUN_BUILD_COLD_STORAGE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `715000` | `FUN_BUILD_COMPREHENSIVE_STORAGE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `716000` | `FUN_BUILD_DEFENCE_CENTER` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `717000` | `FUN_BUILD_FOOD_1` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `718000` | `FUN_BUILD_FOOD_2` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `719000` | `APS_BUILD_PASTURE_OSTRICH` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `720000` | `APS_BUILD_PASTURE_CATTLE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `721000` | `APS_BUILD_PASTURE_SANDWORM` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `722000` | `APS_BUILD_PUB` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `429000` | `FUN_BUILD_FORGE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `431000` | `FUN_BUILD_ELECTRICITY` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `446000` | `FUN_BUILD_HONOR_HALL` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `448000` | `FUN_BUILD_BUILDING_CENTER` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `483000` | `FUN_BUILD_OFFICER` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `445000` | `FUN_BUILD_RECHARGE_GARAGE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `449000` | `FUN_BUILD_DOME` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `437000` | `FUN_BUILD_ELECTRICITY_STORAGE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `438000` | `FUN_BUILD_WATER_STORAGE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `439000` | `FUN_BUILD_OIL_STORAGE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `441000` | `FUN_BUILD_IRON_STORAGE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `444000` | `FUN_BUILD_WIND_TURBINE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `447000` | `FUN_BUILD_SOLAR_POWER_STATION` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `477000` | `FUN_BUILD_DRONE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `700000` | `FUN_BUILD_VILLA` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `701000` | `APS_BUILD_FARM` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `702000` | `APS_BUILD_FARM_FIELD` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `703000` | `APS_BUILD_PASTURE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `704000` | `APS_BUILD_PASTURE_FIELD` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `705000` | `FUN_BUILD_FACTORY_STONE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `706000` | `FUN_BUILD_METALLURGY` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `707000` | `FUN_BUILD_FOOD` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `708000` | `FUN_BUILD_OIL_REFINERY` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `709000` | `FUN_BUILD_INTEGRATED_FACTORY` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `710000` | `FUN_BUILD_TRADING_CENTER` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `711000` | `FUN_BUILD_FOODSHOP` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `712000` | `FUN_BUILD_PRINT_FACTORY` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `713000` | `FUN_BUILD_INFORMATION_CENTER` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `714000` | `FUN_BUILD_COLD_STORAGE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `715000` | `FUN_BUILD_COMPREHENSIVE_STORAGE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `716000` | `FUN_BUILD_DEFENCE_CENTER` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `717000` | `FUN_BUILD_FOOD_1` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `718000` | `FUN_BUILD_FOOD_2` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `719000` | `APS_BUILD_PASTURE_OSTRICH` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `720000` | `APS_BUILD_PASTURE_CATTLE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `721000` | `APS_BUILD_PASTURE_SANDWORM` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `722000` | `APS_BUILD_PUB` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `429000` | `FUN_BUILD_FORGE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `431000` | `FUN_BUILD_ELECTRICITY` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `446000` | `FUN_BUILD_HONOR_HALL` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `448000` | `FUN_BUILD_BUILDING_CENTER` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `483000` | `FUN_BUILD_OFFICER` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `445000` | `FUN_BUILD_RECHARGE_GARAGE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `449000` | `FUN_BUILD_DOME` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
 | `10106000` | `FUND_BUILD_ALLIANCE_CENTER` | Alliance Support Hub | alliance territory building |
-| `791000` | `APS_BUILD_WORMHOLE_MAIN` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `792000` | `APS_BUILD_WORMHOLE_SUB` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `792001` | `APS_BUILD_WORMHOLE_EXPORT` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `796000` | `FUN_BUILD_TEMP_WIND_POWER_PLANT` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `723000` | `FUN_BUILD_PVE_FACTORY` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `724000` | `FUN_BUILD_GROCERY_STORE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `725000` | `FUN_BUILD_SCIENCE_PART` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `797000` | `FUN_BUILD_BARRACKS` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `726000` | `FUN_BUILD_POLICE_STATION` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `727000` | `FUN_BUILD_MARS_CAMP` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `728000` | `FUN_BUILD_LIBRARY` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `729000` | `FUN_BUILD_KONBINI` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `730000` | `FUN_BUILD_GREEN_CRYSTAL` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `731000` | `FUN_BUILD_HERO_MONUMENT` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `732000` | `FUN_BUILD_HERO_BOUNTY` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `733000` | `FUN_BUILD_HERO_OFFICE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `734000` | `FUN_BUILD_HERO_BAR` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `791000` | `APS_BUILD_WORMHOLE_MAIN` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `792000` | `APS_BUILD_WORMHOLE_SUB` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `792001` | `APS_BUILD_WORMHOLE_EXPORT` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `796000` | `FUN_BUILD_TEMP_WIND_POWER_PLANT` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `723000` | `FUN_BUILD_PVE_FACTORY` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `724000` | `FUN_BUILD_GROCERY_STORE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `725000` | `FUN_BUILD_SCIENCE_PART` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `797000` | `FUN_BUILD_BARRACKS` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `726000` | `FUN_BUILD_POLICE_STATION` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `727000` | `FUN_BUILD_MARS_CAMP` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `728000` | `FUN_BUILD_LIBRARY` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `729000` | `FUN_BUILD_KONBINI` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `730000` | `FUN_BUILD_GREEN_CRYSTAL` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `731000` | `FUN_BUILD_HERO_MONUMENT` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `732000` | `FUN_BUILD_HERO_BOUNTY` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `733000` | `FUN_BUILD_HERO_OFFICE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `734000` | `FUN_BUILD_HERO_BAR` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
 | `735000` | `WORM_HOLE_CROSS` | Headquarters | season event building |
-| `736000` | `FUN_BUILD_OUT_WOOD` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
-| `737000` | `FUN_BUILD_OUT_STONE` | — | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `736000` | `FUN_BUILD_OUT_WOOD` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
+| `737000` | `FUN_BUILD_OUT_STONE` | - | legacy/prototype building (FUN_BUILD/APS_BUILD) |
 | `741000` | `SEASON_DESERT_RESISTANCE_1` | Virus Research Institute I | season event building |
 | `742000` | `SEASON_DESERT_MAX_DESERT_1` | Land Planning Bureau | season event building |
 | `743000` | `SEASON_DESERT_MAX_FORMATION_SIZE_1` | Destruction Institute | season event building |
@@ -118,73 +118,73 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 | `746000` | `SEASON_DESERT_RESISTANCE_2` | Virus Research Institute II | season event building |
 | `747000` | `SEASON_DESERT_RESISTANCE_3` | Virus Research Institute III | season event building |
 | `748000` | `SEASON_DESERT_RESISTANCE_4` | Virus Research Institute IV | season event building |
-| `749000` | `SEASON_DESERT_MAX_DESERT_2` | — | season event building |
-| `750000` | `SEASON_DESERT_MAX_FORMATION_SIZE_2` | — | season event building |
-| `751000` | `SEASON_DESERT_ARMY_ATTACK_2` | — | season event building |
-| `752000` | `SEASON_DESERT_ARMY_DEFEND_2` | — | season event building |
+| `749000` | `SEASON_DESERT_MAX_DESERT_2` | - | season event building |
+| `750000` | `SEASON_DESERT_MAX_FORMATION_SIZE_2` | - | season event building |
+| `751000` | `SEASON_DESERT_ARMY_ATTACK_2` | - | season event building |
+| `752000` | `SEASON_DESERT_ARMY_DEFEND_2` | - | season event building |
 | `753000` | `SEASON_DESERT_BUILD_DRONE_1` | Desert Hospital | season event building |
-| `754000` | `SEASON_DESERT_BUILD_DRONE_2` | — | season event building |
-| `755000` | `SEASON_DESERT_NEW_MAX_DESERT_1` | — | season event building |
-| `756000` | `SEASON_DESERT_NEW_MAX_DESERT_2` | — | season event building |
+| `754000` | `SEASON_DESERT_BUILD_DRONE_2` | - | season event building |
+| `755000` | `SEASON_DESERT_NEW_MAX_DESERT_1` | - | season event building |
+| `756000` | `SEASON_DESERT_NEW_MAX_DESERT_2` | - | season event building |
 | `757000` | `EDEN_WORM_HOLE_1` | Missile Vehicle Base | season event building |
-| `758000` | `EDEN_WORM_HOLE_2` | — | season event building |
-| `759000` | `EDEN_WORM_HOLE_3` | — | season event building |
-| `10000` | `ALLIANCE_RES_1` | — | alliance territory building |
-| `11000` | `ALLIANCE_RES_2` | — | alliance territory building |
-| `12000` | `ALLIANCE_RES_3` | — | alliance territory building |
-| `20000` | `ALLIANCE_RES_4` | — | alliance territory building |
-| `21000` | `ALLIANCE_RES_5` | — | alliance territory building |
-| `22000` | `ALLIANCE_RES_6` | — | alliance territory building |
-| `30000` | `ALLIANCE_RES_7` | — | alliance territory building |
-| `31000` | `ALLIANCE_RES_8` | — | alliance territory building |
-| `32000` | `ALLIANCE_RES_9` | — | alliance territory building |
+| `758000` | `EDEN_WORM_HOLE_2` | - | season event building |
+| `759000` | `EDEN_WORM_HOLE_3` | - | season event building |
+| `10000` | `ALLIANCE_RES_1` | - | alliance territory building |
+| `11000` | `ALLIANCE_RES_2` | - | alliance territory building |
+| `12000` | `ALLIANCE_RES_3` | - | alliance territory building |
+| `20000` | `ALLIANCE_RES_4` | - | alliance territory building |
+| `21000` | `ALLIANCE_RES_5` | - | alliance territory building |
+| `22000` | `ALLIANCE_RES_6` | - | alliance territory building |
+| `30000` | `ALLIANCE_RES_7` | - | alliance territory building |
+| `31000` | `ALLIANCE_RES_8` | - | alliance territory building |
+| `32000` | `ALLIANCE_RES_9` | - | alliance territory building |
 | `10218000` | `SEASON_CAREER_BUILD` | Profession Hall | season event building |
-| `80000` | `ALLIANCE_FLAG_BUILD1` | — | alliance territory building |
-| `81000` | `ALLIANCE_FLAG_BUILD2` | — | alliance territory building |
-| `82000` | `ALLIANCE_FLAG_BUILD3` | — | alliance territory building |
-| `83000` | `ALLIANCE_FLAG_BUILD4` | — | alliance territory building |
-| `84000` | `ALLIANCE_FLAG_BUILD5` | — | alliance territory building |
-| `200000` | `SEASON_STOVE_CENTER` | — | season event building |
-| `201000` | `SEASON_STOVE_CENTER_CARRIER` | — | season event building |
-| `202000` | `SEASON_ARES_MISSILE` | — | season event building |
-| `202001` | `SEASON_ARES_MISSILE_GLOBAL` | — | season event building |
-| `202002` | `SEASON_ARES_MISSILE_S4` | — | season event building |
-| `202003` | `CAMP_SEASON_MISSILE` | — | season event building |
-| `203000` | `GODDESS_MUMMY_TARGET` | — | season event building |
-| `203001` | `CAMP_GODDESS_MUMMY_TARGET` | — | season event building |
-| `500001` | `CAMP_TeslaCoil` | — | season event building |
-| `500002` | `CAMP_Reinforcement` | — | season event building |
-| `300000` | `SEASON_MUMMY_CENTER` | — | season event building |
-| `301000` | `SEASON_MUMMY_CENTER_CARRIER` | — | season event building |
-| `400000` | `SEASON_POWER_CENTER` | — | season event building |
-| `401000` | `SEASON_POWER_CENTER_CARRIER` | — | season event building |
-| `402000` | `SEASON_POWER_CENTER_PLUGIN1` | — | season event building |
-| `403000` | `SEASON_POWER_CENTER_PLUGIN2` | — | season event building |
-| `404000` | `SEASON_POWER_CENTER_PLUGIN3` | — | season event building |
-| `302000` | `SEASON_MUMMY_CENTER_PLUGIN_JS` | — | season event building |
-| `303000` | `SEASON_MUMMY_CENTER_PLUGIN_KTT` | — | season event building |
-| `304000` | `SEASON_MUMMY_CENTER_PLUGIN_YLC` | — | season event building |
-| `305000` | `SEASON_MUMMY_CENTER_PLUGIN_SB` | — | season event building |
-| `41000` | `ALLIANCE_CENTER_1` | — | alliance territory building |
-| `42000` | `ALLIANCE_CENTER_2` | — | alliance territory building |
-| `43000` | `ALLIANCE_CENTER_3` | — | alliance territory building |
-| `44000` | `ALLIANCE_CENTER_4` | — | alliance territory building |
-| `45000` | `ALLIANCE_FRONT_BUILD_1` | — | alliance territory building |
-| `46000` | `ALLIANCE_FRONT_BUILD_2` | — | alliance territory building |
-| `47000` | `ALLIANCE_FRONT_BUILD_3` | — | alliance territory building |
-| `50000` | `ALLIANCE_ACT_RES_1` | — | alliance territory building |
-| `51000` | `ALLIANCE_ACT_RES_2` | — | alliance territory building |
-| `52000` | `ALLIANCE_ACT_RES_3` | — | alliance territory building |
-| `60000` | `EDEN_ALLIANCE_ACT_RES_1` | — | alliance territory building |
-| `61000` | `EDEN_ALLIANCE_ACT_RES_2` | — | alliance territory building |
-| `62000` | `EDEN_ALLIANCE_ACT_RES_3` | — | alliance territory building |
-| `91003` | `LW_ALLIANCE_WAR_CAMP_2` | — | alliance territory building |
+| `80000` | `ALLIANCE_FLAG_BUILD1` | - | alliance territory building |
+| `81000` | `ALLIANCE_FLAG_BUILD2` | - | alliance territory building |
+| `82000` | `ALLIANCE_FLAG_BUILD3` | - | alliance territory building |
+| `83000` | `ALLIANCE_FLAG_BUILD4` | - | alliance territory building |
+| `84000` | `ALLIANCE_FLAG_BUILD5` | - | alliance territory building |
+| `200000` | `SEASON_STOVE_CENTER` | - | season event building |
+| `201000` | `SEASON_STOVE_CENTER_CARRIER` | - | season event building |
+| `202000` | `SEASON_ARES_MISSILE` | - | season event building |
+| `202001` | `SEASON_ARES_MISSILE_GLOBAL` | - | season event building |
+| `202002` | `SEASON_ARES_MISSILE_S4` | - | season event building |
+| `202003` | `CAMP_SEASON_MISSILE` | - | season event building |
+| `203000` | `GODDESS_MUMMY_TARGET` | - | season event building |
+| `203001` | `CAMP_GODDESS_MUMMY_TARGET` | - | season event building |
+| `500001` | `CAMP_TeslaCoil` | - | season event building |
+| `500002` | `CAMP_Reinforcement` | - | season event building |
+| `300000` | `SEASON_MUMMY_CENTER` | - | season event building |
+| `301000` | `SEASON_MUMMY_CENTER_CARRIER` | - | season event building |
+| `400000` | `SEASON_POWER_CENTER` | - | season event building |
+| `401000` | `SEASON_POWER_CENTER_CARRIER` | - | season event building |
+| `402000` | `SEASON_POWER_CENTER_PLUGIN1` | - | season event building |
+| `403000` | `SEASON_POWER_CENTER_PLUGIN2` | - | season event building |
+| `404000` | `SEASON_POWER_CENTER_PLUGIN3` | - | season event building |
+| `302000` | `SEASON_MUMMY_CENTER_PLUGIN_JS` | - | season event building |
+| `303000` | `SEASON_MUMMY_CENTER_PLUGIN_KTT` | - | season event building |
+| `304000` | `SEASON_MUMMY_CENTER_PLUGIN_YLC` | - | season event building |
+| `305000` | `SEASON_MUMMY_CENTER_PLUGIN_SB` | - | season event building |
+| `41000` | `ALLIANCE_CENTER_1` | - | alliance territory building |
+| `42000` | `ALLIANCE_CENTER_2` | - | alliance territory building |
+| `43000` | `ALLIANCE_CENTER_3` | - | alliance territory building |
+| `44000` | `ALLIANCE_CENTER_4` | - | alliance territory building |
+| `45000` | `ALLIANCE_FRONT_BUILD_1` | - | alliance territory building |
+| `46000` | `ALLIANCE_FRONT_BUILD_2` | - | alliance territory building |
+| `47000` | `ALLIANCE_FRONT_BUILD_3` | - | alliance territory building |
+| `50000` | `ALLIANCE_ACT_RES_1` | - | alliance territory building |
+| `51000` | `ALLIANCE_ACT_RES_2` | - | alliance territory building |
+| `52000` | `ALLIANCE_ACT_RES_3` | - | alliance territory building |
+| `60000` | `EDEN_ALLIANCE_ACT_RES_1` | - | alliance territory building |
+| `61000` | `EDEN_ALLIANCE_ACT_RES_2` | - | alliance territory building |
+| `62000` | `EDEN_ALLIANCE_ACT_RES_3` | - | alliance territory building |
+| `91003` | `LW_ALLIANCE_WAR_CAMP_2` | - | alliance territory building |
 | `10102000` | `LW_BUILD_LIBRARY` | Shelter | core city building |
 | `10201000` | `LW_BUILD_FARMLAND` | Farmland | core city building |
 | `10202000` | `LW_BUILD_QUARRY` | Iron Mine | core city building |
 | `10203000` | `LW_BUILD_BAKERY` | Food Warehouse | core city building |
-| `10204000` | `LW_BUILD_IRON_MILL` | — | core city building |
-| `10205000` | `LW_BUILD_TRADING_POST` | — | core city building |
+| `10204000` | `LW_BUILD_IRON_MILL` | - | core city building |
+| `10205000` | `LW_BUILD_TRADING_POST` | - | core city building |
 | `10206000` | `LW_BUILD_STEEL_MILL` | Iron Warehouse | core city building |
 | `10207000` | `LW_BUILD_GOLD_MILL` | Gold Mine | core city building |
 | `10105000` | `LW_BUILD_PARKINGLOT` | 1st Squad | core city building |
@@ -194,7 +194,7 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 | `10114000` | `Lw_BUILD_BATTLE_FEATURE_ENTRY` | Radar Vehicle | core city building |
 | `10103000` | `LW_BUILD_MILITARY_CAMP` | Barracks | core city building |
 | `10104000` | `LW_BUILD_ARMY_YARD` | Drill Ground | core city building |
-| `10115000` | `LW_BUILD_BATTLE_HANGUP_REWARD` | (no locale display name; "Armed Truck" was an earlier, corrected guess — see [Live validation against production](/live-validation) for what "Armed Truck" actually is) | core city building |
+| `10115000` | `LW_BUILD_BATTLE_HANGUP_REWARD` | (no locale display name; "Armed Truck" was an earlier, corrected guess, see [Live validation against production](/live-validation) for what "Armed Truck" actually is) | core city building |
 | `10107000` | `LW_BUILD_GATE` | Wall | core city building |
 | `10101000` | `LW_BUILD_SMITH_SHOP` | Gear Factory | core city building |
 | `10120000` | `LW_BUILD_PUB` | Tavern | core city building |
@@ -209,13 +209,13 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 | `10126000` | `LW_FIRST_PAY` | Rocket Shadow | core city building |
 | `10127000` | `LW_BUILD_RAILWAY_STATION` | Trade Station | core city building |
 | `10128000` | `LW_GIFT_PACKAGE` | Rocket Shadow | core city building |
-| `10138000` | `LW_BUILD_TRUCK_STATION_1` | (no locale display name found; NOT "Armed Truck" — see [Live validation against production](/live-validation) for what "Armed Truck" actually is; unconfirmed valid production-line pairing, kept speculatively) | core city building |
+| `10138000` | `LW_BUILD_TRUCK_STATION_1` | (no locale display name found; NOT "Armed Truck", see [Live validation against production](/live-validation) for what "Armed Truck" actually is; unconfirmed valid production-line pairing, kept speculatively) | core city building |
 | `10139000` | `LW_BUILD_TRUCK_STATION_2` | (no locale display name found; see `10138000`'s row) | core city building |
 | `10140000` | `LW_BUILD_TRUCK_STATION_3` | (no locale display name found; see `10138000`'s row) | core city building |
 | `10141000` | `LW_BUILD_TRUCK_STATION_4` | (no locale display name found; see `10138000`'s row) | core city building |
 | `10208000` | `LW_COIN_STORAGE` | Coin Vault | core city building |
-| `10302000` | `LW_STRENGTHEN_FACTORY` | — | core city building |
-| `10303000` | `LW_HERO_STRATEGY_HALL` | — | core city building |
+| `10302000` | `LW_STRENGTHEN_FACTORY` | - | core city building |
+| `10303000` | `LW_HERO_STRATEGY_HALL` | - | core city building |
 | `10209000` | `LW_BUILD_SMELTERY` | Smelter | core city building |
 | `10210000` | `LW_BUILD_TRAINING_CENTER` | Training Base | core city building |
 | `10211000` | `LW_BUILD_MATERIALS_WORKERSHOP` | Material Workshop | core city building |
@@ -325,12 +325,12 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 | `10227000` | `LW_T11_Research` | Armament Institute | season event building |
 | `10230000` | `LW_CIVILIZATION_SPARK` | Freedom Vanguard | season event building |
 | `10261000` | `LW_BUILD_SEASON_TOWER` | Global Expedition Base | season event building |
-| `10000` | `DragonEmptyBuild` | — | dragon (cross-server) building |
-| `10010` | `DragonWarBuild` | — | dragon (cross-server) building |
-| `10020` | `DragonCenterBuild` | — | dragon (cross-server) building |
-| `10030` | `DragonAllianceFlagSelf` | — | dragon (cross-server) building |
-| `10040` | `DragonAllianceFlagOther` | — | dragon (cross-server) building |
-| `10050` | `DragonHospitalBuild` | — | dragon (cross-server) building |
+| `10000` | `DragonEmptyBuild` | - | dragon (cross-server) building |
+| `10010` | `DragonWarBuild` | - | dragon (cross-server) building |
+| `10020` | `DragonCenterBuild` | - | dragon (cross-server) building |
+| `10030` | `DragonAllianceFlagSelf` | - | dragon (cross-server) building |
+| `10040` | `DragonAllianceFlagOther` | - | dragon (cross-server) building |
+| `10050` | `DragonHospitalBuild` | - | dragon (cross-server) building |
 
 </Accordion>
 
@@ -340,175 +340,175 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 
 | ID | Internal name | Display name | Category |
 |---|---|---|---|
-| `1` | `ResMetal` | — | LWWorldMonsterType (world-map category) |
-| `2` | `ResFood` | — | LWWorldMonsterType (world-map category) |
-| `3` | `Boss` | — | LWWorldMonsterType (world-map category) |
-| `4` | `City` | — | LWWorldMonsterType (world-map category) |
-| `5` | `ResGold` | — | LWWorldMonsterType (world-map category) |
-| `6` | `Radar` | — | LWWorldMonsterType (world-map category) |
-| `7` | `MonsterInvade` | — | LWWorldMonsterType (world-map category) |
-| `8` | `RunningMonster` | — | LWWorldMonsterType (world-map category) |
-| `9` | `ResObsidian` | — | LWWorldMonsterType (world-map category) |
-| `10` | `ResFlint` | — | LWWorldMonsterType (world-map category) |
-| `13` | `FlowerCar` | — | LWWorldMonsterType (world-map category) |
-| `14` | `S4Tank` | — | LWWorldMonsterType (world-map category) |
-| `15` | `S4Airplane` | — | LWWorldMonsterType (world-map category) |
-| `16` | `S4Missile` | — | LWWorldMonsterType (world-map category) |
-| `17` | `S4Boss` | — | LWWorldMonsterType (world-map category) |
-| `18` | `S4TankBN` | — | LWWorldMonsterType (world-map category) |
-| `19` | `S4AirplaneBN` | — | LWWorldMonsterType (world-map category) |
-| `20` | `S4MissileBN` | — | LWWorldMonsterType (world-map category) |
-| `21` | `S4BossBN` | — | LWWorldMonsterType (world-map category) |
-| `22` | `S4RunningBoss` | — | LWWorldMonsterType (world-map category) |
-| `1001` | `Lockhart` | — | LWWorldMonsterType (world-map category) |
-| `0` | `Normal` | — | WorldMonsterSpecialType (special/event flavor) |
-| `5` | `LockHartOldS0` | — | WorldMonsterSpecialType (special/event flavor) |
-| `6` | `IndividualChallengeBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `7` | `AllyChallengeBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `8` | `AllyDrill` | — | WorldMonsterSpecialType (special/event flavor) |
-| `9` | `MonsterInvasion` | — | WorldMonsterSpecialType (special/event flavor) |
-| `10` | `MonsterInvasionBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `11` | `RunningMonster` | — | WorldMonsterSpecialType (special/event flavor) |
-| `13` | `GoldenBeetleBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `20` | `CityStrongholdPVE` | — | WorldMonsterSpecialType (special/event flavor) |
-| `21` | `CityStrongholdPVP` | — | WorldMonsterSpecialType (special/event flavor) |
-| `22` | `CityStrongholdBOSS` | — | WorldMonsterSpecialType (special/event flavor) |
-| `23` | `BerserkBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `27` | `InvasionBigBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `28` | `SmallSandWorm` | — | WorldMonsterSpecialType (special/event flavor) |
-| `29` | `BigSandWorm` | — | WorldMonsterSpecialType (special/event flavor) |
-| `30` | `ZoneMobilizationBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `31` | `SandFish` | — | WorldMonsterSpecialType (special/event flavor) |
-| `32` | `SuperRunningBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `33` | `Boss33` | — | WorldMonsterSpecialType (special/event flavor) |
-| `34` | `CityGhostBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `35` | `FlowerBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `36` | `S4RunningBoss` | — | WorldMonsterSpecialType (special/event flavor) |
-| `40` | `HugeSandWorm` | — | WorldMonsterSpecialType (special/event flavor) |
-| `42` | `AllyDrillHugeSandWorm` | — | WorldMonsterSpecialType (special/event flavor) |
-| `44` | `AL_CHALLENGE_BOSS_KIROV` | — | WorldMonsterSpecialType (special/event flavor) |
-| `45` | `ZombieRushAltered` | — | WorldMonsterSpecialType (special/event flavor) |
-| `46` | `S1RestCityDefendMonster` | — | WorldMonsterSpecialType (special/event flavor) |
-| `47` | `S1RestBloodyQueenMonster` | — | WorldMonsterSpecialType (special/event flavor) |
-| `48` | `S1RestBloodyQueenGunner` | — | WorldMonsterSpecialType (special/event flavor) |
-| `49` | `S1RestBloodyQueenButcher` | — | WorldMonsterSpecialType (special/event flavor) |
-| `50` | `AllyDrillCow` | — | WorldMonsterSpecialType (special/event flavor) |
-| `51` | `AllyDrillRoadHog` | — | WorldMonsterSpecialType (special/event flavor) |
-| `52` | `ALLIANCE_BOSS_S0` | — | WorldMonsterSpecialType (special/event flavor) |
-| `53` | `Crocodile` | — | WorldMonsterSpecialType (special/event flavor) |
-| `100` | `LockHartS1` | — | WorldMonsterSpecialType (special/event flavor) |
-| `101` | `LockHartNewS0` | — | WorldMonsterSpecialType (special/event flavor) |
-| `102` | `LockHartS2` | — | WorldMonsterSpecialType (special/event flavor) |
-| `103` | `LockHartS3` | — | WorldMonsterSpecialType (special/event flavor) |
-| `104` | `LockHartS4` | — | WorldMonsterSpecialType (special/event flavor) |
-| `105` | `LockHartS5` | — | WorldMonsterSpecialType (special/event flavor) |
-| `106` | `LockHartS6` | — | WorldMonsterSpecialType (special/event flavor) |
+| `1` | `ResMetal` | - | LWWorldMonsterType (world-map category) |
+| `2` | `ResFood` | - | LWWorldMonsterType (world-map category) |
+| `3` | `Boss` | - | LWWorldMonsterType (world-map category) |
+| `4` | `City` | - | LWWorldMonsterType (world-map category) |
+| `5` | `ResGold` | - | LWWorldMonsterType (world-map category) |
+| `6` | `Radar` | - | LWWorldMonsterType (world-map category) |
+| `7` | `MonsterInvade` | - | LWWorldMonsterType (world-map category) |
+| `8` | `RunningMonster` | - | LWWorldMonsterType (world-map category) |
+| `9` | `ResObsidian` | - | LWWorldMonsterType (world-map category) |
+| `10` | `ResFlint` | - | LWWorldMonsterType (world-map category) |
+| `13` | `FlowerCar` | - | LWWorldMonsterType (world-map category) |
+| `14` | `S4Tank` | - | LWWorldMonsterType (world-map category) |
+| `15` | `S4Airplane` | - | LWWorldMonsterType (world-map category) |
+| `16` | `S4Missile` | - | LWWorldMonsterType (world-map category) |
+| `17` | `S4Boss` | - | LWWorldMonsterType (world-map category) |
+| `18` | `S4TankBN` | - | LWWorldMonsterType (world-map category) |
+| `19` | `S4AirplaneBN` | - | LWWorldMonsterType (world-map category) |
+| `20` | `S4MissileBN` | - | LWWorldMonsterType (world-map category) |
+| `21` | `S4BossBN` | - | LWWorldMonsterType (world-map category) |
+| `22` | `S4RunningBoss` | - | LWWorldMonsterType (world-map category) |
+| `1001` | `Lockhart` | - | LWWorldMonsterType (world-map category) |
+| `0` | `Normal` | - | WorldMonsterSpecialType (special/event flavor) |
+| `5` | `LockHartOldS0` | - | WorldMonsterSpecialType (special/event flavor) |
+| `6` | `IndividualChallengeBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `7` | `AllyChallengeBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `8` | `AllyDrill` | - | WorldMonsterSpecialType (special/event flavor) |
+| `9` | `MonsterInvasion` | - | WorldMonsterSpecialType (special/event flavor) |
+| `10` | `MonsterInvasionBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `11` | `RunningMonster` | - | WorldMonsterSpecialType (special/event flavor) |
+| `13` | `GoldenBeetleBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `20` | `CityStrongholdPVE` | - | WorldMonsterSpecialType (special/event flavor) |
+| `21` | `CityStrongholdPVP` | - | WorldMonsterSpecialType (special/event flavor) |
+| `22` | `CityStrongholdBOSS` | - | WorldMonsterSpecialType (special/event flavor) |
+| `23` | `BerserkBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `27` | `InvasionBigBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `28` | `SmallSandWorm` | - | WorldMonsterSpecialType (special/event flavor) |
+| `29` | `BigSandWorm` | - | WorldMonsterSpecialType (special/event flavor) |
+| `30` | `ZoneMobilizationBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `31` | `SandFish` | - | WorldMonsterSpecialType (special/event flavor) |
+| `32` | `SuperRunningBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `33` | `Boss33` | - | WorldMonsterSpecialType (special/event flavor) |
+| `34` | `CityGhostBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `35` | `FlowerBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `36` | `S4RunningBoss` | - | WorldMonsterSpecialType (special/event flavor) |
+| `40` | `HugeSandWorm` | - | WorldMonsterSpecialType (special/event flavor) |
+| `42` | `AllyDrillHugeSandWorm` | - | WorldMonsterSpecialType (special/event flavor) |
+| `44` | `AL_CHALLENGE_BOSS_KIROV` | - | WorldMonsterSpecialType (special/event flavor) |
+| `45` | `ZombieRushAltered` | - | WorldMonsterSpecialType (special/event flavor) |
+| `46` | `S1RestCityDefendMonster` | - | WorldMonsterSpecialType (special/event flavor) |
+| `47` | `S1RestBloodyQueenMonster` | - | WorldMonsterSpecialType (special/event flavor) |
+| `48` | `S1RestBloodyQueenGunner` | - | WorldMonsterSpecialType (special/event flavor) |
+| `49` | `S1RestBloodyQueenButcher` | - | WorldMonsterSpecialType (special/event flavor) |
+| `50` | `AllyDrillCow` | - | WorldMonsterSpecialType (special/event flavor) |
+| `51` | `AllyDrillRoadHog` | - | WorldMonsterSpecialType (special/event flavor) |
+| `52` | `ALLIANCE_BOSS_S0` | - | WorldMonsterSpecialType (special/event flavor) |
+| `53` | `Crocodile` | - | WorldMonsterSpecialType (special/event flavor) |
+| `100` | `LockHartS1` | - | WorldMonsterSpecialType (special/event flavor) |
+| `101` | `LockHartNewS0` | - | WorldMonsterSpecialType (special/event flavor) |
+| `102` | `LockHartS2` | - | WorldMonsterSpecialType (special/event flavor) |
+| `103` | `LockHartS3` | - | WorldMonsterSpecialType (special/event flavor) |
+| `104` | `LockHartS4` | - | WorldMonsterSpecialType (special/event flavor) |
+| `105` | `LockHartS5` | - | WorldMonsterSpecialType (special/event flavor) |
+| `106` | `LockHartS6` | - | WorldMonsterSpecialType (special/event flavor) |
 | `9` | `world_monster_boss_big` | Doom Elites are strong combat units of the Doom Legion, requiring multiple squads to defeat them. | lw_world_monster kind: Boss |
-| `109` | `world_monster_dog_radar` | — | lw_world_monster kind: Boss |
-| `140` | `world_monster_redMason` | — | lw_world_monster kind: Boss |
-| `170` | `world_monster_Monica` | — | lw_world_monster kind: Boss |
-| `200` | `world_monster_Violet` | — | lw_world_monster kind: Boss |
-| `230` | `wxy_luoha_tanke` | — | lw_world_monster kind: Boss |
-| `260` | `zyf_S4_feiji_datouxiang` | — | lw_world_monster kind: Boss |
-| `290` | `zyf_S5_zaiju_datouxiang` | — | lw_world_monster kind: Boss |
-| `320` | `zyf_S6luoha_zaiju_touxiang` | — | lw_world_monster kind: Boss |
+| `109` | `world_monster_dog_radar` | - | lw_world_monster kind: Boss |
+| `140` | `world_monster_redMason` | - | lw_world_monster kind: Boss |
+| `170` | `world_monster_Monica` | - | lw_world_monster kind: Boss |
+| `200` | `world_monster_Violet` | - | lw_world_monster kind: Boss |
+| `230` | `wxy_luoha_tanke` | - | lw_world_monster kind: Boss |
+| `260` | `zyf_S4_feiji_datouxiang` | - | lw_world_monster kind: Boss |
+| `290` | `zyf_S5_zaiju_datouxiang` | - | lw_world_monster kind: Boss |
+| `320` | `zyf_S6luoha_zaiju_touxiang` | - | lw_world_monster kind: Boss |
 | `200101` | `world_monster_boss_big_S1` | Doom Elites are strong combat units of the Doom Legion, requiring multiple squads to defeat them. | lw_world_monster kind: Boss |
-| `201101` | `world_monster_boss_big_new_S1` | — | lw_world_monster kind: Boss |
+| `201101` | `world_monster_boss_big_new_S1` | - | lw_world_monster kind: Boss |
 | `201201` | `S1_stronghold_boss_tanke` | A biochemical weapon that can contaminate bases and land. Engaging it will lead to virus infection. It is advised to use an Aircraft squad for the attack | lw_world_monster kind: Boss |
-| `201301` | `S1_stronghold_boss_feiji` | — | lw_world_monster kind: Boss |
-| `201401` | `S1_stronghold_boss_daodan` | — | lw_world_monster kind: Boss |
+| `201301` | `S1_stronghold_boss_feiji` | - | lw_world_monster kind: Boss |
+| `201401` | `S1_stronghold_boss_daodan` | - | lw_world_monster kind: Boss |
 | `201501` | `world_monster_boss_big_new_S1_tank` | A biochemical weapon that can contaminate bases and land. Engaging it will lead to virus infection. It is advised to use an Aircraft squad for the attack | lw_world_monster kind: Boss |
-| `201601` | `world_monster_boss_big_new_S1_feiji` | — | lw_world_monster kind: Boss |
-| `201701` | `world_monster_boss_big_new_S1_daodan` | — | lw_world_monster kind: Boss |
-| `202101` | `A_Monster_S2_mengma_feiji` | — | lw_world_monster kind: Boss |
-| `202201` | `A_Monster_S2_mengma_tank` | — | lw_world_monster kind: Boss |
-| `202301` | `world_monster_boss_big_new_S2` | — | lw_world_monster kind: Boss |
-| `202401` | `A_Monster_S2_mengma_daodan` | — | lw_world_monster kind: Boss |
-| `203201` | `zyf_S3_bossjudian_datouxiang` | — | lw_world_monster kind: Boss |
-| `203301` | `mjc_S3_bossfeiji_datouxiang` | — | lw_world_monster kind: Boss |
-| `203401` | `mjc_S3_bossjudian_datouxiang` | — | lw_world_monster kind: Boss |
-| `403201` | `zyf_S4_wushi_datouxiang` | — | lw_world_monster kind: Boss |
-| `403301` | `zyf_S4_tiangou_datouxiang` | — | lw_world_monster kind: Boss |
-| `403401` | `zyf_S4_jiutun_datouxiang` | — | lw_world_monster kind: Boss |
-| `503101` | `zyf_S5_xiong_datouxiang` | — | lw_world_monster kind: Boss |
+| `201601` | `world_monster_boss_big_new_S1_feiji` | - | lw_world_monster kind: Boss |
+| `201701` | `world_monster_boss_big_new_S1_daodan` | - | lw_world_monster kind: Boss |
+| `202101` | `A_Monster_S2_mengma_feiji` | - | lw_world_monster kind: Boss |
+| `202201` | `A_Monster_S2_mengma_tank` | - | lw_world_monster kind: Boss |
+| `202301` | `world_monster_boss_big_new_S2` | - | lw_world_monster kind: Boss |
+| `202401` | `A_Monster_S2_mengma_daodan` | - | lw_world_monster kind: Boss |
+| `203201` | `zyf_S3_bossjudian_datouxiang` | - | lw_world_monster kind: Boss |
+| `203301` | `mjc_S3_bossfeiji_datouxiang` | - | lw_world_monster kind: Boss |
+| `203401` | `mjc_S3_bossjudian_datouxiang` | - | lw_world_monster kind: Boss |
+| `403201` | `zyf_S4_wushi_datouxiang` | - | lw_world_monster kind: Boss |
+| `403301` | `zyf_S4_tiangou_datouxiang` | - | lw_world_monster kind: Boss |
+| `403401` | `zyf_S4_jiutun_datouxiang` | - | lw_world_monster kind: Boss |
+| `503101` | `zyf_S5_xiong_datouxiang` | - | lw_world_monster kind: Boss |
 | `504101` | `zyf_S5_huangmotufu_datouxiang` | Before turning into a zombie, she was an infamous outlaw. Now, as a trusted enforcer of King Spade, she wreaks havoc across the wasteland | lw_world_monster kind: Boss |
-| `505101` | `zyf_S5_lieren_datouxiang` | — | lw_world_monster kind: Boss |
-| `506101` | `zyf_S5_quanshou_datouxiang` | — | lw_world_monster kind: Boss |
-| `1011101` | `zyf_sangshitiaozhan_tanke_icon` | — | lw_world_monster kind: Boss |
-| `1020001` | `hero_icon_Audie_Murphy` | — | lw_world_monster kind: Boss |
-| `1020101` | `mjc_S3_touxiang_jushachong` | — | lw_world_monster kind: Boss |
-| `1021001` | `lyk_lw_touxiang_montser` | — | lw_world_monster kind: Boss |
-| `1021002` | `lyk_lw_touxiang_montser_02` | — | lw_world_monster kind: Boss |
-| `1021003` | `lyk_lw_touxiang_montser_01` | — | lw_world_monster kind: Boss |
-| `1030091` | `world_monster_boss_godzilla` | — | lw_world_monster kind: Boss |
-| `1030201` | `ljq_S5_boss_niu01` | — | lw_world_monster kind: Boss |
-| `1030202` | `ljq_S5_boss_niu02` | — | lw_world_monster kind: Boss |
-| `2000001` | `zyf_BOSS_touxiang_5` | — | lw_world_monster kind: Boss |
-| `2000002` | `zyf_BOSS_touxiang_4` | — | lw_world_monster kind: Boss |
-| `2000003` | `zyf_BOSS_touxiang_6` | — | lw_world_monster kind: Boss |
-| `2000019` | `zyf_S6_boss_daodan_datouxiang` | — | lw_world_monster kind: Boss |
-| `2000020` | `zyf_S6_boss_tanke_datouxiang` | — | lw_world_monster kind: Boss |
-| `2000021` | `zyf_S6_boss_feiji_datouxiang` | — | lw_world_monster kind: Boss |
-| `2000101` | `world_monster_boss_airship` | — | lw_world_monster kind: Boss |
-| `5113001` | `zyf_S6_eyu_datouxiang` | — | lw_world_monster kind: Boss |
-| `100500` | `zombie_icon01` | — | lw_world_monster kind: City |
-| `4045001` | `zyf_S4_huanxiongche_datouxiang` | — | lw_world_monster kind: FlowerCar |
-| `1030000` | `world_monster_general_invasion` | — | lw_world_monster kind: MonsterInvade |
-| `1030003` | `world_monster_boss_invasion` | — | lw_world_monster kind: MonsterInvade |
-| `1030018` | `world_monster_boss_invasion_1` | — | lw_world_monster kind: MonsterInvade |
-| `1030023` | `sj_shengdan_guaiwuruqin_touxiang` | — | lw_world_monster kind: MonsterInvade |
-| `1030024` | `sj_shengdanboss_guaiwuruqin_touxiang` | — | lw_world_monster kind: MonsterInvade |
-| `1031021` | `world_monster_boss_invasion_2` | — | lw_world_monster kind: MonsterInvade |
-| `900001` | `zyf_S3_feiji_datouxiang` | — | lw_world_monster kind: Radar |
-| `900002` | `mjc_S3_bossyoudang` | — | lw_world_monster kind: Radar |
+| `505101` | `zyf_S5_lieren_datouxiang` | - | lw_world_monster kind: Boss |
+| `506101` | `zyf_S5_quanshou_datouxiang` | - | lw_world_monster kind: Boss |
+| `1011101` | `zyf_sangshitiaozhan_tanke_icon` | - | lw_world_monster kind: Boss |
+| `1020001` | `hero_icon_Audie_Murphy` | - | lw_world_monster kind: Boss |
+| `1020101` | `mjc_S3_touxiang_jushachong` | - | lw_world_monster kind: Boss |
+| `1021001` | `lyk_lw_touxiang_montser` | - | lw_world_monster kind: Boss |
+| `1021002` | `lyk_lw_touxiang_montser_02` | - | lw_world_monster kind: Boss |
+| `1021003` | `lyk_lw_touxiang_montser_01` | - | lw_world_monster kind: Boss |
+| `1030091` | `world_monster_boss_godzilla` | - | lw_world_monster kind: Boss |
+| `1030201` | `ljq_S5_boss_niu01` | - | lw_world_monster kind: Boss |
+| `1030202` | `ljq_S5_boss_niu02` | - | lw_world_monster kind: Boss |
+| `2000001` | `zyf_BOSS_touxiang_5` | - | lw_world_monster kind: Boss |
+| `2000002` | `zyf_BOSS_touxiang_4` | - | lw_world_monster kind: Boss |
+| `2000003` | `zyf_BOSS_touxiang_6` | - | lw_world_monster kind: Boss |
+| `2000019` | `zyf_S6_boss_daodan_datouxiang` | - | lw_world_monster kind: Boss |
+| `2000020` | `zyf_S6_boss_tanke_datouxiang` | - | lw_world_monster kind: Boss |
+| `2000021` | `zyf_S6_boss_feiji_datouxiang` | - | lw_world_monster kind: Boss |
+| `2000101` | `world_monster_boss_airship` | - | lw_world_monster kind: Boss |
+| `5113001` | `zyf_S6_eyu_datouxiang` | - | lw_world_monster kind: Boss |
+| `100500` | `zombie_icon01` | - | lw_world_monster kind: City |
+| `4045001` | `zyf_S4_huanxiongche_datouxiang` | - | lw_world_monster kind: FlowerCar |
+| `1030000` | `world_monster_general_invasion` | - | lw_world_monster kind: MonsterInvade |
+| `1030003` | `world_monster_boss_invasion` | - | lw_world_monster kind: MonsterInvade |
+| `1030018` | `world_monster_boss_invasion_1` | - | lw_world_monster kind: MonsterInvade |
+| `1030023` | `sj_shengdan_guaiwuruqin_touxiang` | - | lw_world_monster kind: MonsterInvade |
+| `1030024` | `sj_shengdanboss_guaiwuruqin_touxiang` | - | lw_world_monster kind: MonsterInvade |
+| `1031021` | `world_monster_boss_invasion_2` | - | lw_world_monster kind: MonsterInvade |
+| `900001` | `zyf_S3_feiji_datouxiang` | - | lw_world_monster kind: Radar |
+| `900002` | `mjc_S3_bossyoudang` | - | lw_world_monster kind: Radar |
 | `1006001` | `world_monster_boss_radar` | The girl next door, but now she's looking for something more. | lw_world_monster kind: Radar |
-| `1008027` | `zyf_zombie_new16` | — | lw_world_monster kind: Radar |
-| `2220200` | `zyf_BOSS_touxiang_7.png` | — | lw_world_monster kind: ResFlint |
-| `1003001` | `world_monster_boss_bread` | — | lw_world_monster kind: ResFood |
-| `2003001` | `zyf_munaiyi_touxiang3` | — | lw_world_monster kind: ResFood |
-| `2013001` | `S1_new_monster_feiji` | — | lw_world_monster kind: ResFood |
-| `2023001` | `zyf_S2_xiaoguai_2` | — | lw_world_monster kind: ResFood |
-| `1004001` | `world_monster_boss_coin_2` | — | lw_world_monster kind: ResGold |
-| `1010101` | `hero_icon_Nimitz` | — | lw_world_monster kind: ResGold |
-| `2004001` | `zyf_munaiyi_touxiang1` | — | lw_world_monster kind: ResGold |
-| `2014001` | `S1_new_monster_daodan` | — | lw_world_monster kind: ResGold |
-| `2024001` | `zyf_S2_xiaoguai_3` | — | lw_world_monster kind: ResGold |
-| `2034001` | `zyf_S3_daodan_datouxiang` | — | lw_world_monster kind: ResGold |
-| `1002001` | `world_monster_boss_iron` | — | lw_world_monster kind: ResMetal |
-| `2002001` | `zyf_munaiyi_touxiang2` | — | lw_world_monster kind: ResMetal |
-| `2012001` | `S1_new_monster_tanke` | — | lw_world_monster kind: ResMetal |
-| `2022001` | `zyf_S2_xiaoguai_1` | — | lw_world_monster kind: ResMetal |
-| `2032001` | `zyf_S3_tanke_datouxiang` | — | lw_world_monster kind: ResMetal |
-| `5032001` | `zyf_S5_wunv_datouxiang` | — | lw_world_monster kind: ResMetal |
-| `5032061` | `zyf_S5_niuzai_datouxiang` | — | lw_world_monster kind: ResMetal |
-| `5032091` | `zyf_S5_qima_datouxiang` | — | lw_world_monster kind: ResMetal |
-| `5101001` | `zyf_S6_milin_datouxiang` | — | lw_world_monster kind: ResMetal |
-| `5104001` | `zyf_S6_shidi_datouxiang` | — | lw_world_monster kind: ResMetal |
-| `5107001` | `zyf_S6_dahe_datouxiang` | — | lw_world_monster kind: ResMetal |
-| `1040721` | `zyf_BOSS_sangshibus2` | — | lw_world_monster kind: ResObsidian |
-| `1040726` | `zyf_BOSS_sangshibus` | — | lw_world_monster kind: ResObsidian |
-| `1040001` | `sj_shijiesouguai_boss` | — | lw_world_monster kind: RunningMonster |
-| `1045001` | `zxl_zombie_boss_xin` | — | lw_world_monster kind: RunningMonster |
-| `2040001` | `S1_wonder_boss` | — | lw_world_monster kind: RunningMonster |
-| `2054001` | `zyf_S3_bhuangjinjiachong_datouxiang` | — | lw_world_monster kind: RunningMonster |
-| `4054001` | `zyf_S4_hetong_datouxiang` | — | lw_world_monster kind: RunningMonster |
-| `5053001` | `zyf_S5_niuzaiboss_datouxiang` | — | lw_world_monster kind: RunningMonster |
+| `1008027` | `zyf_zombie_new16` | - | lw_world_monster kind: Radar |
+| `2220200` | `zyf_BOSS_touxiang_7.png` | - | lw_world_monster kind: ResFlint |
+| `1003001` | `world_monster_boss_bread` | - | lw_world_monster kind: ResFood |
+| `2003001` | `zyf_munaiyi_touxiang3` | - | lw_world_monster kind: ResFood |
+| `2013001` | `S1_new_monster_feiji` | - | lw_world_monster kind: ResFood |
+| `2023001` | `zyf_S2_xiaoguai_2` | - | lw_world_monster kind: ResFood |
+| `1004001` | `world_monster_boss_coin_2` | - | lw_world_monster kind: ResGold |
+| `1010101` | `hero_icon_Nimitz` | - | lw_world_monster kind: ResGold |
+| `2004001` | `zyf_munaiyi_touxiang1` | - | lw_world_monster kind: ResGold |
+| `2014001` | `S1_new_monster_daodan` | - | lw_world_monster kind: ResGold |
+| `2024001` | `zyf_S2_xiaoguai_3` | - | lw_world_monster kind: ResGold |
+| `2034001` | `zyf_S3_daodan_datouxiang` | - | lw_world_monster kind: ResGold |
+| `1002001` | `world_monster_boss_iron` | - | lw_world_monster kind: ResMetal |
+| `2002001` | `zyf_munaiyi_touxiang2` | - | lw_world_monster kind: ResMetal |
+| `2012001` | `S1_new_monster_tanke` | - | lw_world_monster kind: ResMetal |
+| `2022001` | `zyf_S2_xiaoguai_1` | - | lw_world_monster kind: ResMetal |
+| `2032001` | `zyf_S3_tanke_datouxiang` | - | lw_world_monster kind: ResMetal |
+| `5032001` | `zyf_S5_wunv_datouxiang` | - | lw_world_monster kind: ResMetal |
+| `5032061` | `zyf_S5_niuzai_datouxiang` | - | lw_world_monster kind: ResMetal |
+| `5032091` | `zyf_S5_qima_datouxiang` | - | lw_world_monster kind: ResMetal |
+| `5101001` | `zyf_S6_milin_datouxiang` | - | lw_world_monster kind: ResMetal |
+| `5104001` | `zyf_S6_shidi_datouxiang` | - | lw_world_monster kind: ResMetal |
+| `5107001` | `zyf_S6_dahe_datouxiang` | - | lw_world_monster kind: ResMetal |
+| `1040721` | `zyf_BOSS_sangshibus2` | - | lw_world_monster kind: ResObsidian |
+| `1040726` | `zyf_BOSS_sangshibus` | - | lw_world_monster kind: ResObsidian |
+| `1040001` | `sj_shijiesouguai_boss` | - | lw_world_monster kind: RunningMonster |
+| `1045001` | `zxl_zombie_boss_xin` | - | lw_world_monster kind: RunningMonster |
+| `2040001` | `S1_wonder_boss` | - | lw_world_monster kind: RunningMonster |
+| `2054001` | `zyf_S3_bhuangjinjiachong_datouxiang` | - | lw_world_monster kind: RunningMonster |
+| `4054001` | `zyf_S4_hetong_datouxiang` | - | lw_world_monster kind: RunningMonster |
+| `5053001` | `zyf_S5_niuzaiboss_datouxiang` | - | lw_world_monster kind: RunningMonster |
 | `5056001` | `zyf_S5_xiaoji_datouxiang` | A virus-infected stray rooster, wandering the wasteland, its eerie clucks bringing plague and death wherever it goes. | lw_world_monster kind: RunningMonster |
-| `5117001` | `zyf_S6_youdang_datouxiang` | — | lw_world_monster kind: RunningMonster |
-| `5119001` | `zyf_S6_wugui_datouxiang` | — | lw_world_monster kind: RunningMonster |
-| `2058001` | `mjc_S3_touxiang_xiaoshachong` | — | lw_world_monster kind: S4Airplane |
-| `2059001` | `mjc_S3_touxiang_dashachong` | — | lw_world_monster kind: S4Airplane |
-| `4033001` | `zyf_S4_renzhe_datouxiang` | — | lw_world_monster kind: S4Airplane |
-| `5100001` | `zyf_S6_shirenhua_datouxiang` | — | lw_world_monster kind: S4Airplane |
-| `4033101` | `zyf_S4_renzhe_datouxiang_xueye` | — | lw_world_monster kind: S4AirplaneBN |
-| `403101` | `zyf_S4_lang_datouxiang` | — | lw_world_monster kind: S4Boss |
-| `4031101` | `zyf_S4_lang_datouxiang_xueye` | — | lw_world_monster kind: S4BossBN |
-| `4034001` | `zyf_S4_yiji_datouxiang` | — | lw_world_monster kind: S4Missile |
-| `4034101` | `zyf_S4_yiji_datouxiang_xueye` | — | lw_world_monster kind: S4MissileBN |
-| `4032001` | `zyf_S4_xiangpu_datouxiang` | — | lw_world_monster kind: S4Tank |
-| `4032101` | `zyf_S4_xiangpu_datouxiang_xueye` | — | lw_world_monster kind: S4TankBN |
-| `4044001` | `zyf_S4_xuegui_datouxiang` | — | lw_world_monster kind: WorldMonsterType_12 (unmapped type code) |
-| `2301001` | `hero_icon_bossBoat` | — | lw_world_monster kind: WorldMonsterType_23 (unmapped type code) |
+| `5117001` | `zyf_S6_youdang_datouxiang` | - | lw_world_monster kind: RunningMonster |
+| `5119001` | `zyf_S6_wugui_datouxiang` | - | lw_world_monster kind: RunningMonster |
+| `2058001` | `mjc_S3_touxiang_xiaoshachong` | - | lw_world_monster kind: S4Airplane |
+| `2059001` | `mjc_S3_touxiang_dashachong` | - | lw_world_monster kind: S4Airplane |
+| `4033001` | `zyf_S4_renzhe_datouxiang` | - | lw_world_monster kind: S4Airplane |
+| `5100001` | `zyf_S6_shirenhua_datouxiang` | - | lw_world_monster kind: S4Airplane |
+| `4033101` | `zyf_S4_renzhe_datouxiang_xueye` | - | lw_world_monster kind: S4AirplaneBN |
+| `403101` | `zyf_S4_lang_datouxiang` | - | lw_world_monster kind: S4Boss |
+| `4031101` | `zyf_S4_lang_datouxiang_xueye` | - | lw_world_monster kind: S4BossBN |
+| `4034001` | `zyf_S4_yiji_datouxiang` | - | lw_world_monster kind: S4Missile |
+| `4034101` | `zyf_S4_yiji_datouxiang_xueye` | - | lw_world_monster kind: S4MissileBN |
+| `4032001` | `zyf_S4_xiangpu_datouxiang` | - | lw_world_monster kind: S4Tank |
+| `4032101` | `zyf_S4_xiangpu_datouxiang_xueye` | - | lw_world_monster kind: S4TankBN |
+| `4044001` | `zyf_S4_xuegui_datouxiang` | - | lw_world_monster kind: WorldMonsterType_12 (unmapped type code) |
+| `2301001` | `hero_icon_bossBoat` | - | lw_world_monster kind: WorldMonsterType_23 (unmapped type code) |
 | `2057001` | `lrb_zhanshuwuqi_zhandouqipao_waiguan` | A mysterious creature is stirring up sandstorms below. Try luring it with a Trap Mine! | lw_world_monster kind: WorldMonsterType_30 (unmapped type code) |
 
 </Accordion>
@@ -519,12 +519,12 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 
 | ID | Internal name | Display name | Category |
 |---|---|---|---|
-| `-1` | `ResourceType.None` | — | ResourceType |
+| `-1` | `ResourceType.None` | - | ResourceType |
 | `0` | `ResourceType.Oil` | Gas | ResourceType |
 | `1` | `ResourceType.Metal` | Metal | ResourceType |
 | `2` | `ResourceType.Wood` | Wood | ResourceType |
 | `3` | `ResourceType.PVE_STAMINA` | Stamina | ResourceType |
-| `4` | `ResourceType.People` | — | ResourceType |
+| `4` | `ResourceType.People` | - | ResourceType |
 | `10` | `ResourceType.OBSIDIAN` | Mutant Crystal | ResourceType |
 | `11` | `ResourceType.Water` | Water | ResourceType |
 | `12` | `ResourceType.Electricity` | Electricity | ResourceType |
@@ -532,135 +532,135 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 | `14` | `ResourceType.Food` | Bread | ResourceType |
 | `15` | `ResourceType.Gold` | Diamond | ResourceType |
 | `17` | `ResourceType.PvePoint` | Exploration Guide | ResourceType |
-| `18` | `ResourceType.MedalOfWisdom` | — | ResourceType |
-| `19` | `ResourceType.FarmBox` | — | ResourceType |
+| `18` | `ResourceType.MedalOfWisdom` | - | ResourceType |
+| `19` | `ResourceType.FarmBox` | - | ResourceType |
 | `20` | `ResourceType.DETECT_EVENT` | Radar Task | ResourceType |
 | `21` | `ResourceType.FORMATION_STAMINA` | Stamina | ResourceType |
-| `22` | `ResourceType.BattlePass` | — | ResourceType |
-| `23` | `ResourceType.Petroleum` | — | ResourceType |
+| `22` | `ResourceType.BattlePass` | - | ResourceType |
+| `23` | `ResourceType.Petroleum` | - | ResourceType |
 | `24` | `ResourceType.GoldBrick` | Gold Brick | ResourceType |
-| `25` | `ResourceType.BatteryPower` | — | ResourceType |
-| `100` | `ResourceType.Max` | — | ResourceType |
-| `9001` | `ResourceType.BlackKnight` | — | ResourceType |
-| `9002` | `ResourceType.MasteryPoint` | — | ResourceType |
-| `9003` | `ResourceType.AllianceDragonPoint` | — | ResourceType |
-| `10000` | `ResourceType.ResourceItem` | — | ResourceType |
-| `1004` | `ResourceType.AlliancePoint` | — | ResourceType |
-| `1005` | `ResourceType.DragonPoint` | — | ResourceType |
-| `1006` | `ResourceType.ResistancePoint` | — | ResourceType |
-| `1007` | `ResourceType.AllianceBattleReward` | — | ResourceType |
-| `11001` | `ResourceType.DragonItem` | — | ResourceType |
+| `25` | `ResourceType.BatteryPower` | - | ResourceType |
+| `100` | `ResourceType.Max` | - | ResourceType |
+| `9001` | `ResourceType.BlackKnight` | - | ResourceType |
+| `9002` | `ResourceType.MasteryPoint` | - | ResourceType |
+| `9003` | `ResourceType.AllianceDragonPoint` | - | ResourceType |
+| `10000` | `ResourceType.ResourceItem` | - | ResourceType |
+| `1004` | `ResourceType.AlliancePoint` | - | ResourceType |
+| `1005` | `ResourceType.DragonPoint` | - | ResourceType |
+| `1006` | `ResourceType.ResistancePoint` | - | ResourceType |
+| `1007` | `ResourceType.AllianceBattleReward` | - | ResourceType |
+| `11001` | `ResourceType.DragonItem` | - | ResourceType |
 | `11014` | `ResourceType.AllianceStone` | Alliance Stone | ResourceType |
-| `11015` | `ResourceType.AllianceCoal` | — | ResourceType |
-| `11016` | `ResourceType.AllianceFarmerExp` | — | ResourceType |
-| `11017` | `ResourceType.AllianceFarmerExpItem` | — | ResourceType |
-| `11018` | `ResourceType.MeteoriteNucleusOfStar` | — | ResourceType |
-| `11019` | `ResourceType.MeteoriteCrystallization` | — | ResourceType |
-| `12000` | `ResourceType.SkyBattleGold` | — | ResourceType |
-| `9002` | `ResourceType.PAID_GOLD` | — | ResourceType |
-| `12001` | `ResourceType.GoldProgress` | — | ResourceType |
+| `11015` | `ResourceType.AllianceCoal` | - | ResourceType |
+| `11016` | `ResourceType.AllianceFarmerExp` | - | ResourceType |
+| `11017` | `ResourceType.AllianceFarmerExpItem` | - | ResourceType |
+| `11018` | `ResourceType.MeteoriteNucleusOfStar` | - | ResourceType |
+| `11019` | `ResourceType.MeteoriteCrystallization` | - | ResourceType |
+| `12000` | `ResourceType.SkyBattleGold` | - | ResourceType |
+| `9002` | `ResourceType.PAID_GOLD` | - | ResourceType |
+| `12001` | `ResourceType.GoldProgress` | - | ResourceType |
 | `0` | `RewardType.OIL` | Gas | RewardType |
 | `1` | `RewardType.METAL` | Metal | RewardType |
 | `2` | `RewardType.Wood` | Wood | RewardType |
 | `5` | `RewardType.GOLD` | Diamond | RewardType |
-| `6` | `RewardType.EXP` | — | RewardType |
-| `7` | `RewardType.GOODS` | — | RewardType |
-| `8` | `RewardType.GENERAL` | — | RewardType |
-| `9` | `RewardType.POWER` | — | RewardType |
-| `10` | `RewardType.HONOR` | — | RewardType |
-| `11` | `RewardType.ALLIANCE_POINT` | — | RewardType |
-| `12` | `RewardType.HOUSE` | — | RewardType |
-| `13` | `RewardType.HOSPITAL` | — | RewardType |
-| `14` | `RewardType.EQUIP` | — | RewardType |
-| `15` | `RewardType.MATERIAL` | — | RewardType |
-| `16` | `RewardType.PART` | — | RewardType |
-| `17` | `RewardType.ITEM_EFFECT` | — | RewardType |
-| `18` | `RewardType.BATTLE_HONOR` | — | RewardType |
+| `6` | `RewardType.EXP` | - | RewardType |
+| `7` | `RewardType.GOODS` | - | RewardType |
+| `8` | `RewardType.GENERAL` | - | RewardType |
+| `9` | `RewardType.POWER` | - | RewardType |
+| `10` | `RewardType.HONOR` | - | RewardType |
+| `11` | `RewardType.ALLIANCE_POINT` | - | RewardType |
+| `12` | `RewardType.HOUSE` | - | RewardType |
+| `13` | `RewardType.HOSPITAL` | - | RewardType |
+| `14` | `RewardType.EQUIP` | - | RewardType |
+| `15` | `RewardType.MATERIAL` | - | RewardType |
+| `16` | `RewardType.PART` | - | RewardType |
+| `17` | `RewardType.ITEM_EFFECT` | - | RewardType |
+| `18` | `RewardType.BATTLE_HONOR` | - | RewardType |
 | `19` | `RewardType.WATER` | Water | RewardType |
 | `20` | `RewardType.FOOD` | Bread | RewardType |
 | `21` | `RewardType.ELECTRICITY` | Electricity | RewardType |
-| `22` | `RewardType.PEOPLE` | — | RewardType |
-| `23` | `RewardType.ARM` | — | RewardType |
-| `24` | `RewardType.MANOR` | — | RewardType |
-| `25` | `RewardType.HERO` | — | RewardType |
-| `26` | `RewardType.PTGOLD` | — | RewardType |
-| `27` | `RewardType.RESOURCE_ITEM` | — | RewardType |
+| `22` | `RewardType.PEOPLE` | - | RewardType |
+| `23` | `RewardType.ARM` | - | RewardType |
+| `24` | `RewardType.MANOR` | - | RewardType |
+| `25` | `RewardType.HERO` | - | RewardType |
+| `26` | `RewardType.PTGOLD` | - | RewardType |
+| `27` | `RewardType.RESOURCE_ITEM` | - | RewardType |
 | `28` | `RewardType.PVE_POINT` | Exploration Guide | RewardType |
 | `29` | `RewardType.DETECT_EVENT` | Radar Task | RewardType |
 | `30` | `RewardType.FORMATION_STAMINA` | Stamina | RewardType |
 | `31` | `RewardType.WOOD` | Wood | RewardType |
 | `32` | `RewardType.PVE_STAMINA` | Stamina | RewardType |
-| `33` | `RewardType.PVE_MONUMENT_TIME` | — | RewardType |
-| `34` | `RewardType.PVE_ACT_SCORE` | — | RewardType |
-| `35` | `RewardType.MuseumArtifact` | — | RewardType |
-| `36` | `RewardType.WORKER` | — | RewardType |
-| `37` | `RewardType.VISITOR` | — | RewardType |
-| `38` | `RewardType.CommonEquip` | — | RewardType |
-| `39` | `RewardType.DecorateBuild` | — | RewardType |
-| `40` | `RewardType.DragonWorldPoint` | — | RewardType |
-| `41` | `RewardType.Building` | — | RewardType |
+| `33` | `RewardType.PVE_MONUMENT_TIME` | - | RewardType |
+| `34` | `RewardType.PVE_ACT_SCORE` | - | RewardType |
+| `35` | `RewardType.MuseumArtifact` | - | RewardType |
+| `36` | `RewardType.WORKER` | - | RewardType |
+| `37` | `RewardType.VISITOR` | - | RewardType |
+| `38` | `RewardType.CommonEquip` | - | RewardType |
+| `39` | `RewardType.DecorateBuild` | - | RewardType |
+| `40` | `RewardType.DragonWorldPoint` | - | RewardType |
+| `41` | `RewardType.Building` | - | RewardType |
 | `42` | `RewardType.OBSIDIAN` | Mutant Crystal | RewardType |
 | `43` | `RewardType.FLINT` | Immune Protein | RewardType |
-| `44` | `RewardType.Resistance_Point` | — | RewardType |
-| `45` | `RewardType.AllianceBattleReward` | — | RewardType |
-| `46` | `RewardType.TWSkillChip` | — | RewardType |
-| `47` | `RewardType.PETROLEUM` | — | RewardType |
-| `48` | `RewardType.TACTICAL_CARD` | — | RewardType |
-| `49` | `RewardType.EMOTION_SELECT` | — | RewardType |
-| `50` | `RewardType.CHAT_EMOTION` | — | RewardType |
-| `999` | `RewardType.FAVOR` | — | RewardType |
-| `888` | `RewardType.PartyMonster` | — | RewardType |
-| `1001` | `RewardType.SEVENDAY_SCORE` | — | RewardType |
-| `1002` | `RewardType.Golloes` | — | RewardType |
+| `44` | `RewardType.Resistance_Point` | - | RewardType |
+| `45` | `RewardType.AllianceBattleReward` | - | RewardType |
+| `46` | `RewardType.TWSkillChip` | - | RewardType |
+| `47` | `RewardType.PETROLEUM` | - | RewardType |
+| `48` | `RewardType.TACTICAL_CARD` | - | RewardType |
+| `49` | `RewardType.EMOTION_SELECT` | - | RewardType |
+| `50` | `RewardType.CHAT_EMOTION` | - | RewardType |
+| `999` | `RewardType.FAVOR` | - | RewardType |
+| `888` | `RewardType.PartyMonster` | - | RewardType |
+| `1001` | `RewardType.SEVENDAY_SCORE` | - | RewardType |
+| `1002` | `RewardType.Golloes` | - | RewardType |
 | `1003` | `RewardType.SAPPHIRE` | Alliance Stone | RewardType |
-| `1004` | `RewardType.ALLIANCE_DONATE` | — | RewardType |
-| `1005` | `RewardType.ALLIANCE_SCIENCE_TECH_POINT` | — | RewardType |
-| `1007` | `RewardType.UnlockModule` | — | RewardType |
-| `1008` | `RewardType.HERO_EXP` | — | RewardType |
-| `1009` | `RewardType.BATTLE_PASS` | — | RewardType |
-| `1010` | `RewardType.TALENT` | — | RewardType |
-| `1011` | `RewardType.RESOURCE` | — | RewardType |
-| `1012` | `RewardType.ALLIANCE_GIFT` | — | RewardType |
-| `1013` | `RewardType.MonthCard` | — | RewardType |
-| `1014` | `RewardType.DailyTaskPoint` | — | RewardType |
-| `1015` | `RewardType.EquipStrengtheningStone` | — | RewardType |
-| `1016` | `RewardType.ScrewSpike` | — | RewardType |
-| `1017` | `RewardType.FourthFormation` | — | RewardType |
-| `1018` | `RewardType.MonthCardBuff` | — | RewardType |
-| `1019` | `RewardType.MarchDefReductionBuff` | — | RewardType |
-| `1021` | `RewardType.ActGiftBox` | — | RewardType |
-| `1022` | `RewardType.Credit` | — | RewardType |
-| `1023` | `RewardType.MASTERY_POINT` | — | RewardType |
-| `1024` | `RewardType.FISH` | — | RewardType |
+| `1004` | `RewardType.ALLIANCE_DONATE` | - | RewardType |
+| `1005` | `RewardType.ALLIANCE_SCIENCE_TECH_POINT` | - | RewardType |
+| `1007` | `RewardType.UnlockModule` | - | RewardType |
+| `1008` | `RewardType.HERO_EXP` | - | RewardType |
+| `1009` | `RewardType.BATTLE_PASS` | - | RewardType |
+| `1010` | `RewardType.TALENT` | - | RewardType |
+| `1011` | `RewardType.RESOURCE` | - | RewardType |
+| `1012` | `RewardType.ALLIANCE_GIFT` | - | RewardType |
+| `1013` | `RewardType.MonthCard` | - | RewardType |
+| `1014` | `RewardType.DailyTaskPoint` | - | RewardType |
+| `1015` | `RewardType.EquipStrengtheningStone` | - | RewardType |
+| `1016` | `RewardType.ScrewSpike` | - | RewardType |
+| `1017` | `RewardType.FourthFormation` | - | RewardType |
+| `1018` | `RewardType.MonthCardBuff` | - | RewardType |
+| `1019` | `RewardType.MarchDefReductionBuff` | - | RewardType |
+| `1021` | `RewardType.ActGiftBox` | - | RewardType |
+| `1022` | `RewardType.Credit` | - | RewardType |
+| `1023` | `RewardType.MASTERY_POINT` | - | RewardType |
+| `1024` | `RewardType.FISH` | - | RewardType |
 | `11014` | `RewardType.AllianceStone` | Alliance Stone | RewardType |
-| `11015` | `RewardType.AllianceCoal` | — | RewardType |
-| `11016` | `RewardType.AllianceFarmerExp` | — | RewardType |
-| `11017` | `RewardType.AllianceFarmerExpItem` | — | RewardType |
-| `11018` | `RewardType.MeteoriteNucleusOfStar` | — | RewardType |
-| `11019` | `RewardType.MeteoriteCrystallization` | — | RewardType |
-| `9001` | `RewardType.ArmsMedal` | — | RewardType |
-| `9002` | `RewardType.PAID_GOLD` | — | RewardType |
-| `7038` | `RewardType.TacticalWeaponPart` | — | RewardType |
-| `3005` | `ResourceItemId.Supply` | — | ResourceItemId |
-| `6001` | `ResourceItemId.EquipStrengtheningStone` | — | ResourceItemId |
-| `7001` | `ResourceItemId.ScrewSpike` | — | ResourceItemId |
-| `8001` | `ResourceItemId.HeroExp` | — | ResourceItemId |
-| `0` | `ResourceItemType.Farming` | — | ResourceItemType |
-| `1` | `ResourceItemType.Industry` | — | ResourceItemType |
-| `8` | `ResourceItemType.EquipMaterial` | — | ResourceItemType |
-| `7` | `ResourceItemRealType.Soldier` | — | ResourceItemRealType |
-| `9` | `ResourceItemRealType.HeroExp` | — | ResourceItemRealType |
-| `12` | `ResourceItemRealType.DragonSoldier` | — | ResourceItemRealType |
-| `18` | `ResourceItemRealType.MummySoldier` | — | ResourceItemRealType |
-| `1101` | `ResourceItemRealType.OpeningHeroStar` | — | ResourceItemRealType |
-| `20` | `ResourceItemRealType.MasterExp` | — | ResourceItemRealType |
+| `11015` | `RewardType.AllianceCoal` | - | RewardType |
+| `11016` | `RewardType.AllianceFarmerExp` | - | RewardType |
+| `11017` | `RewardType.AllianceFarmerExpItem` | - | RewardType |
+| `11018` | `RewardType.MeteoriteNucleusOfStar` | - | RewardType |
+| `11019` | `RewardType.MeteoriteCrystallization` | - | RewardType |
+| `9001` | `RewardType.ArmsMedal` | - | RewardType |
+| `9002` | `RewardType.PAID_GOLD` | - | RewardType |
+| `7038` | `RewardType.TacticalWeaponPart` | - | RewardType |
+| `3005` | `ResourceItemId.Supply` | - | ResourceItemId |
+| `6001` | `ResourceItemId.EquipStrengtheningStone` | - | ResourceItemId |
+| `7001` | `ResourceItemId.ScrewSpike` | - | ResourceItemId |
+| `8001` | `ResourceItemId.HeroExp` | - | ResourceItemId |
+| `0` | `ResourceItemType.Farming` | - | ResourceItemType |
+| `1` | `ResourceItemType.Industry` | - | ResourceItemType |
+| `8` | `ResourceItemType.EquipMaterial` | - | ResourceItemType |
+| `7` | `ResourceItemRealType.Soldier` | - | ResourceItemRealType |
+| `9` | `ResourceItemRealType.HeroExp` | - | ResourceItemRealType |
+| `12` | `ResourceItemRealType.DragonSoldier` | - | ResourceItemRealType |
+| `18` | `ResourceItemRealType.MummySoldier` | - | ResourceItemRealType |
+| `1101` | `ResourceItemRealType.OpeningHeroStar` | - | ResourceItemRealType |
+| `20` | `ResourceItemRealType.MasterExp` | - | ResourceItemRealType |
 | `1` | `TaskResourceType[1] -> ResourceType.Oil` | Gas | TaskResourceType |
 | `2` | `TaskResourceType[2] -> ResourceType.Metal` | Metal | TaskResourceType |
 | `3` | `TaskResourceType[3] -> ResourceType.Water` | Water | TaskResourceType |
 | `4` | `TaskResourceType[4] -> ResourceType.Electricity` | Electricity | TaskResourceType |
-| `731000` | `ResourceTypeScience[ResourceType.Metal]` | — | ResourceTypeScience |
-| `751000` | `ResourceTypeScience[ResourceType.Oil]` | — | ResourceTypeScience |
-| `732000` | `ResourceTypeScience[ResourceType.Water]` | — | ResourceTypeScience |
+| `731000` | `ResourceTypeScience[ResourceType.Metal]` | - | ResourceTypeScience |
+| `751000` | `ResourceTypeScience[ResourceType.Oil]` | - | ResourceTypeScience |
+| `732000` | `ResourceTypeScience[ResourceType.Water]` | - | ResourceTypeScience |
 | `100013` | `ResourceTypeTxt[RewardType.METAL]` | Diamond | ResourceTypeTxt |
 | `100014` | `ResourceTypeTxt[RewardType.OIL]` | Coin | ResourceTypeTxt |
 | `100546` | `ResourceTypeTxt[RewardType.WATER]` | Water | ResourceTypeTxt |
@@ -683,27 +683,27 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 
 | ID | Internal name | Display name | Category |
 |---|---|---|---|
-| `1` | `Item` | — | BagItemType |
-| `2` | `ResourceItem` | — | BagItemType |
-| `3` | `HeroEquip` | — | BagItemType |
-| `4` | `CommonEquip` | — | BagItemType |
-| `1` | `Weapon` | — | EquipmentSlotType |
-| `2` | `Armor` | — | EquipmentSlotType |
-| `3` | `Core` | — | EquipmentSlotType |
-| `4` | `Radar` | — | EquipmentSlotType |
-| `1` | `WHITE` | — | ItemColor (rarity) |
-| `2` | `GREEN` | — | ItemColor (rarity) |
-| `3` | `BLUE` | — | ItemColor (rarity) |
-| `4` | `PURPLE` | — | ItemColor (rarity) |
-| `5` | `ORANGE` | — | ItemColor (rarity) |
-| `6` | `GOLDEN` | — | ItemColor (rarity) |
-| `200001` | `ITEM_MOVE_RANDOM` | — | SpecialItemId |
-| `200002` | `ITEM_MOVE_CITY` | — | SpecialItemId |
-| `200005` | `ITEM_ALLIANCE_CITY_MOVE` | — | SpecialItemId |
-| `200008` | `LW_ITEM_ALLY_MOVE_CITY` | — | SpecialItemId |
-| `200019` | `CHANGE_GENDER` | — | SpecialItemId |
-| `200021` | `CHANGE_NAME` | — | SpecialItemId |
-| `200002` | `MoveCityUseItemIds[1] = SpecialItemId.ITEM_MOVE_CITY` | — | MoveCityUseItemIds |
+| `1` | `Item` | - | BagItemType |
+| `2` | `ResourceItem` | - | BagItemType |
+| `3` | `HeroEquip` | - | BagItemType |
+| `4` | `CommonEquip` | - | BagItemType |
+| `1` | `Weapon` | - | EquipmentSlotType |
+| `2` | `Armor` | - | EquipmentSlotType |
+| `3` | `Core` | - | EquipmentSlotType |
+| `4` | `Radar` | - | EquipmentSlotType |
+| `1` | `WHITE` | - | ItemColor (rarity) |
+| `2` | `GREEN` | - | ItemColor (rarity) |
+| `3` | `BLUE` | - | ItemColor (rarity) |
+| `4` | `PURPLE` | - | ItemColor (rarity) |
+| `5` | `ORANGE` | - | ItemColor (rarity) |
+| `6` | `GOLDEN` | - | ItemColor (rarity) |
+| `200001` | `ITEM_MOVE_RANDOM` | - | SpecialItemId |
+| `200002` | `ITEM_MOVE_CITY` | - | SpecialItemId |
+| `200005` | `ITEM_ALLIANCE_CITY_MOVE` | - | SpecialItemId |
+| `200008` | `LW_ITEM_ALLY_MOVE_CITY` | - | SpecialItemId |
+| `200019` | `CHANGE_GENDER` | - | SpecialItemId |
+| `200021` | `CHANGE_NAME` | - | SpecialItemId |
+| `200002` | `MoveCityUseItemIds[1] = SpecialItemId.ITEM_MOVE_CITY` | - | MoveCityUseItemIds |
 | `210100` | `icon_210100` | M3 Turret | equipment/BLUE/Weapon (craftable) |
 | `210200` | `icon_210200` | M3 Armor | equipment/BLUE/Armor (craftable) |
 | `210300` | `icon_210300` | M3 Data Chip | equipment/BLUE/Core (craftable) |
@@ -843,65 +843,65 @@ Each row carries four fields: **ID** (the numeric value used on the wire or in d
 | `50024` | `hero_50024_name` | Kim Minseo | Legendary/Tank/Exportation |
 | `1000000` | `dominator_name_1` | Gorilla Overlord | Dominator (season boss) |
 | `1100000` | `dominator_name_hawk` | Skybreaker | Dominator (season boss) |
-| `0` | `NEW_HUMAN` | — | HeroCamp enum |
-| `1` | `MAFIA` | — | HeroCamp enum |
-| `2` | `UNION` | — | HeroCamp enum |
-| `3` | `ZELOT` | — | HeroCamp enum |
-| `-1` | `HeroType.None` | — | HeroType enum (class) |
-| `0` | `HeroType.All` | — | HeroType enum (class) |
-| `1` | `HeroType.Tank` | — | HeroType enum (class) |
-| `2` | `HeroType.Missile` | — | HeroType enum (class) |
-| `3` | `HeroType.Aircraft` | — | HeroType enum (class) |
-| `1` | `HeroTemplateType.Hero` | — | HeroTemplateType enum |
-| `2` | `HeroTemplateType.PVPEnemy` | — | HeroTemplateType enum |
-| `3` | `HeroTemplateType.SkirmishSoldier` | — | HeroTemplateType enum |
-| `4` | `HeroTemplateType.Dominator` | — | HeroTemplateType enum |
-| `1` | `HeroJob.Defense` | — | HeroJob enum (role) |
-| `2` | `HeroJob.exportation` | — | HeroJob enum (role) |
-| `3` | `HeroJob.subsidiary` | — | HeroJob enum (role) |
-| `1` | `HeroQualityType.Normal` | — | HeroQualityType enum (rarity) |
-| `2` | `HeroQualityType.Excellent` | — | HeroQualityType enum (rarity) |
-| `3` | `HeroQualityType.Outstanding` | — | HeroQualityType enum (rarity) |
-| `4` | `HeroQualityType.Genius` | — | HeroQualityType enum (rarity) |
-| `5` | `HeroQualityType.Legendary` | — | HeroQualityType enum (rarity) |
+| `0` | `NEW_HUMAN` | - | HeroCamp enum |
+| `1` | `MAFIA` | - | HeroCamp enum |
+| `2` | `UNION` | - | HeroCamp enum |
+| `3` | `ZELOT` | - | HeroCamp enum |
+| `-1` | `HeroType.None` | - | HeroType enum (class) |
+| `0` | `HeroType.All` | - | HeroType enum (class) |
+| `1` | `HeroType.Tank` | - | HeroType enum (class) |
+| `2` | `HeroType.Missile` | - | HeroType enum (class) |
+| `3` | `HeroType.Aircraft` | - | HeroType enum (class) |
+| `1` | `HeroTemplateType.Hero` | - | HeroTemplateType enum |
+| `2` | `HeroTemplateType.PVPEnemy` | - | HeroTemplateType enum |
+| `3` | `HeroTemplateType.SkirmishSoldier` | - | HeroTemplateType enum |
+| `4` | `HeroTemplateType.Dominator` | - | HeroTemplateType enum |
+| `1` | `HeroJob.Defense` | - | HeroJob enum (role) |
+| `2` | `HeroJob.exportation` | - | HeroJob enum (role) |
+| `3` | `HeroJob.subsidiary` | - | HeroJob enum (role) |
+| `1` | `HeroQualityType.Normal` | - | HeroQualityType enum (rarity) |
+| `2` | `HeroQualityType.Excellent` | - | HeroQualityType enum (rarity) |
+| `3` | `HeroQualityType.Outstanding` | - | HeroQualityType enum (rarity) |
+| `4` | `HeroQualityType.Genius` | - | HeroQualityType enum (rarity) |
+| `5` | `HeroQualityType.Legendary` | - | HeroQualityType enum (rarity) |
 
 ### Units/Troops (32)
 
 | ID | Internal name | Display name | Category |
 |---|---|---|---|
-| `1` | `lw_soldier.lua type=1 (SoldierType.Player, ids 3005-3015, model=bubing/Infantry, soldier_lv 1-11)` | — | lw_soldier.lua troop line |
-| `2` | `lw_soldier.lua type=2 (SoldierType.Monster, ids 4001-4015, model=A_Monster_Zombie01)` | — | lw_soldier.lua troop line |
-| `3` | `lw_soldier.lua type=3 (SoldierType.Dragon, ids 5005-5015, model=bubing/Infantry variant, alt resource_item 11000s)` | — | lw_soldier.lua troop line |
-| `4` | `lw_soldier.lua type=4 (SoldierType.Mummy, ids 12001-12011, model=A_Monster_Zombie18)` | — | lw_soldier.lua troop line |
+| `1` | `lw_soldier.lua type=1 (SoldierType.Player, ids 3005-3015, model=bubing/Infantry, soldier_lv 1-11)` | - | lw_soldier.lua troop line |
+| `2` | `lw_soldier.lua type=2 (SoldierType.Monster, ids 4001-4015, model=A_Monster_Zombie01)` | - | lw_soldier.lua troop line |
+| `3` | `lw_soldier.lua type=3 (SoldierType.Dragon, ids 5005-5015, model=bubing/Infantry variant, alt resource_item 11000s)` | - | lw_soldier.lua troop line |
+| `4` | `lw_soldier.lua type=4 (SoldierType.Mummy, ids 12001-12011, model=A_Monster_Zombie18)` | - | lw_soldier.lua troop line |
 | `1001` | `soldier_eleven id=1001, solider="a", stage=1` | Armored Trooper | Soldier Eleven (T11 troop evolution line) |
 | `1002` | `soldier_eleven id=1002, solider="a", stage=5 (jinjie/advanced form)` | Armored Trooper | Soldier Eleven (T11 troop evolution line) |
 | `2001` | `soldier_eleven id=2001, solider="b", stage=1` | Assault Raider | Soldier Eleven (T11 troop evolution line) |
 | `2002` | `soldier_eleven id=2002, solider="b", stage=5 (jinjie/advanced form)` | Assault Raider | Soldier Eleven (T11 troop evolution line) |
-| `1` | `SoldierType.Player` | — | SoldierType enum (battle camp) |
-| `2` | `SoldierType.Monster` | — | SoldierType enum (battle camp) |
-| `3` | `SoldierType.Dragon` | — | SoldierType enum (battle camp) |
-| `4` | `SoldierType.Mummy` | — | SoldierType enum (battle camp) |
-| `0` | `UnitType.None` | — | UnitType enum (battlefield unit category) |
-| `1` | `UnitType.Zombie` | — | UnitType enum (battlefield unit category) |
-| `2` | `UnitType.Member` | — | UnitType enum (battlefield unit category) |
-| `4` | `UnitType.Junk` | — | UnitType enum (battlefield unit category) |
-| `8` | `UnitType.Plot` | — | UnitType enum (battlefield unit category) |
-| `16` | `UnitType.TacticalWeapon` | — | UnitType enum (battlefield unit category) |
-| `32` | `UnitType.Pet` | — | UnitType enum (battlefield unit category) |
-| `63` | `UnitType.All (bitmask union of all flags)` | — | UnitType enum (battlefield unit category) |
-| `1` | `BattleUnitType.Hero` | — | BattleUnitType enum (battle participant category) |
-| `2` | `BattleUnitType.TacticalWeapon` | — | BattleUnitType enum (battle participant category) |
-| `3` | `BattleUnitType.Pet` | — | BattleUnitType enum (battle participant category) |
-| `4` | `BattleUnitType.Dominator` | — | BattleUnitType enum (battle participant category) |
-| `-1` | `HeroType.None` | — | HeroType enum (war-machine vehicle hero class) |
-| `0` | `HeroType.All` | — | HeroType enum (war-machine vehicle hero class) |
-| `1` | `HeroType.Tank (maps to building LW_BUILD_TANKCENTER)` | — | HeroType enum (war-machine vehicle hero class) |
-| `2` | `HeroType.Missile (maps to building LW_BUILD_ARTILLERYCENTER)` | — | HeroType enum (war-machine vehicle hero class) |
-| `3` | `HeroType.Aircraft (maps to building LW_BUILD_AIRCRAFTCENTER)` | — | HeroType enum (war-machine vehicle hero class) |
-| `1` | `OldSoldierType.FootSoldier` | — | OldSoldierType enum (legacy troop class) |
-| `2` | `OldSoldierType.BowSoldier` | — | OldSoldierType enum (legacy troop class) |
-| `3` | `OldSoldierType.CarSoldier` | — | OldSoldierType enum (legacy troop class) |
+| `1` | `SoldierType.Player` | - | SoldierType enum (battle camp) |
+| `2` | `SoldierType.Monster` | - | SoldierType enum (battle camp) |
+| `3` | `SoldierType.Dragon` | - | SoldierType enum (battle camp) |
+| `4` | `SoldierType.Mummy` | - | SoldierType enum (battle camp) |
+| `0` | `UnitType.None` | - | UnitType enum (battlefield unit category) |
+| `1` | `UnitType.Zombie` | - | UnitType enum (battlefield unit category) |
+| `2` | `UnitType.Member` | - | UnitType enum (battlefield unit category) |
+| `4` | `UnitType.Junk` | - | UnitType enum (battlefield unit category) |
+| `8` | `UnitType.Plot` | - | UnitType enum (battlefield unit category) |
+| `16` | `UnitType.TacticalWeapon` | - | UnitType enum (battlefield unit category) |
+| `32` | `UnitType.Pet` | - | UnitType enum (battlefield unit category) |
+| `63` | `UnitType.All (bitmask union of all flags)` | - | UnitType enum (battlefield unit category) |
+| `1` | `BattleUnitType.Hero` | - | BattleUnitType enum (battle participant category) |
+| `2` | `BattleUnitType.TacticalWeapon` | - | BattleUnitType enum (battle participant category) |
+| `3` | `BattleUnitType.Pet` | - | BattleUnitType enum (battle participant category) |
+| `4` | `BattleUnitType.Dominator` | - | BattleUnitType enum (battle participant category) |
+| `-1` | `HeroType.None` | - | HeroType enum (war-machine vehicle hero class) |
+| `0` | `HeroType.All` | - | HeroType enum (war-machine vehicle hero class) |
+| `1` | `HeroType.Tank (maps to building LW_BUILD_TANKCENTER)` | - | HeroType enum (war-machine vehicle hero class) |
+| `2` | `HeroType.Missile (maps to building LW_BUILD_ARTILLERYCENTER)` | - | HeroType enum (war-machine vehicle hero class) |
+| `3` | `HeroType.Aircraft (maps to building LW_BUILD_AIRCRAFTCENTER)` | - | HeroType enum (war-machine vehicle hero class) |
+| `1` | `OldSoldierType.FootSoldier` | - | OldSoldierType enum (legacy troop class) |
+| `2` | `OldSoldierType.BowSoldier` | - | OldSoldierType enum (legacy troop class) |
+| `3` | `OldSoldierType.CarSoldier` | - | OldSoldierType enum (legacy troop class) |
 
 <Note>
-Full per-domain methodology, source file:line citations, and known gaps are in each extraction agent's own notes — not reproduced here for space, but every entry's `category` column traces back to a specific enum table or data-table column documented that way.
+Full per-domain methodology, source file:line citations, and known gaps are in each extraction agent's own notes, not reproduced here for space, but every entry's `category` column traces back to a specific enum table or data-table column documented that way.
 </Note>

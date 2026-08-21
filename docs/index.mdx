@@ -3,7 +3,7 @@ title: "Overview & architecture"
 description: "A reverse-engineered technical dossier of the Last War: Survival Game Android client: crypto, wire protocol, command catalog, and Go client roadmap."
 ---
 
-This is an unofficial reverse-engineering dossier, assembled for interoperability research. It's a from-the-APK reconstruction of the client architecture, the gate-server crypto, the SmartFoxServer wire protocol, and the full 3,178-command protocol surface — assembled to spec a compatible Go client.
+This is an unofficial reverse-engineering dossier, assembled for interoperability research. It's a from-the-APK reconstruction of the client architecture, the gate-server crypto, the SmartFoxServer wire protocol, and the full 3,178-command protocol surface, assembled to spec a compatible Go client.
 
 | Metric | Value |
 |---|---|
@@ -35,36 +35,36 @@ Last War is a Unity game with almost none of its logic compiled into the app you
 
 The client is built on Unity + IL2CPP, but IL2CPP compiles almost nothing of the game itself. Instead:
 
-- **Gameplay logic and UI** — city building, army/hero systems, world map, alliance, chat, mail, shop, and essentially every one of the 3,178 network commands — is written in **Lua** (18,514 compiled modules, hot-updated as one bundle).
-- **Engine glue and platform integration** — the network stack, the crypto, asset/resource management, and third-party SDK wiring — lives in **hot-updatable C#**, shipped as 117 hot-swappable assemblies via [HybridCLR](https://github.com/focus-creative-games/hybridclr), interpreted at runtime rather than AOT-compiled.
-- **The static core** — `libil2cpp.so`, the Unity engine runtime, and the native HybridCLR/xLua interpreters — is what's actually fixed at app-store-release granularity. It contains no game logic at all (confirmed empirically, see [Native binaries & security](/native-binaries)).
+- **Gameplay logic and UI**, city building, army/hero systems, world map, alliance, chat, mail, shop, and essentially every one of the 3,178 network commands, is written in **Lua** (18,514 compiled modules, hot-updated as one bundle).
+- **Engine glue and platform integration**, the network stack, the crypto, asset/resource management, and third-party SDK wiring, lives in **hot-updatable C#**, shipped as 117 hot-swappable assemblies via [HybridCLR](https://github.com/focus-creative-games/hybridclr), interpreted at runtime rather than AOT-compiled.
+- **The static core**, `libil2cpp.so`, the Unity engine runtime, and the native HybridCLR/xLua interpreters, is what's actually fixed at app-store-release granularity. It contains no game logic at all (confirmed empirically, see [Native binaries & security](/native-binaries)).
 
 Two transports carry traffic to FunPlus's servers:
 
-- **HTTP(S)** for bootstrap — version check, hot-update manifests, and gate-server discovery (the "GSL" flow) — wrapped in a custom RSA+AES hybrid scheme.
+- **HTTP(S)** for bootstrap, version check, hot-update manifests, and gate-server discovery (the "GSL" flow), wrapped in a custom RSA+AES hybrid scheme.
 - **A raw TCP socket** speaking a hand-rolled reimplementation of [SmartFoxServer 2X](https://www.smartfoxserver.com/)'s binary `SFSObject` protocol, carrying every gameplay command as a string `cmd` (e.g. `"mail.read"`) plus a typed key/value payload.
 
 ### Layer diagram
 
-```text
-Lua — 18,514 modules
-UI, DataCenter, Net/Msgs (3,047 commands) + Chat (131 commands) — 3,178 total, Scene
+```mermaid
+flowchart TB
+    lua["<b>Lua layer</b> · 18,514 modules<br/>UI, DataCenter, Scene<br/>Net/Msgs: 3,047 commands + Chat: 131 (3,178 total)"]
+    cs["<b>Hot-update C#</b> · 117 assemblies<br/>NetworkManager, AESHelper, BestHttp<br/>SmartFox2X wire types, SDK glue"]
+    core["<b>Static IL2CPP core</b> · libil2cpp.so<br/>Unity engine runtime, HybridCLR native interpreter<br/>libxlua.so (no gameplay code)"]
 
-        ↑ xLua bridge · CS.* reflection · custom require() loader ↓
+    lua -->|"xLua bridge · CS.* reflection · custom require() loader"| cs
+    cs -->|"HybridCLR interpreter, loaded from AssetBundle"| core
 
-Hot-update C# — 117 assemblies
-NetworkManager, AESHelper, BestHttp, SmartFox2X wire types, SDK glue
-
-        ↑ HybridCLR interpreter, loaded from AssetBundle ↓
-
-Static IL2CPP core (libil2cpp.so)
-Unity engine runtime, HybridCLR native interpreter, libxlua.so — no gameplay code
+    classDef gameplay fill:#16A34A,stroke:#15803D,color:#ffffff;
+    classDef native fill:#334155,stroke:#1e293b,color:#ffffff;
+    class lua gameplay;
+    class core native;
 ```
 
 ### What a Go client actually needs
 
-Only two of these three layers matter for protocol compatibility: the **crypto** ([Gate-server crypto](/gate-server-crypto)) and the **wire format** ([SFS2X wire protocol](/wire-protocol), [Command reference](/command-reference)). The Lua/C# split is a client-implementation detail — a Go client talks TCP and HTTP directly and never touches Lua. The [native-binary survey](/native-binaries) exists to answer one practical question: does anything below the protocol layer (anti-cheat, device attestation, signing) block a clean-room client?
+Only two of these three layers matter for protocol compatibility: the **crypto** ([Gate-server crypto](/gate-server-crypto)) and the **wire format** ([SFS2X wire protocol](/wire-protocol), [Command reference](/command-reference)). The Lua/C# split is a client-implementation detail, a Go client talks TCP and HTTP directly and never touches Lua. The [native-binary survey](/native-binaries) exists to answer one practical question: does anything below the protocol layer (anti-cheat, device attestation, signing) block a clean-room client?
 
 <Check>
-  **Short answer**: no, for creating and driving new guest accounts, and for binding a guest session to a real account via email verification — both confirmed live, end to end, repeatedly. Reconnecting into an *already-established* account's live game state is confirmed live too — including against the shipped code after a security fix swapped part of the `ta` blob for placeholders (an unattended cron reconnected and collected real resources over multiple days, August 2026). It's just not yet fully general-purpose: it still needs a captured access token and server address — see [Native binaries & security](/native-binaries) and [Live validation against production](/live-validation) for the full scope and current state.
+  **Short answer**: no, for creating and driving new guest accounts, and for binding a guest session to a real account via email verification, both confirmed live, end to end, repeatedly. Reconnecting into an *already-established* account's live game state is confirmed live too, including against the shipped code after a security fix swapped part of the `ta` blob for placeholders (an unattended cron reconnected and collected real resources over multiple days, August 2026). It's just not yet fully general-purpose: it still needs a captured access token and server address, see [Native binaries & security](/native-binaries) and [Live validation against production](/live-validation) for the full scope and current state.
 </Check>

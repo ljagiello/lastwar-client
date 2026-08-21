@@ -2,7 +2,7 @@
 
 A from-scratch Go reimplementation of the *Last War: Survival Game* (`com.fun.lastwar.gp`) mobile
 client's network layer: GSL RSA+AES bootstrap crypto, SFS2X wire protocol, and SFSObject binary
-codec — enough to log in and drive a real game session over TCP without the Unity client.
+codec, enough to log in and drive a real game session over TCP without the Unity client.
 
 Built by reverse-engineering the decompiled APK; the full protocol dossier is published at
 **[lastwar.tech](https://lastwar.tech)** (source in [`docs/`](docs/)), covering the wire format,
@@ -18,13 +18,13 @@ for the current confirmed-vs-unconfirmed picture. Preview the docs locally with 
   decompression), SFSObject codec, brand-new-guest-account login, email-verification account
   binding, resource collection across 13 confirmed building types (Farmland, Iron Mine, Gold Mine,
   Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, and
-  the four Season 6 Spore Factory tiers — 7 more types are wired in but still unconfirmed, see the
+  the four Season 6 Spore Factory tiers, 7 more types are wired in but still unconfirmed, see the
   building-type table in `docs/live-validation.mdx`), and a growing set of account-level
   automations: the "Armed Truck"/"Overlord" idle rewards, greeting city visitors, bulk-helping alliance
   members, claiming all mail and alliance gifts, donating to the alliance's currently-recommended
   tech, and both once-a-day VIP claims.
 - **Confirmed live (previously an open question):** reconnecting into an *established* real
-  account's live game state, with the code exactly as it ships today — i.e. with the `ta` analytics
+  account's live game state, with the code exactly as it ships today, i.e. with the `ta` analytics
   blob's device/anti-fraud sub-fields (`LwDeviceID`/`LwShumeiID`/`LwAirKey`) sent as the empty
   placeholders a round-13 security fix put in. This was the dossier's biggest open question (the
   original reconnect proof used `ta`'s *real* captured sub-fields, and it was unknown whether the
@@ -33,9 +33,9 @@ for the current confirmed-vs-unconfirmed picture. Preview the docs locally with 
   and it was re-verified after a live zone-server migration. So the server does **not** require
   `ta`'s real device sub-fields for reconnect. Still open: the *minimal* required `ta` content
   hasn't been isolated, and a fully from-scratch login (no captured access token) hasn't been tried
-  — see the next bullet. See `docs/live-validation.mdx` for the full methodology.
+, see the next bullet. See `docs/live-validation.mdx` for the full methodology.
 - The earlier "reconnect blocked" / "init push never arrives" problems were never protocol-level
-  gates — they were a token-identity mismatch (the client claimed Android while replaying an
+  gates, they were a token-identity mismatch (the client claimed Android while replaying an
   iOS-issued token) and an unimplemented Zstd decoder, respectively. A real server merge later
   exposed a third class of the same kind of bug: `serverInfo` zone-migration redirects were either
   unhandled or unreachable on both login paths. See `docs/live-validation.mdx` for the full
@@ -48,7 +48,7 @@ for the current confirmed-vs-unconfirmed picture. Preview the docs locally with 
 
 Interoperability research: understanding the client-server contract well enough to build a
 compatible, from-scratch client. Not in scope: gameplay strategy, economy optimization, or
-anything that reads as a cheating/exploit guide rather than protocol documentation — see
+anything that reads as a cheating/exploit guide rather than protocol documentation, see
 [`docs/AGENTS.md`](docs/AGENTS.md) for the full boundary.
 
 ## Build
@@ -58,7 +58,7 @@ go build -o lastwar-client ./cmd/lastwar-client
 go test ./...
 ```
 
-## Session config (recommended — avoids passing every `-cs-*` flag each run)
+## Session config (recommended, avoids passing every `-cs-*` flag each run)
 
 Reconnecting into an established account needs several values that can only come from a real
 client's own login (device ID, access token, ShuMei fingerprint, ...). Rather than typing them on
@@ -70,7 +70,7 @@ chmod 600 ~/.lastwar_goclient_session.json
 # then edit it with your own real values
 ```
 
-`~/.lastwar_goclient_session.json` is auto-loaded on every run if present — no flag needed. To use
+`~/.lastwar_goclient_session.json` is auto-loaded on every run if present, no flag needed. To use
 a different file, pass `-config /path/to/file.json`. Individual `-cs-*` flags still override
 whatever the config file says, for one-off tests.
 
@@ -88,21 +88,21 @@ whatever the config file says, for one-off tests.
 ```
 
 **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in,
-since the SFS2X game socket is plain TCP with no TLS) and decode the `Login` request — see
+since the SFS2X game socket is plain TCP with no TLS) and decode the `Login` request, see
 `docs/capturing-and-decoding-traffic.mdx` for the exact methodology. `gameUid`/`ip`/`port`/`zone`
 also show up in a GSL `getserverlist` response's `serverList[]` entries. The access token is not
 single-use, but it *is* bound to the platform identity (`iosMode`) it was issued under, and it will
 eventually need refreshing from a fresh capture.
 
 **Recognizing an expired token, confirmed live:** every command starts failing with
-`CROSS-SERVER LOGIN FAILED: ec=28 full={ep=[E011], ec=28}` — the connection succeeds, but login
+`CROSS-SERVER LOGIN FAILED: ec=28 full={ep=[E011], ec=28}`, the connection succeeds, but login
 itself is rejected, so nothing downstream even gets attempted. Don't confuse this with a single
 flaky run: it was 100% reproducible across 16 consecutive scheduled runs (every 3 hours for ~42
 hours) until the credentials were refreshed. Fixing it needs a fresh capture, same as initial setup
-— and in the one real recurrence so far, `shumeiBoxId` had also changed, not just `accessToken`, so
+,  and in the one real recurrence so far, `shumeiBoxId` had also changed, not just `accessToken`, so
 re-extract both from the new capture rather than assuming only the token moved.
 
-**This file contains live credentials for a real account — keep it out of version control** (it's
+**This file contains live credentials for a real account, keep it out of version control** (it's
 already outside the repo, in your home directory, and `chmod 600`'d above; don't move it into
 this repo or commit it anywhere).
 
@@ -173,25 +173,25 @@ CRONEOF"
 Two things worth checking after setup, not just once but as ongoing habits:
 
 - **Actually confirm cron itself fires the job**, not just that the binary runs when you invoke it
-  manually over SSH — those aren't the same test. `crontab -l` accepting the entry doesn't prove
+  manually over SSH, those aren't the same test. `crontab -l` accepting the entry doesn't prove
   the daemon is running or the schedule is right. Add a one-off entry a couple of minutes out,
   wait for it, and check both the log file *and* cron's own record of running it
   (`grep CRON /var/log/syslog` on Debian/Ubuntu) before trusting the real schedule.
-- **The log file has no rotation** in the example above — it just appends forever. At 8 runs/day
+- **The log file has no rotation** in the example above, it just appends forever. At 8 runs/day
   it takes a long time to matter, but for a long-lived deployment either cap it with `logrotate`
   or watch its size periodically.
 - **Check the log's error rate periodically, not just whether the process is still running.** A
   cron job can "work" (exit 0, get invoked on schedule) while every run inside it is failing at
-  the login step — see the token-expiry note in "Session config" above. Grepping the log for
+  the login step, see the token-expiry note in "Session config" above. Grepping the log for
   `"level":"ERROR"` and checking *when* errors started (not just whether any exist) is what
-  actually catches this — see `docs/live-validation.mdx`'s serverInfo-redirect section for a
+  actually catches this, see `docs/live-validation.mdx`'s serverInfo-redirect section for a
   real example of a failure that looked identical on every single run once it started.
 - **Exit code 2 means the session itself is stale, not a transient blip.** Login/auth failures
   (both the plain-login and cross-server-reconnect paths) exit `2` specifically, distinct from
   the generic exit `1` used for other failures -- a cron wrapper can check `$?` directly and
   know to recapture a fresh session (see "Session config" above) without needing to grep the log
   at all.
-- **`-log-level` controls the JSON log verbosity** (`debug`, `warn` — or its alias `warning` —, or `error`; default `info`) --
+- **`-log-level` controls the JSON log verbosity** (`debug`, `warn`, or its alias `warning`, or `error`; default `info`) --
   handy for trimming a noisy cron log down to warnings/errors only, or turning on `debug` output
   while chasing down a problem run.
 

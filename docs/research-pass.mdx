@@ -13,7 +13,7 @@ An 8-agent parallel research pass, one agent per open question listed on [Open q
 | `libxlua.so` crypto helpers | **Resolved** | High |
 | `GetABTestTableName` routing | **Resolved** | High |
 | Season vs. Activity boundary | **Resolved** (97% measured accuracy) | High |
-| Missing `init` push | **Resolved** — unimplemented Zstd decompression | High |
-| Established-account reconnect block | **Resolved** — token/identity mismatch, not anti-fraud | High |
+| Missing `init` push | **Resolved**, unimplemented Zstd decompression | High |
+| Established-account reconnect block | **Resolved**, token/identity mismatch, not anti-fraud | High |
 
-Full findings with complete file:line citations for every claim are folded into [Open questions & further work](/open-questions) rather than duplicated here. The two previously-"narrowed" items were both closed by that live-traffic follow-up run: a Zstd-decompression fix (`packet.go`) unblocked the init push, and an iOS-identity fix (`identity.go`) unblocked the reconnect — see [Open questions & further work](/open-questions) and [Live validation against production](/live-validation).
+Full findings with complete file:line citations for every claim are folded into [Open questions & further work](/open-questions) rather than duplicated here. The two previously-"narrowed" items were both closed by that live-traffic follow-up run: a Zstd-decompression fix (`packet.go`) unblocked the init push, and an iOS-identity fix (`identity.go`) unblocked the reconnect, see [Open questions & further work](/open-questions) and [Live validation against production](/live-validation).
