@@ -335,6 +335,7 @@ func TestLoadOrCreateDeviceIdentityWarnsOnLooseGameUidPermissions(t *testing.T) 
 // of them exercise the os.UserHomeDir() error path.
 func TestStateFilePathWarnsAndFallsBackWhenHomeDirUnavailable(t *testing.T) {
 	t.Setenv("HOME", "")
+	t.Setenv("LASTWAR_STATE_DIR", "")
 
 	var buf bytes.Buffer
 	orig := slog.Default()
@@ -354,6 +355,17 @@ func TestStateFilePathWarnsAndFallsBackWhenHomeDirUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "dir=.") {
 		t.Errorf("expected the warning to record the fallback dir, got: %s", logOutput)
+	}
+}
+
+// TestStateFilePathHonorsStateDirOverride: LASTWAR_STATE_DIR keeps a second device identity's
+// files apart from the home directory's.
+func TestStateFilePathHonorsStateDirOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LASTWAR_STATE_DIR", dir)
+	const name = ".lastwar_goclient_test_marker"
+	if got, want := StateFilePath(name), filepath.Join(dir, name); got != want {
+		t.Errorf("StateFilePath(%q) = %q, want %q", name, got, want)
 	}
 }
 

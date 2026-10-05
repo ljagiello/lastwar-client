@@ -13,6 +13,8 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -108,7 +110,30 @@ func buildBaseZoneLoginAddr(ip string, port int) (string, error) {
 	if port <= 0 {
 		return "", fmt.Errorf("no valid port in GSL server list entry (port=%d would silently build a bogus \"host:0\"-shaped address instead of failing clearly)", port)
 	}
-	return fmt.Sprintf("%s:%d", host, port), nil
+	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+}
+
+// baseZoneLoginAddrs is buildBaseZoneLoginAddr for a whole "|"-delimited gateway list: the first
+// entry is validated exactly as buildBaseZoneLoginAddr does (so a malformed list still fails
+// clearly), and every further non-empty host follows, in order and deduplicated, as a dial
+// fallback. The real client gets one such list per zone (GSL serverList[].ip) and races all of
+// its gateways (1.0.364 ChooseLine); dialFirst in crossserver.go tries them in turn instead.
+func baseZoneLoginAddrs(ip string, port int) ([]string, error) {
+	first, err := buildBaseZoneLoginAddr(ip, port)
+	if err != nil {
+		return nil, err
+	}
+	addrs := []string{first}
+	_, rest, _ := strings.Cut(ip, "|")
+	for host := range strings.SplitSeq(rest, "|") {
+		if host = strings.TrimSpace(host); host == "" {
+			continue
+		}
+		if addr := net.JoinHostPort(host, strconv.Itoa(port)); !slices.Contains(addrs, addr) {
+			addrs = append(addrs, addr)
+		}
+	}
+	return addrs, nil
 }
 
 // redirectIP reads a serverInfo redirect payload's "ip" field the same way the pre-round-29

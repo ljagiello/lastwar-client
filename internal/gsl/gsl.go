@@ -19,11 +19,13 @@ import (
 
 // Client build identity, pulled directly from the analyzed APK
 // (jadx_out/resources/AndroidManifest.xml) so the server sees the same
-// values a real 1.0.351 install would present.
+// values a real 1.0.364 install would present. 1.0.364/1892 (posted
+// 2026-09-23) is signed with the same certificate as 1.0.351, so psh and
+// packageSign are unchanged.
 const (
 	PackageName = "com.fun.lastwar.gp"
-	AppVersion  = "1.0.351"
-	VersionCode = "1835"
+	AppVersion  = "1.0.364"
+	VersionCode = "1892"
 	Platform    = "Android" // Versions.PlatformName / GameUtility.GetPlatformName() -- capitalized
 	unityVer    = "440"
 )
@@ -187,6 +189,13 @@ func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error
 			lastErr = fmt.Errorf("%s: server returned code=%s msg=%s", host, cv.Code, cv.Msg)
 			slog.Warn("check-version: host failed, trying next", "host", host, "error", lastErr)
 			continue
+		}
+		// updateType: 0 and 3 proceed, 1 offers an optional store update, 2 forces one
+		// (CheckResVersionState in the 1.0.364 C#). A forced update means the server has stopped
+		// accepting this build, so Logins claiming it are likely to start failing too.
+		if cv.UpdateType == "2" {
+			slog.Warn("check-version: the server demands a forced update of this build; bump gsl.AppVersion/VersionCode to the current release",
+				"appVersion", AppVersion, "versionCode", VersionCode)
 		}
 		return &cv, host, nil
 	}

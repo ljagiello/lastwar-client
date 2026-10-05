@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -89,6 +90,7 @@ func Run() {
 	decodeLabel := fs.String("decode-label", "", "prefix label for -decode-stream output lines, e.g. \"c2s\" or \"s2c\" (default: \"stream\")")
 	logLevel := fs.String("log-level", "info", "log verbosity: debug, info, warn (or its alias warning), or error")
 	version := fs.Bool("version", false, "print build info and exit")
+	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: after -email verification has bound this client's own device (state under $LASTWAR_STATE_DIR, else the home directory), trade its persisted loginKey for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit. As of 2026-10-04 the game server rejects a Login with the result (ec=28/E005), see auth.OwnDeviceSession")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag.ContinueOnError still runs the same failf/usage path flag.ExitOnError does
 		// internally -- it only differs in returning the error here instead of calling os.Exit
@@ -163,6 +165,14 @@ func Run() {
 	}
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(*logLevel)})))
+
+	if *ownDeviceSession != "" {
+		if err := writeOwnDeviceSession(gsl.DefaultHTTPClient(), *ownDeviceSession); err != nil {
+			slog.Error("own-device bootstrap failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	csIOSSetExplicitly := false
 	// csIPSetExplicitly/csPortSetExplicitly/csZoneSetExplicitly/csGameUidSetExplicitly/
@@ -272,7 +282,9 @@ func Run() {
 	if !*noConfig {
 		cfg, cfgSource = loadEffectiveConfig(*configPath)
 	}
+	var cfgAppVersion, cfgVersionCode string
 	if cfg != nil {
+		cfgAppVersion, cfgVersionCode = cfg.AppVersion, cfg.VersionCode
 		slog.Info("loaded session config", "path", cfgSource)
 		// Round 33 fix (originally scoped to -cs-ip/-cs-port/-cs-gameuid only; round 34 extends it
 		// to -cs-zone/-cs-deviceid/-cs-shumei/-cs-at, the four siblings round 33 missed):
@@ -344,7 +356,8 @@ func Run() {
 		runCrossServerTest(crossServerTestOpts{
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
-			iosMode: *csIOS, interactive: *interactive, handshake: *handshake,
+			iosMode: *csIOS, appVersion: cfgAppVersion, versionCode: cfgVersionCode,
+			interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
 			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
 			zoneExplicit: csZoneSetExplicitly, gameUidExplicit: csGameUidSetExplicitly,
@@ -607,6 +620,7 @@ var stringFlagSwallowGuardNames = map[string]bool{
 	"cs-ip": true, "cs-zone": true, "cs-gameuid": true, "cs-deviceid": true,
 	"cs-shumei": true, "cs-rt": true, "cs-at": true,
 	"config": true, "decode-stream": true, "decode-label": true, "log-level": true,
+	"own-device-session": true,
 }
 
 // detectSwallowedFlagValue is the pure decision at the heart of round 25's Fix 1 (the MAJOR
@@ -752,27 +766,22 @@ func serverListOverrideFlags(ip string, ipExplicit bool, port int, portExplicit 
 // either, so a -cs-rt refresh that changed ONLY GameUid (leaving host/port/zone/accessTok
 // unchanged) was silently never persisted.
 //
-// Bug fixed here (round 26): origHost is normalized through gsl.FirstHost (gsl.go) below, before the
-// comparison, rather than compared as the raw string the caller captured it as. -cs-ip/session-
-// config's ip value legitimately supports a pipe-delimited multi-host fallback list (e.g.
-// "host-a|host-b", documented in -cs-ip's own help text), and every dial path already normalizes
-// this via gsl.FirstHost before actually connecting (see crossserver.go) -- but newHost here is
-// always a single resolved host, parsed from the actual dialed address via net.SplitHostPort.
-// Comparing that single resolved host against a raw, un-normalized pipe-delimited origHost meant
-// an operator-supplied "host-a|host-b" that connected cleanly to the FIRST host, with NO redirect
-// and no other change, still spuriously reported "save needed" purely because the resolved
-// single host could never string-equal the original pipe-delimited value -- permanently
-// collapsing the operator's configured multi-host resilience list down to one host in the
-// persisted session config on the very first run. Normalizing here, inside this function, rather
-// than only at the call site, means this comparison is correct regardless of what shape any
-// caller's origHost happens to be in.
+// Bug fixed here (round 26, widened 2026-10-04): newHost counts as unchanged when it is ANY member
+// of origHost's pipe-delimited list. -cs-ip/session-config's ip value legitimately supports a
+// pipe-delimited multi-host fallback list (e.g. "host-a|host-b", documented in -cs-ip's own help
+// text), and DoCrossServerLogin dials those hosts in order until one connects -- but newHost here
+// is always the single host it actually connected to, parsed from the dialed address via
+// net.SplitHostPort. Comparing that against the raw pipe-delimited origHost meant a clean
+// connection with NO redirect and no other change still spuriously reported "save needed",
+// permanently collapsing the operator's configured multi-host resilience list down to one host in
+// the persisted session config on the very first run. (Round 26 compared against origHost's first
+// entry only; a dial that fell back to a later entry would have collapsed the list the same way.)
 //
 // Taking every value as a plain argument (rather than closing over runCrossServerTest's locals)
 // is what makes all of these mistakes structurally impossible to reintroduce silently, and what
 // makes this testable without spinning up fake GSL/game servers.
 func crossServerSaveBackNeeded(newHost string, newPort int, newZone, newAccessTok, newGameUid, origHost string, origPort int, origZone, origAccessTok, origGameUid string) bool {
-	origHost = gsl.FirstHost(origHost)
-	return newHost != origHost || newPort != origPort || newZone != origZone || newAccessTok != origAccessTok || newGameUid != origGameUid
+	return !slices.Contains(strings.Split(origHost, "|"), newHost) || newPort != origPort || newZone != origZone || newAccessTok != origAccessTok || newGameUid != origGameUid
 }
 
 // parseLogLevel maps a -log-level flag value to an slog.Level, defaulting to Info for the empty
@@ -827,6 +836,7 @@ func printVersion() {
 
 type crossServerTestOpts struct {
 	ip, zone, gameUid, deviceID, shumeiBoxId, rt, at, interactive string
+	appVersion, versionCode                                       string // session config only; see SessionConfig.AppVersion
 	port                                                          int
 	handshake, iosMode, collect, listBuildings                    bool
 	configSavePath                                                string // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
@@ -1155,11 +1165,17 @@ func runCrossServerTest(o crossServerTestOpts) {
 		DeviceID: deviceID, AirKey: airKey,
 		AccessTok: accessTok, ShumeiBoxId: o.shumeiBoxId,
 		Handshake: o.handshake, IOSMode: o.iosMode,
+		AppVersion: o.appVersion, VersionCode: o.versionCode,
 		HTTPClient: gslHTTPClient, RSAPub: gslRSAPub, GateHost: gslGateHost,
 		DialGame: o.dialGame,
 	})
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
+		if errors.Is(err, session.ErrTokenRejected) {
+			slog.Error("the session config's access token has been rotated server-side; every run will fail until it is replaced. " +
+				"Recapture: run `tcpdump -i en0 -w login.pcap 'tcp and not port 443'`, cold-start the real app until its main screen loads, " +
+				"then `pcap -in login.pcap -session-out ~/.lastwar_goclient_session.json` (see README, \"Recognizing an expired token\")")
+		}
 		// Exit code 2 marks a confirmed server-side auth rejection specifically -- see the
 		// matching comment in main() above. A bare TCP dial failure never reaches that point,
 		// so it falls through to the generic exit code 1.
@@ -1184,11 +1200,15 @@ func runCrossServerTest(o crossServerTestOpts) {
 		if newHost, newPortStr, splitErr := net.SplitHostPort(result.Addr); splitErr == nil {
 			if newPort, atoiErr := strconv.Atoi(newPortStr); atoiErr == nil {
 				if crossServerSaveBackNeeded(newHost, newPort, result.Zone, result.AccessTok, result.GameUid, origIP, origPort, origZone, origAccessTok, origGameUid) {
+					savedIP := newHost
+					if newPort == origPort && slices.Contains(strings.Split(origIP, "|"), newHost) {
+						savedIP = origIP // keep the configured gateway fallback list
+					}
 					updated := &SessionConfig{
-						IP: newHost, Port: newPort, Zone: result.Zone,
+						IP: savedIP, Port: newPort, Zone: result.Zone,
 						GameUid: result.GameUid, DeviceID: deviceID,
 						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
-						IOSMode: o.iosMode,
+						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
 					}
 					if err := SaveSessionConfig(updated, o.configSavePath); err != nil {
 						slog.Warn("failed to persist redirected server address to session config", "path", o.configSavePath, "error", err)

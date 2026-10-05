@@ -3,13 +3,15 @@ package game
 import "lastwar-client/internal/sfs"
 
 // NewTestBuildingSFS builds a minimal building_new-shaped sfs.SFSObject with the fields Building's
-// accessors read -- uuid/bId/lv -- mirroring what a real init push carries (see ParseInitBuildings'
-// doc comment in buildings.go).
+// accessors read -- uuid/bId/lv -- plus the prodST a building with a running production cycle
+// carries (collectibleBuildings skips buildings without it), mirroring what a real init push
+// carries (see ParseInitBuildings' doc comment in buildings.go).
 func NewTestBuildingSFS(uuid int64, bId, lv int32) *sfs.SFSObject {
 	b := sfs.NewSFSObject()
 	b.PutLong("uuid", uuid)
 	b.PutInt("bId", bId)
 	b.PutInt("lv", lv)
+	b.PutLong("prodST", 1791171134420)
 	return b
 }
 

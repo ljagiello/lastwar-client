@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/session"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"time"
 )
 
@@ -74,6 +76,8 @@ type CrossServerLoginParams struct {
 	ShumeiBoxId string // real anti-fraud device fingerprint, if known
 	Handshake   bool   // experimental: send the vanilla SFS2X pre-Login Handshake (see conn.go:DoHandshake)
 	IOSMode     bool   // send an iOS-flavored identity instead of Android; see LoginParamsInput.IOSMode
+	AppVersion  string // build the token was issued under, if known; see LoginParamsInput.AppVersion
+	VersionCode string
 
 	// HTTPClient/RSAPub/GateHost are OPTIONAL GSL plumbing, needed only to
 	// refresh AccessTok via gsl.GetServerList(opt=fix) if a serverInfo redirect
@@ -174,10 +178,11 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 	// happens to pre-validate both of these before calling DoCrossServerLogin today, but this is
 	// an exported, reusable function in its own right (see the doc comment above) -- it must not
 	// rely on a specific caller's external guards to avoid a silent loopback dial.
-	addr, err := buildBaseZoneLoginAddr(p.IP, p.Port)
+	addrs, err := baseZoneLoginAddrs(p.IP, p.Port)
 	if err != nil {
 		return nil, fmt.Errorf("cross-server login: %w", err)
 	}
+	var addr string
 	zone := p.Zone
 
 	for hop := 0; ; hop++ {
@@ -187,15 +192,16 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			}
 			slog.Info("cross-server login: following serverInfo redirect", "hop", hop, "addr", addr, "zone", zone)
 		}
-		slog.Info("cross-server login: dialing directly (no GSL call)", "addr", addr)
+		slog.Info("cross-server login: dialing directly (no GSL call)", "addr", addrs[0], "fallbacks", len(addrs)-1)
 		dial := dialGame
 		if p.DialGame != nil {
 			dial = p.DialGame
 		}
-		conn, err := dial(addr, 10*time.Second)
+		conn, dialed, err := dialFirst(dial, addrs)
 		if err != nil {
 			return nil, err
 		}
+		addr = dialed
 		conn.StartHeartbeat(4*time.Second, time.Now())
 		slog.Info("connected")
 
@@ -218,6 +224,8 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			ServerID:    serverIDFromZone(zone),
 			ShumeiBoxId: p.ShumeiBoxId,
 			IOSMode:     p.IOSMode,
+			AppVersion:  p.AppVersion,
+			VersionCode: p.VersionCode,
 		})
 		loginContent := sfs.NewSFSObject()
 		loginContent.PutUtfString("zn", zone)
@@ -277,7 +285,12 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// Wrapped in ErrAuthRejected (defined in errors.go) so callers can
 			// distinguish "server actively rejected this login" (ec present) from
 			// a bare dial/timeout/I/O failure above, which stay unwrapped.
-			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), session.ErrAuthRejected)
+			cause := session.ErrAuthRejected
+			ep, _ := env.Content.Get("ep")
+			if codes, _ := ep.Val.([]string); slices.Contains(codes, "E011") {
+				cause = session.ErrTokenRejected
+			}
+			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), cause)
 		}
 		slog.Info("login OK")
 
@@ -297,7 +310,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// to an empty host. An unguarded fmt.Sprintf("%s:%d", "", port) wouldn't fail --
 			// Go's "host:port" dial syntax treats an empty host as the loopback interface,
 			// so this would silently redial 127.0.0.1/::1 instead of erroring clearly.
-			newAddr, err := buildBaseZoneLoginAddr(redirectIPVal, int(getIntFlexible(siObj, "port")))
+			newAddrs, err := baseZoneLoginAddrs(redirectIPVal, int(getIntFlexible(siObj, "port")))
 			if err != nil {
 				_ = conn.Close()
 				return nil, fmt.Errorf("cross-server login: serverInfo redirect: %w", err)
@@ -308,7 +321,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// followed: ip/port can still resolve fine on their own, so this would otherwise
 			// silently redial to the new address while keeping the stale zone.
 			newZone := redirectZone(siObj, "crossserver.go cross-server Login")
-			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddr, "newZone", newZone, "oldAddr", addr, "oldZone", zone)
+			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddrs[0], "newZone", newZone, "oldAddr", addr, "oldZone", zone)
 
 			// Before closing this connection and redialing, refresh AccessTok via GSL --
 			// mirroring login.go's equivalent redirect path, on the same documented
@@ -364,7 +377,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			}
 
 			_ = conn.Close()
-			addr = newAddr
+			addrs = newAddrs
 			if newZone != "" {
 				zone = newZone
 			}
@@ -374,6 +387,28 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		_ = conn.SetReadDeadline(time.Time{})
 		return &CrossServerLoginResult{Conn: conn, Content: env.Content, Addr: addr, Zone: zone, AccessTok: p.AccessTok, GameUid: p.GameUid}, nil
 	}
+}
+
+// dialFirst dials addrs in order and returns the first connection that succeeds, along with its
+// address, logging each failure. The real client races every gateway at once and keeps the first to
+// answer its a=29 ping; trying them in turn is the simpler fallback with the same effect when one is
+// unreachable. A single-address list fails with that dial's own error, unwrapped.
+func dialFirst(dial func(addr string, timeout time.Duration) (*session.GameConn, error), addrs []string) (*session.GameConn, string, error) {
+	var errs []error
+	for _, addr := range addrs {
+		conn, err := dial(addr, 10*time.Second)
+		if err == nil {
+			return conn, addr, nil
+		}
+		if len(addrs) > 1 {
+			slog.Warn("cross-server login: gateway dial failed", "addr", addr, "error", err)
+		}
+		errs = append(errs, err)
+	}
+	if len(errs) == 1 {
+		return nil, "", errs[0]
+	}
+	return nil, "", errors.Join(errs...)
 }
 
 func serverIDFromZone(zone string) string {

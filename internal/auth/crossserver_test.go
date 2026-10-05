@@ -1423,6 +1423,41 @@ func TestDoCrossServerLoginRejectsAuthRejection(t *testing.T) {
 	if !strings.Contains(err.Error(), "CROSS-SERVER LOGIN FAILED") {
 		t.Errorf("err = %v, want it to mention CROSS-SERVER LOGIN FAILED", err)
 	}
+	if errors.Is(err, session.ErrTokenRejected) {
+		t.Errorf("err = %v, must not be ErrTokenRejected without ep=[E011]", err)
+	}
+}
+
+// TestDoCrossServerLoginTokenRejected checks the rotated-token signature seen live, {ec=28,
+// ep=[E011]}, maps to ErrTokenRejected while still satisfying ErrAuthRejected (exit code 2).
+func TestDoCrossServerLoginTokenRejected(t *testing.T) {
+	addr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		resp := sfs.NewSFSObject()
+		resp.PutValue("ep", sfs.SFSValue{Type: 16, Val: []string{"E011"}}) // 16 = UTF_STRING_ARRAY
+		resp.PutShort("ec", 28)
+		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp)
+	})
+	host, port := testutil.SplitHostPortInt(t, addr)
+
+	result, err := DoCrossServerLogin(CrossServerLoginParams{
+		IP: host, Port: port, Zone: "APS1", GameUid: "uid-1",
+		DeviceID: "dev-1", AirKey: "airkey-1", AccessTok: "tok-1",
+	})
+	if err == nil {
+		if result != nil && result.Conn != nil {
+			_ = result.Conn.Close()
+		}
+		t.Fatal("DoCrossServerLogin() error = nil, want ErrTokenRejected")
+	}
+	if !errors.Is(err, session.ErrTokenRejected) {
+		t.Errorf("err = %v, want errors.Is(err, ErrTokenRejected)", err)
+	}
+	if !errors.Is(err, session.ErrAuthRejected) {
+		t.Errorf("err = %v, want errors.Is(err, ErrAuthRejected) to still hold", err)
+	}
 }
 
 // TestDoCrossServerLoginBaseZoneResponseWaitConnectionFailure is the round-51 regression test for

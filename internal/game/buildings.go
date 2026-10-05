@@ -66,6 +66,18 @@ import (
 // but treat this as unverified, not confirmed, until one of them actually
 // returns status=1.
 //
+// RESOLVED (2026-10-04): they are not production lines, and are no longer
+// collected. Over 342 consecutive cron runs every one of the 6 got 602026,
+// never a single status=1, and the 1.0.364 Lua settles why: the real client
+// only ever sends building.production.collect for Global/EnumType.lua's
+// ProductLineBuilds (plus the current season week-card farm building), and
+// none of these 6 is in it. The same Lua also has the real client skip any
+// building without prodST (ProductLineManager GetNextCollectTime returns -1),
+// which collectibleBuildings now mirrors. 1.0.364 added one production line,
+// LW_BUILD_CRYSTAL_STONE (10310000, Crystal Factory), and the Season 6 week
+// card's farm building (846000) belongs to the same Spore Factory family as
+// 842000-845000; both are collected now, unconfirmed live.
+//
 // "Armed Truck" itself is RESOLVED, and it's neither of the above two
 // leads: it's not a building at all, and not LW_BUILD_TRUCK_STATION_1-4
 // (kept below anyway since that pairing still looks real, see above).
@@ -107,7 +119,9 @@ const (
 	BuildingTruckStation3     int32 = 10140000 // LW_BUILD_TRUCK_STATION_3
 	BuildingTruckStation4     int32 = 10141000 // LW_BUILD_TRUCK_STATION_4
 	BuildingComponentFactory  int32 = 10214000 // LW_BUILD_SQUAD_EQUIP_FACTORY -- the REAL "Component Factory"; confirmed live, real status=1 collection (resId=630011)
-	BuildingTacticalInstitute int32 = 10235000 // LW_BUILD_DOMINATOR_TRAIN -- the REAL "Tactical Institute"; real active production data (unlike Tactical Center below) but not yet confirmed with a status=1 collection
+	BuildingTacticalInstitute int32 = 10235000 // LW_BUILD_DOMINATOR_TRAIN -- the REAL "Tactical Institute"; confirmed live, status=1 collections since
+	BuildingSporeFactoryCard  int32 = 846000   // LW_BUILD_SEASON6_WEEK_CARD -- Season 6 week-card farm building; ProductLineBuilds via season_weekcard, unconfirmed live
+	BuildingCrystalFactory    int32 = 10310000 // LW_BUILD_CRYSTAL_STONE -- new in 1.0.364, in ProductLineBuilds; unconfirmed live
 )
 
 var buildingNames = map[int32]string{
@@ -134,6 +148,8 @@ var buildingNames = map[int32]string{
 	BuildingTruckStation4:     "Truck Station IV (not Armed Truck)",
 	BuildingComponentFactory:  "Component Factory",
 	BuildingTacticalInstitute: "Tactical Institute",
+	BuildingSporeFactoryCard:  "Spore Factory (Week Card)",
+	BuildingCrystalFactory:    "Crystal Factory",
 	10208000:                  "Gold Warehouse",
 	10203000:                  "Food Warehouse (Bakery)",
 	10206000:                  "Iron Warehouse (Steel Mill)",
@@ -671,19 +687,16 @@ func PrintBuildings(buildings []Building) {
 // Workshop, Training Base, Oil Well, Drone Parts Workshop, Component
 // Factory, and the four Spore Factory tiers.
 //
-// Tactical Center, Armament Institute, Tactical Institute, and the four
-// Truck Station tiers are NOT confirmed -- see the long comment on the
-// const block above for why they're included anyway (never E000001, so
-// the pairing looks real, but no successful collection yet -- Tactical
-// Institute has real production timestamps, unlike the other five, so
-// it's the best-positioned of this group to flip to confirmed soon).
+// Tactical Institute has since collected live too. Crystal Factory and the
+// Spore Factory week-card building are unconfirmed (1.0.364 Lua only).
+// Tactical Center, Armament Institute and the four Truck Station tiers are
+// deliberately absent: they are not production lines (see the const block).
 func collectCmdFor(bId int32) (cmd string, ok bool) {
 	switch bId {
 	case BuildingFarmland, BuildingIronMine, BuildingGoldMine, BuildingSmelter, BuildingMaterialWorkshop, BuildingTrainingBase,
-		BuildingOilWell, BuildingDronePartsShop, BuildingTacticalCenter, BuildingArmamentInst,
-		BuildingSporeFactory1, BuildingSporeFactory2, BuildingSporeFactory3, BuildingSporeFactory4,
-		BuildingTruckStation1, BuildingTruckStation2, BuildingTruckStation3, BuildingTruckStation4,
-		BuildingComponentFactory, BuildingTacticalInstitute:
+		BuildingOilWell, BuildingDronePartsShop,
+		BuildingSporeFactory1, BuildingSporeFactory2, BuildingSporeFactory3, BuildingSporeFactory4, BuildingSporeFactoryCard,
+		BuildingComponentFactory, BuildingTacticalInstitute, BuildingCrystalFactory:
 		return "building.production.collect", true
 	default:
 		return "", false
@@ -852,13 +865,15 @@ func CollectAll(conn *session.GameConn, buildings []Building, visitors []Visitor
 	return errors.Join(errs...)
 }
 
-// collectibleBuildings filters buildings down to the ones collectCmdFor recognizes -- pulled out
-// of CollectAll as a standalone, network-free function so it can be unit tested without a live
-// connection.
+// collectibleBuildings filters buildings down to the ones collectCmdFor recognizes and that have
+// a production cycle running (a prodST field) -- pulled out of CollectAll as a standalone,
+// network-free function so it can be unit tested without a live connection. The prodST check
+// mirrors the real client (ProductLineManager GetNextCollectTime returns -1 without it, so it
+// never sends a collect); every live status=1 collection has had prodST set.
 func collectibleBuildings(buildings []Building) []Building {
 	var out []Building
 	for _, b := range buildings {
-		if _, ok := collectCmdFor(b.BId()); ok {
+		if _, ok := collectCmdFor(b.BId()); ok && b.Raw.Has("prodST") {
 			out = append(out, b)
 		}
 	}

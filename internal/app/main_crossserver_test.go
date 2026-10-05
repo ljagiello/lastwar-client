@@ -112,6 +112,20 @@ func TestCrossServerSaveBackNeeded(t *testing.T) {
 			origHost: "host-a|host-b", origPort: 100, origZone: "APS1", orig: "tok", origGameUid: "uid1",
 			want: false,
 		},
+		{
+			// DoCrossServerLogin now falls back through the whole list, so connecting to a later
+			// member is just as "unchanged" as connecting to the first.
+			name:    "pipe-delimited origHost, newHost is a later fallback member -- no save needed",
+			newHost: "host-b", newPort: 100, newZone: "APS1", newAccessTok: "tok", newGameUid: "uid1",
+			origHost: "host-a|host-b", origPort: 100, origZone: "APS1", orig: "tok", origGameUid: "uid1",
+			want: false,
+		},
+		{
+			name:    "pipe-delimited origHost, newHost outside the list (a redirect) -- save needed",
+			newHost: "host-c", newPort: 100, newZone: "APS1", newAccessTok: "tok", newGameUid: "uid1",
+			origHost: "host-a|host-b", origPort: 100, origZone: "APS1", orig: "tok", origGameUid: "uid1",
+			want: true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

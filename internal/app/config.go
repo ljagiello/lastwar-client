@@ -27,6 +27,17 @@ type SessionConfig struct {
 	ShumeiBoxId string `json:"shumeiBoxId"`
 	AccessToken string `json:"accessToken"`
 	IOSMode     bool   `json:"iosMode"`
+	// AppVersion/VersionCode are the build the captured accessToken was issued under (the token is
+	// bound to it); empty means the built-in defaults. cmd/pcap -session-out fills both in.
+	AppVersion  string `json:"appVersion,omitempty"`
+	VersionCode string `json:"versionCode,omitempty"`
+	// RefreshToken (with GSL's at.time/rt.time, unix seconds of issue) is only present for the
+	// client's own device (-own-device-session, experimental). Nothing consumes it yet: the real
+	// client's own E011 recovery is GSL opt=refresh with it, but the own-device Login itself is
+	// still rejected (see auth.OwnDeviceSession), so that retry isn't implemented.
+	RefreshToken     string `json:"refreshToken,omitempty"`
+	AccessTokenTime  int64  `json:"accessTokenTime,omitempty"`
+	RefreshTokenTime int64  `json:"refreshTokenTime,omitempty"`
 }
 
 // String/GoString are the round-48 regression fix for the MAJOR finding that SessionConfig --

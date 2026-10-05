@@ -6,5 +6,7 @@
   "deviceId": "your-real-device-id_n3d",
   "shumeiBoxId": "your-real-shumei-fingerprint-token",
   "accessToken": "your-real-access-token-from-a-captured-login",
-  "iosMode": true
+  "iosMode": true,
+  "appVersion": "1.0.344",
+  "versionCode": "786"
 }
