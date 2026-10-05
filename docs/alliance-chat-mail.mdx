@@ -33,10 +33,10 @@ The alliance room id is **not** a deterministic function of the alliance id; it 
 | `al.kick` / `al.setrank` | Membership & rank management (kicks are rate-limited) |
 | `alliance.declare.war.create` | Declare war on a target city |
 | `al.call.help` / `al.show.help` | Mutual-aid: rally-assist build/queue speedups |
-| `al.help.all` | Bulk-completes every pending member help request in one call, **confirmed live**, only field on the wire is `cmdBaseTime` (a Long, current epoch-ms; everything else the UI passes locally never reaches the server). Safe to call with nothing pending, a no-op success, not an error. See [Live validation against production](/live-validation#alliance-automation-help-all-and-gift-claiming-both-true-bulk-commands). |
-| `alliance.reward.list` / `alliance.reward.allreceive` | Alliance Gifts panel: list, and "Claim All" for one `type` (`1` = Premium, `2` = Regular, both need claiming separately, **confirmed live** for both), needs only `type`, no per-gift uids. See [Live validation against production](/live-validation#alliance-automation-help-all-and-gift-claiming-both-true-bulk-commands). |
+| `al.help.all` | Bulk-completes every pending member help request in one call, **confirmed live**, only field on the wire is `cmdBaseTime` (a Long, current epoch-ms; everything else the UI passes locally never reaches the server). Safe to call with nothing pending, a no-op success, not an error. The 1.0.364 real client only sends it when another member's help request exists, so its server-side answer to an empty help-all comes from `goclient`'s live calls alone. See [Live validation against production](/live-validation#alliance-automation-help-all-and-gift-claiming-both-true-bulk-commands). |
+| `alliance.reward.list` / `alliance.reward.allreceive` | Alliance Gifts panel: list, and "Claim All" for one `type` (`1` = Premium, `2` = Regular, both need claiming separately, **confirmed live** for both), needs only `type`, no per-gift uids. Per the 1.0.364 Lua, the client only offers the Premium claim-all once the alliance gift level reaches the `alliance_gift` config's `k5` value; the server's answer below that level hasn't been observed. See [Live validation against production](/live-validation#alliance-automation-help-all-and-gift-claiming-both-true-bulk-commands). |
 | `science.data.refresh` | Returns the account's *entire* alliance tech tree in one no-parameter call, every `scienceId` with donation progress and a `state` field. **Confirmed live**: exactly one entry had `state=1` (every other had `0`), matching the real UI's thumbs-up-badged "Recommended" tech via its progress numbers. See [Live validation against production](/live-validation#alliance-tech-donation-bulk-tree-discovery-then-one-targeted-donate). |
-| `al.science.donate` / `al.science.donate.gold` | Donate to one alliance tech's research, `.donate` costs a resource (**confirmed live**, rate-limited to `maxNum=30`/day per `al.science.refreshNum`, plus a separate per-donation cooldown confirmed live via a real `errorCode=120471` response, its exact duration is unconfirmed; `refreshTimeBlock=1200000`/20min was the original guess, but two `-collect` runs ~3 minutes apart both donated successfully, so it hasn't been independently re-measured), `.donate.gold` costs gems with no cooldown (`useGoldNum`/`maxGoldNum` both `999999999`). Neither has a batch/count field; "hold to donate repeatedly" is a client-side auto-repeat of single-donation calls, not a server-side multiplier. |
+| `al.science.donate` / `al.science.donate.gold` | Donate to one alliance tech's research. `.donate` costs a resource (**confirmed live**). `al.science.refreshNum {scienceId}` returned `maxNum=30` and `refreshTimeBlock=1200000` live, and the server has answered a donation with `errorCode=120471` and the `errorMsg` "Donate science CD time is not finish" (both confirmed live). Per the 1.0.364 Lua (static-analysis-only), those fields describe a pool of regenerating charges, `useNum` of `maxNum`, refilled every `refreshTimeBlock` ms with the next refill at `timePoint`, and `120471` means no charge is left: its locale text is "Donation Count has reached its limit, please wait." It isn't a per-donation cooldown; the client shows `120471` itself when `useNum <= 0`, without sending anything. `.donate.gold` costs gems with no charge limit (`useGoldNum`/`maxGoldNum` both `999999999`). Neither has a batch/count field; "hold to donate repeatedly" is a client-side auto-repeat of single-donation calls, not a server-side multiplier. |
 | `al.science.recommend` | Alliance-officer action: marks/unmarks one `scienceId` as the alliance's currently-Recommended tech (the "Cancel Recommend" button). Read the current value via `science.data.refresh`'s `state` field instead; there's no dedicated "get recommended" request. |
 
 ## Core Mail commands
@@ -44,12 +44,31 @@ The alliance room id is **not** a deterministic function of the alliance id; it 
 | cmd | Purpose |
 | --- | --- |
 | `mail.read` | Read one mail, `{uid: mailId, type, toUser: senderUid}` |
-| `chat.get.system.mails` | List/sync the mailbox, paginated (`clientseq`/`time`/`count`/`firstCmd`/`isAll` in, `more`/`lastUid`/`lastMailTime` out). Response arrives as a separate push, `push.chat.get.system.mails`, not inline. **Confirmed live**: a cold-start call (`time: 0`, empty `clientseq`) correctly paginated a full 350-entry mailbox across 4 pages. |
-| `mail.delete` / `.batch` | Delete mail |
+| `chat.get.system.mails` | List/sync the mailbox, paginated (`clientseq`/`time`/`count`/`firstCmd`/`isAll` in, `more`/`lastUid`/`lastMailTime` out). Response arrives as a separate push, `push.chat.get.system.mails`, not inline. **Confirmed live**: a cold-start call (`time: 0`, empty `clientseq`) correctly paginated a full 350-entry mailbox across 4 pages. The real client pages differently: in the 2026-10-04 capture its first call carried `isAll:true`, a 32-hex `clientseq`, a `time`, `firstCmd:"YES"`, and `count:20`, and every later call carried `clientseq:"0"`, `time:0`. Per the 1.0.364 Lua, that continuation is a server-side cursor with no `lastUid`/`lastMailTime` feedback, and a true cold start sends `clientseq:"0"`, `time:0`. The list push gained `delActivityIds` in 1.0.364. |
+| `mail.delete` / `.batch` | Delete mail. The real client sends `mail.delete.batch {type:"auto", uids}` on login: in the 2026-10-04 capture it auto-deleted mail in 9 calls, and the server answered with `push.mail.delete.batch` |
 | `mail.read.status.betch` | Mark mail read, needs only `uids` (comma-separated string GUIDs), no `type`, so it's global across every mailbox category in one call. **Confirmed live**, and genuinely independent of whether the mail has a reward: a real capture showed the actual client sending this with no matching `mail.reward.batch` call at all for a reward-less category (battle reports). Don't gate this on reward status, see the note in [Live validation against production](/live-validation#mail-claimable-but-scoped-per-category-with-string-guid-uids). |
 | `mail.reward` / `.batch` | Claim attachment reward. Gotcha, **confirmed live**: mail uids are string GUIDs, not the int64s every other uuid in this project uses, and the batch claim is scoped per mailbox category (`type`), one call per category, not one global call. See [Live validation against production](/live-validation#mail-claimable-but-scoped-per-category-with-string-guid-uids). |
 | `mail.send` | Send mail (1:1 or alliance-wide) |
 | `get.fight.report.detail` | Pull a full battle report; mail is the delivery mechanism for combat reports |
+
+### What `mail.reward.batch`'s `type` holds
+
+The 1.0.364 Lua (`MailRewardBatchMessage`) sends `type` as a **UtfString** holding an internal mail *group* id, never the mail's own raw `type` (static-analysis-only):
+
+| Group id | Group |
+|---|---|
+| `2` | Report |
+| `3` | Alliance |
+| `4` | Activity |
+| `5` | System |
+| `6` | Daily |
+| `7` | Charge |
+| `8` | Favor; also any mail with `saveFlag==1` |
+| `9` | Season |
+
+The client maps each raw mail type to a group through a 139-row table. Mail whose raw type has no group never gets claimed in bulk. An optional `types` UtfString exists too, but the claim-all path never uses it. The `3`, `4`, and `9` in the original live capture of the real client are exactly the alliance, activity, and season group ids.
+
+`goclient` sends `type` as an **Int** holding the raw mail type. Confirmed live: `mail.reward.batch` with that shape returns `{success=true}`, and each unclaimed mail disappears from the inbox after one run. Which value the server actually reads is unknown, so the table above records the real client's shape, not a requirement.
 
 ## Government ("Kingdom") system
 

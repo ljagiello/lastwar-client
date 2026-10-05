@@ -1,6 +1,6 @@
 ---
 title: "SFS2X wire protocol"
-description: "How the game's hand-rolled SmartFoxServer 2X packet envelope, header flags, XOR obfuscation, and binary SFSObject codec work on the wire, validated against the official SmartFoxServer JS SDK."
+description: "How the game's hand-rolled SmartFoxServer 2X packet envelope, header flags, XOR obfuscation, gateway race, heartbeat, and binary SFSObject codec work on the wire, validated against the official SmartFoxServer JS SDK."
 ---
 
 The client bundles the real SmartFoxServer 2X SDK but never actually uses its socket layer. Every byte on the wire is written by a hand-rolled reimplementation that only reuses SFS2X's data model, and the "encryption" bit is a length-derived XOR, not a cipher.
@@ -11,6 +11,40 @@ Plain TCP socket, **no TLS**. Host/port/zone/connection-type arrive dynamically 
 
 - `connectionType 0`: raw TCP, straight into the packet framing below.
 - `connectionType 1`: a one-shot literal HTTP/1.1 `Upgrade: websocket` preamble (with a **hardcoded, non-random** `Sec-WebSocket-Key`; only the HTTP status line is checked on response, the `Sec-WebSocket-Accept` challenge/response is never validated) is sent first, purely to satisfy load balancers that require a valid HTTP handshake, then the exact same raw SFS2X binary framing runs on the same socket. **This is not a real WebSocket**: there's no RFC 6455 frame masking anywhere in the read/write path. A Go client can dial TCP directly, or replay the literal handshake bytes if a load balancer demands them.
+
+In 1.0.364, `client_config` switch 26 selects connection type 1 to the `ws_ip` host on port 80, and switch 44 makes every second connect retry use it (see [Server-controlled transport switches](#server-controlled-transport-switches)). `KCPMode` is always `"0"`, and the client never uses UDP. Sockets set `NoDelay`, a 2 MiB receive buffer, a 64 KiB send buffer, and 30 s send and receive timeouts (static-analysis-only).
+
+## Gateway race and the pre-login probe
+
+The GSL `serverList[].ip` field is a `|`-delimited list of gateway hosts for one zone, all on the same port. Two live GSL responses on 2026-10-04 listed the same three hostnames, with only the port differing by zone: `10783` for `APS783` and `10072` for a guest account on `APS72` (confirmed live):
+
+```text
+lastwar-game-tcp-aws-1.lastwargame.com|lastwar-game-tcp-gcp-1.lastwargame.com|lastwar-game-tcp-cf-1.lastwarapp.net
+```
+
+A packet capture only shows the addresses these resolve to, so a session config written by `pcap -session-out` holds IP addresses; the hostnames work in its `ip` field too. The shipped client connects to all the gateways at once and keeps whichever answers first. This comes from the 1.0.364 C# (`ChooseLine`, `NetRawProxy`) and matches the 2026-10-04 capture of the real iOS app:
+
+1. Open a TCP connection to every gateway in parallel.
+2. On each, immediately send a `CustomPingPong` request (`c=0`, `a=29`).
+3. The first gateway to answer with a pong wins. Close the others and save the winner as `SERVER_IP`.
+4. Only then send `Login`.
+
+The capture showed the race across three gateways, two IPv4 and one Cloudflare IPv6:
+
+| | Winner (IPv4) | Cloudflare (IPv6) | IPv4 (the address an older session config pinned) |
+|---|---|---|---|
+| SYN-ACK | 19 ms | 14.5 ms | 77 ms |
+| Probe sent | 25 ms | 26 ms | 88 ms |
+| Pong | **154 ms** (first) | 162.5 ms | 162.5 ms |
+| Afterwards | `Login` at 200 ms, 45 ms after the pong | FIN at 187 ms | FIN at 188 ms |
+
+The three pongs carried `serverTime` values within 11 ms of each other, so all three front-ends reach one backend. The winner varies from run to run; an earlier capture had the pinned address winning.
+
+The probe's `p` object is fixed: a masked, Android-login-shaped template with literal placeholder values, into which the client splices only the device's real `deviceId`, plus a `clientTime`. It's byte-identical across all three sockets apart from `clientTime`. Its purpose is unknown, and it may be an anti-fraud surface, so it's documented here as a protocol fact only. The reply is a plain pong, `{p:{serverTime, clientTime}}` with `serverTime` in ms. After the probe, every keepalive is a plain ping.
+
+Per the C#, a gateway that times out at `Login` (7 s) is blacklisted and the connect is retried. A separate `NetLineSpeedTester` re-probes every gateway the same way for analytics, at most once per 25 s, and never switches lines (static-analysis-only).
+
+`goclient` doesn't race. `DoCrossServerLogin` dials the `|` list in order, 10 s per host and IPv6-safe, sends no probe, and sends `Login` straight after connecting. The server accepts that order (confirmed live). The fallback is confirmed live too: with an unreachable TEST-NET address first in the list, the dial timed out after 10 s and the login went through on the next gateway. When `goclient` writes a changed address or token back to the session config, it keeps the list as long as the gateway it reached is on it.
 
 ## Packet envelope: three nested layers
 
@@ -35,16 +69,27 @@ SFSObject {
 
 So a full `mail.read` request is schematically `{c:1, a:13, p:{c:"mail.read", r:-1, p:{uid:..., type:..., toUser:..., _id:42}}}`.
 
+The real client puts `_id` on every extension request: `Login` carries `1`, and requests count up from `2`. The server echoes `_id` and adds `_time` (observed in the 2026-10-04 capture). `goclient` sets `_id` only on `Login` and `login.init`, and the server accepts that (confirmed live).
+
 ## Packet header bits
 
 | Bit | Flag | Behavior |
 |---|---|---|
 | `0x80` | binary | always set |
-| `0x40` | encrypted | always set, see XOR "encryption" below |
-| `0x20` | compressed | set iff serialized payload > 1024 bytes (zlib deflate, level 9) |
-| `0x10` | useLZ4 (repurposed) | dead on send in this build; on receive the "LZ4" bit actually triggers **Zstandard** decompression, not LZ4, leftover naming from a migration. **Implemented**: `ReadPacket` (`packet.go`) previously detected this branch correctly but just returned an error instead of decompressing, which read as connection-closed; now decodes via `github.com/klauspost/compress/zstd`, confirmed live against the server's ~313KB Zstd-compressed init bootstrap push |
-| `0x08` | bigSized | set iff payload > 65535 bytes → 4-byte length instead of 2 (`BitSwarmManager.WriteBinaryData`, `Smartfox2xLw.decompiled.cs:13563`, the Unity SFS2X SDK this game actually embeds; see the correction note below) |
-| `0x04` | forward | off by default; appends a 2-byte source-shard id |
+| `0x40` | encrypted | always set on what the client sends, see XOR "encryption" below. Server-to-client frames in the 2026-10-04 capture (`0x80`, `0xB0`, `0xB8`) didn't set it and weren't XORed; `goclient`'s reader XORs only when the bit is set |
+| `0x20` | compressed | set iff the uncompressed serialized payload > 1024 bytes (zlib deflate, level 9) |
+| `0x10` | useLZ4 (repurposed) | never set on send; on receive the "LZ4" bit actually triggers **Zstandard** decompression, not LZ4, leftover naming from a migration. With `0x20` and `0x10` both set, a 4-byte big-endian uncompressed length follows the length field. **Implemented**: `ReadPacket` (`packet.go`) previously detected this branch correctly but just returned an error instead of decompressing, which read as connection-closed; now decodes via `github.com/klauspost/compress/zstd`, confirmed live against the server's ~313KB Zstd-compressed init bootstrap push |
+| `0x08` | bigSized | set iff payload > 65535 bytes → 4-byte length instead of 2 (`BitSwarmManager.WriteBinaryData`, `Smartfox2xLw.decompiled.cs:13563`, the Unity SFS2X SDK this game actually embeds; see the correction note below). The 1.0.364 sender tests the uncompressed length; `goclient` tests the compressed length, which is harmless because it never sends packets that large |
+| `0x04` | forward | a 2-byte big-endian server id follows the header byte, before the length. The 1.0.364 client sets it on **every** send when `client_config` switch 29 and the Lua switch `EnableServerRangeRouting` are both on. The 2026-10-04 capture shows it on every client-to-server frame (headers `0xE4` and `0xC4`), including the probe, with id `0x030F`: the zone's server id 783, in that one sample. Likely gateway routing. `goclient` never sets it, and the server accepts that (confirmed live) |
+
+### Send and receive framing differ
+
+The 1.0.364 client writes and reads packets with two different classes (static-analysis-only):
+
+- **Send** always uses the legacy `NetPacket`: header `0x80 | 0x40`, plus `0x20` with zlib when the uncompressed body is over 1024 bytes, plus `0x08` when it's over 65535, plus `0x04` and the server id when forwarding. The body is XORed against the little-endian bytes of its final length. The maximum is 1,000,000 bytes.
+- **Receive** uses `NetPacketNew`: when `0x20` and `0x10` are both set, the 4-byte uncompressed length follows, and the body is Zstd-decompressed. When only `0x20` is set, it's zlib.
+
+`goclient`'s `packet.go` already matches both sides.
 
 <Warning>
 **The "encryption" is not encryption**
@@ -98,19 +143,50 @@ SmartFoxServer publishes its own JS client SDK (`npm install sfs2x-api`, the off
 <tr><td>Action ids: <code>Login=1</code>, <code>PingPong=29</code></td><td><strong>Exact match</strong></td></tr>
 <tr><td>zlib compression, header bits <code>0x80</code>/<code>0x20</code>/<code>0x08</code></td><td><strong>Exact match</strong></td></tr>
 <tr><td>bigSized threshold specifically</td><td><strong>Correction, not a match</strong>: the JS SDK's own <code>IoHandler.onPacketWrite</code> uses <code>65335</code>, which this dossier briefly (and wrongly) adopted as a "fix." The <em>actual</em> reference for this game is the Unity SFS2X SDK it embeds (<code>Smartfox2xLw.decompiled.cs:13563</code>), which uses the standard <code>65535</code>, the JS client's <code>65335</code> is an idiosyncratic quirk of that specific (different) implementation, not a shared protocol constant. Reverted after a later audit pass caught the discrepancy; a good reminder that "official" only means authoritative for the exact client it ships with.</td></tr>
-<tr><td>Encryption flag (<code>0x40</code>) / XOR obfuscation</td><td><strong>Refined</strong>, the bit itself is real vanilla SFS2X: the Unity SDK sets it exactly when a session-negotiated <code>CryptoKey</code> (a real AES key+IV pair, via <code>Handshake</code>) is present (<code>bitSwarm.CryptoKey != null</code>, <code>Smartfox2xLw.decompiled.cs:13557</code>). This game never negotiates a <code>CryptoKey</code> at all, yet the server always sets <code>0x40</code> anyway and expects the length-derived XOR instead of real AES, a deliberate server-side override of the vanilla semantics, not evidence the bit is undocumented. The JS SDK's read/write path (which never sets or checks this bit) simply never implements the CryptoKey path at all, consistent with this reading.</td></tr>
+<tr><td>Encryption flag (<code>0x40</code>) / XOR obfuscation</td><td><strong>Refined</strong>, the bit itself is real vanilla SFS2X: the Unity SDK sets it exactly when a session-negotiated <code>CryptoKey</code> (a real AES key+IV pair, via <code>Handshake</code>) is present (<code>bitSwarm.CryptoKey != null</code>, <code>Smartfox2xLw.decompiled.cs:13557</code>). This game never negotiates a <code>CryptoKey</code> at all, yet the client always sets <code>0x40</code> anyway and the server expects the length-derived XOR instead of real AES, a deliberate override of the vanilla semantics, not evidence the bit is undocumented. The server's own frames don't set it (2026-10-04 capture). The JS SDK's read/write path (which never sets or checks this bit) simply never implements the CryptoKey path at all, consistent with this reading.</td></tr>
 <tr><td><code>0x10</code> LZ4-repurposed-as-Zstandard flag</td><td><strong>Confirmed game-specific</strong>: same story, absent from the official client entirely</td></tr>
 </tbody>
 </table>
 
-The official SDK's connection sequence also revealed a real gap: it sends a `Handshake` request (action `0`, fields `api`/`cl`, a step this dossier previously called out below as unused) *before* every Login, receiving back a session token / max-message-size / compression-threshold. Sending it against this game's real server got a clean, correctly-shaped response, `{ct=3072, ms=1000000, tk=<32-hex>}`, so the server-side handshake handler is real and working, contradicting the "never instantiated" framing below at least on the server side (whether the shipped Android/iOS client itself exercises this path wasn't re-confirmed). Practically, though, adding it to the Go client changed nothing: at the time this was tested, the init-push and reconnect-block problems were still unresolved, and this `Handshake` step made no difference to either, guest login and email-bind behaved identically with or without it. Both problems have since been resolved by unrelated fixes (a Zstd decompression bug and a token-identity mismatch, respectively, see [Live validation against production](/live-validation)), confirming the `Handshake` step was never the missing piece.
+The official SDK's connection sequence also revealed a real gap: it sends a `Handshake` request (action `0`, fields `api`/`cl`, a step this dossier previously called out below as unused) *before* every Login, receiving back a session token / max-message-size / compression-threshold. Sending it against this game's real server got a clean, correctly-shaped response, `{ct=3072, ms=1000000, tk=<32-hex>}`, so the server-side handshake handler is real and working, even though the shipped client never uses it (see below). Practically, though, adding it to the Go client changed nothing: at the time this was tested, the init-push and reconnect-block problems were still unresolved, and this `Handshake` step made no difference to either, guest login and email-bind behaved identically with or without it. Both problems have since been resolved by unrelated fixes (a Zstd decompression bug and a token-identity mismatch, respectively, see [Live validation against production](/live-validation)), confirming the `Handshake` step was never the missing piece.
 
 ## Heartbeat & reconnect
 
-A `PingPongRequest` (system controller, action 29, payload `{clientTime}`) fires every **4000 ms**. Client-perceived timeout is **12s** since the last pong, at which point the client disconnects and re-runs the entire connect→login sequence; there is no lightweight session-resume. No exponential backoff was found; retry cadence is a fixed timer.
+A `PingPongRequest` (system controller, action 29) fires every **4000 ms**. On the wire, the real client nests its `clientTime` one level deeper than the action's own `p`: `{c:0, a:29, p:{p:{clientTime}}}` (observed in the 2026-10-04 capture). `goclient` sends it flat, `p:{clientTime}`, and the server answers that too (confirmed live). The pong carries `serverTime` in ms and echoes `clientTime`; the client uses the pair for server-time sync. In the capture, the server answered all 83 heartbeats over 320 s.
+
+Client-perceived timeout is **12s** since the last pong or response, at which point the client disconnects and re-runs the entire connect→login sequence; there is no lightweight session-resume. No exponential backoff was found; retry cadence is a fixed timer.
+
+The 1.0.364 timers (static-analysis-only):
+
+| Timer | Value |
+|---|---|
+| Keepalive | 4000 ms; the first ping (the probe) goes out immediately on connect |
+| Ping-pong timeout | 12 s since the last pong or response, then reconnect |
+| `ConnectGame` | 6 s, 3 tries |
+| `Login` response | 7 s, up to 3 tries |
+| `init` push | 13 s, then reconnect and re-send `Login` with the same `at`, up to 3 times |
+| GSL HTTP | 5 s, 4 tries, alternating UnityWebRequest and BestHTTP |
+
+`goclient` sends its first heartbeat 4 s after connecting rather than immediately, waits up to 45 s for `init`, and makes a single attempt. That's more conservative than the real client, and the server accepts it.
+
+## Server-controlled transport switches
+
+The check-version response's `client_config` field is a `|`-separated list of `"0"`/`"1"` flags, indexed by switch id (`ClientSwitch.Parse`, see [Startup, version-check & hot-update](/bootstrap)). In 1.0.364, these switches change what goes on the wire (static-analysis-only):
+
+| Index | Name | Effect when on |
+|---|---|---|
+| 4 | `DISABLE_NEW_NET_PACKET` | The receive path falls back to the old packet class, without Zstd |
+| 5 | `DISABLE_ZSTD` | The client stops sending `isUseLz4` in `Login`, so the server doesn't Zstd-compress |
+| 20 | named `ENABLE_CDN_SPEED_TEST` | Sets a `tcpSecurityEnabled` value that the 1.0.364 connection constructor ignores |
+| 25 | ShuMei SDK on | When off, `shumeiBoxId` is `""` |
+| 26 | `ENABLE_SERVER_WS_CONNECTION` | Connect to `ws_ip` on port 80 with connection type 1 |
+| 29 | `ENABLE_CROSS_FORWARD` | Together with the Lua switch `EnableServerRangeRouting`, sets the forward bit and server id on every send |
+| 44 | `ENABLE_CONNECT_GAME_WEBSOCKET_FALLBACK` | Every second connect retry uses the WebSocket path |
+
+The forward bit in the 2026-10-04 capture suggests switch 29 is on for the iOS app today; the server still accepts `goclient`'s frames without it. `goclient` doesn't parse `client_config`.
 
 <Check>
-**What's genuinely unused, partially revised, see above**
+**Settled: the shipped client never sends a `Handshake`**
 
-SFS2X's SDK ships a full `Handshake` request (session token negotiation + a real AES `CryptoKey`, via `DefaultPacketEncrypter`) and a complete MMORoom/AOI (area-of-interest) streaming subsystem. The MMORoom/AOI claim stands untouched. The Handshake claim needs an asterisk: this game's own decompiled SDK (`Smartfox2xLw.decompiled.cs:4363`, `SendHandshakeRequest`) does contain a working implementation, called from the socket's own `OnSocketConnect`, and the live server answers it correctly when sent (see above). Whether `LoginState`'s actual connect path invokes that code or bypasses it in favor of jumping straight to `LoginMessage.Send` (as this dossier's original read of `LoginState.OnEnter` suggested) remains unsettled; either way, a reimplementation can skip it, it demonstrably makes no difference to anything tested live. The client reimplements its own point-id-addressed query model on top of plain extension requests instead of AOI streaming (see [World map](/world-map)).
+SFS2X's SDK ships a full `Handshake` request (session token negotiation + a real AES `CryptoKey`, via `DefaultPacketEncrypter`) and a complete MMORoom/AOI (area-of-interest) streaming subsystem. The game uses neither. This game's own decompiled SDK (`Smartfox2xLw.decompiled.cs:4363`, `SendHandshakeRequest`) contains a working `Handshake`, and the live server answers it when sent (see above), but the game's own transport never calls it. In 1.0.364, `NetConnection` handles only two system actions, `a=1` (`Login`) and `a=29` (ping-pong), and the connect path runs TCP connect, `a=29` probe, then `Login` (static-analysis-only). The 2026-10-04 capture of the real iOS app agrees: no `a=0` on any of the three sockets. A reimplementation should skip it; `goclient` keeps `-handshake` only as an off-by-default experiment. The client reimplements its own point-id-addressed query model on top of plain extension requests instead of AOI streaming (see [World map](/world-map)).
 </Check>

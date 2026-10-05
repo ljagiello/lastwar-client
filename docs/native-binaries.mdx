@@ -28,10 +28,10 @@ Only 1.8 MB, small for a Unity IL2CPP binary, and for good reason: it contains *
         empty/synthetic values are accepted without issue for a brand-new guest account; reconnecting into an
         <em> established</em> account initially looked ShuMei-gated but turned out to be an unrelated
         <code>packageName</code>/<code>platform</code>/<code>appVersion</code> identity mismatch against the access
-        token, fixed, reconnect worked at the time against the code as it then shipped (a later security fix
-        replaced part of the request with placeholders, and whether reconnect still succeeds is now an open
-        question, see [Live validation against production](/live-validation)), and no ShuMei-specific block was
-        ever found
+        token. Once that was fixed, reconnect worked, and it still works against the shipped code after a later
+        security fix replaced part of the request with placeholders. On 2026-10-04 a captured iOS session also
+        reconnected with <code>shumeiBoxId</code> sent empty, see [Live validation against production](/live-validation).
+        No ShuMei-specific block was ever found
       </td>
     </tr>
     <tr>
@@ -51,8 +51,11 @@ Only 1.8 MB, small for a Unity IL2CPP binary, and for good reason: it contains *
         <strong>None</strong>: actually <code>SHA1(packageName)</code>, a constant public string; trivially
         reproducible without touching the APK's real signature. The field that genuinely depends on the signing
         cert is <code>psh</code> (see [Identity, login & session](/auth)), and the Go client reproduces it correctly
-        for the Android identity, under iOS mode it still sends the Android-derived value, since no live iOS
-        capture of this field exists to confirm what a real iOS client would send instead.
+        for the Android identity; 1.0.364 is signed with the same certificate, so the value is unchanged. Under iOS
+        mode it still sends the Android-derived value. The 2026-10-04 capture of the real iOS app shows its
+        <code>psh</code> doesn't match that formula, yet the server accepted the Android-derived value from the
+        iOS-mode client for weeks. <code>psh</code> is an app-integrity signature, so the iOS routine is left
+        unexamined; reproducing it is out of scope for this project.
       </td>
     </tr>
     <tr>

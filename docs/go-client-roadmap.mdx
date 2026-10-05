@@ -7,13 +7,15 @@ Everything documented elsewhere in this dossier translated into a build order. B
 
 ## Phase 1: Bootstrap (nothing else works without this)
 
-1. `GET getlsu3dversion.php`, extract `resMsg` (RSA pubkey) and the answering host.
+1. `GET getlsu3dversion.php`, extract `resMsg` (RSA pubkey) and the answering host. An `updateType` of `2` means the server no longer accepts the build you claim ([Startup, version-check & hot-update](/bootstrap)).
 2. Implement the GSL RSA-PKCS1v15 + AES-256-ECB-PKCS7 envelope ([Gate-server RSA+AES handshake](/gate-server-crypto)), Go has no stdlib ECB mode, write the trivial 16-byte-block loop.
-3. `POST getserverlist.php`, parse `serverList[]`, pick a server, persist `at`/`rt` tokens.
-4. Open a plain TCP socket to `ip:port`. Implement the packet envelope, the length-derived XOR "encryption," zlib compression, and the `SFSObject` codec ([SFS2X wire protocol](/wire-protocol)).
+3. `POST getserverlist.php`, check `code` (`0` is success), parse `serverList[]`, pick the entry matching the last-logged server (else the first), and persist `at`/`at.time`/`rt`/`rt.time`. The [token lifecycle](/auth#token-lifecycle) covers how the real client picks `opt` and refreshes.
+4. Open a plain TCP socket to the zone's gateway. `serverList[].ip` is a `|`-delimited list; the real client races every entry and keeps the first to answer its ping ([SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe)). Implement the packet envelope, the length-derived XOR "encryption," zlib compression, and the `SFSObject` codec ([SFS2X wire protocol](/wire-protocol)).
 5. Send SFS `Login` with the ~50-field parameter object ([Identity, login & session](/auth)), including the `SecurityCode`/`OneCode`/`CoreV` MD5 constructions.
-6. Wait for `init.before` → `init` → `init.after`. Capture `chatToken` if chat is needed later.
+6. Wait for the bare `init` push; live, it arrives on its own, with no `init.before` or `init.after`. Capture `chatToken` if chat is needed later.
 7. Start a 4-second `PingPongRequest` heartbeat.
+
+[Live validation against production](/live-validation) has a side-by-side table of what the real client does on the wire and which of `goclient`'s simplifications the server accepts.
 
 ## Phase 2: Core loop
 
@@ -40,10 +42,10 @@ Season (754 cmds) and Activity (900 cmds) are recurring/time-limited live-ops co
 
 ## Running the Go client
 
-The roadmap above was actually built, the repository root is a from-scratch Go reimplementation of this protocol, live-tested against production (see [Live validation against production](/live-validation) for the full writeup of what's confirmed against live production servers). It's **fully working and live-confirmed** for GSL crypto, SFS2X packet framing (including Zstandard decompression), the SFSObject codec, brand-new-guest-account login, email-verification account binding, resource collection across 13 confirmed building types (Farmland, Iron Mine, Gold Mine, Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, and the four Season 6 Spore Factory tiers, 7 more building types are wired in but still unconfirmed, see the building-type table), and a growing set of account-level automations, none of which are building-`uuid`-scoped: the "Armed Truck"/"Overlord" idle rewards (`lw.pve.idle.reward`), greeting city visitors (`visitor.operate`), bulk-helping alliance members (`al.help.all`), claiming all alliance gifts (`alliance.reward.allreceive`), claiming all mail (`chat.get.system.mails` + `mail.reward.batch`), donating to the alliance's currently-recommended tech (`science.data.refresh` + `al.science.donate`), and both once-a-day VIP claims (`vip.add.login.score`, `vip.get.every.day.reward`), see [Live validation against production](/live-validation) for the full writeup of each. Reconnecting into an *established* real account's live game state was proven working end-to-end when first captured; that capture used the `ta` analytics blob's real device/anti-fraud sub-fields, which a later security fix replaced with empty-string placeholders, and reconnect is now **re-confirmed still working with those placeholders** (an unattended cron reconnected and collected real resources over multiple days, August 2026). What remains open is the *minimal* required `ta` content and a fully from-scratch login without a captured token; see [Live validation against production](/live-validation) for the current state.
+The roadmap above was actually built, the repository root is a from-scratch Go reimplementation of this protocol, live-tested against production (see [Live validation against production](/live-validation) for the full writeup of what's confirmed against live production servers). It's **fully working and live-confirmed** for GSL crypto, SFS2X packet framing (including Zstandard decompression), the SFSObject codec, brand-new-guest-account login, email-verification account binding, resource collection across 14 confirmed building types (Farmland, Iron Mine, Gold Mine, Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, Tactical Institute, and the four Season 6 Spore Factory tiers; the 1.0.364 Crystal Factory and the Season 6 week-card building are wired in but unconfirmed, see the building-type table), and a growing set of account-level automations, none of which are building-`uuid`-scoped: the "Armed Truck"/"Overlord" idle rewards (`lw.pve.idle.reward`), greeting city visitors (`visitor.operate`), bulk-helping alliance members (`al.help.all`), claiming all alliance gifts (`alliance.reward.allreceive`), claiming all mail (`chat.get.system.mails` + `mail.reward.batch`), donating to the alliance's currently-recommended tech (`science.data.refresh` + `al.science.donate`), and both once-a-day VIP claims (`vip.add.login.score`, `vip.get.every.day.reward`), see [Live validation against production](/live-validation) for the full writeup of each. Reconnecting into an *established* real account's live game state was proven working end-to-end when first captured; that capture used the `ta` analytics blob's real device/anti-fraud sub-fields, which a later security fix replaced with empty-string placeholders, and reconnect is now **re-confirmed still working with those placeholders** (an unattended cron reconnected and collected real resources over multiple days, August 2026). What remains open is the *minimal* required `ta` content and a fully from-scratch login without a captured token; see [Live validation against production](/live-validation) for the current state.
 
 <Note>
-  **Not yet general-purpose.** The reconnect path currently needs a session config captured from a real client login (see below) rather than deriving one from scratch. A from-scratch login using `-cs-ios`-equivalent identity from the very first GSL call hasn't been tried yet.
+  **Not yet general-purpose.** The reconnect path currently needs a session config captured from a real client login (see below) rather than deriving one from scratch. A from-scratch login using `-cs-ios`-equivalent identity from the very first GSL call hasn't been tried yet. `goclient` also keeps no refresh token, so when the server invalidates the captured access token (`ec=28`, `ep=[E011]`, as on 2026-08-16 and 2026-10-02), the fix is a fresh capture, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token).
 </Note>
 
 This section walks through going from a clean checkout to a working `-collect` run.
@@ -56,7 +58,7 @@ This section walks through going from a clean checkout to a working `-collect` r
     ```
   </Step>
   <Step title="Set up a session config (recommended)">
-    Reconnecting into an established account needs several values that can only come from a real client's own login (device ID, access token, ShuMei fingerprint, ...). Rather than typing them on the command line every time, put them in a JSON file:
+    Reconnecting into an established account needs several values that can only come from a real client's own login (device ID, access token, ...). The ShuMei fingerprint is optional: a captured session reconnects with `shumeiBoxId` empty (confirmed live, 2026-10-04). Rather than typing them on the command line every time, put them in a JSON file:
 
     ```bash
     cp config.example.json ~/.lastwar_goclient_session.json
@@ -75,11 +77,13 @@ This section walks through going from a clean checkout to a working `-collect` r
       "deviceId": "your-real-device-id_n3d",
       "shumeiBoxId": "your-real-shumei-fingerprint-token",
       "accessToken": "your-real-access-token-from-a-captured-login",
-      "iosMode": true
+      "iosMode": true,
+      "appVersion": "1.0.344",
+      "versionCode": "786"
     }
     ```
 
-    **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in, since the SFS2X game socket is plain TCP with no TLS) and decode the `Login` request, see [Capturing and decoding traffic](/capturing-and-decoding-traffic) for the exact, reproducible pipeline. `gameUid`/`ip`/`port`/`zone` also show up in a GSL `getserverlist` response's `serverList[]` entries. The access token is not single-use, but it *is* bound to the platform identity (`iosMode`) it was issued under, and it will eventually need refreshing from a fresh capture.
+    **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in, since the SFS2X game socket is plain TCP with no TLS) and let `pcap -session-out` write this file from the captured `Login`, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token). [Capturing and decoding traffic](/capturing-and-decoding-traffic) also covers the manual pipeline. `ip` can hold a `|`-delimited list of the zone's gateways, tried in order. `gameUid`/`ip`/`port`/`zone` also show up in a GSL `getserverlist` response's `serverList[]` entries. The access token is not single-use, but it *is* bound to the platform identity (`iosMode`) and the build (`appVersion`/`versionCode`, optional, defaulting to built-in values) it was issued under, and it will eventually need refreshing from a fresh capture.
 
     <Warning>
       This file contains live credentials for a real account, keep it out of version control. It's already outside the repo, in your home directory, and `chmod 600`'d above; don't move it into this repo or commit it anywhere.
@@ -121,7 +125,15 @@ mkfifo /tmp/lw_code_pipe
 echo 123456 > /tmp/lw_code_pipe
 ```
 
-Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, username, gameUid, loginKey) independent of the session config, so repeated guest/email-flow runs present a consistent device to the server. Delete those files to start fully fresh.
+Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, username, gameUid, loginKey) independent of the session config, so repeated guest/email-flow runs present a consistent device to the server. Delete those files to start fully fresh. Set `LASTWAR_STATE_DIR` to keep them in another directory instead, so several device identities can coexist on one machine.
+
+```bash
+# EXPERIMENTAL: after the -email flow has bound this client's own device (same LASTWAR_STATE_DIR),
+# trade its loginKey for the device's own token pair (GSL opt=login) and write a session config:
+LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -own-device-session ~/own_device_session.json
+```
+
+As of 2026-10-04 the game server rejects a `Login` with the resulting token (`ec=28`, `ep=[E005]`), so the written config doesn't work for `-collect` yet, see [Identity, login & session](/auth#a-device-of-its-own).
 
 ### Flags reference
 

@@ -3,7 +3,7 @@ title: "Command reference"
 description: "How the client's ~3,178 dispatch commands break down by gameplay domain and transport channel, and where the full searchable catalog lives."
 ---
 
-Every command is dispatched off one flat string; there's no numeric opcode layer above SFS2X's own framing. 3,047 commands were mechanically extracted from the client's own dispatch tables (`MsgDefines`/`MsgMap`); 131 more live on the dedicated chat channel's parallel table. This page summarizes how they're organized; the full row-level catalog is described below rather than reproduced as a giant static table.
+Every command is dispatched off one flat string; there's no numeric opcode layer above SFS2X's own framing. 3,047 commands were mechanically extracted from the 1.0.351 client's own dispatch tables (`MsgDefines`/`MsgMap`); 131 more live on the dedicated chat channel's parallel table. 1.0.364 handles 3,097, see the changes section below. This page summarizes how they're organized; the full row-level catalog is described below rather than reproduced as a giant static table.
 
 ## By functional domain
 
@@ -30,6 +30,36 @@ Two independent axes describe every command: which gameplay system it belongs to
 | Misc | 108 | **Triage** | Leaderboards, player career/talent, photo album, titles |
 
 These rows sum to 3,057, not the 3,047 mechanically-extracted main-table figure quoted above (and not the 3,178 grand total, which also includes the 131 chat-table commands this per-domain breakdown doesn't cover) -- a handful of commands land ambiguously between two domains and were counted in each, so this table is a categorization aid, not an exact partition.
+
+## Changes in 1.0.364
+
+An exact diff of the 1.0.351 catalog (`LWLF` 793, recovered from the CDN) against the 1.0.364 APK's (`LWLF` 825) gives:
+
+- `MsgDefines` keys: 3,065 → 3,115. Handled commands (`MsgMap`): 3,047 → **3,097**.
+- **50 added, 0 removed, 0 renamed** (same key, different wire string), and no handler moved.
+- The live Android (826) and iOS (821) bundles match 1.0.364 at the catalog level.
+- Every request schema `goclient` sends is unchanged. Some responses gained fields; for example, the `push.chat.get.system.mails` list push gained `delActivityIds`.
+
+The 131-command chat table wasn't re-diffed, so the domain table above and the 3,178 total still describe 1.0.351. All of this is static-analysis-only.
+
+| Module | Added | Commands |
+|---|---:|---|
+| CrystalBoss (new "Red Boss" activity) | 13 | `red.boss.get.march`, `red.boss.battle.report`, `get.red.boss.user.record`, `red.boss.get.achievement.info`, `red.boss.receive.achievement.reward`, `red.boss.get.progress`, `red.boss.claim.all {type}`, `red.boss.claim.daily.reward`, and 5 `push.red.boss.*` pushes |
+| Account | 8 | `user.del.user`, `user.del.check`, `del.account.get.max.pay.user`, `push.account.del.max.pay.user`, `account.passkey.init`, `push.account.passkey.init`, `account.passkey.list`, `account.passkey.delete`: role and account deletion, and passkeys. `goclient` never sends the deletion commands |
+| DispatchRecover | 7 | `reward.recover.param`, `dispatch.recover.reward.list`, `dispatch.recover.reward.log`, `dispatch.recover.reward {customId}`, `train.recover.reward.list`, `train.recover.reward.log`, `train.recover.reward {customId}`: recovering missed dispatch and train rewards |
+| `Net.Msgs` root | 5 | `age.signal.record` (age-signal compliance), `exchange.goods.buy`, `world.alliance.expedition.info`, `world.give.up.alliance.building`, `push.bp.score.repair` |
+| PVPFormationPreset | 5 | `formation.preset.save`, `.apply`, `.rename`, `.delete`, and `push.formation.preset` |
+| Social | 3 | `social.status.update`, `.clear`, `.view` |
+| Activity | 2 | `dragon.move.base.cool`, `winter.storm.reward.get.all` |
+| AllianceStar | 2 | `alliance.star.scratch.detail.info`, `alliance.star.gain.scratch.reward` |
+| CrystalTalent | 2 | `crystal.talent.info`, `crystal.talent.upgrade {nodeId, recommend}` |
+| Alliance | 1 | `push.alliance.gift.exp.change` |
+| Chat | 1 | `chat.permission.syn {action}` |
+| HeroAbout | 1 | `hero.init.detail.get {heroUuids}`, sent at every `init` by `HeroDataManager:InitData` |
+
+Other 1.0.364 changes that touch protocol behavior: `ProductLineBuilds` gained the Crystal Factory (see [City & building](/city-building#which-buildings-are-production-lines)), `MailEnum` gained `CrystalBoss=58`, and the Lua `LoginErrorCode` table gained `55`-`58` (see [Identity, login & session](/auth#login-rejection-codes)).
+
+A few commands the real client sends never appear in `MsgDefines`, because C# sends them directly: `change.user.parseid`, `check.device.change`, and `login.ext`. See [Identity, login & session](/auth#post-login-sequence).
 
 ## Search the full catalog
 

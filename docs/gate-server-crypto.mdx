@@ -27,6 +27,20 @@ The "GSL" (Gate Server List) HTTP exchange is wrapped in a hybrid RSA+AES scheme
 | AES IV | None: ECB has no IV concept |
 | Encoding | base64 → URL-safe (`+`→`-`, `/`→`_`, strip `=`) |
 
+## Request fields
+
+The plaintext form body that step 4 encrypts joins its fields with `&`, without URL-encoding. In 1.0.364 (static-analysis-only), the UnityWebRequest path sends:
+
+```text
+uuid=<deviceId>, airKey, loginFlag=1, country=<fromCountry>, is3D=1, lang, simOp,
+platform, newServer=1, isSimulator, zone=<cached zone>, gameuid=<gameUid>,
+openCountry=<storefront>, [opt, loginKey | rt]
+```
+
+This inner `uuid` is the device id, not the outer `uuid` POST field that carries the RSA-encrypted salt. The BestHTTP path sends the same fields with `newServer` after `gameuid`, and `goclient` matches the BestHTTP order. `platform` is `"Android"` on Android and `"iOS"` on iOS; `goclient` always sends `"Android"` and an empty `zone`. How the client picks `opt`, and what the response's `code` field means, are on [Identity, login & session](/auth#token-lifecycle).
+
+The crypto itself is unchanged in 1.0.364: RSA PKCS#1 v1.5, a 20-character salt, and AES-256-ECB keyed by `hex(MD5(salt))`, with URL-safe base64.
+
 ## Go implementation
 
 ```go
@@ -54,5 +68,5 @@ data := urlSafeB64NoPad(aesECBEncryptPKCS7(formBody, key))
 ```
 
 <Note>
-  **Same key/AES-ECB scheme, reused elsewhere.** The identical `AESDecrypt` function is reused with a hardcoded key `7a7611b0efc334a7cc229fe5d89c5997` to decrypt a server-pushed Lua snippet that's fed directly to `eval`-equivalent (`GameEntry.Lua.Env.DoString`). Elsewhere the same client also uses a properly-chained AES-CBC-with-explicit-IV helper for a Zendesk webchat URL, so the ECB choice for GSL is a deliberate (if weak) design decision for that one path, not a general "forgot the IV" bug.
+  **Same AES-ECB scheme, reused elsewhere.** The identical `AESDecrypt` function is reused, with a hardcoded key, to decrypt a server-pushed Lua snippet (`init.add.data`) that's fed directly to an `eval`-equivalent (`GameEntry.Lua.Env.DoString`); the result goes back to the server in `login.ext` (see [Identity, login & session](/auth#post-login-sequence)). That snippet is an integrity challenge, so this project documents it as a protocol fact only and leaves the key out. Elsewhere the same client also uses a properly-chained AES-CBC-with-explicit-IV helper for a Zendesk webchat URL, so the ECB choice for GSL is a deliberate (if weak) design decision for that one path, not a general "forgot the IV" bug.
 </Note>

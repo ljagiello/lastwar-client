@@ -1,6 +1,6 @@
 ---
 title: "Identity, login & session"
-description: "How device identity, SFS2X zone login, the MD5 integrity fields, post-login init sequence, and the separate chat channel authenticate a client against the game's servers."
+description: "How device identity, SFS2X zone login, the MD5 integrity fields, the access-token lifecycle, the post-login init sequence, and the separate chat channel authenticate a client against the game's servers."
 ---
 
 The SFS2X username/password fields are vestigial; the password is always sent empty. Real authentication rides in ~50 fields on a custom SFSObject payload, most of them device fingerprints, three of them opaque MD5-based "integrity" tokens.
@@ -14,7 +14,7 @@ deviceId += CommonUtils.IsDebug() ? "_3d" : "_n3d"
 airKey    = "lwDid_" + base64(utf8(deviceId))          // sent alongside deviceId everywhere
 ```
 
-Persisted to `PlayerPrefs["DEVICE_ID"]`; on iOS additionally mirrored to the Keychain (survives uninstall). The `assets/deviceId.txt` file present in the install package contains a single byte, `"1"`; no code reads it anywhere; it does not appear to be the device id source.
+Persisted to `PlayerPrefs["DEVICE_ID"]`; on iOS additionally mirrored to the Keychain (survives uninstall). The `assets/deviceId.txt` file present in the install package contains a single byte, `"1"`; no code reads it anywhere; it does not appear to be the device id source. Unchanged in 1.0.364.
 
 ## SFS zone login
 
@@ -26,32 +26,153 @@ A stock SFS2X `LoginRequest` (`action=1`, system controller), but every call sit
 | `gameUid` | server-assigned account id (also used as the SFS username) |
 | `serverId` | `zone` string minus its `"APS"` prefix |
 | `at` | the HTTP-obtained access token, only if non-empty |
+| `appVersion` / `versionCode` | the build identity. An access token is bound to the `packageName`/`platform`/`appVersion`/`versionCode` it was issued under (confirmed live). The 1.0.364 Android build is `1.0.364`/`1892`; the iOS app captured on 2026-10-04 still sent `1.0.344`/`786` |
 | `SecurityCode` | `MD5(cmdBaseTime + "4d1c383ccbedf3d98320d6ea06d8dedc" + gameUid)`, hardcoded salt |
 | `OneCode` | char-interleave of `MD5(rand32)` and `rand32` itself |
 | `CoreV` | hash chain: `MD5(reverse(base64(rand32)))` then `MD5(that + rand32)`, interleaved |
-| `packageSign` | despite the name, *not* a certificate check, just `SHA1(packageName)`, a constant public string, trivially reproducible without touching the APK's real signature. The field that actually depends on the real signing cert is `psh`, below. |
-| `psh` | `MD5(cmdBaseTime + hex(signing-cert DER bytes))`, the one field genuinely tied to the APK's real signing certificate; confirmed directly in the decompiled Android SDK source, `SdkManager.LW_PSH()`, which concatenates `cmdBaseTime` with each `PackageInfo.signatures[i].toCharsString()` and MD5s the result |
-| `shumeiBoxId` | ShuMei anti-fraud device fingerprint, **empty string is a first-class, non-error client path** on SDK-init failure |
+| `packageSign` | despite the name, *not* a certificate check, just `SHA1(packageName)`, a constant public string, trivially reproducible without touching the APK's real signing certificate. The field that actually depends on the real signing cert is `psh`, below. |
+| `psh` | `MD5(cmdBaseTime + hex(signing-cert DER bytes))`, the one field genuinely tied to the APK's real signing certificate; confirmed directly in the decompiled Android SDK source, `SdkManager.LW_PSH()`, which concatenates `cmdBaseTime` with each `PackageInfo.signatures[i].toCharsString()` and MD5s the result. Unchanged in 1.0.364, whose signing certificate is byte-identical to 1.0.351's. The iOS app's `psh` doesn't match this formula, see [Native binaries & security](/native-binaries) |
+| `shumeiBoxId` | ShuMei anti-fraud device fingerprint. **An empty string is a first-class, non-error client path**: the 1.0.364 C# sends `""` when the SDK isn't ready or `client_config` switch 25 is off. In the 2026-10-04 capture, a TLS call to a ShuMei endpoint preceded the game connection by 0.5 s, and the value had changed in both observed token rotations. The server doesn't require it: the same day, a captured iOS session reconnected into the established account with `shumeiBoxId` sent empty (confirmed live) |
+| `dataConfigMd5` | not computed by the client: an echo of a server-issued value, omitted when the client has none, see [Live validation against production](/live-validation) |
+| `resVersion` | built from check-version data, see [Startup, version-check & hot-update](/bootstrap#resversion) |
 | `androidDid`, `IMEI`, `gaid`, `afuid`, `firebaseId`… | ~15 more device/ad identifiers, all static/spoofable strings |
 
-All three integrity fields (`SecurityCode`/`OneCode`/`CoreV`) are ordinary client-side MD5 constructions with a hardcoded salt, fully reproducible in Go, no native dependency. [Native binaries & security posture](/native-binaries) found no evidence the server treats them as a hard gate versus a fingerprint for offline analysis, but a Go client should send them anyway (they cost nothing to compute).
+All three integrity fields (`SecurityCode`/`OneCode`/`CoreV`) are ordinary client-side MD5 constructions with a hardcoded salt, fully reproducible in Go, no native dependency. [Native binaries & security](/native-binaries) found no evidence the server treats them as a hard gate versus a fingerprint for offline analysis, but a Go client should send them anyway (they cost nothing to compute). Checked against the 2026-10-04 capture, the `SecurityCode` and `OneCode`/`CoreV` formulas reproduce the real iOS app's values exactly.
+
+## Token lifecycle
+
+Everything in this section comes from the 1.0.364 C# (`AccountCredentialManager`, `AppStartupLoading`, `LoginState`, `LoginMessage`) and is static-analysis-only unless a line says otherwise. `goclient` implements little of it: it keeps no refresh token, so it can't refresh itself the way the real client does.
+
+### Storage
+
+| PlayerPrefs key | Holds | Written |
+|---|---|---|
+| `Login.access_token` / `Login.access_token_time` | `at` and the server-sent `at.time`: the moment of issue, in unix seconds (confirmed live) | after a successful GSL (Gate Server List) call, only when the new token is non-empty |
+| `Login.refresh_token` / `Login.refresh_token_time` | `rt` and `rt.time`, also the moment of issue (confirmed live) | same as `at` |
+| `Login.login_key` | one-shot account-resolution key | by Lua on account creation and role switch; cleared after every successful GSL call |
+| `Setting.GAME_UID` | `gameUid`, also sent as the SFS2X `un` | overwritten from `init.user.uid` on every `init` |
+| `SERVER_IP` / `SERVER_PORT` / `SERVER_ZONE` / `SERVER_CONNECTION_TYPE` | last game server | overwritten with the single winning gateway after each connect |
+
+`at` and `rt` come only from `getserverlist.php` responses. No Lua code sets them.
+
+### A GSL call on every cold start
+
+`CheckResVersionState` clears the cached server IP, port, and connection type (keeping zone and `gameUid`), so `StartConnect` never finds a cached server and always runs `GetServerList`. The client then:
+
+1. Picks the `serverList` entry matching the response's `lastLoggedServer`, falling back to `serverList[0]`. `goclient`'s regular login takes `serverList[0]`.
+2. Stores the new `at`/`rt` and clears `loginKey`.
+3. Connects and logs in with the stored `at`.
+
+### Choosing the GSL `opt`
+
+```text
+if loginKey != ""              -> opt=login   & loginKey=<loginKey>
+else if gameuid == ""          -> opt=new
+else:
+    stale = attime > 0 && now_unix - attime >= 2592000     // 30 days
+    if rt == ""                -> opt=fix
+    else if at == "" || stale  -> opt=refresh & rt=<rt>
+    else                       -> no opt field at all
+```
+
+So a returning client refreshes its token on its own once `at.time` is 30 days old, and right after an `E011` clears `at`. The form fields and their order are on [Gate-server RSA+AES handshake](/gate-server-crypto#request-fields). `goclient` sends `opt=login`, `opt=fix`, or `opt=new`, and sends `opt=refresh` only through the manual `-cs-rt` flag.
+
+### GSL result codes
+
+The client accepts a GSL response only when `code == 0` and `serverList` is non-empty.
+
+| `code` | Client action |
+|---|---|
+| `0` | Success. An empty `serverList` still fails, as `E120` |
+| `201` | Fails with `E116_201`, shows a "not available" dialog, then quits |
+| `211` | Clears `at`, `rt`, and `loginKey`: the refresh token was rejected, so the account needs a full re-authentication |
+| `212` | Clears the server info and `gameUid` as well: the account-to-device mapping is reset |
+| `213` | Fails with `E213` (`ERROR_CHECK_SERVER_LIST_ENCRYPT`): an envelope or crypto error |
+| any other non-zero | Fails with the generic `E116` |
+
+`goclient` decodes `code` but doesn't branch on it.
+
+### Login rejection codes
+
+A rejected `Login` arrives as SFS2X `ec=28` with a reason string in `ep[0]` (see [Live validation against production](/live-validation)). `LoginState.OnLoginResponse` and the Lua `LoginErrorCode` table map them:
+
+| `ep[0]` | Client's label | Client action |
+|---|---|---|
+| `E001`, `E002` | `ACCOUNT_NOT_EXIST` | Clears auth and server info, then reloads |
+| `E005` | `ERROR_MAINTENANCE` | Maintenance dialog, no credential change. Live, the server also returned `E005` for a token presented under the wrong platform identity |
+| `E010` | Account deletion pending | Dialog |
+| `E011` | `ERROR_LOGIN_ACCESS_TOKEN` | Clears **only `at`** and keeps `rt`. Shows a dialog and reloads; the reload runs GSL `opt=refresh`, because `at` is now empty. Confirmed live as the whole failure signature of a rotated token |
+| `E012` | Korean real-name authentication | Dialog |
+| `E013`, `E015`, `E016` | Season register ban, season start, season stop or maintenance | `E013` clears all user data |
+| `E014` | `ERROR_OLD_UID_USE_NEW_RT` | Clears `gameUid`, `at`, `rt`, and `loginKey`, then reloads |
+| `4` (with `;` details) | Ban | UI only |
+| `43`, `44` | IP blacklist, device blacklist | No C# case; falls through to the generic `E117` |
+| `45`-`48` | Account deletion: applied, deleted, refused, confirmed | UI only |
+| `49` (with `;` details) | `TRAFFIC_CONTROL_BANNED_USER` | UI only |
+| `55`-`58` | Role deletion: applied, deleted, refused, confirmed. New in 1.0.364 | UI only |
+
+None of the numeric codes is a credential problem, and none is worth retrying. The `E1xx` codes (`E101`-`E117`) are client-local loading and network codes; the server never sends them. `goclient` reports `E011` as `session.ErrTokenRejected` and every other rejection as `ErrAuthRejected`; both exit with code `2`.
+
+The real client's recovery from `E011` needs the refresh token: clear `at`, run GSL `opt=refresh` with `rt`, store the new pair, and log in again. `goclient` doesn't persist `rt` from GSL responses, so its recovery is a fresh capture, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token).
+
+### Following a `serverInfo` redirect
+
+When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live), but calls GSL `opt=fix` before redialing, which the real client never does.
+
+### A device of its own
+
+A Go client that copies the real app's tokens shares them with the app, so either side's refresh may invalidate the other's. The real client's role-switch flow shows how a device gets a pair of its own: email verification, then `loginKey`, then GSL `opt=login`. `goclient` ran that flow on 2026-10-04 with a fresh, Go-generated device (confirmed live):
+
+1. The existing `-email` and `-code-pipe` flow bound the new device to the real account. `push.account.login.new` returned the account's `gameUid` and a `loginKey`. The `LASTWAR_STATE_DIR` environment variable kept that device's state files apart from the existing ones.
+2. The experimental `-own-device-session <path>` flag traded the `loginKey` for the device's own `at`/`rt` pair through GSL `opt=login`. The response named `lastLoggedServer` 783 and a one-entry `serverList` for `APS783`, whose `ip` held three gateway hostnames on port 10783 (see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe)). `at.time` and `rt.time` both equaled the moment of issue. The flag writes these into a session config, including `refreshToken`, `accessTokenTime`, and `refreshTokenTime`, though nothing reads the refresh token yet.
+3. A base-zone `Login` with that token and `goclient`'s Android identity (1.0.364/1892, `un` = `gameUid`, `shumeiBoxId` empty) was rejected with `ec=28`, `ep=[E005]`.
+
+So GSL will issue a newly bound device a token pair of its own, but the game server didn't accept a session from it. A missing `shumeiBoxId` isn't the cause, since a captured iOS session logs in without one. The open candidates are the Android identity on this account or server, the shape of the Go-generated `deviceId` (32 hex characters plus `_n3d`, where the real client's has 40), and how far the server trusts a freshly bound device. Testing stopped there on purpose, see [Findings & further work](/findings#open-questions).
+
+### Open questions
+
+These need live observation; [Findings & further work](/findings) tracks them.
+
+- Does `opt=refresh` return a rotated `rt`? The client stores whatever arrives non-empty.
+- Can two devices hold working sessions for one account at once? GSL issued a newly bound device its own pair, but whether that leaves other devices' tokens valid is unknown, and the one own-device `Login` attempted so far was rejected.
+- Does the server check `platform`, `uuid`, or `airKey` on `opt=refresh`? The client always sends the values the token was issued under.
 
 ## Post-login sequence
 
-The server pushes, unsolicited, in order: `init.before` → `init` (the big state snapshot: `user.uid`, account-bind status, and critically `chatToken` for the separate chat WebSocket) → `init.after` (or `init.error`). A Go client does not send `init` itself, just wait for it. Immediately after, the real client fires `check.device.change` (empty payload), worth mimicking.
+In the 2026-10-04 capture of the real iOS app, the server pushed one bare `init` (about 287 KB, 247 top-level keys) about 200 ms after `Login`. No `init.before`, `init.after`, or `push.init.build` arrived. A Go client doesn't send `init` itself; it just waits for it, see [Live validation against production](/live-validation#the-real-post-login-bootstrap-bare-init-not-push-init-build).
+
+Around and after `init`, the real client sends, in order (observed in the capture, with the C# and Lua sources noted):
+
+1. `change.user.parseid` and `check.device.change {_id}`, both from C#. The server answered `check.device.change` with `r:false`; the C# reads the result and ignores it.
+2. About 45 requests from Lua's `RequestOtherLoginMsg`, nearly all reads: VIP, news, shop, alliance, world, and season info. The capture holds about 224 extension requests in the first 5 s.
+3. `login.ext {info, add}`. `info` is a JSON device description: device name and model, OS version, network type, GPU, and CPU. When `init` carries `add {a, b, data, enc}`, the C# decrypts `data` with a hardcoded AES key, **executes it as Lua**, and returns the result as `add`: a server-pushed, executable integrity challenge. It's documented here as a protocol fact only; reproducing it is out of scope. In the capture, `init` carried `add` and the server answered `login.ext` with `{success:true}`.
+
+The server also pushes `push.shumei.id {shumeiId}` about 0.5 s after `Login` (observed live). The client caches that value and reports it as `ta.lw_shumei_id` in its next `Login`.
+
+`login.init` is an active pull that the real client never sent in the capture. The C# sends `dataConfigMd5` with it only when non-empty.
+
+As far as the 1.0.364 Lua shows, none of these requests is a prerequisite for server-side state: production, idle rewards, visitors, and mail are all server-time-based, and daily VIP state arrives in `init` (static-analysis-only).
+
+### `init` fields worth reading
+
+| Field | Contents |
+|---|---|
+| `user` | 59 keys, including `uid`, `serverId`, and `deviceBindTimes`. Also holds the account's **email address**: never log `user` unredacted |
+| `building_new[]` | `uuid`, `bId`, `lv`, `pId`, and the production timers `prodST`, `prodT`, `prodET`, `pEndT`, `prodStatus`, see [City & building](/city-building#which-buildings-are-production-lines) |
+| `visitor` | `{addNum, maxNum, list[]}`. Per the Lua, a visitor whose `startTime` (ms) is still in the future can't be greeted yet |
+| `vip.vipInfo` | `level`, `loginDays`, `score`, `loginScoreState`, `everyDayReward`, `endTime`, `privilegeReward` |
+| `tomorrow` | Unix time of the next server-day boundary; every `*_times_expire` field uses the same instant. The `Login` response's `real_timezone_offset` (`-7200` on 2026-10-04) gives the server day's offset |
+| `mixedInfo` | `todayLoginTimes` (counts every login, including each `goclient` run), `scoreSwitch`, `materialBackup`, `popRate` |
+| `freeRewardArr`, `todayFreeStamina`, `lastClaimFreeStaminaTime` | daily freebie and stamina state |
+| `queue_new[]`, `collect_reward[]` | build and research queue timers; pending rewards with expiry |
+| `chatToken` | auth for the separate chat WebSocket, below |
+| `add` | `{a, b, data, enc}`, the integrity-challenge input described above |
+
+No gateway list, session hint, or token expiry appears anywhere in `init`.
 
 ## Guest identity is sufficient
 
-No OAuth is required to play: `account.login.new` with `type=1` and only `deviceId`/`airKey`/`pf` is the full "no external provider" path. Social binding (Google Sign-In `type=2`, Apple Game Center `type=4`, Play Games `type=5`) requires obtaining a provider token yourself, out of scope for a headless client, and optional.
-
-## Session persistence
-
-| Key | Meaning |
-|---|---|
-| `Login.access_token` / `_time` | HTTP GSL access token, reused as-is at the SFS layer |
-| `Login.refresh_token` / `_time` | refreshed via GSL `opt=refresh` once > 30 days old |
-| `Login.login_key` | durable "remember this account" token, survives a changed device id |
-| `SERVER_IP/PORT/ZONE` | last-connected game server, from GSL `serverList[]` |
+No OAuth is required to play: `account.login.new` with `type=1` and only `deviceId`/`airKey`/`pf` is the full "no external provider" path. Social binding (Google Sign-In `type=2`, Apple Game Center `type=4`, Play Games `type=5`) requires obtaining a provider token yourself, out of scope for a headless client, and optional. Per the 1.0.364 Lua, `account.login.new` sends `pf` as `"AppStore"` on iOS and `"market_global"` on Android; `goclient` always sends `market_global`.
 
 ## A second, optional channel: chat
 

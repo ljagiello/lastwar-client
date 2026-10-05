@@ -20,6 +20,8 @@ Only 4 field types exist across the entire 1,279-table corpus: `string`, `number
 
 A plain ZIP, one flat-namespace entry per table name, the odd `.data` extension is misleading; `unzip -l` works on it directly. Local version manifest, one line: `version,size,md5,timestamp`, matching the filename `table_{version}_{md5}.data`. Table updates are tracked and patched (bsdiff) fully independently of the Lua bundle and asset bundles.
 
+The 1.0.364 C# reads the current table version from a check-version `table_version` field (`version,size,md5[,crc][;patch chain]`) and requests the online table set with `table_env=table_online` (see [Startup, version-check & hot-update](/bootstrap)). The 1.0.364 APK ships table version 39432 and locale 23557. On 2026-10-04 the iOS app's `resVersion` ended in `39516.23570`, which the C# maps to the table and locale versions, but that day's iOS check-version response carried no `table_version` or `locale` field at all. Where the live client gets those numbers is open. The live tables weren't fetched, and their CDN path hasn't been derived. The only table read for the 1.0.364 pass was `season_weekcard`, whose `farm_building` and `farm_building_weekcard` columns name each season week card's production buildings (see [City & building](/city-building#which-buildings-are-production-lines)).
+
 ## Categorized index (1,279 tables)
 
 | Group | Count | Examples |
