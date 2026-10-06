@@ -48,7 +48,7 @@ func BootstrapOwnDevice(httpClient *http.Client) (*OwnDeviceSession, error) {
 	if ident.LoginKey == "" || ident.GameUid == "" {
 		return nil, errors.New("own-device bootstrap: no persisted loginKey/gameUid -- run the -email verification flow first, with the same LASTWAR_STATE_DIR")
 	}
-	cv, gateHost, err := gsl.CheckVersion(httpClient)
+	cv, gateHost, err := gsl.CheckVersion(httpClient, "")
 	if err != nil {
 		return nil, err
 	}
@@ -63,31 +63,20 @@ func BootstrapOwnDevice(httpClient *http.Client) (*OwnDeviceSession, error) {
 	return ownDeviceSessionFrom(lsr, ident.DeviceID, ident.GameUid)
 }
 
-// ownDeviceSessionFrom validates a GSL reply (code 0, a non-empty at) and picks the server entry
-// carrying this account's gameUid, falling back to lastLoggedServer and then the first entry, the
-// same preference order as the real client's GetLastLoggedServerInfo() ?? serverList[0].
+// ownDeviceSessionFrom validates a GSL reply (gsl.LoginServerListRespon.Err, a non-empty at) and
+// picks the server entry with gsl.LoginServerListRespon.PickServer: this account's gameUid, then
+// lastLoggedServer, then the first entry.
 func ownDeviceSessionFrom(lsr *gsl.LoginServerListRespon, deviceID, gameUid string) (*OwnDeviceSession, error) {
-	// 211: at/rt/loginKey rejected (client clears all three); 212: also the uid/server mapping;
-	// 201: not available; 213: envelope crypto error (1.0.364 C#, A-CS:12665-12705).
-	if code := lsr.Code.String(); code != "" && code != "0" {
-		return nil, fmt.Errorf("GSL rejected the request: code=%s (211/212 mean the loginKey/refresh token is no longer valid: re-run the -email flow)", code)
+	if err := lsr.Err(); err != nil {
+		if errors.Is(err, gsl.ErrReauthNeeded) {
+			return nil, fmt.Errorf("%w (the loginKey is no longer valid: re-run the -email flow)", err)
+		}
+		return nil, err
 	}
 	if lsr.At == nil || lsr.At.Token.String() == "" {
 		return nil, errors.New("GSL reply carried no access token")
 	}
-	if len(lsr.ServerList) == 0 {
-		return nil, errors.New("GSL reply carried no server list")
-	}
-	srv := lsr.ServerList[0]
-	for _, s := range lsr.ServerList {
-		if s.GameUid.String() == gameUid {
-			srv = s
-			break
-		}
-		if s.ID.String() == lsr.LastLoggedServer.String() {
-			srv = s
-		}
-	}
+	srv := *lsr.PickServer(gameUid)
 	slog.Info("own device: GSL server selected", "id", srv.ID, "zone", srv.Zone, "ip", srv.IP, "port", srv.Port,
 		"serverListLen", len(lsr.ServerList), "lastLoggedServer", lsr.LastLoggedServer)
 	s := &OwnDeviceSession{

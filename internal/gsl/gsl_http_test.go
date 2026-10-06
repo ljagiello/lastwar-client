@@ -33,7 +33,7 @@ func TestCheckVersionAgainstFakeServer(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, host, err := CheckVersion(DefaultHTTPClient())
+	cv, host, err := CheckVersion(DefaultHTTPClient(), "")
 	if err != nil {
 		t.Fatalf("CheckVersion: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestCheckVersionResponseFieldsAcceptStringOrNumber(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, _, err := CheckVersion(DefaultHTTPClient())
+	cv, _, err := CheckVersion(DefaultHTTPClient(), "")
 	if err != nil {
 		t.Fatalf("CheckVersion: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestCheckVersionFallsBackToNextHostOnConnectionFailure(t *testing.T) {
 	CheckVersionHosts = []string{"http://127.0.0.1:1", server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, host, err := CheckVersion(DefaultHTTPClient())
+	cv, host, err := CheckVersion(DefaultHTTPClient(), "")
 	if err != nil {
 		t.Fatalf("CheckVersion: %v, want it to fall back to the second, working host", err)
 	}
@@ -144,7 +144,7 @@ func TestCheckVersionLogsEachHostFailureBeforeFallingBackToNext(t *testing.T) {
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	cv, host, err := CheckVersion(DefaultHTTPClient())
+	cv, host, err := CheckVersion(DefaultHTTPClient(), "")
 	slog.SetDefault(orig)
 
 	if err != nil {
@@ -181,7 +181,7 @@ func TestCheckVersionRejectsServerErrorCode(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, _, err := CheckVersion(DefaultHTTPClient())
+	cv, _, err := CheckVersion(DefaultHTTPClient(), "")
 	if err == nil {
 		t.Fatalf("CheckVersion: expected an error for a non-empty rejection code, got nil (cv=%+v)", cv)
 	}
@@ -206,7 +206,7 @@ func TestCheckVersionRejectsOversizedResponse(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	_, _, err := CheckVersion(DefaultHTTPClient())
+	_, _, err := CheckVersion(DefaultHTTPClient(), "")
 	if err == nil {
 		t.Fatal("CheckVersion: expected an error for an oversized response, got nil")
 	}
@@ -242,7 +242,7 @@ func TestCheckVersionAcceptsExactlyMaxSizeResponse(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, host, err := CheckVersion(DefaultHTTPClient())
+	cv, host, err := CheckVersion(DefaultHTTPClient(), "")
 	if err != nil {
 		t.Fatalf("CheckVersion() error = %v, want nil for a response body of exactly MaxGSLResponseSize bytes (the boundary value, not over the cap)", err)
 	}
@@ -271,7 +271,7 @@ func TestCheckVersionRejectsNon200Status(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	_, _, err := CheckVersion(DefaultHTTPClient())
+	_, _, err := CheckVersion(DefaultHTTPClient(), "")
 	if err == nil {
 		t.Fatal("CheckVersion: expected an error for a non-200 HTTP status, got nil")
 	}
@@ -298,7 +298,7 @@ func TestCheckVersionRejectsMalformedJSON(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	_, _, err := CheckVersion(DefaultHTTPClient())
+	_, _, err := CheckVersion(DefaultHTTPClient(), "")
 	if err == nil {
 		t.Fatal("CheckVersion: expected an error for a malformed JSON body, got nil")
 	}

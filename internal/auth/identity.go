@@ -502,6 +502,48 @@ type LoginParamsInput struct {
 	// that capture's appVersion/versionCode -- cmd/pcap -session-out records both.
 	AppVersion  string
 	VersionCode string
+
+	// ResVersion is the hot-update state to report (see ResVersionFor); "" sends "0", the value
+	// this client sent for months. It also fills ta's lw_res_version under IOSMode.
+	ResVersion string
+}
+
+// The iOS build the 2026 captured iOS session presented. A GSL-issued `at` access token is bound
+// to the exact AppVersion/VersionCode it was obtained under, same as PackageName/Platform --
+// confirmed live: our hardcoded Android 1.0.351/1835 build numbers, sent alongside a real captured
+// iOS token issued to 1.0.344/786, still got ec=28/E005 even after PackageName/Platform/pf matched.
+// There is no known way to derive these generically the way packageSign derives from PackageName,
+// so a session config carries the capture's own appVersion/versionCode once the real app moves on.
+const (
+	iosDefaultAppVersion  = "1.0.344"
+	iosDefaultVersionCode = "786"
+	iosPlatformName       = "iOS" // GameUtility.GetPlatformName() on iOS (BU:1945-1961)
+)
+
+// loginBuild is the client build a Login claims: gsl.AndroidBuild, or the iOS capture's build under
+// iosMode, with a session config's appVersion/versionCode (when non-empty) replacing the defaults.
+func loginBuild(iosMode bool, appVersion, versionCode string) gsl.ClientBuild {
+	b := gsl.AndroidBuild
+	if iosMode {
+		b = gsl.ClientBuild{PackageName: iosPackageName, Platform: iosPlatformName,
+			AppVersion: iosDefaultAppVersion, VersionCode: iosDefaultVersionCode}
+	}
+	if appVersion != "" {
+		b.AppVersion = appVersion
+	}
+	if versionCode != "" {
+		b.VersionCode = versionCode
+	}
+	return b
+}
+
+// storefrontPF is the `pf` storefront a client of this platform sends, on Login and on
+// account.login.new alike: "AppStore" on iOS, "market_global" on Android.
+func storefrontPF(iosMode bool) string {
+	if iosMode {
+		return "AppStore"
+	}
+	return "market_global"
 }
 
 // String/GoString are the round-48 regression fix for the MINOR finding that LoginParamsInput --
@@ -575,25 +617,13 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p := sfs.NewSFSObject()
 	p.PutInt("_id", in.FutureID)
 	p.PutInt("netType", 2) // 2 = wifi, matches the common case
-	effectiveAppVersion, effectiveVersionCode := gsl.AppVersion, gsl.VersionCode
-	if in.IOSMode {
-		// A GSL-issued `at` access token is bound to the exact
-		// AppVersion/VersionCode it was obtained under, same as
-		// PackageName/Platform above -- confirmed live: our hardcoded
-		// Android 1.0.351/1835 build numbers, sent alongside a real
-		// captured iOS token issued to 1.0.344/786, still got ec=28/E005
-		// even after PackageName/Platform/pf matched. These iOS values
-		// are what that capture actually showed; there is no known way
-		// to derive them generically the way packageSign derives from
-		// PackageName, so a fresh capture is needed if the real client's
-		// build ever moves on.
-		effectiveAppVersion, effectiveVersionCode = "1.0.344", "786"
-	}
-	if in.AppVersion != "" {
-		effectiveAppVersion = in.AppVersion
-	}
-	if in.VersionCode != "" {
-		effectiveVersionCode = in.VersionCode
+	build := loginBuild(in.IOSMode, in.AppVersion, in.VersionCode)
+	effectiveAppVersion, effectiveVersionCode := build.AppVersion, build.VersionCode
+	// resVersion "0" and ta's lw_res_version "0.0" are what this client sent for months, and the
+	// server accepted them. A derived value goes into both, as in the real client's ta.
+	resVersion, lwResVersion := "0", "0.0"
+	if in.ResVersion != "" {
+		resVersion, lwResVersion = in.ResVersion, in.ResVersion
 	}
 	ta := "{}"
 	if in.IOSMode {
@@ -621,7 +651,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 			AppVersion: effectiveAppVersion, FPS: 0, RAM: "0.0/0.0", Simulator: false, ZoneOffset: 0,
 			Manufacturer: "Apple", ScreenHeight: 0, NetworkType: "WIFI", DeviceModel: "unknown",
 			ScreenWidth: 0, InstallTime: "2000-01-01 00:00:00.000",
-			LwNet: "wifi", LwResVersion: "0.0", LwBuildcode: effectiveVersionCode, LwLine: "",
+			LwNet: "wifi", LwResVersion: lwResVersion, LwBuildcode: effectiveVersionCode, LwLine: "",
 			PdDl: 0, LwAb: "0", LwPlatform: "AppStore",
 			LwGameSessionID: "00000000-0000-0000-0000-000000000000", LwFirstLaunch: false,
 			LwAllianceID: "00000000000000000000000000000000",
@@ -696,13 +726,11 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// whether it alone matters, but omitting the key entirely is now
 	// known to differ from every real login this server has ever seen.
 	p.PutUtfString("dataConfigMd5", "")
-	effectivePackageName := gsl.PackageName
-	platformCode := "1"   // Android
-	pf := "market_global" // Android storefront
+	effectivePackageName := build.PackageName
+	platformCode := "1" // Android
+	pf := storefrontPF(in.IOSMode)
 	if in.IOSMode {
-		effectivePackageName = iosPackageName
 		platformCode = "0"
-		pf = "AppStore"
 		// iOS-only identifiers a real client always sends; captured live
 		// with real (non-secret, ad-tracking-scoped) values, sent empty
 		// here since we have none of our own.
@@ -726,7 +754,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p.PutUtfString("parseRegisterId", "")
 	p.PutUtfString("gameUid", in.GameUid)
 	p.PutUtfString("appVersion", effectiveAppVersion)
-	p.PutUtfString("resVersion", "0")
+	p.PutUtfString("resVersion", resVersion)
 	p.PutUtfString("versionCode", effectiveVersionCode)
 	p.PutUtfString("lang", "en")
 	p.PutUtfString("serverId", in.ServerID)

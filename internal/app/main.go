@@ -81,7 +81,7 @@ func Run() {
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
 	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- IF the refresh response includes a non-empty server list, it REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and IF it includes a fresh access token, that REPLACES any explicitly-passed -cs-at; either can come back empty, in which case the corresponding -cs-* value passed here (or loaded from a session config) is used unchanged instead -- a warning is logged when that leaves a possibly-stale -cs-at in place with no refresh. If BOTH come back empty (no fresh access token AND no server list), that is NOT a graceful fallback: it is treated as a likely-rejected/expired refresh token and exits with code 2")
-	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at (e.g. one captured live from a real client) -- a cheap gsl.CheckVersion call is still made, to enable mid-login redirect-refresh capability, but no other GSL call happens unless -cs-rt is also set")
+	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at (e.g. one captured live from a real client) -- cheap anonymous check-version calls are still made (to derive the Login resVersion), but no GSL call happens unless -cs-rt is also set; a mid-login serverInfo redirect reuses the same token, as the real client does")
 	csIOS := fs.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
 	handshake := fs.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
 	configPath := fs.String("config", "", "path to a session config JSON (see config.example.json); if unset, auto-loads "+defaultSessionConfigPath()+" when present. Explicit -cs-* flags override individual config fields.")
@@ -171,6 +171,7 @@ func Run() {
 	if *ownDeviceSession != "" {
 		if err := writeOwnDeviceSession(gsl.DefaultHTTPClient(), *ownDeviceSession); err != nil {
 			slog.Error("own-device bootstrap failed", "error", err)
+			exitIfReauthNeeded(err)
 			os.Exit(1)
 		}
 		return
@@ -377,6 +378,7 @@ func Run() {
 	result, err := auth.Login(auth.LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake})
 	if err != nil {
 		slog.Error("login failed", "error", err)
+		exitIfReauthNeeded(err)
 		// Exit code 2 (rather than the generic 1) specifically marks a
 		// confirmed server-side auth rejection (ErrAuthRejected) -- the
 		// class of failure the README documents as needing a fresh
@@ -435,6 +437,9 @@ func Run() {
 		}
 	}
 	slog.Info("got buildings", "count", len(buildings))
+	if result.GotInit || len(buildings) > 0 {
+		sendCheckDeviceChange(conn)
+	}
 
 	if *listBuildings || !*collect {
 		game.PrintBuildings(buildings)
@@ -458,6 +463,26 @@ func Run() {
 	}
 
 	slog.Info("client exiting")
+}
+
+// exitIfReauthNeeded exits with code 2 when err carries GSL code 211 or 212
+// (gsl.ErrReauthNeeded): the server no longer accepts this device's at/rt/loginKey, so retrying
+// cannot help. Code 2 is the README's "session is stale" exit code for cron wrappers.
+func exitIfReauthNeeded(err error) {
+	if !errors.Is(err, gsl.ErrReauthNeeded) {
+		return
+	}
+	slog.Error("re-auth needed: GSL rejected this device's credentials (code 211/212). " +
+		"Run the -email verification flow again, or recapture the real app's session (README, \"Recognizing an expired token\")")
+	os.Exit(2)
+}
+
+// sendCheckDeviceChange sends check.device.change once after init, as every real session does
+// (auth.SendCheckDeviceChange). Its reply is informational, so a failure is only logged.
+func sendCheckDeviceChange(conn *session.GameConn) {
+	if err := auth.SendCheckDeviceChange(conn); err != nil {
+		slog.Warn("check.device.change failed; continuing", "error", err)
+	}
 }
 
 // shouldAbortBeforeInteractive decides, at the two -collect call sites (main() and
@@ -936,49 +961,39 @@ func runCrossServerTest(o crossServerTestOpts) {
 	// crossServerSaveBackNeeded's doc comment for the bug this specifically fixes.
 	origIP, origPort, origZone, origAccessTok, origGameUid := ip, port, zone, accessTok, gameUid
 
-	// GSL plumbing (HTTP client + gate host + RSA pubkey), threaded into CrossServerLoginParams so a
-	// mid-login serverInfo redirect can refresh AccessTok instead of reusing a stale one (see
-	// CrossServerLoginParams' doc comment). gsl.CheckVersion is a single cheap HTTP call, so it's made
-	// unconditionally here rather than only under -cs-rt: a plain SessionConfig reconnect with no
-	// -cs-rt at all (the primary case crossserver.go's own redirect-following doc comment is about --
-	// surviving a real server-merge zone migration) could otherwise never reach this safety net.
-	//
-	// -cs-rt additionally NEEDS this to make its own opt=refresh call below, so a failure here stays
-	// fatal (os.Exit) in that case, matching this function's existing error-handling posture for
-	// -cs-rt. For every other path, this is purely a best-effort enhancement on top of a reconnect
-	// that doesn't otherwise need any GSL/HTTP capability -- a failure here just logs a warning and
-	// leaves gslHTTPClient/gslRSAPub/gslGateHost nil, falling back to today's documented degraded
-	// behavior (DoCrossServerLogin reusing the current access token unrefreshed, with its own logged
-	// warning, if a redirect is actually hit) instead of failing the whole run over it.
-	var gslHTTPClient *http.Client
+	// Check-version, as the real client runs on every launch, with the session's zone as `server`.
+	// Its reply feeds the Login resVersion (auth.ResVersionFor, below) and, for -cs-rt, the gate host
+	// and RSA pubkey of the GSL opt=refresh call. -cs-rt NEEDS it, so a failure stays fatal there;
+	// otherwise the reconnect only loses the derived resVersion ("0" is sent, as before) and goes on.
+	httpClient := o.httpClient
+	if httpClient == nil {
+		httpClient = gsl.DefaultHTTPClient()
+	}
+	var cv *gsl.CheckVersionResponse
 	var gslRSAPub *rsa.PublicKey
 	var gslGateHost string
-	{
-		httpClient := o.httpClient
-		if httpClient == nil {
-			httpClient = gsl.DefaultHTTPClient()
+	if reply, gateHost, err := gsl.CheckVersion(httpClient, zone); err != nil {
+		if o.rt != "" {
+			slog.Error("check-version failed", "error", err)
+			os.Exit(1)
 		}
-		cv, gateHost, err := gsl.CheckVersion(httpClient)
-		if err != nil {
-			if o.rt != "" {
-				slog.Error("check-version failed", "error", err)
-				os.Exit(1)
-			}
-			slog.Warn("check-version failed; proceeding without redirect-refresh capability (a mid-login serverInfo redirect will fall back to reusing the current access token)", "error", err)
-		} else if pub, err := crypto.ParseRSAPubKeyFromDER(cv.ResMsg.String()); err != nil {
+		slog.Warn(`check-version failed; continuing with resVersion "0"`, "error", err)
+	} else {
+		cv = reply
+		if pub, err := crypto.ParseRSAPubKeyFromDER(cv.ResMsg.String()); err != nil {
 			if o.rt != "" {
 				slog.Error("parse RSA pubkey failed", "error", err)
 				os.Exit(1)
 			}
-			slog.Warn("parse RSA pubkey failed; proceeding without redirect-refresh capability (a mid-login serverInfo redirect will fall back to reusing the current access token)", "error", err)
+			slog.Warn("parse RSA pubkey failed; continuing (only -cs-rt needs it)", "error", err)
 		} else {
-			gslHTTPClient, gslRSAPub, gslGateHost = httpClient, pub, gateHost
+			gslRSAPub, gslGateHost = pub, gateHost
 		}
 	}
 
 	if o.rt != "" {
 		slog.Info("GSL getserverlist (opt=refresh)")
-		lsr, err := gsl.GetServerList(gslHTTPClient, gslGateHost, gslRSAPub, deviceID, gsl.GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
+		lsr, err := gsl.GetServerList(httpClient, gslGateHost, gslRSAPub, deviceID, gsl.GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
 		if err != nil {
 			// Unlike the ErrAuthRejected-gated os.Exit(2) sites elsewhere in this file (the
 			// plain-login failure in main(), and the SFS2X cross-server-login failure further
@@ -986,22 +1001,25 @@ func runCrossServerTest(o crossServerTestOpts) {
 			// ErrAuthRejected) here: gsl.GetServerList's own error returns (gsl.go) never wrap it --
 			// only the SFS2X handshake/login/cross-server-login paths (conn.go, login.go,
 			// crossserver.go) do, since those are the ones that decode an explicit server-side
-			// rejection error code from the game server. This HTTP-based GSL endpoint's own
-			// success-vs-rejection semantics haven't been confirmed live yet either (see
-			// gsl.LoginServerListRespon.Code's own doc comment), so there is nothing here an exit-2
-			// branch could actually be gated on -- a prior version of this code had one anyway,
-			// unreachable, with a comment incorrectly claiming it matched those sibling sites.
-			// Every gsl.GetServerList failure -- network/HTTP/decode/decrypt, all of it -- is just a
-			// generic failure (1) until real evidence of a confirmed-rejection shape exists here.
+			// rejection error code from the game server. A GSL result-code rejection is checked
+			// separately just below (lsr.Err); this error is a network/HTTP/decode/decrypt
+			// failure, which is just a generic failure (1).
 			slog.Error("GSL refresh failed", "error", err)
 			os.Exit(1)
 		}
 		slog.Info("GSL refresh response", "code", lsr.Code, "serverListLen", len(lsr.ServerList))
+		// A non-zero GSL code is a failure, as in the real client: 211/212 (the refresh token is
+		// no longer accepted) exit 2 with a re-auth message, any other code exits 1. An empty
+		// server list with code 0 (E120 to the real client) stays handled by the
+		// refreshHasUsableData check below, which keeps a fresh token usable on its own.
+		if err := lsr.Err(); err != nil && !errors.Is(err, gsl.ErrEmptyServerList) {
+			slog.Error("GSL refresh rejected", "error", err)
+			exitIfReauthNeeded(err)
+			os.Exit(1)
+		}
 		if !refreshHasUsableData(lsr) {
-			// A nil error only means the HTTP round-trip and envelope decrypt succeeded -- gsl.go
-			// deliberately doesn't validate lsr.Code yet (no live evidence exists for what a
-			// semantically-rejected-but-HTTP-200 refresh looks like on this endpoint). Neither a
-			// fresh access token nor a server list means this response is useless: falling through
+			// The code was 0 (checked above), but neither a fresh access token nor a server
+			// list means this response is useless: falling through
 			// would silently reuse the stale accessTok/ip/port/zone/gameUid already in scope,
 			// producing a confusing downstream DoCrossServerLogin failure instead of failing clearly
 			// here, at the point where the actual problem is known.
@@ -1066,7 +1084,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 			slog.Warn("GSL refresh response carried no access token, and none was already set -- this run has zero access token and will very likely fail downstream", "code", lsr.Code)
 		}
 		if len(lsr.ServerList) > 0 {
-			srv := lsr.ServerList[0]
+			// This role's entry first, then lastLoggedServer, then [0] (gsl PickServer).
+			srv := *lsr.PickServer(gameUid)
 			if overridden := serverListOverrideFlags(ip, o.ipExplicit, port, o.portExplicit, zone, o.zoneExplicit, gameUid, o.gameUidExplicit); len(overridden) > 0 {
 				// Symmetric to the "ignoring -cs-at" WARN above, for the same reason (and, as of
 				// round 25's fix to serverListOverrideFlags, genuinely the same check: both
@@ -1170,14 +1189,15 @@ func runCrossServerTest(o crossServerTestOpts) {
 		os.Exit(1)
 	}
 
+	resVersion := auth.ResVersionFor(httpClient, cv, o.iosMode, o.appVersion, o.versionCode, zone)
 	result, err := auth.DoCrossServerLogin(auth.CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
 		DeviceID: deviceID, AirKey: airKey,
 		AccessTok: accessTok, ShumeiBoxId: o.shumeiBoxId,
 		Handshake: o.handshake, IOSMode: o.iosMode,
 		AppVersion: o.appVersion, VersionCode: o.versionCode,
-		HTTPClient: gslHTTPClient, RSAPub: gslRSAPub, GateHost: gslGateHost,
-		DialGame: o.dialGame,
+		ResVersion: resVersion,
+		DialGame:   o.dialGame,
 	})
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
@@ -1250,6 +1270,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 	slog.Info("got buildings", "count", len(buildings))
+	if initPush.Raw != nil {
+		sendCheckDeviceChange(conn)
+	}
 	if o.runFeature != "" {
 		if err := game.RunFeatures(conn, initPush, nil, o.runFeature); err != nil {
 			slog.Error("feature run failed", "feature", o.runFeature, "error", err)

@@ -2,9 +2,9 @@ package app
 
 import (
 	"bytes"
-	"crypto/rsa"
 	"lastwar-client/internal/auth"
 	"lastwar-client/internal/gsl"
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"strings"
@@ -58,18 +58,16 @@ func TestCredentialTypesLogValueProtectsJSONHandler(t *testing.T) {
 
 // TestCrossServerLoginParamsLogValueWithGSLPlumbing is a companion to
 // TestCredentialTypesLogValueProtectsJSONHandler above, specifically for
-// CrossServerLoginParams: its HTTPClient/RSAPub fields hold live pointers that, if LogValue() were
-// ever accidentally removed and the struct fell through to a raw json.Marshal, would themselves
-// fail to marshal (an *rsa.PublicKey's exported fields are also not directly JSON-safe in every
-// Go version) -- proving LogValue() short-circuits before json.Marshal ever has to touch them, not
-// just that the string result happens to omit the credential.
+// CrossServerLoginParams: its DialGame field holds a func value that, if LogValue() were ever
+// accidentally removed and the struct fell through to a raw json.Marshal, would itself fail to
+// marshal -- proving LogValue() short-circuits before json.Marshal ever has to touch it, not just
+// that the string result happens to omit the credential.
 func TestCrossServerLoginParamsLogValueWithGSLPlumbing(t *testing.T) {
 	const marker = "MUST-NOT-LEAK-cross-server-plumbing"
 
 	p := auth.CrossServerLoginParams{
-		AccessTok:  marker,
-		RSAPub:     &rsa.PublicKey{},
-		HTTPClient: nil,
+		AccessTok: marker,
+		DialGame:  session.DialGame,
 	}
 
 	var buf bytes.Buffer

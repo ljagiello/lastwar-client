@@ -722,7 +722,9 @@ func mainCollectInteractiveFakeGameServer() func(*session.GameConn) {
 			return
 		}
 
-		const wantRequests = 9
+		// 9 collect requests plus the check.device.change Run() sends after init (answered by the
+		// default branch below; the client never waits for it).
+		const wantRequests = 10
 		for range wantRequests {
 			env, err := server.ReadEnvelope()
 			if err != nil {
@@ -1055,7 +1057,9 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*session
 		// expected request, AsExtension() returns ok=false for it, and the handler gives up --
 		// leaving the connection to eventually read as a genuine EOF/dead-connection failure to
 		// the client's next real request instead of the benign push this actually was.
-		const wantRequests = 10
+		// One more for the check.device.change Run() sends after init (answered by the default
+		// branch below; the client never waits for it).
+		const wantRequests = 11
 		for range wantRequests {
 			msg, err := session.ReadNextExtension(server)
 			if err != nil {
