@@ -33,13 +33,13 @@ Game-data rows are keyed `id = base_type_id + level`, where `base_type_id` is al
     </tr>
     <tr>
       <td><code>free.building.upgrade.finish</code></td>
-      <td>Instantly finish (premium currency)</td>
-      <td><code>uuid</code></td>
+      <td>Complete an upgrade whose timer has already ended. It's free: the request has no cost field, and the client sends it only when <code>IsUpgradeFinish()</code> is true (1.0.364 <code>BuildManager</code>; static-analysis-only). The reply carries <code>serverSystemTime</code>, which the client uses to resync its clock. The paid instant finishes are <code>build.ccd.&#42;</code> / <code>queue.ccd.&#42;</code> with gold or items, and <code>free.building.up.new</code> with <code>gold: 2</code></td>
+      <td><code>uuid</code> (Long)</td>
     </tr>
     <tr>
       <td><code>queue.finish</code> / <code>.batch</code></td>
-      <td>Instantly finish production item(s)</td>
-      <td><code>uuid</code> / <code>queueList[]</code></td>
+      <td>The normal, free collect of a finished queue: research, healing, the rebirth hospital, and the T11 break. <code>queue.finish.batch</code> harvests pastures. Neither has a cost field (static-analysis-only)</td>
+      <td><code>uuid</code> (Long) / <code>queueList, paraState</code></td>
     </tr>
     <tr>
       <td><code>building.camp.training</code></td>
@@ -48,7 +48,7 @@ Game-data rows are keyed `id = base_type_id + level`, where `base_type_id` is al
     </tr>
     <tr>
       <td><code>building.camp.collect</code></td>
-      <td>Collect finished camp output (Military Camp, Smith Shop, Tactical Chip Factory, NOT Training Base, despite the name)</td>
+      <td>Collect finished camp output: Military Camp (soldiers) and Smith Shop (equipment), NOT Training Base, despite the name. The client sends it when <code>prodST &gt; 0</code> and <code>prodET</code> has passed. <strong>The Tactical Chip Factory (10232000) is disputed:</strong> one reading of the 1.0.364 Lua has <code>BuildBubbleManager</code> sending <code>building.camp.collect</code> for chip buildings, another has the factory's own UI sending <code>chip.collect &#123;&#125;</code>. Treat that pairing as unverified until a live check settles it</td>
       <td><code>uuid</code></td>
     </tr>
     <tr>
@@ -89,6 +89,32 @@ Two details of the collect response, from the 1.0.364 Lua:
 
 - The client treats a **missing or `-1`** `status` as failure and shows tip 602026. Every live success has carried `status=1`; what `status=0` means server-side is unknown.
 - Locale `602026` reads "Production in progress. Please wait."
+
+## Building and queue fields in `init`
+
+Field meanings from the 1.0.364 Lua (`BuildingDate`, `QueueDataManager`, `Global/EnumType.lua`); static-analysis-only. Times are in ms.
+
+**`building_new[]`**, one entry per building:
+
+| Field | Meaning |
+|---|---|
+| `uuid`, `bId`, `lv`, `pId` | Building instance, type id, level, and city tile |
+| `sT` / `uT` | Upgrade start and end; `uT` is `0` when no upgrade is running |
+| `state` | `0` normal, `1` upgrading, `2` folded, `3` paused, `5` crossing |
+| `help` | Alliance help state: `0` none, `1` upgrade helped, `2` ruins helped, `3` both |
+| `lCT` | Last collect, for the legacy collect buildings |
+| `unaT` | Unavailable-from time |
+| `pEndT` | Produce end, for the legacy collect buildings |
+| `gValT` | Grow-value start, for the residential buildings that accrue items |
+| `dStT` / `dEndT` | Repair start and end |
+| `prodST` / `prodT` / `prodET` / `prodExtend` | Production line start, last tick, end (the cap), and stored amount |
+| `prodStatus` | Production state; on camp buildings, the soldier level or equipment id being made |
+
+**`queue_new[]`**, one entry per timed queue: `{uuid, qid, type, sT, uT, itemObj, funcUuid, para, para2, isHelped, lastHelpTime, helpNum}`. Builder queues add `{expireTime, unlock, gift, rentPrice, rentTime}`. `type` is a `NewQueueType` id, for example `3` hospital, `6` science, `117` rebirth hospital, and `120` T11 break; the full list is in the [Entity ID reference](/entity-id-reference).
+
+A production line collects only when its stored amount is above 0. In the 1.0.364 Lua that's `prodExtend + num * floor((min(now, prodET) - prodT) / produce_time)`, with `produce_time` per building and level from the `building` table (milliseconds per tick). The tick is 5 s for Farmland, Iron Mine, Gold Mine, and Training Base, 60 s for the Oil Well, and 1,800 s for the Smelter, Material Workshop, and Tactical Institute; storage stops filling at `prodET` (static-analysis-only).
+
+`collect_reward[]` lists pending world rewards with an expiry; its source ids are `CollectRewardType`, also in the [Entity ID reference](/entity-id-reference).
 
 ## Resource economy: two systems
 

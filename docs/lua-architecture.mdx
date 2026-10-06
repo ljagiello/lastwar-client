@@ -3,20 +3,22 @@ title: "Lua scripting architecture"
 description: "How the C# hot-update tier hands off to xLua, the module tree, boot sequence, require() resolution, and the BaseClass OOP convention used across the codebase."
 ---
 
-The C# tier's only job, once it finishes booting, is to spin up xLua and get out of the way. Nearly everything a player experiences, city, army, hero, world map, chat, every one of the 3,178 commands, is Lua.
+Once the C# tier finishes booting, it spins up xLua and mostly gets out of the way, keeping only the transport, the login plumbing, and the world-map viewport protocol. Nearly everything a player experiences, city, army, hero, world map, chat, and all 3,115 commands in the Lua catalog, is Lua. The exceptions are the 54 commands only C# handles, see [Dispatch order](#dispatch-order).
 
 ## Module tree
 
+Counts are from a walk of the 1.0.364 `LWLF` bundle (version 825, 18,733 modules); the rest sit in `Common/`, `Global/`, `Util/`, `RedPoint/`, and a few smaller trees.
+
 | Directory | Files | Purpose |
 | --- | ---: | --- |
-| `UI/` | 9,802 | Per-screen UI logic, the largest tree by far |
-| `Net/` | 2,790 | Networking: dispatch core + all 2,777 command classes |
-| `DataCenter/` | 2,226 | Client-side state managers, the "model" layer, ~825 lazy-singleton managers |
-| `Scene/` | 880 | In-world/3D scene & rendering glue |
-| `Chat/` | 169 | The dedicated chat subsystem (see [Alliance, chat & mail](/alliance-chat-mail)) |
-| `Framework/` | 112 | The actual engine: base classes, event system, logger, loaded first |
+| `UI/` | 11,709 | Per-screen UI logic, the largest tree by far |
+| `Net/` | 3,117 | Networking: dispatch core + 3,104 command (`Message`) classes |
+| `DataCenter/` | 2,483 | Client-side state managers, the "model" layer, 833 lazy-singleton manager names in the registry |
+| `Scene/` | 951 | In-world/3D scene & rendering glue |
+| `Chat/` | 172 | The dedicated chat subsystem (see [Alliance, chat & mail](/alliance-chat-mail)) |
+| `Framework/` | 113 | The actual engine: base classes, event system, logger, loaded first |
 
-\* `UI/`, `Net/`, and `DataCenter/` counts are undercounts (a manifest path-truncation artifact affects a subset of entries in these three trees); true counts are somewhat higher. See [Extraction methodology](/methodology) for the extraction methodology.
+An earlier version of this table, built from the 1.0.351 manifest, undercounted `UI/`, `Net/`, and `DataCenter/` because of a path-truncation artifact.
 
 ## Boot sequence
 
@@ -54,4 +56,33 @@ return MailGetMessage
 
 ## Relationship to the C# hot-update layer
 
-Three independently-versioned payloads, confirmed by reading the version-check parser directly: asset bundles (covers the C# `.mdl` assemblies), the Lua bundle, and the data tables each carry their own version field and can update independently. They are *not* fully independent, though; the Lua bootstrap itself (`XLuaManager`, the custom loader) lives inside the hot-update C# tier, so a broken C# release could in principle break the Lua loader before any Lua code runs.
+Four independently-versioned payloads, confirmed by reading the version-check parser directly: asset bundles, the C# `.mdl` assemblies (through the `dllres` manifest), the Lua bundle, and the data tables each carry their own version field and can update independently (see [Startup, version-check & hot-update](/bootstrap)). They are *not* fully independent, though; the Lua bootstrap itself (`XLuaManager`, the custom loader) lives inside the hot-update C# tier, so a broken C# release could in principle break the Lua loader before any Lua code runs.
+
+## Dispatch order
+
+Every incoming extension response goes to C# first (1.0.364 C# `MessageFactory.DispatchResponse`; static-analysis-only):
+
+- C# `MessageFactory` handles 71 wire names itself. Everything else becomes a Lua table and goes through `GameMain.Protocal`, then `SFSNetwork.HandleMessage`, then the handler that `MsgMap[wire]` names. A reply with no `MsgMap` handler falls through to the chat manager.
+- 18 of the 71 are also in the Lua catalog, and for those **C# wins**: the Lua `HandleMessage` never runs. Lua still builds some of the requests, among them `world.march.formation.new`, `world.march.change`, `world.march.speed.up`, `train.send`, and `train.batch.send`.
+- 54 commands exist only in C# (53 of the 71, plus `world.get.cross`) and are missing from any Lua-derived catalog. They include `login.ext`, `check.device.change`, `change.user.parseid`, `init.error`, the world-map viewport pulls (`world.get.block`, `world.get.new`, `world.get.cross`), `push.world.march.new` / `.del`, and `push.user.off`.
+- Lua-originated and C#-native requests share one `_id` counter, which resets on reconnect.
+- There's no protocol-level request timeout or retry: `FutureManager.update()` is a no-op. Each feature handles a missing reply on its own.
+- Duplicate wire names resolve to one class for both directions: `SFSNetwork.GetMsgType` uses `MsgMap[wire]` for sending and receiving.
+
+## At-rest Lua obfuscation ("SuperEncrypt")
+
+Besides the non-standard header that [Extraction methodology](/methodology) describes, `BaseUtils`' `EncryptUtils` has an at-rest obfuscation for individual Lua chunks (static-analysis-only):
+
+- An encrypted chunk starts with `0B 45 4E 43`, and the rest of the 32-byte Lua 5.3 header is replaced by `S` bytes.
+- The source-name string is XORed with a 32-byte key derived through ChaCha.
+- The body is XORed with a ChaCha8 keystream, and the `_ENV` tail is masked.
+
+The keys come from the same dummy-constant derivation as the file wrappers on [Startup, version-check & hot-update](/bootstrap).
+
+## Hot-patching C# from Lua
+
+Lua can rewrite the C# layer, not only itself (static-analysis-only):
+
+- `CommonUtils.Lua_File_Write` gives Lua arbitrary file IO inside the app sandbox, including `persistentDataPath/Assemblies/*.mdl`, which FM_Mono loads on the next start. A Lua hot update could therefore ship a replacement C# assembly. No use of this path was found in 1.0.364.
+- xLua's `[Hotfix]` IL injection isn't active in 1.0.364. The attribute appears on some C# message classes, but `HotfixDelegateBridge` is never called, so those classes can't be patched that way.
+- `DevPatchRuntime` is unused developer tooling.

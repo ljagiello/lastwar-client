@@ -12,7 +12,7 @@ description: "How alliance management and mail ride the main SFS2X socket while 
 | Carries | Moderation (ban/lock), room admin, "share to chat" (attachments/cards), player search | **Actual message text**, room join, history/pagination, read receipts |
 | Format | Binary SFSObject | JSON text frames |
 | Auth | Piggybacks the main session | `chatToken` from the SFS `init` push + a signed per-connection header |
-| Discovery | n/a | Separate HTTP bootstrap, MD5-signed request |
+| Discovery | n/a | Separate HTTP bootstrap, MD5-signed request, see [Chat WebSocket transport](#chat-websocket-transport) |
 
 Sending an alliance/world chat message: `cmd="chat.room"` on the WebSocket, **not** the SFS-side `al.msg`/`chat.country` commands (those are for sharing a rich attachment/card into a room, no free-text field). Every message is signed:
 
@@ -21,7 +21,33 @@ sign = MD5(uid + json(sortedRecursively(params)) + sendTime + connectionSign)
 frame = {"cmd": cmd, "params": params, "sendTime": sendTime, "sign": sign}
 ```
 
-The alliance room id is **not** a deterministic function of the alliance id; it must be fetched via `common.chat.room.id` on the main SFS socket before you can `room.joinMulti` on the WebSocket.
+In 1.0.364 the Lua builds the alliance room id deterministically, `alliance_<sourceServerId>_<allianceId>`, with `alliance_manager_<sid>_<aid>` for the R4/R5 room and `alliance_<sid>_<aid>_Notice` for the notice room, and it treats any other id as a mismatch to re-sync (`ChatRoomManager`; static-analysis-only). How the client gets into that room depends on a server switch:
+
+- By default, the client joins the room itself with `room.joinMulti {rooms: [{id, group: "alliance"}]}` on the WebSocket.
+- With the DataConfig switch `room_join_control` on, the server grants membership instead. The client sends `chat.permission.syn {action}` on the SFS socket (`joinAlliance`, `leaveAlliance`, `rankChange`, or `notCheck`), and the chat server answers on the WebSocket with `push.room.synPermission {roomId, auth, group}`.
+
+`common.chat.room.id` on the SFS socket returns `allRooms[{group, roomId}]`, but the client sends it only when the C# switch `ClientSwitch.CHAT_SERVER_ROOMLIST` is on. Earlier versions of this page said the alliance room id isn't derivable from the alliance id and must be fetched with `common.chat.room.id`. If that came from a live observation, it was probably made in `room_join_control` mode; which mode production runs in hasn't been checked.
+
+## Chat WebSocket transport
+
+Everything in this section is from the 1.0.364 Lua (`ChatNetManager`, `ChatManager2`) and C# (`ChatService`), and is static-analysis-only. Chat starts once per login, after the `init` push has been processed.
+
+1. **Discovery.** An HTTPS form POST to the first reachable of three line-specific URLs, starting with the game socket's current line:
+
+   ```text
+   https://lastwar-chat-cf.lastwarapp.net/server/links
+   https://lastwar-chat-us-aws-ali.lastwargame.com/server/links
+   https://lastwar-chat-us-gcp-ali.lastwargame.com/server/links
+   ```
+
+   When the DataConfig switch `CheckChatNewLine` is on, the client posts to `/gameservice/chat_server_links.php` on the three `lastwar-serverlist-*` hosts instead. The form fields are `t` (server time in seconds), `s` (an MD5 signature), `a` (the app id), `u` (the uid), `serverId`, and `f=cn` in China only. The response is `{code, data: [{protocol, ip, port}], data_new}`; the server switch `ChatUseNewLine` selects `data_new`. On failure the client retries every 3 s, rotating URLs.
+2. **Connect.** The WebSocket URL is `{protocol}://{ip}:{port}`, with no path. The handshake carries five headers: `APPID`, `TIME` (server time in ms), `UID`, `SIGN`, and `CHATTOKEN` (the `chatToken` from `init`). `SIGN` is the `connectionSign` that every frame signature above includes.
+3. **Keepalive.** The client pings every 3 s and closes the connection after 9 s without any frame. The server also sends literal `heartbeat` text frames.
+4. **Session.** The server pushes `login.success`. The client then sends `user.setInfo`, `user.setSwitchFlag`, `room.getCustomRoomListV2`, and `room.joinMulti`, and once those answer, pulls each joined room's newest page with `history.roomsv2`.
+5. **One session per uid.** `another.login` means the same uid connected to chat elsewhere; the client closes and doesn't reconnect.
+6. **Frames.** Every outbound command is signed, not just `chat.room`, using the formula above. Replies reuse the request's `cmd` with a `result` object; pushes carry `data`.
+
+Nothing claimable travels on the chat socket. Red packets, gift boxes, and shared rewards are claimed with game-socket commands; the chat socket only delivers the ids those commands need.
 
 ## Core Alliance commands
 
@@ -45,7 +71,7 @@ The alliance room id is **not** a deterministic function of the alliance id; it 
 | --- | --- |
 | `mail.read` | Read one mail, `{uid: mailId, type, toUser: senderUid}` |
 | `chat.get.system.mails` | List/sync the mailbox, paginated (`clientseq`/`time`/`count`/`firstCmd`/`isAll` in, `more`/`lastUid`/`lastMailTime` out). Response arrives as a separate push, `push.chat.get.system.mails`, not inline. **Confirmed live**: a cold-start call (`time: 0`, empty `clientseq`) correctly paginated a full 350-entry mailbox across 4 pages. The real client pages differently: in the 2026-10-04 capture its first call carried `isAll:true`, a 32-hex `clientseq`, a `time`, `firstCmd:"YES"`, and `count:20`, and every later call carried `clientseq:"0"`, `time:0`. Per the 1.0.364 Lua, that continuation is a server-side cursor with no `lastUid`/`lastMailTime` feedback, and a true cold start sends `clientseq:"0"`, `time:0`. The list push gained `delActivityIds` in 1.0.364. |
-| `mail.delete` / `.batch` | Delete mail. The real client sends `mail.delete.batch {type:"auto", uids}` on login: in the 2026-10-04 capture it auto-deleted mail in 9 calls, and the server answered with `push.mail.delete.batch` |
+| `mail.delete` / `.batch` | Delete mail. The real client sends `mail.delete.batch {type:"auto", uids}` on login: in the 2026-10-04 capture it auto-deleted mail in 9 calls, and the server answered with `push.mail.delete.batch`. Per the 1.0.364 Lua (`MailDataManager`), that auto-delete removes mail older than 30 days, once per day, so an attachment left unclaimed for 30 days is lost at the real client's next login (static-analysis-only) |
 | `mail.read.status.betch` | Mark mail read, needs only `uids` (comma-separated string GUIDs), no `type`, so it's global across every mailbox category in one call. **Confirmed live**, and genuinely independent of whether the mail has a reward: a real capture showed the actual client sending this with no matching `mail.reward.batch` call at all for a reward-less category (battle reports). Don't gate this on reward status, see the note in [Live validation against production](/live-validation#mail-claimable-but-scoped-per-category-with-string-guid-uids). |
 | `mail.reward` / `.batch` | Claim attachment reward. Gotcha, **confirmed live**: mail uids are string GUIDs, not the int64s every other uuid in this project uses, and the batch claim is scoped per mailbox category (`type`), one call per category, not one global call. See [Live validation against production](/live-validation#mail-claimable-but-scoped-per-category-with-string-guid-uids). |
 | `mail.send` | Send mail (1:1 or alliance-wide) |

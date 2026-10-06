@@ -1,9 +1,9 @@
 ---
 title: "World map"
-description: "The fixed 1000×1000 per-server tile grid, its linear point-id addressing, and the four query patterns the client uses instead of SFS2X's unused area-of-interest streaming."
+description: "The per-server tile grid (1000×1000, or 3000×3000 on season big maps), its linear point-id addressing, the C#-owned viewport block pull, and the other query patterns the client uses instead of SFS2X's unused area-of-interest streaming."
 ---
 
-A fixed 1000×1000 tile grid per server, addressed by a 1-based linear index. The client never streams a viewport, it pulls single points by id, asks the server to find things "nearest," or bulk-fetches an entire server's territory dataset. SFS2X's built-in area-of-interest streaming exists in the SDK and is completely unused.
+A 1000×1000 tile grid per server, addressed by a 1-based linear index; season "nine palaces" maps join nine servers into one 3000×3000 grid. The client streams the visible part of the map itself, through C#-owned block-pull requests, and supplements that with single-point pulls, server-side "find nearest" searches, and bulk per-server datasets. SFS2X's built-in area-of-interest streaming exists in the SDK and is completely unused.
 
 ## Tile math
 
@@ -20,20 +20,32 @@ worldX  = (x + 0.5) * TileSize
 worldPos = uint64(serverId) << 32 | uint64(pointId)
 ```
 
-## Query model: four patterns, no viewport scanning
+On a season "nine palaces" map, the 1.0.364 C# sets the world size to **3000** when the palace list holds 9 servers. A tile's server is the grid cell `(x / 1000, y / 1000)`, and its index is `x + y * 3000 + 1`. Battlefield worlds take their size from Lua instead (static-analysis-only).
 
-1. **Single-point pull**: `world.get.detail.new`, given a `pointId` the client already computed or learned elsewhere.
-2. **Server-side "find nearest"**: `find.resource`, `find.enemy.point`: the client sends criteria only (level, type), **no coordinates at all**; the server searches from the player's context and returns a single point id. `find.monster` is the same family but (unusually) also sends a `pointId` alongside its criteria.
-3. **Bulk per-server/per-alliance push**: `world.get.alliance.city.info`, `lw.req.world.occupy.info`: the entire dataset for a server, no pagination. Pushes are invalidate-then-refetch, not deltas.
-4. **Batch pull by uuid list**: radar/detect-event lookups, pipe-delimited uuid lists.
+## Query model
 
-The one genuine coordinate-pair query found anywhere: `world.get.march.infos` (`x,y`), used to find marches passing near a raw tile coordinate.
+1. **Viewport block pull (C#-owned)**: `world.get.block`, `world.get.new`, and, on the cross-server line, `world.get.cross`. These never appear in the Lua command catalog; C# `WorldPointManager` sends them as the camera moves and handles the replies itself. `world.get.block` asks for up to **160 block indices** per request (static-analysis-only):
+
+   ```text
+   world.get.block {bigMap, x, y, serverId, worldId, type, viewLvl (≤ 2), timeStamp,
+                    index: IntArray (block ids), blockSize, clearUuidSet (first request only),
+                    force, leftBottom, rightTop}
+   ```
+
+   `leftBottom` and `rightTop` are tile indices computed on a 3000-wide grid. `world.get.new` is the view-level variant, `{x, y, serverId, type, viewLvl, timeStamp, worldId}`. Replies carry per-server sub-replies (`serverPointArr[]`) or flat `serverId`/`worldId`, with protobuf byte arrays: `points[]` as `WorldPointInfo`, `lands[]` as `LandPointInfo`, `deserts[]` as `DesertInfo`, `alInfos[]`, plus overlays such as `hotSpots`, `triggers`, and `greenPoints`. After the first request with `clearUuidSet=1`, the client drops every previously known point the server didn't return. `push.world.get.block` tells the client to re-request its view.
+2. **Single-point pull**: `world.get.detail.new {point, serverId, worldId, previewAssistance, pointType, uid}`. The field is `point`, not `pointId`.
+3. **Server-side "find nearest"**: `find.resource`, `find.enemy.point`: the client sends criteria only (level, type), **no coordinates at all**; the server searches from the player's context and returns a single point id. `find.monster` is the same family but (unusually) also sends a `pointId` alongside its criteria.
+4. **Bulk per-server/per-alliance push**: `world.get.alliance.city.info`, `lw.req.world.occupy.info`: the entire dataset for a server, no pagination. Pushes are invalidate-then-refetch, not deltas.
+5. **Batch pull by uuid list**: radar/detect-event lookups, pipe-delimited uuid lists.
+
+`world.get.march.infos {x, y, needCross}` finds marches passing near a raw tile coordinate. March state then streams as C#-handled pushes: `push.world.march.new` carries a protobuf `WorldMarch` (or a `WorldMarchDeltaMeta` delta), and `push.world.march.del` carries the march `uuid` and `isBattleFail`. In all, 29 world, scene, and season `push.*` messages are handled only in C#.
 
 ## Core commands
 
 | cmd | Purpose |
 | --- | --- |
-| `world.get.detail.new` | Single-tile dynamic-state pull |
+| `world.get.block` / `world.get.new` | Viewport block pull (C#-owned) |
+| `world.get.detail.new` | Single-tile dynamic-state pull, keyed by `point` |
 | `world.march.formation.new` | Dispatch a march to a target tile (or through a multi-hop `;`-delimited path) |
 | `alliance.world.mark.add` | Persistent alliance-shared map marker |
 | `world.favo.add` | Personal (non-shared) map bookmark |
