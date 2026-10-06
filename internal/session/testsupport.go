@@ -65,6 +65,8 @@ func NewFakeGameListener(t *testing.T) (net.Listener, string) {
 // Takes no *testing.T deliberately: like conn_wait_test.go's ReadAndReply, handler may still be
 // running in the background after the test function itself has returned, and calling T methods
 // from such a goroutine is unsafe.
+//
+// The handler's GameConn never sees the client's PingPong requests (see newFakeServerConn).
 func ServeFakeGameServer(ln net.Listener, handler func(*GameConn)) {
 	go func() {
 		for {
@@ -72,10 +74,19 @@ func ServeFakeGameServer(ln net.Listener, handler func(*GameConn)) {
 			if err != nil {
 				return
 			}
-			gc := NewGameConnForTest(c)
+			gc := newFakeServerConn(c)
 			go handler(gc)
 		}
 	}()
+}
+
+// newFakeServerConn wraps the server end of a fake game connection. Its ReadEnvelope drops the
+// client's heartbeat pings: StartHeartbeat sends one before Login, and fake handlers read the
+// first envelope as the Login request and count later ones as the requests they answer.
+func newFakeServerConn(c net.Conn) *GameConn {
+	gc := NewGameConnForTest(c)
+	gc.skipClientPings = true
+	return gc
 }
 
 // StartFakeGameServer covers the common single-listener case: listen and serve immediately.
@@ -104,7 +115,7 @@ func NewInMemoryGameDial(handler func(*GameConn)) func(addr string, timeout time
 	return func(string, time.Duration) (*GameConn, error) {
 		c1, c2 := net.Pipe()
 		go func() {
-			srv := NewGameConnForTest(c2)
+			srv := newFakeServerConn(c2)
 			defer func() { _ = srv.Close() }()
 			handler(srv)
 			for {

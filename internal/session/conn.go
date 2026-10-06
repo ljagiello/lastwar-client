@@ -52,6 +52,11 @@ type GameConn struct {
 	// session the server has ended, whichever loop happens to be running.
 	ended atomic.Pointer[SessionEndedError]
 
+	// skipClientPings makes ReadEnvelope drop PingPong requests. Only the fake-server side of
+	// testsupport.go's ServeFakeGameServer/NewInMemoryGameDial sets it, so fake handlers that read
+	// "the next envelope" as Login keep working now that StartHeartbeat pings before Login.
+	skipClientPings bool
+
 	stopHeartbeat chan struct{}
 	closeOnce     sync.Once
 	closeErr      error
@@ -194,6 +199,16 @@ func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
 // rather than in each read loop means WaitFor/SendAndWait, DoHandshake, login's waitForInitPush
 // and game's FetchInit all stop on it through the dead-connection check they already make.
 func (c *GameConn) ReadEnvelope() (*Envelope, error) {
+	for {
+		env, err := c.readEnvelope()
+		if err == nil && c.skipClientPings && env.Controller == ControllerSystem && env.Action == ActionPingPong {
+			continue
+		}
+		return env, err
+	}
+}
+
+func (c *GameConn) readEnvelope() (*Envelope, error) {
 	if e := c.ended.Load(); e != nil {
 		return nil, e
 	}
@@ -621,9 +636,20 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*sfs.SFSObject, error) {
 // 4000ms, {clientTime: ms}), required to avoid the ~12s server-perceived
 // timeout while we wait on slower steps (e.g. the user fetching an email
 // verification code).
+//
+// The first ping goes out synchronously, before StartHeartbeat returns, so it precedes Login on
+// the wire as the real client's does: NetRawProxy.OnConnection enables its 4000 ms keepalive timer
+// and calls CheckKeepAlive at once (BaseUtils.decompiled.cs:36011-36035), and Login waits for that
+// first pong. The real client's first probe is a CustomPingPong carrying a decoy login template;
+// this one stays the flat {clientTime} the server has always accepted, and Login is not held back
+// for the pong. If the first ping cannot be sent the connection is closed and no loop starts, so
+// the caller's Login send fails.
 func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 	c.stopHeartbeat = make(chan struct{})
 	stopCh := c.stopHeartbeat // snapshot: avoids racing Close()'s concurrent access to the field
+	if !c.sendHeartbeat(start) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
@@ -632,23 +658,33 @@ func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				pp := sfs.NewSFSObject()
-				pp.PutLong("clientTime", time.Since(start).Milliseconds())
-				if err := c.SendEnvelope(ControllerSystem, ActionPingPong, pp); err != nil {
-					if errors.Is(err, ErrSessionEnded) {
-						return // already logged by ReadEnvelope; the caller exits and closes the conn
-					}
-					// SendStageError: consistency with SendAndWait/DoHandshake/the login-path send
-					// sites -- this error is never returned across a function boundary or inspected
-					// for Timeout() today (it's logged and the connection is closed unconditionally
-					// either way), so wrapping it has no behavioral effect now, but keeps the
-					// invariant "every direct send-stage error in this package is SendStageError-
-					// wrapped" true package-wide for any future caller that does inspect it.
-					slog.Error("heartbeat send failed -- closing connection", "error", SendStageError{Err: err})
-					_ = c.Close()
+				if !c.sendHeartbeat(start) {
 					return
 				}
 			}
 		}
 	}()
+}
+
+// sendHeartbeat sends one PingPongRequest and reports whether the heartbeat should keep going. A
+// send failure closes the connection.
+func (c *GameConn) sendHeartbeat(start time.Time) bool {
+	pp := sfs.NewSFSObject()
+	pp.PutLong("clientTime", time.Since(start).Milliseconds())
+	err := c.SendEnvelope(ControllerSystem, ActionPingPong, pp)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, ErrSessionEnded) {
+		return false // already logged by ReadEnvelope; the caller exits and closes the conn
+	}
+	// SendStageError: consistency with SendAndWait/DoHandshake/the login-path send
+	// sites -- this error is never returned across a function boundary or inspected
+	// for Timeout() today (it's logged and the connection is closed unconditionally
+	// either way), so wrapping it has no behavioral effect now, but keeps the
+	// invariant "every direct send-stage error in this package is SendStageError-
+	// wrapped" true package-wide for any future caller that does inspect it.
+	slog.Error("heartbeat send failed -- closing connection", "error", SendStageError{Err: err})
+	_ = c.Close()
+	return false
 }
