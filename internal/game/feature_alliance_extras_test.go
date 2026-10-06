@@ -8,7 +8,7 @@ import (
 	"lastwar-client/internal/sfs"
 )
 
-// allianceInit is an Init in an alliance, with switches on and the star ceremony running.
+// evAllianceInit is an Init in an alliance, with switches on and the star ceremony running.
 func evAllianceInit(switches ...string) *Init {
 	in := evInit(30)
 	u := sfs.NewSFSObject()
