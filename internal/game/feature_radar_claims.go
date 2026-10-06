@@ -52,30 +52,6 @@ func init() {
 	session.RegisterBenignErrorCode("120289", radarEventCmd, radarLevelCmd)
 }
 
-// radarEvents returns the event objects under key, whether sent as an array or a map.
-func radarEvents(o *sfs.SFSObject, key string) []*sfs.SFSObject {
-	if evs := claimObjects(o, key); evs != nil {
-		return evs
-	}
-	v, ok := o.Get(key)
-	if !ok {
-		return nil
-	}
-	m, ok := v.Val.(*sfs.SFSObject)
-	if !ok {
-		return nil
-	}
-	var out []*sfs.SFSObject
-	for _, k := range m.Keys() {
-		if e, ok := m.Get(k); ok {
-			if obj, ok := e.Val.(*sfs.SFSObject); ok {
-				out = append(out, obj)
-			}
-		}
-	}
-	return out
-}
-
 func runRadarClaims(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil {
 		slog.Info("radar-claims: no init push; skipping")
@@ -89,7 +65,7 @@ func runRadarClaims(conn *session.GameConn, in *Init) error {
 	}
 
 	var due []int64
-	for _, ev := range radarEvents(info.Params, "events") {
+	for _, ev := range claimObjectsOrMap(info.Params, "events") {
 		uuid, ok := claimInt(ev, "uuid")
 		state, _ := claimInt(ev, "state")
 		eventID, _ := claimInt(ev, "eventId")

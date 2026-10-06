@@ -413,3 +413,28 @@ func claimObjects(o *sfs.SFSObject, key string) []*sfs.SFSObject {
 	}
 	return out
 }
+
+// claimObjectsOrMap returns the objects under key whether the server sent an array of objects or
+// an object keyed by id (the Lua walks both alike with table.walk/pairs).
+func claimObjectsOrMap(o *sfs.SFSObject, key string) []*sfs.SFSObject {
+	if objs := claimObjects(o, key); objs != nil {
+		return objs
+	}
+	v, ok := o.Get(key)
+	if !ok {
+		return nil
+	}
+	m, ok := v.Val.(*sfs.SFSObject)
+	if !ok {
+		return nil
+	}
+	var out []*sfs.SFSObject
+	for _, k := range m.Keys() {
+		if e, ok := m.Get(k); ok {
+			if obj, ok := e.Val.(*sfs.SFSObject); ok {
+				out = append(out, obj)
+			}
+		}
+	}
+	return out
+}
