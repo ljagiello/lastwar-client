@@ -1026,7 +1026,7 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*session
 
 		v := sfs.NewSFSObject()
 		v.PutLong("uid", 777)
-		v.PutInt("eventId", 1)
+		v.PutInt("eventId", 2001) // a GIFT visitor: GreetVisitors skips eventIds not on its allowlist
 		list := sfs.NewSFSArray()
 		list.AddSFSObject(v)
 		visitorObj := sfs.NewSFSObject()

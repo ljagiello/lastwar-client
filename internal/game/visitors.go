@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"time"
 )
 
 // Visitor is a city visitor NPC ("greet visitors") -- confirmed live via a
@@ -52,12 +53,104 @@ func (v Visitor) Uid() int64       { return v.Raw.GetLong("uid") }
 func (v Visitor) EventId() int32   { return v.Raw.GetInt("eventId") }
 func (v Visitor) VisitorId() int32 { return v.Raw.GetInt("visitorId") }
 
-// StartTime has no caller today, but it's kept: it's the field that
-// distinguishes a still-arriving visitor (visitor_err_coming, see the
-// Visitor doc comment above) from one actually greetable, so a future
-// GreetVisitors could use it to skip a doomed operate call instead of
-// discovering "not started yet" from the server's error response.
+// StartTime is the visitor's arrival time in unix milliseconds. Before it, visitor.operate answers
+// visitor_err_coming (see visitorArrived).
 func (v Visitor) StartTime() int64 { return v.Raw.GetLong("startTime") }
+
+// QueueType is the list entry's own `type` field: the client's queue type (Scene/CityVisitor/
+// Const.lua:10-24, e.g. 0 GEN_BY_TIME), not the behaviour type GreetVisitors filters on (see
+// visitorBehaviourType).
+func (v Visitor) QueueType() int32 { return v.Raw.GetInt("type") }
+
+// Visitor behaviour types: lw_base_visitor_event.type for the visitor's eventId, which the client
+// picks the visitor's class by (global VisitorType, Global/EnumType.lua:11982-12004; dispatch in
+// Scene/CityVisitor/CityVisitorManager.lua:98-129). visitorTypeNames has the full list.
+const (
+	visitorTypeGift          int32 = 2
+	visitorTypeRecruitment   int32 = 3
+	visitorTypeDominator     int32 = 9
+	visitorTypeSeasonDayGift int32 = 10
+	visitorTypeActivity      int32 = 11
+	visitorTypeSystemGift    int32 = 30
+)
+
+var visitorTypeNames = map[int32]string{
+	1: "MERCHANT", 2: "GIFT", 3: "RECRUITMENT", 4: "BATTLE", 5: "WORKER_LOTTERY", 6: "NOTIFY",
+	7: "OPEN_PANEL", 8: "ALLIANCE_INVITE_MOVE_CITY", 9: "DOMINATOR", 10: "SeasonDayGift",
+	11: "VisitorActivity", 12: "ALLIANCE_INVITE", 13: "DOMINATOR_COCKATRICE",
+	14: "AllianceCongratulation", 15: "AD_REMINDER", 16: "SKY_BATTLE", 17: "PLANE_FEATURE",
+	18: "S0_ALLIANCE_BOSS", 19: "SURVIVOR_PACK_GiFT", 20: "ProtectCoverVisitor", 30: "SystemGift",
+}
+
+func visitorTypeName(t int32) string {
+	if n, ok := visitorTypeNames[t]; ok {
+		return n
+	}
+	return "unknown"
+}
+
+// visitorBehaviourType looks up eventId in the generated lw_base_visitor_event map
+// (visitor_types_gen.go). ok is false for an eventId the table does not have.
+func visitorBehaviourType(eventId int32) (t int32, ok bool) {
+	t, ok = visitorEventTypes[eventId]
+	return t, ok
+}
+
+// greetableVisitorTypes are the behaviour types GreetVisitors accepts with `operate: 1`: the ones
+// whose only accept path in the client grants a reward and spends nothing.
+//
+//   - GIFT, DOMINATOR, SeasonDayGift use VisitorGift, whose OnConfirmClick sends operate:1 with no
+//     cost check (VisitorGift.lua:142-166). Their para is a reward id: GIFT "HQ;rewardId|..."
+//     (2001), SeasonDayGift "1;rewardId", DOMINATOR 9001 reward 280000001 (items
+//     800006-800008). GIFT and SeasonDayGift are live-validated; DOMINATOR is static-only.
+//   - RECRUITMENT (VisitorRecruitWorker.lua:57-66, UIWorkerDetailRecruitView.lua:27-38): both
+//     buttons of the recruit window send operate:1 and the worker joins at no cost. Live-validated.
+//   - SystemGift (VisitorSystemGift.lua:53-71, UICityVistorSystemGiftView.lua:111-190): the window
+//     shows one gift item addressed to the player, and its only button sends operate:1.
+//     Static-only.
+//
+// Every other type is skipped and left for the player, never declined with operate:0. Notably:
+// MERCHANT, where operate:1 buys para "item;count;resourceType;price" (VisitorMerchant.lua:34-58);
+// WORKER_LOTTERY, an invitation to the paid worker lottery that the client only dismisses with
+// operate:1 (VisitorWorkerLottery.lua:32-51); SKY_BATTLE and PLANE_FEATURE, VisitorGift too but
+// with no reward in the table, whose plot starts a feature guide (lw_guide_flow 5530); and
+// SURVIVOR_PACK_GiFT, whose visitors have client-made uids and open a pack popup rather than
+// sending visitor.operate (SurvivorPackManager.lua:298-345, 448-457).
+var greetableVisitorTypes = map[int32]bool{
+	visitorTypeGift:          true,
+	visitorTypeRecruitment:   true,
+	visitorTypeDominator:     true,
+	visitorTypeSeasonDayGift: true,
+	visitorTypeSystemGift:    true,
+}
+
+// visitorArrivalMargin is how long after its startTime GreetVisitors waits before greeting a
+// visitor. init carries no server clock (the login reply's db_utc_timestamp was 0 live), so
+// arrival is judged on the host clock, and the margin absorbs a host clock running slightly ahead
+// of the server's.
+const visitorArrivalMargin = 5 * time.Second
+
+// visitorArrived reports whether v's startTime is at least visitorArrivalMargin before now. The
+// client creates, and so lets the player tap, a visitor only once server time reaches startTime
+// (VisitorUnit.lua:16-31); a missing startTime counts as arrived.
+func visitorArrived(v Visitor, now time.Time) bool {
+	return v.StartTime() <= now.Add(-visitorArrivalMargin).UnixMilli()
+}
+
+// visitorSkipReason returns why GreetVisitors leaves v alone, or "" when it greets it, plus v's
+// behaviour type (0 when the eventId is unknown).
+func visitorSkipReason(v Visitor, now time.Time) (behaviour int32, reason string) {
+	t, ok := visitorBehaviourType(v.EventId())
+	switch {
+	case !ok:
+		return 0, "eventId not in lw_base_visitor_event"
+	case !greetableVisitorTypes[t]:
+		return t, "behaviour type not on the greet allowlist"
+	case !visitorArrived(v, now):
+		return t, "not arrived yet (startTime in the future)"
+	}
+	return t, ""
+}
 
 // maxVisitorsDefensiveCeiling is the fallback cap ParseInitVisitors applies to `visitor.list` when
 // the init push's own sibling `maxNum` field (see the Visitor doc comment above -- the real push
@@ -222,17 +315,30 @@ func ParseInitVisitors(initParams *sfs.SFSObject) []Visitor {
 	return out
 }
 
-// GreetVisitors sends `visitor.operate {uid, operate: 1}` for every
-// currently-present visitor, matching the real client's own captured
-// per-tap behavior (see the Visitor doc comment above).
+// GreetVisitors sends `visitor.operate {uid, operate: 1}`, the real client's per-tap accept (see
+// the Visitor doc comment above), for each visitor whose behaviour type is on
+// greetableVisitorTypes and whose startTime has passed. Every other visitor, including one with
+// an eventId the generated table does not know, gets one Info log line and is left for the
+// player.
 func GreetVisitors(conn *session.GameConn, visitors []Visitor) error {
+	return greetVisitors(conn, visitors, time.Now())
+}
+
+func greetVisitors(conn *session.GameConn, visitors []Visitor, now time.Time) error {
 	if len(visitors) == 0 {
 		slog.Info("no visitors to greet")
 		return nil
 	}
 	var errs []error
 	for _, v := range visitors {
-		slog.Info("attempting visitor greet", "uid", v.Uid(), "eventId", v.EventId(), "visitorId", v.VisitorId())
+		t, skip := visitorSkipReason(v, now)
+		if skip != "" {
+			slog.Info("skipping visitor", "reason", skip, "uid", v.Uid(), "eventId", v.EventId(),
+				"type", t, "typeName", visitorTypeName(t), "visitorId", v.VisitorId(), "startTime", v.StartTime())
+			continue
+		}
+		slog.Info("attempting visitor greet", "uid", v.Uid(), "eventId", v.EventId(), "type", t,
+			"typeName", visitorTypeName(t), "visitorId", v.VisitorId())
 		params := sfs.NewSFSObject()
 		params.PutLong("uid", v.Uid())
 		params.PutInt("operate", 1)
