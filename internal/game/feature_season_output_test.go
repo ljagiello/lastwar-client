@@ -67,7 +67,8 @@ func TestSeasonOutputS6(t *testing.T) {
 	if err := runSeasonOutput(conn, in); err != nil {
 		t.Fatal(err)
 	}
-	want := "lw.season.mummy.get,lw.season.alliance.city.occupy.info,batch.get.city.output," +
+	// Mummies are waiting, but season-output never sends lw.season.mummy.get (see season-mummies).
+	want := "lw.season.alliance.city.occupy.info,batch.get.city.output," +
 		"lw.season.city.stronghold.occupy.info,get.stronghold.output,camp.product.view,get.camp.product.reward"
 	if got := strings.Join(fake.cmds(), ","); got != want {
 		t.Fatalf("sent %s\nwant %s", got, want)

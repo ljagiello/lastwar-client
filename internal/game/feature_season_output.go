@@ -10,10 +10,6 @@ import (
 // Season output collectors (MASTER.md §4 #19), static-only, sent only while the account is in a
 // season (evSeasonID).
 //
-//   - Mummies (S3-S6): lw.season.mummy.get {} while the season's mummy yard is built and init
-//     mummyWaitRecInfo[].armyNum sums above 0 (BuildBubbleManager.lua:3218-3266, 4440-4448;
-//     SeasonMummyDataManager.lua:29-42). It turns waiting fallen troops into mummy soldiers; the
-//     server enforces the stock cap (effect 94064), which init alone can't give.
 //   - City output (S5, S6): lw.season.alliance.city.occupy.info {} -> rewardInfo[{leftNum}];
 //     batch.get.city.output {} when any leftNum > 0 (UILWSeasonCityOccupyListS6View.lua:214-221).
 //   - Stronghold output (S2-S6): lw.season.city.stronghold.occupy.info {} -> rewardInfo[{id,
@@ -28,12 +24,14 @@ import (
 //     [{serverId: Int, cityId: Int}], isShake: Bool false} for every city with num > receiveNum,
 //     while the CampScience activity (392) runs (CampProduceDataManager.lua:21-55, 278-306).
 //
+// Mummy collection (lw.season.mummy.get) is deliberately not here: it converts fallen troops into
+// mummy soldiers, which changes the army, so it is the separate opt-in feature season-mummies.
+//
 // The alliance reads are sent only with init user.allianceId set, as OnEnterGame does
 // (SeasonDataManager.lua:173-200). Not sent: user.collect.desert.res (legacy desert seasons; the
 // pending amounts are computed client-side from effects) and get.alliance.build.output.reward (its
 // buildId comes from an alliance-mine template mapping that needs a live capture).
 const (
-	seasonMummyCmd          = "lw.season.mummy.get"
 	seasonCityInfoCmd       = "lw.season.alliance.city.occupy.info"
 	seasonCityOutputCmd     = "batch.get.city.output"
 	seasonStrongholdInfoCmd = "lw.season.city.stronghold.occupy.info"
@@ -45,16 +43,13 @@ const (
 	seasonStrongholdRefresh = "season_s2_tips_004"
 )
 
-// seasonMummyYards maps a season to its mummy-yard building (SeasonUtil.lua:456-480).
-var seasonMummyYards = map[int64]int32{3: 787000, 4: 806000, 5: 831000, 6: 851000}
-
 func init() {
 	registerFeature(Feature{
 		Name:    "season-output",
-		Summary: "in season: collect mummies, alliance city/stronghold output, S1 attachments, S6 faction production; static-only",
+		Summary: "in season: collect alliance city/stronghold output, S1 attachments, S6 faction production; static-only",
 		Run:     runSeasonOutput,
 	})
-	session.RegisterBenignErrorCode(evAlreadyExecuted, seasonMummyCmd, seasonCityOutputCmd, seasonStrongholdCmd,
+	session.RegisterBenignErrorCode(evAlreadyExecuted, seasonCityOutputCmd, seasonStrongholdCmd,
 		seasonAttachOutputCmd, seasonCampRewardCmd)
 	session.RegisterBenignErrorCode(seasonStrongholdRefresh, seasonStrongholdCmd)
 }
@@ -69,16 +64,6 @@ func runSeasonOutput(conn *session.GameConn, in *Init) error {
 	}
 	b := &evBatch{conn: conn}
 	s := Activities(conn, in)
-	if yard, ok := seasonMummyYards[season]; ok && evHasBuilding(in, yard) {
-		var waiting int64
-		for _, w := range in.Objects("mummyWaitRecInfo") {
-			n, _ := evNum(w, "armyNum")
-			waiting += n
-		}
-		if waiting > 0 {
-			b.send("season mummies", seasonMummyCmd, sfs.NewSFSObject())
-		}
-	}
 	inAlliance := evString(in.Object("user"), "allianceId") != ""
 	if inAlliance && (season == 5 || season == 6) && !b.dead {
 		if msg := b.send("season city output info", seasonCityInfoCmd, sfs.NewSFSObject()); msg != nil {
