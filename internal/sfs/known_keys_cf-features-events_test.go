@@ -28,6 +28,10 @@ func init() {
 		"pveMonsterId", // locked-monster id
 		"target",       // arena daily box index
 		"trainUuid",    // flower-train id
+		// alliance likes, konbini
+		"configId",  // congratulation config id
+		"targetUid", // the liked alliance member's game uid: an entity id like "uid", not a credential
+		"useFree",   // konbini free-buy flag (always true)
 	} {
 		knownNonSensitiveSFSKeys[k] = true
 	}
