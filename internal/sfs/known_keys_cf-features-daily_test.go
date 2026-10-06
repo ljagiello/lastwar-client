@@ -8,6 +8,8 @@ func init() {
 		"isAutoClaim", // free.reward.receive: tip-text flag, echoed back
 		"isLogin",     // get.week.card.info: login-refresh flag
 		"isSeason",    // get.alliance.task.info: season task list flag
+		"openWnd",     // get.detect.info: whether the radar window is open
+		"rewardLevel", // detect.event.claim.level.reward: radar level whose reward is claimed
 		"stage",       // daily.quest.reward: chest index, -1 for every reached chest
 		"taskId",      // daily.task.reward / receive.alliance.task.reward: quest or task id
 		"uuidArr",     // gather.collect.reward: Collect Rewards entry uuids
