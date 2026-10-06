@@ -9,7 +9,7 @@ import (
 )
 
 // withSeason adds running season info for season id to in.
-func withSeason(in *Init, id int32) *Init {
+func evWithSeason(in *Init, id int32) *Init {
 	end := evTestNow.Add(30 * 24 * time.Hour).UnixMilli()
 	for _, k := range []string{"playerServerSeasonInfo", "curServerSeasonInfo"} {
 		o := sfs.NewSFSObject()
@@ -23,15 +23,15 @@ func withSeason(in *Init, id int32) *Init {
 
 func TestEvSeasonID(t *testing.T) {
 	withEvNow(t, evTestNow)
-	if got := evSeasonID(withSeason(evInit(1), 6)); got != 6 {
+	if got := evSeasonID(evWithSeason(evInit(1), 6)); got != 6 {
 		t.Errorf("running season 6: got %d", got)
 	}
-	ended := withSeason(evInit(1), 3)
+	ended := evWithSeason(evInit(1), 3)
 	ended.Object("playerServerSeasonInfo").PutLong("seasonEndTime", evTestNow.Add(-time.Hour).UnixMilli())
 	if got := evSeasonID(ended); got != 0 {
 		t.Errorf("ended season: got %d", got)
 	}
-	closed := withSeason(evInit(1), 3)
+	closed := evWithSeason(evInit(1), 3)
 	closed.Object("curServerSeasonInfo").PutBool("open", false)
 	if got := evSeasonID(closed); got != 0 {
 		t.Errorf("login server not open: got %d", got)
@@ -76,7 +76,7 @@ func TestSeasonDailiesClaims(t *testing.T) {
 		}
 		return r
 	})
-	in := withSeason(evInit(30, evActivity(1200101), evActivity(1200016)), 6)
+	in := evWithSeason(evInit(30, evActivity(1200101), evActivity(1200016)), 6)
 	if err := runSeasonDailies(conn, in); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestSeasonDailiesOutOfSeasonOrNothingDue(t *testing.T) {
 		}
 		return r
 	})
-	if err := runSeasonDailies(conn2, withSeason(evInit(30, evActivity(1200101)), 6)); err != nil {
+	if err := runSeasonDailies(conn2, evWithSeason(evInit(30, evActivity(1200101)), 6)); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(fake2.cmds(), ","); got != "lw.season.user.max.force.reward.info,military.act.info" {
@@ -138,7 +138,7 @@ func TestSeasonDailiesBenignAndFailure(t *testing.T) {
 		}
 		return evOK()
 	})
-	err := runSeasonDailies(conn, withSeason(evInit(30, evActivity(1200101)), 6))
+	err := runSeasonDailies(conn, evWithSeason(evInit(30, evActivity(1200101)), 6))
 	if err == nil || !strings.Contains(err.Error(), "E3") || strings.Contains(err.Error(), evAlreadyExecuted) {
 		t.Errorf("err = %v, want only the E3 failure", err)
 	}

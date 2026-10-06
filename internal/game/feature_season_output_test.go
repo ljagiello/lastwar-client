@@ -8,14 +8,14 @@ import (
 )
 
 func seasonOutputInit(season int32, acts ...*sfs.SFSObject) *Init {
-	in := withSeason(evInit(30, acts...), season)
+	in := evWithSeason(evInit(30, acts...), season)
 	u := sfs.NewSFSObject()
 	u.PutUtfString("allianceId", "fake-alliance")
 	in.Raw.PutSFSObject("user", u)
 	return in
 }
 
-func rewardInfo(entries ...[3]int32) *sfs.SFSArray {
+func seasonRewardInfo(entries ...[3]int32) *sfs.SFSArray {
 	a := sfs.NewSFSArray()
 	for _, e := range entries {
 		o := sfs.NewSFSObject()
@@ -33,9 +33,9 @@ func TestSeasonOutputS6(t *testing.T) {
 		r := sfs.NewSFSObject()
 		switch cmd {
 		case seasonCityInfoCmd:
-			r.PutSFSArray("rewardInfo", rewardInfo([3]int32{1, 783, 0}, [3]int32{2, 783, 3}))
+			r.PutSFSArray("rewardInfo", seasonRewardInfo([3]int32{1, 783, 0}, [3]int32{2, 783, 3}))
 		case seasonStrongholdInfoCmd:
-			r.PutSFSArray("rewardInfo", rewardInfo([3]int32{11, 783, 0}, [3]int32{12, 790, 2}))
+			r.PutSFSArray("rewardInfo", seasonRewardInfo([3]int32{11, 783, 0}, [3]int32{12, 790, 2}))
 		case seasonCampInfoCmd:
 			prod := sfs.NewSFSArray()
 			for _, c := range [][3]int32{{5, 783, 10}, {6, 783, 4}} { // cityId, serverId, num
@@ -96,7 +96,7 @@ func TestSeasonOutputOutOfSeasonNoAllianceS1(t *testing.T) {
 	if len(fake.requests()) != 0 {
 		t.Errorf("out of season sent %v", fake.cmds())
 	}
-	noAlliance := withSeason(evInit(30), 5)
+	noAlliance := evWithSeason(evInit(30), 5)
 	if err := runSeasonOutput(conn, noAlliance); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestSeasonOutputBenignRefreshAndFailure(t *testing.T) {
 		switch cmd {
 		case seasonStrongholdInfoCmd:
 			r := sfs.NewSFSObject()
-			r.PutSFSArray("rewardInfo", rewardInfo([3]int32{1, 783, 1}, [3]int32{2, 783, 1}, [3]int32{3, 783, 1}))
+			r.PutSFSArray("rewardInfo", seasonRewardInfo([3]int32{1, 783, 1}, [3]int32{2, 783, 1}, [3]int32{3, 783, 1}))
 			return r
 		case seasonStrongholdCmd:
 			switch p.GetInt("strongholdId") {
