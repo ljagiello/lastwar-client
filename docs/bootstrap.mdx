@@ -30,7 +30,7 @@ GET {host}/gameservice/getlsu3dversion.php
 &returnJson=1&unityVersion=440
 ```
 
-In 1.0.364, `table_env` is `table_online` and `server` carries the cached zone (static-analysis-only). `goclient` sends both empty, and the server answers anyway (confirmed live). The empty `table_env` has one visible cost: the server returns `table_version` and `locale` only when the request carries `table_env=table_online`. Four anonymous check-version GETs on 2026-10-05, Android 1.0.364 and iOS 1.0.344 each with and without `table_online`, showed both fields (plus an empty `x_table_version`) only in the `table_online` variants, with every other field identical (confirmed live).
+In 1.0.364, `table_env` is `table_online` and `server` carries the cached zone (static-analysis-only). `goclient` now sends the same: `table_env=table_online`, and the session zone in `server` on the cross-server path. Earlier versions sent both empty, and the server answered anyway (confirmed live). The empty `table_env` had one visible cost: the server returns `table_version` and `locale` only when the request carries `table_env=table_online`. Four anonymous check-version GETs on 2026-10-05, Android 1.0.364 and iOS 1.0.344 each with and without `table_online`, showed both fields (plus an empty `x_table_version`) only in the `table_online` variants, with every other field identical (confirmed live).
 
 Host list (requests go out to every host in parallel and the first success wins; on total failure the client retries the same list once). About 5% of devices are A/B-bucketed to the `ea-` hosts by `GrayUtils.GetPercentageFromMd5`: `MD5(deviceId)` read as a little-endian uint64, `mod 100 + 1 <= 5`.
 

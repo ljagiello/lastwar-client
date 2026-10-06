@@ -117,7 +117,7 @@ The real client's recovery from `E011` needs the refresh token: clear `at`, run 
 
 ### Following a `serverInfo` redirect
 
-When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live), but calls GSL `opt=fix` before redialing, which the real client never does.
+When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live) and now does the same as the real client: it redials with the same `at` and adopts `serverInfo.zone` and `serverInfo.uid`. Earlier versions called GSL `opt=fix` before redialing. Under the iOS identity that call could only swap a working token for an Android-bound one, because `goclient`'s GSL requests claim `platform=Android`.
 
 ### A device of its own
 
