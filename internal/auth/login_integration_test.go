@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"lastwar-client/internal/game"
@@ -11,8 +12,11 @@ import (
 	"lastwar-client/internal/testutil"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -523,53 +527,56 @@ func TestLoginSurvivesCorruptPushWhileWaitingForInit(t *testing.T) {
 	}
 }
 
-// TestLoginRedirectRefreshesGameUid is Login()'s counterpart to crossserver_test.go's
-// TestDoCrossServerLoginRedirectRefreshesGameUid, exercising the mirrored fix this round added to
-// Login()'s own serverInfo-redirect handling (see login.go, "gameUid changed on GSL refresh"): the
-// mid-redirect GSL refresh (opt=fix, triggered because the base zone Login got redirected to a new
-// shard) returns a serverList entry with a NEW gameUid, and that gameUid must end up both on the
-// returned LoginResult.Ident and persisted to disk -- not left pinned to whatever the initial GSL
-// call originally returned.
-//
-// Flow: a fresh device identity has no loginKey/gameUid, so the initial GSL call uses opt=new and
-// points at a first fake game server. That server's Login response carries a serverInfo redirect
-// to a second fake game server on a new zone. Following the redirect triggers a second GSL call
-// (opt=fix, since the device now has a persisted gameUid from the first GSL response) -- this is
-// the one that hands back the updated gameUid. The second fake game server then accepts the
-// redialed Login and sends the init push, letting Login() return successfully as a guest.
-func TestLoginRedirectRefreshesGameUid(t *testing.T) {
+// countingGSLServer is testutil.NewFakeGSLServer that also counts getserverlist.php calls, so a
+// test can prove a flow made no GSL call beyond the initial one.
+func countingGSLServer(t *testing.T, resp gsl.LoginServerListRespon) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	pub := testutil.RSAPubKeyDER(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "getlsu3dversion.php"):
+			_ = json.NewEncoder(w).Encode(gsl.CheckVersionResponse{ResMsg: gsl.FlexString(pub)})
+		case strings.HasSuffix(r.URL.Path, "getserverlist.php"):
+			calls.Add(1)
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, &calls
+}
+
+// TestLoginRedirectAdoptsServerInfoUidWithoutGSL covers Login()'s serverInfo redirect the way the
+// real client follows it (LoginMessage.CSHandleResponse, A-CS:82799-82858): serverInfo.uid becomes
+// the persisted gameUid, the redialed Login carries the SAME access token and the new zone, and no
+// second GSL call is made (Login used to fetch a "fresh" token via GSL opt=fix here).
+func TestLoginRedirectAdoptsServerInfoUidWithoutGSL(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
-	const oldGameUid = "uid-old"
-	const newGameUid = "uid-new"
+	const oldGameUid, newGameUid, accessTok = "uid-old", "uid-new", "tok-1"
 
-	gotSecondZone := make(chan string, 1)
-	newAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(gotSecondZone))
-
+	seen := make(chan loginSeen, 1)
+	newAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+		recordingLoginServer(seen)(server)
+		_ = server.SendExtension("init", sfs.NewSFSObject())
+	})
 	oldAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, putRedirectServerInfo(newAddr, "APS2"))
+		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin,
+			putRedirectServerInfoUid(newAddr, "APS2", func(si *sfs.SFSObject) { si.PutUtfString("uid", newGameUid) }))
 	})
 	oldHost, oldPort := testutil.SplitHostPortInt(t, oldAddr)
 
-	gsl := testutil.NewFakeGSLServer(t,
-		// Initial GSL call (opt=new): points at the first fake server, on the old gameUid.
-		gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: testutil.FlexPort(oldPort), Zone: "APS1", GameUid: oldGameUid}},
-			At:         &gsl.LoginToken{Token: "tok-1"},
-		},
-		// Mid-redirect refresh (opt=fix): the account has since moved to a new gameUid -- this is
-		// the value that must propagate into the persisted identity, per this round's fix.
-		gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{GameUid: newGameUid}},
-			At:         &gsl.LoginToken{Token: "tok-fresh"},
-		},
-	)
-	testutil.UseFakeGSLServer(t, gsl)
+	server, gslCalls := countingGSLServer(t, gsl.LoginServerListRespon{
+		Code:       "0",
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: testutil.FlexPort(oldPort), Zone: "APS1", GameUid: oldGameUid}},
+		At:         &gsl.LoginToken{Token: accessTok},
+	})
+	testutil.UseFakeGSLServer(t, server)
 
 	result, err := Login(LoginOptions{})
 	if err != nil {
@@ -577,17 +584,15 @@ func TestLoginRedirectRefreshesGameUid(t *testing.T) {
 	}
 	defer func() { _ = result.Conn.Close() }()
 
-	if result.Ident == nil {
-		t.Fatal("result.Ident = nil")
+	if n := gslCalls.Load(); n != 1 {
+		t.Errorf("getserverlist.php calls = %d, want 1 (no GSL call while following the redirect)", n)
+	}
+	if !result.GotInit {
+		t.Error("GotInit = false, want true (the post-redirect server sent init)")
 	}
 	if result.Ident.GameUid != newGameUid {
-		t.Errorf("Ident.GameUid = %q, want %q (refreshed via GSL mid-redirect, not the stale %q from the initial call)",
-			result.Ident.GameUid, newGameUid, oldGameUid)
+		t.Errorf("Ident.GameUid = %q, want %q (serverInfo.uid)", result.Ident.GameUid, newGameUid)
 	}
-
-	// Confirm the refresh actually landed on disk too, not just on the in-memory Ident the
-	// running process happened to hold -- the whole point of persisting gameUid is that the
-	// *next* run picks it up (see identity.go's SaveGameUid / gslOptFor's opt=fix case).
 	persisted, err := os.ReadFile(gameUidStatePath())
 	if err != nil {
 		t.Fatalf("read persisted gameUid: %v", err)
@@ -595,14 +600,60 @@ func TestLoginRedirectRefreshesGameUid(t *testing.T) {
 	if got := strings.TrimSpace(string(persisted)); got != newGameUid {
 		t.Errorf("persisted gameUid = %q, want %q", got, newGameUid)
 	}
-
 	select {
-	case zn := <-gotSecondZone:
-		if zn != "APS2" {
-			t.Errorf("second server saw Login zn=%q, want %q (the redialed Login should use the post-redirect zone)", zn, "APS2")
+	case got := <-seen:
+		if got.at != accessTok {
+			t.Errorf("redialed Login p.at = %q, want the same token %q", got.at, accessTok)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("post-redirect fake server never received a Login request")
+	}
+}
+
+// TestLoginRedirectIgnoresOversizedServerInfoUid is the Login() side of
+// TestDoCrossServerLoginRedirectKeepsGameUidOnBadUid: an oversized serverInfo.uid is not adopted
+// (or persisted), and the redirect is still followed.
+func TestLoginRedirectIgnoresOversizedServerInfoUid(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const oldGameUid = "uid-old"
+	newAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
+	oldAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, putRedirectServerInfoUid(newAddr, "APS2", func(si *sfs.SFSObject) {
+			si.PutValue("uid", sfs.SFSValue{Type: sfs.SFSText, Val: strings.Repeat("g", maxIdentityFieldLen+1)})
+		}))
+	})
+	oldHost, oldPort := testutil.SplitHostPortInt(t, oldAddr)
+
+	fake := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
+		Code:       "0",
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: testutil.FlexPort(oldPort), Zone: "APS1", GameUid: oldGameUid}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
+	})
+	testutil.UseFakeGSLServer(t, fake)
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	result, err := Login(LoginOptions{})
+	slog.SetDefault(orig)
+	if err != nil {
+		t.Fatalf("Login: %v (an oversized serverInfo.uid must be ignored, not fail the login)", err)
+	}
+	defer func() { _ = result.Conn.Close() }()
+
+	if result.Ident.GameUid != oldGameUid {
+		t.Errorf("Ident.GameUid = %q, want %q kept", result.Ident.GameUid, oldGameUid)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "gameUid exceeds identity field length cap") {
+		t.Errorf("expected a Warn about the oversized serverInfo.uid, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "reconnecting to new address") {
+		t.Errorf("expected the redirect to be followed anyway, got:\n%s", logged)
 	}
 }
 
@@ -834,7 +885,7 @@ func mkfifoT(t *testing.T, dir, name string) string {
 // a code via account.login.send.verify.code, block on LoginOptions.CodePipe for the code, then
 // account.login.new followed by the account data arriving separately as a push.account.login.new
 // push -- see login.go's step 6-8 comments), which neither TestLoginGuestHappyPath nor
-// TestLoginRedirectRefreshesGameUid reaches, since both call Login() with no Email set and so
+// TestLoginRedirectAdoptsServerInfoUidWithoutGSL reaches, since both call Login() with no Email set and so
 // always take the early guest-identity return instead.
 //
 // The verification code is delivered through a real FIFO (not an in-memory reader) because that's
@@ -856,6 +907,7 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 	gotSendCodeEmail := make(chan string, 1)
 	gotFinishEmail := make(chan string, 1)
 	gotFinishCode := make(chan string, 1)
+	gotFinishPF := make(chan string, 1)
 
 	addr := session.StartFakeGameServer(t, func(server *session.GameConn) {
 		// Step 4: base zone Login -- plain success, no serverInfo redirect, immediately
@@ -893,6 +945,7 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 		}
 		gotFinishEmail <- finishMsg.Params.GetString("mail")
 		gotFinishCode <- finishMsg.Params.GetString("verifyCode")
+		gotFinishPF <- finishMsg.Params.GetString("pf")
 		finishAck := sfs.NewSFSObject()
 		finishAck.PutBool("success", true)
 		if err := server.SendExtension("account.login.new", finishAck); err != nil {
@@ -958,6 +1011,10 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake server never received an account.login.new request")
 	}
+	// Login() presents the Android identity, so account.login.new carries its storefront.
+	if got := <-gotFinishPF; got != "market_global" {
+		t.Errorf("account.login.new pf = %q, want %q (the base-zone Login's storefront)", got, "market_global")
+	}
 
 	if result.Account == nil {
 		t.Fatal("result.Account = nil, want the push.account.login.new params")
@@ -981,7 +1038,7 @@ func TestLoginEmailVerificationPath(t *testing.T) {
 
 	// Confirm the account.login.new push's fields actually landed on disk too -- not just on
 	// the in-memory Ident this process happens to hold -- same reload-from-disk check
-	// TestLoginRedirectRefreshesGameUid uses for gameUid, extended here to loginKey/username
+	// TestLoginRedirectAdoptsServerInfoUidWithoutGSL uses for gameUid, extended here to loginKey/username
 	// since this is the path that populates all three.
 	if got, err := os.ReadFile(loginKeyStatePath()); err != nil {
 		t.Fatalf("read persisted loginKey: %v", err)
@@ -1866,242 +1923,6 @@ func TestLoginRedirectOversizedZoneIsWarned(t *testing.T) {
 	}
 	if !strings.Contains(logged, "reconnecting to new address") {
 		t.Errorf("expected the serverInfo redirect to still have been followed (ip/port are well-typed, only zone is oversized), but the log shows none was:\n%s", logged)
-	}
-}
-
-// TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized covers the third of the three accessTok
-// call sites the round-47 fix closes (login.go:246 initial assignment, covered by
-// TestLoginRejectsOversizedInitialZoneAccessTokAndGameUid above; crossserver.go:267, covered by
-// TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized): the mid-redirect GSL refresh
-// (opt=fix) fetched before following a serverInfo redirect. An oversized refreshed token must fall
-// back to the PREVIOUS access token (capOversizedIdentityField, login.go) instead of ever reaching
-// PutUtfString with a value sfs.WriteUtfString would hard-reject. testutil.NewFakeGSLServer's variadic
-// responses let the first (initial) and second (mid-redirect refresh) gsl.GetServerList calls answer
-// differently.
-func TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
-	const oldAccessTok = "tok-1"
-	oversizedAccessTok := gsl.FlexString(strings.Repeat("t", maxIdentityFieldLen+1))
-
-	gotParamsAt := make(chan string, 1)
-	newAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
-		env, err := server.ReadEnvelope()
-		if err != nil {
-			return
-		}
-		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
-				gotParamsAt <- pObj.GetString("at")
-			}
-		}
-		resp := sfs.NewSFSObject()
-		resp.PutBool("success", true)
-		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp); err != nil {
-			return
-		}
-		_ = server.SendExtension("init", sfs.NewSFSObject())
-	})
-	newHost, newPort := testutil.SplitHostPortInt(t, newAddr)
-
-	oldAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
-		if _, err := server.ReadEnvelope(); err != nil {
-			return
-		}
-		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, putRedirectServerInfo(newAddr, "APS2"))
-	})
-	oldHost, oldPort := testutil.SplitHostPortInt(t, oldAddr)
-
-	gsl := testutil.NewFakeGSLServer(t,
-		gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: testutil.FlexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
-			At:         &gsl.LoginToken{Token: oldAccessTok},
-		},
-		gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(newHost), Port: testutil.FlexPort(newPort), Zone: "APS2", GameUid: "uid-1"}},
-			At:         &gsl.LoginToken{Token: oversizedAccessTok},
-		},
-	)
-	testutil.UseFakeGSLServer(t, gsl)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
-	result, err := Login(LoginOptions{})
-
-	slog.SetDefault(orig)
-
-	if err != nil {
-		t.Fatalf("Login: %v (an oversized refreshed accessTok must fall back to the previous token, not fail the login)", err)
-	}
-	defer func() { _ = result.Conn.Close() }()
-
-	select {
-	case at := <-gotParamsAt:
-		if at != oldAccessTok {
-			t.Errorf("post-redirect Login params.at = %q, want %q (the stale, still-valid access token)", at, oldAccessTok)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("post-redirect fake server never received a Login request")
-	}
-
-	logged := buf.String()
-	if !strings.Contains(logged, "accessTok exceeds identity field length cap") {
-		t.Errorf("expected a Warn about the oversized refreshed accessTok, got:\n%s", logged)
-	}
-}
-
-// TestLoginRedirectRefreshKeepsOldAccessTokWhenEmpty is the round-53 regression test for the MAJOR
-// finding that Login()'s mid-redirect GSL access-token refresh unconditionally overwrote the
-// already-valid accessTok with freshLsr.At.Token.String() whenever freshLsr.At was non-nil, even
-// when the decoded Token field was empty -- unlike the byte-for-byte adjacent gameUid reassignment
-// a few lines below, which was already correctly guarded against exactly this shape. gsl.go's
-// gsl.LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at" field (via
-// gsl.LooksLikeJSONObject) as present, including "{}" or one with no/empty "token" -- a plausible shape
-// for a degraded or rejected opt=fix refresh response. Mirrors
-// TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized's technique exactly, substituting an
-// empty-token gsl.LoginToken for the mid-redirect refresh response instead of an oversized one.
-func TestLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
-	const oldAccessTok = "tok-1-good"
-
-	gotParamsAt := make(chan string, 1)
-	newAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
-		env, err := server.ReadEnvelope()
-		if err != nil {
-			return
-		}
-		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
-				gotParamsAt <- pObj.GetString("at")
-			}
-		}
-		resp := sfs.NewSFSObject()
-		resp.PutBool("success", true)
-		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp); err != nil {
-			return
-		}
-		_ = server.SendExtension("init", sfs.NewSFSObject())
-	})
-	newHost, newPort := testutil.SplitHostPortInt(t, newAddr)
-
-	oldAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
-		if _, err := server.ReadEnvelope(); err != nil {
-			return
-		}
-		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, putRedirectServerInfo(newAddr, "APS2"))
-	})
-	oldHost, oldPort := testutil.SplitHostPortInt(t, oldAddr)
-
-	gsl := testutil.NewFakeGSLServer(t,
-		gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: testutil.FlexPort(oldPort), Zone: "APS1", GameUid: "uid-1"}},
-			At:         &gsl.LoginToken{Token: oldAccessTok},
-		},
-		gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(newHost), Port: testutil.FlexPort(newPort), Zone: "APS2", GameUid: "uid-1"}},
-			At:         &gsl.LoginToken{Token: ""}, // present but empty -- the shape under test
-		},
-	)
-	testutil.UseFakeGSLServer(t, gsl)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
-	result, err := Login(LoginOptions{})
-
-	slog.SetDefault(orig)
-
-	if err != nil {
-		t.Fatalf("Login: %v (an empty refreshed accessTok must fall back to the previous token, not fail the login)", err)
-	}
-	defer func() { _ = result.Conn.Close() }()
-
-	select {
-	case at := <-gotParamsAt:
-		if at != oldAccessTok {
-			t.Errorf("post-redirect Login params.at = %q, want %q (the stale, still-valid access token -- an empty refreshed token must never clobber it)", at, oldAccessTok)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("post-redirect fake server never received a Login request")
-	}
-
-	logged := buf.String()
-	if !strings.Contains(logged, "returned an empty access token; keeping the existing one") {
-		t.Errorf("expected a Warn about the empty refreshed accessTok, got:\n%s", logged)
-	}
-}
-
-// TestLoginRedirectRefreshSkipsOversizedGameUid is TestLoginRedirectRefreshKeepsOldAccessTokWhenOversized's
-// sibling for the mid-redirect GSL-refresh gameUid reassignment (login.go), the round-48 regression
-// test for the MAJOR finding that this call site -- unlike its byte-for-byte structural twin in
-// crossserver.go's DoCrossServerLogin, and unlike login.go's own accessTok in the very same code
-// block -- was never passed through capOversizedIdentityField. An oversized refreshed gameUid must
-// be rejected (falling back to "" per capOversizedIdentityField's call here, which makes the
-// existing `newGameUid != "" && newGameUid != gameUid` guard skip the update entirely) instead of
-// desyncing the in-memory gameUid variable for the rest of Login(), including its unredacted
-// "login request sent"/"serverInfo redirect: gameUid changed" Info log lines.
-func TestLoginRedirectRefreshSkipsOversizedGameUid(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
-	const oldGameUid = "uid-old"
-	oversizedGameUid := gsl.FlexString(strings.Repeat("g", maxIdentityFieldLen+1))
-
-	newAddr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
-	newHost, newPort := testutil.SplitHostPortInt(t, newAddr)
-
-	oldAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
-		if _, err := server.ReadEnvelope(); err != nil {
-			return
-		}
-		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, putRedirectServerInfo(newAddr, "APS2"))
-	})
-	oldHost, oldPort := testutil.SplitHostPortInt(t, oldAddr)
-
-	gsl := testutil.NewFakeGSLServer(t,
-		gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(oldHost), Port: testutil.FlexPort(oldPort), Zone: "APS1", GameUid: oldGameUid}},
-			At:         &gsl.LoginToken{Token: "tok-1"},
-		},
-		gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(newHost), Port: testutil.FlexPort(newPort), Zone: "APS2", GameUid: oversizedGameUid}},
-			At:         &gsl.LoginToken{Token: "tok-1"},
-		},
-	)
-	testutil.UseFakeGSLServer(t, gsl)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
-	result, err := Login(LoginOptions{})
-
-	slog.SetDefault(orig)
-
-	if err != nil {
-		t.Fatalf("Login: %v (an oversized refreshed gameUid must be skipped, not fail the login)", err)
-	}
-	defer func() { _ = result.Conn.Close() }()
-
-	if result.Ident.GameUid != oldGameUid {
-		t.Errorf("Ident.GameUid = %q, want %q (the oversized refreshed gameUid must be rejected, keeping the previous one)", result.Ident.GameUid, oldGameUid)
-	}
-
-	logged := buf.String()
-	if !strings.Contains(logged, "gameUid exceeds identity field length cap") {
-		t.Errorf("expected a Warn about the oversized refreshed gameUid, got:\n%s", logged)
-	}
-	if strings.Contains(logged, "serverInfo redirect: gameUid changed on GSL refresh") {
-		t.Errorf("expected NO \"gameUid changed\" log line -- the oversized value must never be adopted, got:\n%s", logged)
 	}
 }
 

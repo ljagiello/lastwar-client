@@ -1095,7 +1095,7 @@ func TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling(t *testing.T) 
 			name:        "check-version fails, -cs-rt empty: warns and continues",
 			rt:          "",
 			wantExit:    1, // from the unrelated port=0 check, not from gsl.CheckVersion itself
-			wantContain: "WARN check-version failed; proceeding without redirect-refresh capability",
+			wantContain: "WARN check-version failed; continuing with resVersion",
 			wantAbsent:  "ERROR check-version failed",
 		},
 		{
@@ -1110,7 +1110,7 @@ func TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling(t *testing.T) 
 			rsaParse:    true,
 			rt:          "",
 			wantExit:    1, // from the unrelated port=0 check, not from the RSA parse itself
-			wantContain: "WARN parse RSA pubkey failed; proceeding without redirect-refresh capability",
+			wantContain: "WARN parse RSA pubkey failed; continuing (only -cs-rt needs it)",
 			wantAbsent:  "ERROR parse RSA pubkey failed",
 		},
 	}
