@@ -80,7 +80,8 @@ func runDailyStamina(conn *session.GameConn, in *Init) error {
 	resp, err := claimAndLog(conn, "daily stamina claim", dailyStaminaClaimCmd, sfs.NewSFSObject())
 	if err == nil && resp != nil && !resp.Params.Has("errorCode") {
 		n, _ := claimInt(resp.Params, "todayFreeStamina")
-		slog.Info("daily-stamina: claimed", "todayFreeStamina", n)
+		stamina, _ := claimInt(resp.Params, "stamina")
+		slog.Info("daily-stamina: claimed", "todayFreeStamina", n, "stamina", stamina)
 	}
 	return err
 }

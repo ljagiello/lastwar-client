@@ -184,7 +184,7 @@ func TestDecodeRewardGrantsShapes(t *testing.T) {
 
 func TestDescribeGrantsFallbacks(t *testing.T) {
 	p := sfs.NewSFSObject()
-	if got := describeGrants(p); got != "nothing" {
+	if got := describeGrants(p); got != "no itemised reward in the reply" {
 		t.Errorf("empty response = %q, want nothing", got)
 	}
 	res := sfs.NewSFSObject()

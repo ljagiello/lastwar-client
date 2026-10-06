@@ -175,7 +175,7 @@ func describeGrants(p *sfs.SFSObject, keys ...string) string {
 			return "resource balances " + strings.Join(parts, ", ")
 		}
 	}
-	return "nothing"
+	return "no itemised reward in the reply"
 }
 
 // claimAndLog sends one claim through session.SendAndWait and, when the server answered without

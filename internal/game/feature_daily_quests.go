@@ -100,7 +100,7 @@ func runDailyQuests(conn *session.GameConn, in *Init) error {
 			errs = append(errs, err)
 		}
 	} else {
-		slog.Info("daily-quests: no chest reached", "points", points)
+		slog.Info("daily-quests: no unclaimed chest reached", "points", points)
 	}
 	return errors.Join(errs...)
 }
