@@ -70,6 +70,7 @@ const (
 	visitorTypeRecruitment   int32 = 3
 	visitorTypeDominator     int32 = 9
 	visitorTypeSeasonDayGift int32 = 10
+	visitorTypeActivity      int32 = 11
 	visitorTypeSystemGift    int32 = 30
 )
 
