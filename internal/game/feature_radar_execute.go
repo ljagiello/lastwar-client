@@ -43,7 +43,9 @@ import (
 //
 // The fake march lasts min(3000 ms, distance x 1000 / detect_quick_finish_config.k2)
 // (RadarFakeUIMarchData_Base.lua:35-59), so every end is sent radarFakeMarchWait after the last
-// start. Everything else is left alone, by an allowlist: every march, rally, battle and mini-game
+// start. That is the Quick Execute timing only, so nothing runs unless init dataConfig turns on
+// radarQuickSwitch, as the client requires (RadarFakeUIMarchManager.lua:105-111).
+// Everything else is left alone, by an allowlist: every march, rally, battle and mini-game
 // type (2, 8, 16, 17, 20, 40, 46, the PvE types 7/10/12/15 whose result the client simulates, ...).
 // RESCUE (11) is left alone too although its fake march is the same pair (FakeRescueMarchData.lua:
 // 63, 90): its claim needs the client's troop-cap confirm, which radar-claims can't do, so a
@@ -89,8 +91,13 @@ const (
 	radarStaminaBaseMax = 110
 	radarStaminaRegen   = 300 * time.Second
 
-	// radarFakeMarchWait is the client's longest fake march (3 s) plus a margin for rounding.
+	// radarFakeMarchWait is the client's longest Quick Execute fake march (3 s) plus a margin for
+	// rounding. The client uses it only while radarQuickSwitch is on (RadarFakeUIMarchManager.lua:
+	// 105-111; absent from the item table, so off unless init dataConfig sets it); otherwise it
+	// sends the end after a march at armyspeed.k2 plus detect_event.para seconds of collecting
+	// (FakeCollectGarbageMarchData.lua:60-73, 109-130), which needs the map distance.
 	radarFakeMarchWait = 3500 * time.Millisecond
+	radarQuickSwitch   = "radar_quick_operation_switch"
 	// radarExecuteMaxEvents caps the tasks started per run; radarExecuteMaxRounds caps the
 	// execute-claim rounds on a radar-scoring day.
 	radarExecuteMaxEvents = 30
@@ -327,6 +334,11 @@ func radarExecPlan(ev detectEvent, radarDay bool, nowMs int64) (radarAction, str
 func runRadarExecute(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil {
 		slog.Info("radar-execute: no init push; skipping")
+		return nil
+	}
+	if !claimSwitchOn(in, radarQuickSwitch) {
+		slog.Warn("radar-execute: init dataConfig doesn't turn on " + radarQuickSwitch + ", so the client runs radar tasks " +
+			"by its long fake march (distance and collect time), not the 3 s Quick Execute this reproduces; doing nothing")
 		return nil
 	}
 	radarDay := TodayDuel(conn, in).Scores(DuelScoreRadarTask, "")
@@ -568,7 +580,8 @@ func runRadarInventory(conn *session.GameConn, in *Init) error {
 	}
 	slog.Info("radar-inventory", "theme", day.ThemeName(), "radarDay", radarDay, "level", snap.level, "eventNum", snap.eventNum,
 		"slotsUsed", len(snap.events), "nextRefresh", time.UnixMilli(snap.nextRefresh).UTC().Format(time.RFC3339),
-		"staminaFloor", st.have, "staminaKnown", st.known, "inAlliance", st.inAlliance)
+		"staminaFloor", st.have, "staminaKnown", st.known, "inAlliance", st.inAlliance,
+		"quickExecuteOn", claimSwitchOn(in, radarQuickSwitch))
 
 	overflowWhy := "radar-scoring day: radar-overflow does nothing, radar-claims claims"
 	pick := map[int64]bool{}
@@ -586,6 +599,9 @@ func runRadarInventory(conn *session.GameConn, in *Init) error {
 		}
 	}
 	slog.Info("radar-inventory: " + overflowWhy)
+	if !claimSwitchOn(in, radarQuickSwitch) {
+		slog.Info("radar-inventory: radar-execute would do nothing: init dataConfig doesn't turn on " + radarQuickSwitch)
+	}
 	for _, d := range radarExecuteDecide(snap.events, radarDay, &st, radarExecuteMaxEvents, now.UnixMilli()) {
 		execute := d.action.String()
 		if d.action == radarSkip {

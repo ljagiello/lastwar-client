@@ -60,10 +60,13 @@ func placedReply(p *sfs.SFSObject, skip ...int64) *sfs.SFSObject {
 	return r
 }
 
-// radarTestInit is an init with an open duel, an alliance and stamina (lastStaminaTime now, so
-// no regeneration); stamina < 0 leaves playerInfo out.
+// radarTestInit is an init with an open duel, Quick Execute on, an alliance and stamina
+// (lastStaminaTime now, so no regeneration); stamina < 0 leaves playerInfo out.
 func radarTestInit(stamina int64, inAlliance bool) *Init {
 	in := evInit(30, duelActivity())
+	dc := sfs.NewSFSObject()
+	dc.PutUtfString(radarQuickSwitch, "1")
+	in.Raw.PutSFSObject("dataConfig", dc)
 	if stamina >= 0 {
 		p := sfs.NewSFSObject()
 		p.PutInt("stamina", int32(stamina))
@@ -158,9 +161,24 @@ func radarUUIDs(f *evFake, cmd string) []int64 {
 	return out
 }
 
-// radarExecuteAllowed is everything radar-execute may send on an off day.
-var radarExecuteAllowed = []string{"hero.event.info.get", radarInfoCmd, radarPlaceCmd, radarPickStartCmd, radarSamplingEndCmd,
-	radarVisitorEndCmd, radarHelpStartCmd, radarHelpEndCmd}
+// radarExecuteAllowed is everything radar-execute may send on an off day; a radar-scoring day adds
+// radarDayAllowed.
+var (
+	radarExecuteAllowed = []string{"hero.event.info.get", radarInfoCmd, radarPlaceCmd, radarPickStartCmd, radarSamplingEndCmd,
+		radarVisitorEndCmd, radarHelpStartCmd, radarHelpEndCmd}
+	radarDayAllowed = append(slices.Clone(radarExecuteAllowed), radarTalkStartCmd, radarTalkEndCmd, radarEventCmd)
+)
+
+// checkRadarSent fails on any command outside allowed (so never reset.detect.event, a battle
+// result, a march or an item use).
+func checkRadarSent(t *testing.T, f *evFake, allowed []string) {
+	t.Helper()
+	for _, c := range f.cmds() {
+		if !slices.Contains(allowed, c) {
+			t.Errorf("sent %q, which radar-execute must never send here", c)
+		}
+	}
+}
 
 func TestRadarExecuteOffDayRunsOnlyMarchFreeTasks(t *testing.T) {
 	mismatch := detectEv(12, 100, 0)
@@ -198,11 +216,7 @@ func TestRadarExecuteOffDayRunsOnlyMarchFreeTasks(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 
-	for _, c := range fake.cmds() {
-		if !slices.Contains(radarExecuteAllowed, c) {
-			t.Errorf("sent %q, which radar-execute must never send on an off day", c)
-		}
-	}
+	checkRadarSent(t, fake, radarExecuteAllowed)
 	var placed []string
 	for _, r := range fake.requests() {
 		if r.Cmd == radarPlaceCmd {
@@ -342,21 +356,37 @@ func TestRadarExecuteTalkOnlyOnRadarDays(t *testing.T) {
 		if got := radarUUIDs(fake, radarEventCmd); len(got) != 0 {
 			t.Errorf("radarDay=%v: claimed %v; a talk's end claims it, nothing else may", radarDay, got)
 		}
+		checkRadarSent(t, fake, radarDayAllowed)
+	}
+}
+
+func TestRadarExecuteNeedsQuickExecute(t *testing.T) {
+	in := radarTestInit(110, true)
+	in.Raw.PutSFSObject("dataConfig", sfs.NewSFSObject())
+	conn, fake := startRadarFake(t, radarOffDay(), []*sfs.SFSObject{detectReply(16, 10, detectEv(1, 100, 0))}, nil)
+	if err := runRadarExecute(conn, in); err != nil || len(fake.cmds()) != 0 {
+		t.Errorf("Quick Execute off: err %v, sent %v; want nothing", err, fake.cmds())
 	}
 }
 
 func TestRadarExecuteClaimsWhatItFinishesOnRadarDays(t *testing.T) {
+	// Tasks it must leave alone on a radar day too: a banked one from earlier (radar-claims' job),
+	// a finished rescue, and march, rally and battle tasks.
+	untouched := func() []*sfs.SFSObject {
+		return []*sfs.SFSObject{detectEv(9, 100, radarStateFinished), detectEv(10, 199, radarStateFinished),
+			detectEv(30, 205, 0), detectEv(31, 15000, 0), detectEv(32, 18001, 0), detectEv(33, 21001, radarStateNotInWorld)}
+	}
 	infos := []*sfs.SFSObject{
-		// Round 1: one task to run, one banked from earlier (radar-claims' job).
-		detectReply(16, 10, detectEv(1, 100, 0), detectEv(9, 100, radarStateFinished)),
+		// Round 1: one task to run.
+		detectReply(16, 10, append(untouched(), detectEv(1, 100, 0))...),
 		// After round 1's ends: task 1 finished.
-		detectReply(16, 10, detectEv(1, 100, radarStateFinished), detectEv(9, 100, radarStateFinished)),
+		detectReply(16, 10, append(untouched(), detectEv(1, 100, radarStateFinished))...),
 		// After the claim: its newEvent, unplaced.
-		detectReply(16, 9, detectEv(9, 100, radarStateFinished), detectEv(21, 102, radarStateNotInWorld)),
+		detectReply(16, 9, append(untouched(), detectEv(21, 102, radarStateNotInWorld))...),
 		// After round 2's ends.
-		detectReply(16, 9, detectEv(9, 100, radarStateFinished), detectEv(21, 102, radarStateFinished)),
+		detectReply(16, 9, append(untouched(), detectEv(21, 102, radarStateFinished))...),
 		// After the second claim: nothing march-free left.
-		detectReply(16, 8, detectEv(9, 100, radarStateFinished), detectEv(22, 205, 0)),
+		detectReply(16, 8, untouched()...),
 	}
 	var f *evFake
 	waits := withRadarSleep(t, &f)
@@ -364,6 +394,10 @@ func TestRadarExecuteClaimsWhatItFinishesOnRadarDays(t *testing.T) {
 	f = fake
 	if err := runRadarExecute(conn, radarTestInit(110, true)); err != nil {
 		t.Fatalf("run: %v", err)
+	}
+	checkRadarSent(t, fake, radarDayAllowed)
+	if got := radarUUIDs(fake, radarPickStartCmd); !slices.Equal(got, []int64{1, 21}) {
+		t.Errorf("started %v, want [1 21]", got)
 	}
 	if got := radarUUIDs(fake, radarEventCmd); !slices.Equal(got, []int64{1, 21}) {
 		t.Errorf("claimed %v, want [1 21]: only the tasks this run finished", got)
