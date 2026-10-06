@@ -684,10 +684,10 @@ func TestDonateRecommendedAllianceTechDonates(t *testing.T) {
 }
 
 // TestDonateRecommendedAllianceTechBenignCooldown checks the realistic, commonly-hit outcome
-// documented extensively in DonateRecommendedAllianceTech's own doc comment: al.science.donate
-// gates repeat donations within a ~20-minute cooldown window, confirmed live via
-// errorCode=120471 ("Donate science CD time is not finish"), which conn.go's benignErrorCodes map
-// classifies as a non-fatal no-op. DonateRecommendedAllianceTech must return nil, not an error,
+// documented in DonateRecommendedAllianceTech's own doc comment: once the regenerating donation
+// charges are used up, al.science.donate answers errorCode=120471 (server text "Donate science CD
+// time is not finish", confirmed live), which conn.go's benignErrorCodes map classifies as a
+// non-fatal no-op. DonateRecommendedAllianceTech must return nil, not an error,
 // when the fake server replies to al.science.donate with that errorCode -- same
 // TestGreetVisitorsAggregatesErrorsAndSkipsBenign-style benign-errorCode pattern
 // (visitors_orchestration_test.go) used for the success-path test above.
@@ -712,7 +712,7 @@ func TestDonateRecommendedAllianceTechBenignCooldown(t *testing.T) {
 		}
 		donateCmd = msg.Cmd
 		resp := sfs.NewSFSObject()
-		resp.PutUtfString("errorCode", "120471") // benignErrorCodes: al.science.donate cooldown
+		resp.PutUtfString("errorCode", "120471") // benignErrorCodes: donation charges used up
 		_ = server.SendExtension(msg.Cmd, resp)
 	}()
 
@@ -725,7 +725,7 @@ func TestDonateRecommendedAllianceTechBenignCooldown(t *testing.T) {
 	}
 
 	if err != nil {
-		t.Fatalf("DonateRecommendedAllianceTech() = %v, want nil (errorCode=120471 is a documented benign donate-cooldown no-op)", err)
+		t.Fatalf("DonateRecommendedAllianceTech() = %v, want nil (errorCode=120471, charges used up, is a documented benign no-op)", err)
 	}
 	if donateCmd != "al.science.donate" {
 		t.Errorf("donate cmd = %q, want al.science.donate", donateCmd)

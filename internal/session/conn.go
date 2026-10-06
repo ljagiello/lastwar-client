@@ -252,7 +252,7 @@ var benignErrorCodes = map[string][]string{
 	"602026":             {"building.production.collect"},                     // buildings.go: "In production, please be patient."
 	"120289":             {"vip.add.login.score", "vip.get.every.day.reward"}, // vip.go: "no score"/"no reward" -- already claimed today
 	"visitor_err_coming": {"visitor.operate"},                                 // visitors.go: visitor not yet arrived/greetable
-	"120471":             {"al.science.donate"},                               // alliance.go: al.science.donate cooldown -- "Donate science CD time is not finish"
+	"120471":             {"al.science.donate"},                               // alliance.go: donation charges used up (useNum 0); server text "Donate science CD time is not finish"
 }
 
 // RegisterBenignErrorCode marks errorCode as an expected no-op for the given cmds, with the same

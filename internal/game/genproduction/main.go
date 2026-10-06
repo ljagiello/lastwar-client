@@ -1,0 +1,190 @@
+// Command genproduction writes internal/game/production_gen.go: every row of the game's `building`
+// data table that has a production tick, keyed by the table's own row id (bId + level). It reads
+// the JSON dump of the table (rows are positional; the `index` object maps each column name to its
+// 1-based position), so regenerating after a table update is:
+//
+//	go generate ./internal/game   (with LASTWAR_TABLES and LASTWAR_TABLE_VERSION set)
+//
+// or directly:
+//
+//	go run ./internal/game/genproduction -in <tables>/building.json -version <table version> -out internal/game/production_gen.go
+package main
+
+import (
+	"bytes"
+	"cmp"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"go/format"
+	"log"
+	"math"
+	"os"
+	"slices"
+	"strconv"
+)
+
+// table is the JSON dump's shape: index maps column name -> [position, type, linked?], and each
+// row is [key, [values...]] with values in column order.
+type table struct {
+	Name  string                       `json:"name"`
+	Index map[string][]json.RawMessage `json:"index"`
+	Rows  [][]json.RawMessage          `json:"rows"`
+}
+
+type row struct {
+	id     int64
+	tickMs int64
+	capS   int64
+}
+
+func main() {
+	in := flag.String("in", "", "path to the building table's JSON dump (building.json)")
+	version := flag.String("version", "", "table version the dump came from, recorded in the header (e.g. 39432)")
+	out := flag.String("out", "production_gen.go", "output file")
+	flag.Parse()
+	if *in == "" || *version == "" {
+		log.Fatal("genproduction: -in and -version are required")
+	}
+	src, err := os.ReadFile(*in)
+	if err != nil {
+		log.Fatal(err)
+	}
+	rows, err := parse(src)
+	if err != nil {
+		log.Fatalf("genproduction: %s: %v", *in, err)
+	}
+	code, err := render(rows, *version)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(*out, code, 0o644); err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("genproduction: wrote %d rows to %s", len(rows), *out)
+}
+
+// parse returns every row with a positive produce_time, sorted by id.
+func parse(src []byte) ([]row, error) {
+	dec := json.NewDecoder(bytes.NewReader(src))
+	dec.UseNumber()
+	var t table
+	if err := dec.Decode(&t); err != nil {
+		return nil, err
+	}
+	if t.Name != "building" {
+		return nil, fmt.Errorf("table name %q, want building", t.Name)
+	}
+	tickCol, err := column(t, "produce_time")
+	if err != nil {
+		return nil, err
+	}
+	capCol, err := column(t, "para1")
+	if err != nil {
+		return nil, err
+	}
+	var rows []row
+	for i, r := range t.Rows {
+		if len(r) != 2 {
+			return nil, fmt.Errorf("row %d: want [key, values], got %d elements", i, len(r))
+		}
+		id, ok, err := number(r[0])
+		if err != nil || !ok {
+			return nil, fmt.Errorf("row %d: bad key %s", i, r[0])
+		}
+		var vals []json.RawMessage
+		if err := json.Unmarshal(r[1], &vals); err != nil {
+			return nil, fmt.Errorf("row %d: %v", i, err)
+		}
+		tick, ok, err := cell(vals, tickCol)
+		if err != nil {
+			return nil, fmt.Errorf("row %d produce_time: %v", id, err)
+		}
+		if !ok || tick <= 0 {
+			continue
+		}
+		if id <= 0 || id > math.MaxInt32 {
+			return nil, fmt.Errorf("row id %d does not fit the int32 bId+level key", id)
+		}
+		capS, _, err := cell(vals, capCol)
+		if err != nil {
+			return nil, fmt.Errorf("row %d para1: %v", id, err)
+		}
+		rows = append(rows, row{id: id, tickMs: tick, capS: capS})
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("no rows with a produce_time")
+	}
+	slices.SortFunc(rows, func(a, b row) int { return cmp.Compare(a.id, b.id) })
+	return rows, nil
+}
+
+// column returns the 0-based position of a column, refusing interned ("linked") columns, whose
+// cells are indexes into a value table rather than the values themselves.
+func column(t table, name string) (int, error) {
+	spec, ok := t.Index[name]
+	if !ok || len(spec) < 1 {
+		return 0, fmt.Errorf("no %s column in index", name)
+	}
+	pos, ok, err := number(spec[0])
+	if err != nil || !ok || pos < 1 {
+		return 0, fmt.Errorf("%s: bad column position %s", name, spec[0])
+	}
+	if len(spec) > 2 && string(spec[2]) == "true" {
+		return 0, fmt.Errorf("%s is a linked column", name)
+	}
+	return int(pos - 1), nil
+}
+
+// cell reads an integer cell stored as a JSON number or a numeric string; a missing, null or empty
+// cell reports ok=false.
+func cell(vals []json.RawMessage, col int) (int64, bool, error) {
+	if col >= len(vals) {
+		return 0, false, nil
+	}
+	return number(vals[col])
+}
+
+func number(raw json.RawMessage) (int64, bool, error) {
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return 0, false, err
+	}
+	var s string
+	switch x := v.(type) {
+	case nil:
+		return 0, false, nil
+	case json.Number:
+		s = x.String()
+	case string:
+		s = x
+	default:
+		return 0, false, fmt.Errorf("unexpected %T", v)
+	}
+	if s == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
+}
+
+func render(rows []row, version string) ([]byte, error) {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "// Code generated by genproduction from the building data table (table version %s); DO NOT EDIT.\n\n", version)
+	b.WriteString("package game\n\n")
+	b.WriteString("// productionTable holds every building table row with a production tick, keyed by the row id\n")
+	b.WriteString("// (bId + level): tickMs is produce_time (milliseconds per output tick) and capS is para1 (the\n")
+	b.WriteString("// line's max production time in seconds, locale 220347).\n")
+	b.WriteString("var productionTable = map[int32]productionLevel{\n")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "\t%d: {tickMs: %d, capS: %d},\n", r.id, r.tickMs, r.capS)
+	}
+	b.WriteString("}\n")
+	return format.Source(b.Bytes())
+}
