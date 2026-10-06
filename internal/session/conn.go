@@ -47,6 +47,10 @@ type GameConn struct {
 	// the real client's FutureManager.reset() does on reconnect.
 	extSent atomic.Int32
 
+	// lastCmd is the cmd of the most recent SendExtension, logged beside each score push so a
+	// push.act.score.obtain can be tied to the action that earned it (see logScorePush).
+	lastCmd atomic.Pointer[string]
+
 	// ended is set once ReadEnvelope sees a terminal server push (see SessionEndedError). From
 	// then on every read and send on this connection returns it, so nothing else goes out on a
 	// session the server has ended, whichever loop happens to be running.
@@ -189,6 +193,7 @@ func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
 	extContent.PutUtfString("c", cmd)
 	extContent.PutInt("r", -1)
 	extContent.PutSFSObject("p", withID)
+	c.lastCmd.Store(&cmd)
 	return c.SendEnvelope(ControllerExtension, ActionCallExtension, extContent)
 }
 
@@ -253,7 +258,33 @@ func (c *GameConn) readEnvelope() (*Envelope, error) {
 	if err := c.endIfTerminalPush(env); err != nil {
 		return nil, err
 	}
+	c.logScorePush(env)
 	return env, nil
+}
+
+// scorePushCmd is the server's "points earned" push for score events: Arms Race and, with type
+// 15, the Alliance Duel (PushActScoreObtainMessage.lua:6-16). Nothing waits for it, so it is
+// logged here, where every read passes, with the last request sent: one live day of these lines
+// shows which step (start, finish or claim) books a duel action's points (DUEL.md §8).
+const scorePushCmd = "push.act.score.obtain"
+
+func (c *GameConn) logScorePush(env *Envelope) {
+	if env.Controller != ControllerExtension || env.Content == nil {
+		return
+	}
+	v, ok := env.Content.Get("c")
+	if !ok || v.Val != scorePushCmd {
+		return
+	}
+	var params *sfs.SFSObject
+	if pv, ok := env.Content.Get("p"); ok {
+		params, _ = pv.Val.(*sfs.SFSObject)
+	}
+	last := ""
+	if p := c.lastCmd.Load(); p != nil {
+		last = *p
+	}
+	slog.Info("activity score obtained", "afterCmd", last, "push", params.StringRedacted())
 }
 
 // endIfTerminalPush records and returns a SessionEndedError when env is a terminal server push,
