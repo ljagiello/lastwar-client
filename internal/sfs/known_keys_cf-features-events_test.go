@@ -24,6 +24,10 @@ func init() {
 		"serverCityArr", // faction-production {serverId, cityId} list
 		"strongholdId",  // season stronghold id
 		"viewLevel",     // S6 military level
+		// world and event claims
+		"pveMonsterId", // locked-monster id
+		"target",       // arena daily box index
+		"trainUuid",    // flower-train id
 	} {
 		knownNonSensitiveSFSKeys[k] = true
 	}

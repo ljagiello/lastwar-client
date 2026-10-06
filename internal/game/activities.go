@@ -401,6 +401,43 @@ func evString(o *sfs.SFSObject, key string) string {
 	return ""
 }
 
+// evNums reads a list of numbers sent as an SFSArray of numbers, a typed number array, or a
+// string array of decimals; anything else in it is skipped.
+func evNums(o *sfs.SFSObject, key string) []int64 {
+	v, ok := o.Get(key)
+	if !ok {
+		return nil
+	}
+	var out []int64
+	switch a := v.Val.(type) {
+	case *sfs.SFSArray:
+		for _, it := range a.Items() {
+			e := sfs.NewSFSObject()
+			e.PutValue("v", it)
+			if n, ok := evNum(e, "v"); ok {
+				out = append(out, n)
+			}
+		}
+	case []int16:
+		for _, n := range a {
+			out = append(out, int64(n))
+		}
+	case []int32:
+		for _, n := range a {
+			out = append(out, int64(n))
+		}
+	case []int64:
+		out = append(out, a...)
+	case []string:
+		for _, s := range a {
+			if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
 // evObjects returns the object elements of the array under key, skipping anything else.
 func evObjects(o *sfs.SFSObject, key string) []*sfs.SFSObject {
 	v, ok := o.Get(key)
