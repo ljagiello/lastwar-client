@@ -47,7 +47,8 @@ import (
 // (SoldierDataManager.lua:75-162). The cap is GetGameEffect(30122), a sum of eight sources of which
 // init effect carries only the base, so init effect["30122"] is a lower bound: checking against it
 // can only skip a collect the client would allow, never the reverse. Without effect["30122"] or
-// resource_items, hospital, rebirth and camp collects are skipped. Static-only: not sent live yet.
+// resource_items (or with an effect value that is not a number), hospital, rebirth and camp collects
+// are skipped. Static-only: not sent live yet.
 const (
 	finishedTimersUpgradeCmd = "free.building.upgrade.finish"
 	finishedTimersRepairCmd  = "user.finish.fix.building"

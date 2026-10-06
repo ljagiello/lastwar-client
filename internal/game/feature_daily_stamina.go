@@ -16,7 +16,10 @@ import (
 // day reset; a missing todayFreeStamina means 0, UserGetDailyStaminaInfoMessage.lua:12-15) and from
 // the claim reply (PlayerInfo.lua:250-266). Its countdown (Util/UIUtil.lua:3880-3898) treats the
 // claim as available when both fields are 0, or when todayFreeStamina < k2 and the k3 cooldown
-// since the last claim has run out; the claim itself is the parameterless
+// since the last claim has run out. The countdown is also capped at the time left to the day
+// reset, but that only shortens the displayed wait: after the reset the cap is a full day again,
+// and the info read here picks up any server-side reset of the two fields. The claim itself is the
+// parameterless
 // `user.claim.daily.stamina` (LWResourceLackCell.lua:1986-1991). The real client only claims from
 // the resource-lack popup, which offers it from unlock ClaimFreeStamina (208: HQ ≥ 3,
 // lw_function_unlock; LWFunctionUnlockManager.lua:8-52). Static-only: not sent live yet.
