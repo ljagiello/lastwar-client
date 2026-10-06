@@ -47,6 +47,11 @@ type GameConn struct {
 	// the real client's FutureManager.reset() does on reconnect.
 	extSent atomic.Int32
 
+	// ended is set once ReadEnvelope sees a terminal server push (see SessionEndedError). From
+	// then on every read and send on this connection returns it, so nothing else goes out on a
+	// session the server has ended, whichever loop happens to be running.
+	ended atomic.Pointer[SessionEndedError]
+
 	stopHeartbeat chan struct{}
 	closeOnce     sync.Once
 	closeErr      error
@@ -123,8 +128,12 @@ func (c *GameConn) SetReadDeadline(t time.Time) error {
 }
 
 // SendEnvelope builds the outer {c,a,p} sfs.SFSObject, serializes, frames, and
-// writes it to the socket. Safe for concurrent use (heartbeat + main flow).
+// writes it to the socket. Safe for concurrent use (heartbeat + main flow). After a terminal
+// server push it writes nothing and returns that push's SessionEndedError.
 func (c *GameConn) SendEnvelope(controller byte, action int16, content *sfs.SFSObject) error {
+	if e := c.ended.Load(); e != nil {
+		return e
+	}
 	outer := sfs.NewSFSObject()
 	outer.PutByte("c", controller)
 	outer.PutShort("a", action)
@@ -179,7 +188,15 @@ func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
 }
 
 // ReadEnvelope blocks until the next framed packet arrives and decodes it.
+//
+// A terminal server push (push.user.off, push.server.stop, init.error) comes back as a
+// *SessionEndedError instead of an envelope, and so does every later call. Detecting it here
+// rather than in each read loop means WaitFor/SendAndWait, DoHandshake, login's waitForInitPush
+// and game's FetchInit all stop on it through the dead-connection check they already make.
 func (c *GameConn) ReadEnvelope() (*Envelope, error) {
+	if e := c.ended.Load(); e != nil {
+		return nil, e
+	}
 	body, err := sfs.ReadPacket(c.reader)
 	if err != nil {
 		return nil, err
@@ -218,7 +235,43 @@ func (c *GameConn) ReadEnvelope() (*Envelope, error) {
 			slog.Warn("ReadEnvelope: p field is present but not an object", "type", fmt.Sprintf("%T", v.Val))
 		}
 	}
+	if err := c.endIfTerminalPush(env); err != nil {
+		return nil, err
+	}
 	return env, nil
+}
+
+// endIfTerminalPush records and returns a SessionEndedError when env is a terminal server push,
+// and returns nil for anything else. It reads c and p directly rather than through AsExtension so
+// a wrong-typed field is warned about once, by the caller's own AsExtension, not twice.
+func (c *GameConn) endIfTerminalPush(env *Envelope) error {
+	if env.Controller != ControllerExtension || env.Content == nil {
+		return nil
+	}
+	v, ok := env.Content.Get("c")
+	if !ok {
+		return nil
+	}
+	cmd, ok := v.Val.(string)
+	if !ok {
+		return nil
+	}
+	sentinel, ok := terminalPushes[cmd]
+	if !ok {
+		return nil
+	}
+	ended := &SessionEndedError{Cmd: cmd, Err: sentinel}
+	var params *sfs.SFSObject
+	if pv, ok := env.Content.Get("p"); ok {
+		params, _ = pv.Val.(*sfs.SFSObject)
+	}
+	if ec, ok := params.Get("errorCode"); ok && ec.Val != nil {
+		ended.Code = fmt.Sprintf("%v", ec.Val)
+	}
+	c.ended.CompareAndSwap(nil, ended)
+	slog.Error("server ended the session; stopping this run without reconnecting",
+		"cmd", cmd, "errorCode", ended.Code, "push", params.StringRedacted())
+	return c.ended.Load()
 }
 
 // ExtensionMessage is a decoded server->client `cmd` push/response.
@@ -582,6 +635,9 @@ func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 				pp := sfs.NewSFSObject()
 				pp.PutLong("clientTime", time.Since(start).Milliseconds())
 				if err := c.SendEnvelope(ControllerSystem, ActionPingPong, pp); err != nil {
+					if errors.Is(err, ErrSessionEnded) {
+						return // already logged by ReadEnvelope; the caller exits and closes the conn
+					}
 					// SendStageError: consistency with SendAndWait/DoHandshake/the login-path send
 					// sites -- this error is never returned across a function boundary or inspected
 					// for Timeout() today (it's logged and the connection is closed unconditionally
