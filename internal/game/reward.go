@@ -195,6 +195,61 @@ func claimAndLog(conn *session.GameConn, label, cmd string, params *sfs.SFSObjec
 // apply one. "Not yet claimed today" gates use in.ServerDayStart(claimNow(in)).
 func claimNow(*Init) time.Time { return time.Now() }
 
+// claimBeforeToday reports whether the ms timestamp lastMs is before the start of the current
+// server day (anchored on init tomorrow, see Init.ServerDayStart): a once-per-day claim last made
+// then is due again. ok is false when init carried no anchor.
+func claimBeforeToday(in *Init, lastMs int64) (before, ok bool) {
+	start, ok := in.ServerDayStart(claimNow(in))
+	if !ok {
+		return false, false
+	}
+	return lastMs < start.UnixMilli(), true
+}
+
+// claimHQBuildingID is FUN_BUILD_MAIN, the Headquarters; feature unlocks key on its level
+// (LWFunctionUnlockManager.lua:8-52).
+const claimHQBuildingID = 10100000
+
+// claimHQLevel returns the Headquarters level from init building_new, or 0 when it is missing.
+func claimHQLevel(in *Init) int64 {
+	var lv int64
+	for _, b := range in.Objects("building_new") {
+		if id, _ := claimInt(b, "bId"); id == claimHQBuildingID {
+			if l, _ := claimInt(b, "lv"); l > lv {
+				lv = l
+			}
+		}
+	}
+	for _, b := range in.Buildings {
+		if b.BId() == claimHQBuildingID && int64(b.Level()) > lv {
+			lv = int64(b.Level())
+		}
+	}
+	return lv
+}
+
+// claimInAlliance reports whether init shows an alliance: a non-empty alliance.uid (the client
+// treats an empty alliance object as no alliance, AllianceBaseDataManager.lua:129-137) or
+// user.allianceId (PlayerInfo.lua:152). Only that one field of user is read; user holds PII.
+func claimInAlliance(in *Init) bool {
+	for _, id := range []string{
+		func() string { s, _ := claimString(in.Object("alliance"), "uid"); return s }(),
+		func() string { s, _ := claimString(in.Object("user"), "allianceId"); return s }(),
+	} {
+		if id != "" && id != "0" {
+			return true
+		}
+	}
+	return false
+}
+
+// claimSwitchOn reads a DataConfig switch from init dataConfig: on when its value is 1
+// (DataConfig:CheckSwitch, DataConfig.lua:70-82).
+func claimSwitchOn(in *Init, key string) bool {
+	n, ok := claimInt(in.Object("dataConfig"), key)
+	return ok && n == 1
+}
+
 // claimEach runs fn over items in order, collecting every error and stopping early only when the
 // connection is known dead -- the same policy as collectCore.
 func claimEach[T any](items []T, fn func(T) error) []error {
@@ -238,7 +293,12 @@ func claimInt(o *sfs.SFSObject, key string) (int64, bool) {
 	if !ok {
 		return 0, false
 	}
-	switch n := v.Val.(type) {
+	return claimIntValue(v.Val)
+}
+
+// claimIntValue is claimInt for a bare decoded value.
+func claimIntValue(val any) (int64, bool) {
+	switch n := val.(type) {
 	case int64:
 		return n, true
 	case int32:
@@ -263,6 +323,35 @@ func claimWholeFloat(f float64) (int64, bool) {
 		return 0, false // also rejects NaN and ±Inf
 	}
 	return int64(f), true
+}
+
+// claimInts reads key as a list of integers: an SFSArray of numbers, an IntArray or a LongArray.
+// Non-numeric items are skipped.
+func claimInts(o *sfs.SFSObject, key string) []int64 {
+	v, ok := o.Get(key)
+	if !ok {
+		return nil
+	}
+	var out []int64
+	switch a := v.Val.(type) {
+	case *sfs.SFSArray:
+		for _, it := range a.Items() {
+			if n, ok := claimIntValue(it.Val); ok {
+				out = append(out, n)
+			}
+		}
+	case []int32:
+		for _, n := range a {
+			out = append(out, int64(n))
+		}
+	case []int64:
+		out = append(out, a...)
+	case []int16:
+		for _, n := range a {
+			out = append(out, int64(n))
+		}
+	}
+	return out
 }
 
 // claimFirstInt returns the first of keys present as an integer.

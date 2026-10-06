@@ -26,7 +26,7 @@ func dailyStaminaServer(t *testing.T, today int32, claimReply *sfs.SFSObject) (*
 }
 
 func dailyStaminaInit(lastClaim time.Time) *Init {
-	return rewardInit(func(raw *sfs.SFSObject) {
+	return rewardInitWithDay(5, func(raw *sfs.SFSObject) {
 		raw.PutLong("lastClaimFreeStaminaTime", lastClaim.UnixMilli())
 	})
 }
@@ -48,7 +48,7 @@ func TestDailyStaminaClaimsWhenCooldownPassed(t *testing.T) {
 
 func TestDailyStaminaNeverClaimedIsEligible(t *testing.T) {
 	fake, run := dailyStaminaServer(t, -1, rewardOK()) // info omits todayFreeStamina: 0
-	if err := run(rewardInit(func(*sfs.SFSObject) {})); err != nil {
+	if err := run(rewardInitWithDay(3, func(*sfs.SFSObject) {})); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if got := fake.cmds(); len(got) != 2 || got[1] != dailyStaminaClaimCmd {
@@ -76,13 +76,20 @@ func TestDailyStaminaSkipsWhenNotEligible(t *testing.T) {
 	}
 }
 
-func TestDailyStaminaNoInitSendsNothing(t *testing.T) {
-	fake, run := dailyStaminaServer(t, 0, rewardOK())
-	if err := run(&Init{}); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if got := fake.cmds(); len(got) != 0 {
-		t.Errorf("sent %v without an init push", got)
+func TestDailyStaminaNoInitOrLockedSendsNothing(t *testing.T) {
+	for name, in := range map[string]*Init{
+		"no init": {},
+		"HQ 2":    rewardInitWithDay(2, func(*sfs.SFSObject) {}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, run := dailyStaminaServer(t, 0, rewardOK())
+			if err := run(in); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := fake.cmds(); len(got) != 0 {
+				t.Errorf("sent %v, want nothing", got)
+			}
+		})
 	}
 }
 

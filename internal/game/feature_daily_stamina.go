@@ -18,7 +18,8 @@ import (
 // claim as available when both fields are 0, or when todayFreeStamina < k2 and the k3 cooldown
 // since the last claim has run out; the claim itself is the parameterless
 // `user.claim.daily.stamina` (LWResourceLackCell.lua:1986-1991). The real client only claims from
-// the resource-lack popup. Static-only: not sent live yet.
+// the resource-lack popup, which offers it from unlock ClaimFreeStamina (208: HQ ≥ 3,
+// lw_function_unlock; LWFunctionUnlockManager.lua:8-52). Static-only: not sent live yet.
 const (
 	dailyStaminaInfoCmd  = "user.get.daily.stamina.info"
 	dailyStaminaClaimCmd = "user.claim.daily.stamina"
@@ -28,6 +29,7 @@ const (
 	// (DataConfig.lua:47-66, 34-44), so the table values are the ones the client uses.
 	dailyStaminaClaimsPerDay = 2
 	dailyStaminaCooldown     = 14400 * time.Second
+	dailyStaminaUnlockHQ     = 3
 )
 
 func init() {
@@ -52,6 +54,10 @@ func dailyStaminaEligible(todayClaims, lastClaimMs int64, now time.Time) bool {
 func runDailyStamina(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil {
 		slog.Info("daily-stamina: no init push; skipping")
+		return nil
+	}
+	if hq := claimHQLevel(in); hq < dailyStaminaUnlockHQ {
+		slog.Info("daily-stamina: free stamina locked", "hqLevel", hq)
 		return nil
 	}
 	lastClaim, _ := claimInt(in.Raw, "lastClaimFreeStaminaTime")
