@@ -434,15 +434,16 @@ func saveStateFile(path, data string) error {
 // unbounded-size write to a credential state file (saveStateFile below has no size check of its
 // own), and -- more seriously -- BuildLoginParams/DoCrossServerLogin unconditionally re-embed
 // these persisted values into every future login/cross-server-login request via PutUtfString,
-// whose underlying sfs.WriteUtfString (sfsobject.go) hard-rejects any string over 65535 bytes at
+// whose underlying sfs.WriteUtfString (sfsobject.go) hard-rejects any string over 32767 bytes at
 // encode time -- so an oversized persisted value would permanently break every subsequent login
 // attempt using that identity, in-memory for the rest of the current session and on disk for every
 // future run, until an operator manually intervened. Rejecting before either the in-memory field
 // assignment or the disk write (keeping the previous, presumably-valid value) closes both harms at
 // once, exactly mirroring mail.go's "skip a malformed/hostile field, don't let it corrupt state"
-// discipline. Set at the wire format's own hard limit, matching maxMailUidLen's own rationale: any
-// value this accepts is guaranteed re-encodable later.
-const maxIdentityFieldLen = 65535
+// discipline. Set at the encoder's own hard limit (sfs.MaxUtfStringBytes, 32767 since the SFS2X
+// WriteUTF cap was adopted), matching maxMailUidLen's own rationale: any value this accepts is
+// guaranteed re-encodable later.
+const maxIdentityFieldLen = sfs.MaxUtfStringBytes
 
 func (d *deviceIdentity) SaveLoginKey(key string) error {
 	if len(key) > maxIdentityFieldLen {

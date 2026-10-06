@@ -207,7 +207,7 @@ func redirectUid(siObj *sfs.SFSObject, context string) string {
 // 1MiB whole-HTTP-body gsl.MaxGSLResponseSize cap, or an SFS2X serverInfo redirect field that can
 // arrive tagged sfs.SFSText (bounded only by packet.go's 64MiB sfs.MaxFrameSize) -- GetString cannot tell
 // that tag apart from the 65535-byte-capped sfs.SFSUtfString tag it also decodes to the identical Go
-// string type for. sfs.WriteUtfString (sfsobject.go) hard-rejects anything over 65535 bytes, so an
+// string type for. sfs.WriteUtfString (sfsobject.go) hard-rejects anything over 32767 bytes, so an
 // oversized value reaching PutUtfString fails sfs.EncodeObject/SendEnvelope, and that purely local
 // encode failure gets wrapped in sendStageError (conn.go), which deliberately, by design, forces
 // Timeout()==false -- indistinguishable from a genuine dead connection to every caller. field/
