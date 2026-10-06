@@ -65,7 +65,10 @@ import (
 // skew the pick. At most duelSpeedupsMaxCalls spend calls per run.
 //
 // duel-speedups-plan runs the same selection with every spend replaced by a log line, the read-only
-// pre-check before a live run. Static-only: no speed-up has been sent live yet.
+// pre-check before a live run. Live 2026-10-06 (Base Expansion): build.ccd.m.new {itemIDs:
+// "200211;25"} replied remainGold unchanged, itemCostArr [{itemId 200211, costNum 25}] and a new
+// buildInfo.uT, and the duel score rose 18,750 for 125 item minutes (50/min x the tech bonuses).
+// The queue and camp forms are not yet sent live.
 const (
 	duelSpeedupsBuildCmd = "build.ccd.m.new"
 	duelSpeedupsQueueCmd = "queue.ccd.m.new"
