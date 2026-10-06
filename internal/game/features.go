@@ -24,7 +24,21 @@ type Feature struct {
 	// DefaultOn is true only once the feature's commands have been validated live (see -run);
 	// everything else must be enabled explicitly in the session config.
 	DefaultOn bool
-	Run       func(conn *session.GameConn, in *Init) error
+	// Duel lists the Alliance Duel score types this feature's actions earn points for (see
+	// duel.go); empty for features that score nothing.
+	Duel []DuelScore
+	// Hold, for a feature that scores in the duel, holds it (skips its run) on days whose duel
+	// scores none of Duel, so the work is done on a day it counts. The session config's
+	// duelPolicy map can override it per feature.
+	Hold bool
+	Run  func(conn *session.GameConn, in *Init) error
+}
+
+// FeatureConfig is the session config's feature settings.
+type FeatureConfig struct {
+	Enabled    map[string]bool   // "features": on/off per feature name
+	DuelPolicy map[string]string // "duelPolicy": "hold" or "always" per feature name
+	Force      bool              // -run-anyway: run a -run feature even when the duel holds it today
 }
 
 var featureRegistry = map[string]Feature{}
@@ -59,25 +73,38 @@ func FeatureEnabled(f Feature, cfg map[string]bool) bool {
 }
 
 // RunFeatures runs every enabled feature in name order, or, when only is non-empty, just that
-// feature regardless of whether it is enabled (the -run validation path). Like CollectAll it keeps
-// going after a failure and stops early only on a dead connection.
-func RunFeatures(conn *session.GameConn, in *Init, cfg map[string]bool, only string) error {
+// feature regardless of whether it is enabled (the -run validation path). A feature the Alliance
+// Duel holds today is skipped with a log line; for -run that is an error unless cfg.Force is set,
+// so validating a duel-scoring feature can't spend its points on the wrong day. Like CollectAll it
+// keeps going after a failure and stops early only on a dead connection.
+func RunFeatures(conn *session.GameConn, in *Init, cfg FeatureConfig, only string) error {
 	if only != "" {
 		f, ok := featureRegistry[only]
 		if !ok {
 			return fmt.Errorf("unknown feature %q (see -list-features)", only)
 		}
+		LogDuelStatus(conn, in)
+		if held, why := duelHeld(conn, in, f, cfg.DuelPolicy); held {
+			if !cfg.Force {
+				return fmt.Errorf("feature %q is held for the Alliance Duel: %s (pass -run-anyway to run it regardless)", f.Name, why)
+			}
+			slog.Warn("running a duel-held feature anyway (-run-anyway)", "feature", f.Name, "reason", why)
+		}
 		slog.Info("running single feature", "feature", f.Name)
 		return f.Run(conn, in)
 	}
-	for k := range cfg {
+	for k := range cfg.Enabled {
 		if _, ok := featureRegistry[k]; !ok {
 			slog.Warn("session config enables an unknown feature; ignoring it", "feature", k)
 		}
 	}
 	var errs []error
 	for _, f := range Features() {
-		if !FeatureEnabled(f, cfg) {
+		if !FeatureEnabled(f, cfg.Enabled) {
+			continue
+		}
+		if held, why := duelHeld(conn, in, f, cfg.DuelPolicy); held {
+			slog.Info("feature held for the Alliance Duel", "feature", f.Name, "reason", why)
 			continue
 		}
 		slog.Info("running feature", "feature", f.Name)
@@ -94,10 +121,22 @@ func RunFeatures(conn *session.GameConn, in *Init, cfg map[string]bool, only str
 
 // Collect is the full -collect run: the core actions (CollectAll) followed by the enabled
 // features.
-func Collect(conn *session.GameConn, in *Init, cfg map[string]bool) error {
+func Collect(conn *session.GameConn, in *Init, cfg FeatureConfig) error {
 	err := collectCore(conn, in)
 	if session.ContainsNonTimeoutNetError(err) {
 		return err
 	}
+	if anyFeatureEnabled(cfg.Enabled) {
+		LogDuelStatus(conn, in)
+	}
 	return errors.Join(err, RunFeatures(conn, in, cfg, ""))
+}
+
+func anyFeatureEnabled(cfg map[string]bool) bool {
+	for _, f := range featureRegistry {
+		if FeatureEnabled(f, cfg) {
+			return true
+		}
+	}
+	return false
 }

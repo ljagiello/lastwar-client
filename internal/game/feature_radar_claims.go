@@ -47,7 +47,11 @@ func init() {
 	registerFeature(Feature{
 		Name:    "radar-claims",
 		Summary: "claim finished radar events and radar level rewards; never starts an event",
-		Run:     runRadarClaims,
+		// Radar tasks score 10,000 duel points each on Mon/Wed/Fri (score type 82; DUEL.md §2.7),
+		// so claims are held for those days. Finished events never expire.
+		Duel: []DuelScore{{Type: DuelScoreRadarTask}},
+		Hold: true,
+		Run:  runRadarClaims,
 	})
 	session.RegisterBenignErrorCode("120289", radarEventCmd, radarLevelCmd)
 }

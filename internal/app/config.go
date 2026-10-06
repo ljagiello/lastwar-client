@@ -41,6 +41,9 @@ type SessionConfig struct {
 	// Features turns optional automations (game.Feature) on or off by name; a feature not listed
 	// keeps its default (off unless validated live). See -list-features.
 	Features map[string]bool `json:"features,omitempty"`
+	// DuelPolicy overrides a feature's Alliance Duel policy by name: "hold" runs it only on duel
+	// days that score it, "always" runs it every time. See -list-features.
+	DuelPolicy map[string]string `json:"duelPolicy,omitempty"`
 }
 
 // String/GoString are the round-48 regression fix for the MAJOR finding that SessionConfig --

@@ -61,7 +61,7 @@ func TestRunFeaturesRunsEnabledInNameOrder(t *testing.T) {
 		Feature{Name: "disabled", DefaultOn: true},
 	)
 	cfg := map[string]bool{"disabled": false, "unknown-feature": true}
-	if err := RunFeatures(nil, &Init{}, cfg, ""); err != nil {
+	if err := RunFeatures(nil, &Init{}, FeatureConfig{Enabled: cfg}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(*ran, ","); got != "alpha,zeta" {
@@ -71,13 +71,13 @@ func TestRunFeaturesRunsEnabledInNameOrder(t *testing.T) {
 
 func TestRunFeaturesOnlyIgnoresEnablement(t *testing.T) {
 	ran := withRegistry(t, Feature{Name: "off-by-default"}, Feature{Name: "other", DefaultOn: true})
-	if err := RunFeatures(nil, &Init{}, nil, "off-by-default"); err != nil {
+	if err := RunFeatures(nil, &Init{}, FeatureConfig{}, "off-by-default"); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(*ran, ","); got != "off-by-default" {
 		t.Errorf("ran %q, want only off-by-default", got)
 	}
-	if err := RunFeatures(nil, &Init{}, nil, "nope"); err == nil || !strings.Contains(err.Error(), "unknown feature") {
+	if err := RunFeatures(nil, &Init{}, FeatureConfig{}, "nope"); err == nil || !strings.Contains(err.Error(), "unknown feature") {
 		t.Errorf("RunFeatures(unknown) error = %v, want an unknown-feature error", err)
 	}
 }
@@ -88,7 +88,7 @@ func TestRunFeaturesAggregatesErrors(t *testing.T) {
 		Feature{Name: "a", DefaultOn: true, Run: func(*session.GameConn, *Init) error { return boom }},
 		Feature{Name: "b", DefaultOn: true},
 	)
-	err := RunFeatures(nil, &Init{}, nil, "")
+	err := RunFeatures(nil, &Init{}, FeatureConfig{}, "")
 	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "a: boom") {
 		t.Errorf("RunFeatures error = %v, want it to wrap boom with the feature name", err)
 	}
