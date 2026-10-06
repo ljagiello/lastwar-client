@@ -10,9 +10,17 @@ The client bundles the real SmartFoxServer 2X SDK but never actually uses its so
 Plain TCP socket, **no TLS**. Host/port/zone/connection-type arrive dynamically from the GSL response. Two connection types exist:
 
 - `connectionType 0`: raw TCP, straight into the packet framing below.
-- `connectionType 1`: a one-shot literal HTTP/1.1 `Upgrade: websocket` preamble (with a **hardcoded, non-random** `Sec-WebSocket-Key`; only the HTTP status line is checked on response, the `Sec-WebSocket-Accept` challenge/response is never validated) is sent first, purely to satisfy load balancers that require a valid HTTP handshake, then the exact same raw SFS2X binary framing runs on the same socket. **This is not a real WebSocket**: there's no RFC 6455 frame masking anywhere in the read/write path. A Go client can dial TCP directly, or replay the literal handshake bytes if a load balancer demands them.
+- `connectionType 1`: a one-shot literal HTTP/1.1 `Upgrade: websocket` preamble is sent first, purely to satisfy load balancers that require a valid HTTP handshake, then the exact same raw SFS2X binary framing runs on the same socket. **This is not a real WebSocket**: there's no RFC 6455 frame masking anywhere in the read/write path. A Go client can dial TCP directly, or replay the literal handshake bytes if a load balancer demands them.
 
-In 1.0.364, `client_config` switch 26 selects connection type 1 to the `ws_ip` host on port 80, and switch 44 makes every second connect retry use it (see [Server-controlled transport switches](#server-controlled-transport-switches)). `KCPMode` is always `"0"`, and the client never uses UDP. Sockets set `NoDelay`, a 2 MiB receive buffer, a 64 KiB send buffer, and 30 s send and receive timeouts (static-analysis-only).
+The 1.0.364 preamble is fixed (`NetHandShakeInterceptor` in `BaseUtils`; static-analysis-only):
+
+- `Sec-WebSocket-Key: cmFuZG9t`, which is base64 for `random`, on every connection.
+- `User-Agent: LastWarWebSocket`, plus fixed `Cache-Control`, `Pragma`, `Accept-Encoding`, `TE`, and `Content-Length` headers.
+- The request path comes from the `ws://host/path` line URL and defaults to `/`.
+- The client accepts the response on status 101, any 2xx, or 304. It never checks `Sec-WebSocket-Accept`.
+- On these lines the first ping is a plain ping, not the `a=29` probe described below.
+
+In 1.0.364, `client_config` switch 26 selects connection type 1 to the `ws_ip` host on port 80, and switch 44 makes every second connect retry use it (see [Server-controlled transport switches](#server-controlled-transport-switches)). `KCPMode` is always `"0"`, and the game socket never uses UDP; only the real-time PvP mini-games do, over a separate transport (see [Mini-game PvP transport](#mini-game-pvp-transport)). Sockets set `NoDelay`, a 2 MiB receive buffer, a 64 KiB send buffer, and 30 s send and receive timeouts (static-analysis-only).
 
 ## Gateway race and the pre-login probe
 
@@ -21,6 +29,15 @@ The GSL `serverList[].ip` field is a `|`-delimited list of gateway hosts for one
 ```text
 lastwar-game-tcp-aws-1.lastwargame.com|lastwar-game-tcp-gcp-1.lastwargame.com|lastwar-game-tcp-cf-1.lastwarapp.net
 ```
+
+The Lua also carries two fallback "proxy lines", `ProxyList` in `Global/EnumType.lua`, named `aws` and `cf` by `ProxyName`. They use the zone's current `GameServerPort`, the C# reads them through `CSharpCallLuaInterface.GetAllProxy()`, and the in-game ping screen lists them. When C# switches to them wasn't traced (static-analysis-only):
+
+```text
+lastwar-game-us-aws-ali.lastwargame.com
+lastwar-game-us-cf-ali.lastwarapp.com
+```
+
+A related helper, `CommonUtil.GetPortId(zoneId)`, returns `17000 + zoneId`.
 
 A packet capture only shows the addresses these resolve to, so a session config written by `pcap -session-out` holds IP addresses; the hostnames work in its `ip` field too. The shipped client connects to all the gateways at once and keeps whichever answers first. This comes from the 1.0.364 C# (`ChooseLine`, `NetRawProxy`) and matches the 2026-10-04 capture of the real iOS app:
 
@@ -79,8 +96,8 @@ The real client puts `_id` on every extension request: `Login` carries `1`, and 
 | `0x40` | encrypted | always set on what the client sends, see XOR "encryption" below. Server-to-client frames in the 2026-10-04 capture (`0x80`, `0xB0`, `0xB8`) didn't set it and weren't XORed; `goclient`'s reader XORs only when the bit is set |
 | `0x20` | compressed | set iff the uncompressed serialized payload > 1024 bytes (zlib deflate, level 9) |
 | `0x10` | useLZ4 (repurposed) | never set on send; on receive the "LZ4" bit actually triggers **Zstandard** decompression, not LZ4, leftover naming from a migration. With `0x20` and `0x10` both set, a 4-byte big-endian uncompressed length follows the length field. **Implemented**: `ReadPacket` (`packet.go`) previously detected this branch correctly but just returned an error instead of decompressing, which read as connection-closed; now decodes via `github.com/klauspost/compress/zstd`, confirmed live against the server's ~313KB Zstd-compressed init bootstrap push |
-| `0x08` | bigSized | set iff payload > 65535 bytes → 4-byte length instead of 2 (`BitSwarmManager.WriteBinaryData`, `Smartfox2xLw.decompiled.cs:13563`, the Unity SFS2X SDK this game actually embeds; see the correction note below). The 1.0.364 sender tests the uncompressed length; `goclient` tests the compressed length, which is harmless because it never sends packets that large |
-| `0x04` | forward | a 2-byte big-endian server id follows the header byte, before the length. The 1.0.364 client sets it on **every** send when `client_config` switch 29 and the Lua switch `EnableServerRangeRouting` are both on. The 2026-10-04 capture shows it on every client-to-server frame (headers `0xE4` and `0xC4`), including the probe, with id `0x030F`: the zone's server id 783, in that one sample. Likely gateway routing. `goclient` never sets it, and the server accepts that (confirmed live) |
+| `0x08` | bigSized | set iff payload > 65535 bytes → 4-byte length instead of 2. The game's own sender is `NetPacket` in `BaseUtils` (`BaseUtils.decompiled.cs:33284-33324`); the embedded SmartFox2X 1.7.8 SDK's `SFSIOHandler` uses the same threshold (`SmartFox2X.decompiled.cs:31762-31783`). See [Which SDK is the reference](#which-sdk-is-the-reference). The 1.0.364 sender tests the uncompressed length; `goclient` tests the compressed length, which is harmless because it never sends packets that large |
+| `0x04` | forward | a 2-byte big-endian server id follows the header byte, before the length. The 1.0.364 client sets it on **every** send when `client_config` switch 29 and the Lua switch `EnableServerRangeRouting` are both on. The id is the zone number: `BaseUtils`' `ParseSid("APS783")` returns 783 (static-analysis-only). The 2026-10-04 capture agrees: it shows the bit on every client-to-server frame (headers `0xE4` and `0xC4`), including the probe, with id `0x030F` = 783 for zone `APS783`. Likely gateway routing. `goclient` never sets it, and the server accepts that (confirmed live) |
 
 ### Send and receive framing differ
 
@@ -121,7 +138,7 @@ Big-endian throughout. A standalone serialized object is self-describing, it sta
 | 5 | `LONG` | 8 bytes, signed |
 | 6 | `FLOAT` | 4 bytes, IEEE-754 |
 | 7 | `DOUBLE` | 8 bytes, IEEE-754 |
-| 8 | `UTF_STRING` | u16 byte-length + UTF-8 (max 65535 B) |
+| 8 | `UTF_STRING` | u16 byte-length + UTF-8. The u16 allows 65535 B, but the client's encoder refuses strings over 32,767 B (SmartFox2X `ByteArray`), so a compatible sender should cap there too |
 | 10 | `BYTE_ARRAY` | i32 count + N × element, the one array type that skips the shared size helper; the decompiled Unity SDK's `BinDecode_BYTE_ARRAY` calls a bare 4-byte `ReadInt` instead of `GetTypedArraySize`. A genuine SFS2X wire-format asymmetry, confirmed decoding the live 313KB init payload. |
 | 9, 11–16 | `*_ARRAY` | i16 count + N × element (`GetTypedArraySize`) |
 | 17 | `SFS_ARRAY` | i16 count, then N × (tag + payload), recursive |
@@ -130,6 +147,16 @@ Big-endian throughout. A standalone serialized object is self-describing, it sta
 | 20 | `TEXT` | i32 byte-length + UTF-8 (uncapped) |
 
 *`BIG_NUM`, present in some SFS2X SDK builds, doesn't exist in this game's enum at all, no gap in the numbering. Not needed.*
+
+## Which SDK is the reference
+
+The APK carries two SFS2X C# libraries, and only one of them is live in 1.0.364 (static-analysis-only):
+
+- **SmartFox2X** is the official SFS2X C# API 1.7.8. The game uses its data model, binary codec, and request envelopes (`ExtensionRequest`, `LoginRequest`, `LogoutRequest`), but never constructs its socket stack.
+- **BaseUtils** holds the game's own socket layer and framing (`NetConnection`, `NetPacket` for sending, `NetPacketNew` for receiving), which replaces SFS2X's BitSwarm. There's no `BitSwarmManager` anywhere on the shipping path.
+- **Smartfox2xLw** is a 2024 in-house fork of SmartFox2X stripped down to a codec. It's dead code: the only reference to it is a placeholder field that's never assigned, and its system controller has an empty handler table, so it can't even process `Login`. Earlier versions of this page cited it; the citations now point at SmartFox2X and BaseUtils.
+
+`noUpdateAssemblies.json` pins SmartFox2X to the APK copy, so the codec changes only with an app release, unless a hot update replaces that pin list. BaseUtils, which writes the actual frames, can still be replaced through a hot update.
 
 ## Validated against the official client: `sfs2x-api` (npm)
 
@@ -142,9 +169,9 @@ SmartFoxServer publishes its own JS client SDK (`npm install sfs2x-api`, the off
 <tr><td>Envelope shape <code>\{c: BYTE, a: SHORT, p: SFS_OBJECT\}</code></td><td><strong>Exact match</strong></td></tr>
 <tr><td>Action ids: <code>Login=1</code>, <code>PingPong=29</code></td><td><strong>Exact match</strong></td></tr>
 <tr><td>zlib compression, header bits <code>0x80</code>/<code>0x20</code>/<code>0x08</code></td><td><strong>Exact match</strong></td></tr>
-<tr><td>bigSized threshold specifically</td><td><strong>Correction, not a match</strong>: the JS SDK's own <code>IoHandler.onPacketWrite</code> uses <code>65335</code>, which this dossier briefly (and wrongly) adopted as a "fix." The <em>actual</em> reference for this game is the Unity SFS2X SDK it embeds (<code>Smartfox2xLw.decompiled.cs:13563</code>), which uses the standard <code>65535</code>, the JS client's <code>65335</code> is an idiosyncratic quirk of that specific (different) implementation, not a shared protocol constant. Reverted after a later audit pass caught the discrepancy; a good reminder that "official" only means authoritative for the exact client it ships with.</td></tr>
-<tr><td>Encryption flag (<code>0x40</code>) / XOR obfuscation</td><td><strong>Refined</strong>, the bit itself is real vanilla SFS2X: the Unity SDK sets it exactly when a session-negotiated <code>CryptoKey</code> (a real AES key+IV pair, via <code>Handshake</code>) is present (<code>bitSwarm.CryptoKey != null</code>, <code>Smartfox2xLw.decompiled.cs:13557</code>). This game never negotiates a <code>CryptoKey</code> at all, yet the client always sets <code>0x40</code> anyway and the server expects the length-derived XOR instead of real AES, a deliberate override of the vanilla semantics, not evidence the bit is undocumented. The server's own frames don't set it (2026-10-04 capture). The JS SDK's read/write path (which never sets or checks this bit) simply never implements the CryptoKey path at all, consistent with this reading.</td></tr>
-<tr><td><code>0x10</code> LZ4-repurposed-as-Zstandard flag</td><td><strong>Confirmed game-specific</strong>: same story, absent from the official client entirely</td></tr>
+<tr><td>bigSized threshold specifically</td><td><strong>Correction, not a match</strong>: the JS SDK's own <code>IoHandler.onPacketWrite</code> uses <code>65335</code>, which this dossier briefly (and wrongly) adopted as a "fix." The <em>actual</em> references for this game are the SmartFox2X 1.7.8 C# SDK it embeds (<code>SmartFox2X.decompiled.cs:31762-31783</code>) and its own <code>BaseUtils</code> sender (<code>BaseUtils.decompiled.cs:33284-33324</code>), which both use the standard <code>65535</code>. The JS client's <code>65335</code> is an idiosyncratic quirk of that specific (different) implementation, not a shared protocol constant. Reverted after a later audit pass caught the discrepancy; a good reminder that "official" only means authoritative for the exact client it ships with.</td></tr>
+<tr><td>Encryption flag (<code>0x40</code>) / XOR obfuscation</td><td><strong>Refined</strong>, the bit itself is real vanilla SFS2X: the C# SDK sets it exactly when a <code>CryptoKey</code> (a real AES-CBC key+IV pair) is present (<code>SmartFox2X.decompiled.cs:31766</code>). In stock SFS2X that key comes from an HTTPS call to <code>/BlueBox/CryptoManager</code> (<code>SmartFox2X.decompiled.cs:20760-20836</code>), not from the <code>Handshake</code>. This game never fetches a <code>CryptoKey</code> at all, yet the client always sets <code>0x40</code> anyway and the server expects the length-derived XOR instead of real AES, a deliberate override of the vanilla semantics, not evidence the bit is undocumented. The server's own frames don't set it (2026-10-04 capture). The JS SDK's read/write path (which never sets or checks this bit) simply never implements the CryptoKey path at all, consistent with this reading.</td></tr>
+<tr><td><code>0x10</code> LZ4-repurposed-as-Zstandard flag</td><td><strong>Game-specific meaning, stock bit</strong>: in the C# SDK, header bit <code>0x10</code> is <code>BlueBoxed</code> (HTTP tunnelling; <code>SmartFox2X.decompiled.cs:31328-31331</code>), and the game's own old header class still calls it that (<code>BaseUtils.decompiled.cs:33142-33175</code>). The game repurposes it on receive to mean Zstandard, under the name <code>useLZ4</code>. The JS SDK doesn't use it</td></tr>
 </tbody>
 </table>
 
@@ -169,6 +196,16 @@ The 1.0.364 timers (static-analysis-only):
 
 `goclient` sends its first heartbeat 4 s after connecting rather than immediately, waits up to 45 s for `init`, and makes a single attempt. That's more conservative than the real client, and the server accepts it.
 
+## Error conventions
+
+Errors on extension responses are per handler; the 1.0.364 Lua has no generic error layer (static-analysis-only):
+
+- A failed request carries `errorCode`, a UtfString holding either an error code or a locale key.
+- An optional `errorPara2` (UtfStringArray) carries tip parameters. The client shows `Localization:GetString(errorCode, table.unpack(errorPara2))`.
+- `E000000` is the generic "unknown error" (`SeverErrorCode` in `ConstDefine.lua`). A few handlers treat it as a soft "no data" result, for example a rank preview with nothing to rank.
+- `Login` rejections don't use `errorCode`. They arrive as SFS2X's own `ec` (a short) and `ep` (a UTF string array), formatted through the stock SFS2X error table. Code `28` is that table's `"{0}"` passthrough, which carries the game's `E0xx` strings in `ep[0]`, see [Identity, login & session](/auth#login-rejection-codes).
+- Fatal conditions come only from the C#: a `Login` rejection, `push.user.off` (kicked: the client quits and doesn't reconnect), `push.server.stop` / `push.server.tostop`, and connection loss.
+
 ## Server-controlled transport switches
 
 The check-version response's `client_config` field is a `|`-separated list of `"0"`/`"1"` flags, indexed by switch id (`ClientSwitch.Parse`, see [Startup, version-check & hot-update](/bootstrap)). In 1.0.364, these switches change what goes on the wire (static-analysis-only):
@@ -188,5 +225,16 @@ The forward bit in the 2026-10-04 capture suggests switch 29 is on for the iOS a
 <Check>
 **Settled: the shipped client never sends a `Handshake`**
 
-SFS2X's SDK ships a full `Handshake` request (session token negotiation + a real AES `CryptoKey`, via `DefaultPacketEncrypter`) and a complete MMORoom/AOI (area-of-interest) streaming subsystem. The game uses neither. This game's own decompiled SDK (`Smartfox2xLw.decompiled.cs:4363`, `SendHandshakeRequest`) contains a working `Handshake`, and the live server answers it when sent (see above), but the game's own transport never calls it. In 1.0.364, `NetConnection` handles only two system actions, `a=1` (`Login`) and `a=29` (ping-pong), and the connect path runs TCP connect, `a=29` probe, then `Login` (static-analysis-only). The 2026-10-04 capture of the real iOS app agrees: no `a=0` on any of the three sockets. A reimplementation should skip it; `goclient` keeps `-handshake` only as an off-by-default experiment. The client reimplements its own point-id-addressed query model on top of plain extension requests instead of AOI streaming (see [World map](/world-map)).
+SFS2X's SDK ships a full `Handshake` request (session token negotiation), an AES `CryptoKey` path (`DefaultPacketEncrypter`, keyed over HTTPS from `/BlueBox/CryptoManager`), and a complete MMORoom/AOI (area-of-interest) streaming subsystem. The game uses none of them. The embedded SmartFox2X SDK contains a working `Handshake` (`SendHandshakeRequest`, `SmartFox2X.decompiled.cs:20085-20089`), and the live server answers it when sent (see above), but the game's own transport never calls it. In 1.0.364, `NetConnection` handles only two system actions, `a=1` (`Login`) and `a=29` (ping-pong), and the connect path runs TCP connect, `a=29` probe, then `Login` (static-analysis-only). The 2026-10-04 capture of the real iOS app agrees: no `a=0` on any of the three sockets. A reimplementation should skip it; `goclient` keeps `-handshake` only as an off-by-default experiment. Instead of SFS2X's AOI streaming, the client pulls the world-map viewport and individual points with its own extension requests (see [World map](/world-map)).
 </Check>
+
+## Mini-game PvP transport
+
+Two real-time PvP mini-games, BiuBiu (shooting) and GGGo, don't run over the game socket. They use the `Joker.Share` assembly (static-analysis-only):
+
+1. Matchmaking runs over ordinary SFS2X commands (`activity.shoot.pvp.*`). The reply names a separate server: `ip`, `port`, `sessionidgame`, and `sessionidplayer`, a shape that looks like AWS GameLift.
+2. The client connects there over TCP, or in "Hybrid" mode over TCP plus UDP.
+3. TCP frames are `u32 LE length | i32 opcode | i32 jsonLen | JSON`.
+4. UDP datagrams start with `KCPH` and a channel id, and use kcp2k-style Connect, Data, and Disconnect messages, with an MTU of 470.
+
+This is recorded as a transport fact only. Results in these modes are client-computed, and forging them is out of scope (see [Military, hero & battle](/military-battle)).

@@ -3,7 +3,7 @@ title: "Startup, version-check & hot-update"
 description: "The 18-state cold-start machine and the three independently-versioned hot-update payloads it downloads and patches."
 ---
 
-Cold start walks an 18-state machine from splash screen to a live game connection. Three independently-versioned payloads, asset bundles, the Lua bundle, and the C# hot-update assemblies, are checked and patched separately, from a single version-check HTTP response.
+Cold start walks an 18-state machine from splash screen to a live game connection. Four independently-versioned payloads, asset bundles, the C# hot-update assemblies, the Lua bundle, and the data tables, are checked and patched separately, from a single version-check HTTP response.
 
 ## State machine (cold start, first launch)
 
@@ -30,7 +30,7 @@ GET {host}/gameservice/getlsu3dversion.php
 &returnJson=1&unityVersion=440
 ```
 
-In 1.0.364, `table_env` is `table_online` and `server` carries the cached zone (static-analysis-only). `goclient` sends both empty, and the server answers anyway (confirmed live).
+In 1.0.364, `table_env` is `table_online` and `server` carries the cached zone (static-analysis-only). `goclient` sends both empty, and the server answers anyway (confirmed live). The empty `table_env` has one visible cost: the server returns `table_version` and `locale` only when the request carries `table_env=table_online`. Four anonymous check-version GETs on 2026-10-05, Android 1.0.364 and iOS 1.0.344 each with and without `table_online`, showed both fields (plus an empty `x_table_version`) only in the `table_online` variants, with every other field identical (confirmed live).
 
 Host list (requests go out to every host in parallel and the first success wins; on total failure the client retries the same list once). About 5% of devices are A/B-bucketed to the `ea-` hosts by `GrayUtils.GetPercentageFromMd5`: `MD5(deviceId)` read as a little-endian uint64, `mod 100 + 1 <= 5`.
 
@@ -56,16 +56,16 @@ A response counts as valid when it has a non-empty `code` (which the client trea
 | `resMsg` | Base64 DER RSA public key (no PEM armor), feeds the GSL crypto, see [Gate-server RSA+AES handshake](/gate-server-crypto). **Not hardcoded**, delivered fresh every check. |
 | `updateType` | See the table below |
 | `downloadurl` | Store link shown with a forced update |
-| `hotUpdateMsg` | `;`-separated `name,version,crc,size`, asset-bundle manifest versions (`GameRes`, `DataTable`, `Lua`, `Download`, `PackageRes`, `DllRes`) |
+| `hotUpdateMsg` | `;`-separated `name,version,size,crc32`, asset-bundle manifest versions (`GameRes`, `DataTable`, `Lua`, `Download`, `PackageRes`, `DllRes`). `size` and `crc32` describe the manifest file itself: the APK's `gameres.version` is `2342,18537644,856103597`, where 18,537,644 is the manifest's byte size, and the client writes the three fields verbatim into `<name>.version` (`CheckResVersionState.SaveManifestVersion`; static-analysis-only) |
 | `lwfile2` | The Lua bundle: `version\|bzSize\|bzCrc[\|rawSize\|rawCrc];oldVer\|patchSize\|patchCrc;...`. A patch downloads only when the local version equals one of the `oldVer` entries |
-| `table_version` | `version,size,md5[,crc][;patch chain]` for the game-data table archive. Parsed by the C#, but absent from the live iOS response on 2026-10-04 |
-| `locale` | `version,lang1,lang2,...`. Parsed by the C#, but absent from the live iOS response on 2026-10-04 |
+| `table_version` | `version,size,md5[,crc][;patch chain]` for the game-data table archive. Returned only when the request carries `table_env=table_online` (confirmed live), see [Game data tables](/data-tables) |
+| `locale` | `version,lang1,lang2,...`. Returned only with `table_env=table_online` (confirmed live) |
 | `client_config` | Server-pushed feature flags: `\|`-separated `"0"`/`"1"` values indexed by switch id (`ClientSwitch.IsOn(N)` gates throughout the client). See [SFS2X wire protocol](/wire-protocol#server-controlled-transport-switches) for the ones that change the wire |
 | `checkok` | Present only in review mode; the client then skips the table and locale updates |
 | `warmup` | Opaque asset pre-download list; not protocol-relevant |
 | `firstLaunchForceUpdateMsg` | Read only in a first-launch skip-update experiment; not protocol-relevant |
 
-That's every field the parser handles. A live response carries fewer: the iOS check-version response for 1.0.344 (786), fetched on 2026-10-04, held only `client_config`, `downloadurl`, `firstLaunchForceUpdateMsg`, `hotUpdateMsg`, `lwfile2`, `resMsg`, `updateType`, and `warmup`.
+That's every field the parser handles. A live response carries fewer: the iOS check-version response for 1.0.344 (786), fetched on 2026-10-04, held only `client_config`, `downloadurl`, `firstLaunchForceUpdateMsg`, `hotUpdateMsg`, `lwfile2`, `resMsg`, `updateType`, and `warmup`. With `table_env=table_online`, the 2026-10-05 responses also carried `table_version`, `locale`, and an empty `x_table_version` (confirmed live).
 
 `updateType` meanings (1.0.364 C#):
 
@@ -86,25 +86,33 @@ The `Login` response can carry `updateType` too; with `2`, the client enters its
 {GameRes}.{DllRes}_{lwfile2 version}F_{table_version}.{locale}
 ```
 
-In the C#, each part is the first field of the matching check-version entry: the `GameRes` and `DllRes` versions from `hotUpdateMsg`, the first `|` field of `lwfile2`, and the first `,` field of `table_version` and `locale`.
+The `{GameRes}.{DllRes}_{lwfile2 version}F` prefix comes from the versions check-version installs: the `GameRes` and `DllRes` manifest versions from `hotUpdateMsg`, and the first `|` field of `lwfile2`. The real iOS app sent `2159.1505_821F_39516.23570` on 2026-10-04, and that day's check-version response returned `GameRes` 2159, `DllRes` 1505, and `lwfile2` version 821, matching the prefix.
 
-Only the `{GameRes}.{DllRes}_{lwfile2 version}F` prefix can be derived from a live response. The real iOS app sent `2159.1505_821F_39516.23570` on 2026-10-04, and that day's check-version response returned `GameRes` 2159, `DllRes` 1505, and `lwfile2` version 821, matching the prefix. It carried no `table_version` or `locale` field, and neither 39516 nor 23570 appears anywhere in it. The tail's source is unknown (local state or another endpoint), and its mapping to `table_version` and `locale` is static-analysis-only. `goclient` sends `"0"`, which the server has accepted for months.
+The `{table}.{locale}` tail is **local state**, not a field copied from the response (static-analysis-only):
+
+- `{table}` is `CURRENT_TABLE_VERSION`: the APK's built-in `table/version` until a newer table archive has been downloaded, then the highest downloaded version.
+- `{locale}` is `LOCALE_VERSION`: the APK's built-in `locale/version` until a downloaded `locale/<ver>/` exists, then the highest such version.
+
+After a successful update, those equal check-version's `table_version` and `locale`, which the server returns only for `table_env=table_online` (confirmed live). On 2026-10-05 a `table_online` request returned table version 39516 and locale 23570, exactly the iOS app's tail. Every part of the 1.0.364 APK's own baseline is in the APK: `2342.1501_825F_39432.23557` (`gameres.version`, `dllres.version`, `LWScripts.txt`, `table/version`, `locale/version`). `goclient` sends `"0"`, which the server has accepted for months.
 
 ## Hot-update transport & patch format
 
-Three independently-versioned payloads, compared via the fields above and patched separately:
+Four independently-versioned payloads, compared via the fields above and patched separately:
 
-- **Asset bundles** (incl. C# `.mdl` assemblies): standard Unity `AssetBundle`, tracked by the `dllres` manifest.
+- **Asset bundles**: UnityFS bundles in the XAssetPro container, tracked by the `gameres` manifest (see [The XAssetPro asset container](#the-xassetpro-asset-container) below).
+- **C# assemblies**: the APK ships 118 loose, XOR'd `.mdl` files in `assets/Assemblies/`, not bundles, plus `noUpdateAssemblies.json` = `[{"name":"SmartFox2X"}]`, which pins the SFS2X library to the APK copy. The `dllres` manifest (v1501 in the APK) lists 117 remote-only `<asm>.encrypt.bytes` bundles plus its own copy of that JSON; `mscorlib` has no entry, so it can't be hot-updated. Updated assemblies are written to `persistentDataPath/Assemblies/<asm>.mdl`, which FM_Mono searches before the APK (static-analysis-only).
 - **Lua bundle**: one flat `LWLF` file, not wrapped in an AssetBundle at all.
 - **Data tables**: the plain-ZIP `table_*.data` archive.
 
 Downloaded patches/replacements may be wrapped in a lightweight on-disk XOR obfuscation (not real confidentiality, key material is hardcoded client-side) built on a **reduced-round ChaCha** stream cipher: 8 rounds (4 double-rounds) instead of standard ChaCha20, IETF layout, detected by a short (3–6 byte) magic-prefix swap:
 
-| Plain magic | Wrapped magic | Content |
-|---|---|---|
-| `50 4B 03 04` (`PK··`) | `CHAC` | table `.data` ZIP |
-| `42 5A 68` (`BZh`) | `PRB` | bzip2 (Lua bundle package) |
-| `42 53 44 49 46 46` (`BSDIFF`) | `PURBDP` | bsdiff patch |
+| Plain magic | Wrapped magic | Content | Keystream starts at |
+|---|---|---|---|
+| `50 4B 03 04` (`PK··`) | `CHAC` | table `.data` ZIP | byte 4 |
+| `42 5A 68` (`BZh`) | `PRB` | bzip2 (Lua bundle package) | byte 4 |
+| `42 53 44 49 46 46` (`BSDIFF`) | `PURBDP` | bsdiff patch | byte 8, so bytes 6-7 stay plaintext |
+
+The offsets come from the 1.0.364 `EncryptUtils` in `BaseUtils` (static-analysis-only).
 
 Key/nonce are derived once from hardcoded dummy constants via two self-referential ChaCha8 passes (reproduced independently in Python and confirmed reproducible):
 
@@ -112,6 +120,20 @@ Key/nonce are derived once from hardcoded dummy constants via two self-referenti
 _key   = 83aa6a90bdfb210e4742405500db2c0c80b30776f6441df7cd1504f830ad1f2b
 _nonce = 2122232425262728292a2b2c
 ```
+
+## The XAssetPro asset container
+
+The `gameres` asset bundles aren't plain Unity AssetBundles on disk. XAssetPro (`VEngine`, API 6.1.5) packs them, and the APK's install-time asset pack holds one container. Except for the dated HEAD requests, everything in this section is static-analysis-only, checked against the shipped files:
+
+- `assets/AssetBundles/BundleFragment0.bytes` (539 MB) is 8,059 UnityFS bundles laid end to end, with no gaps or padding. Their headers have the engine version stripped (`5.x.x` / `0.0.0`; the real engine is 2019.4.41f1), and their blocks are LZ4HC.
+- `BundleOffsetTable.bytes` and `AliasOffsetTable.bytes` map a bundle's name, or its alias, to `(fragment index << 32) | offset`. Both hold the same 8,059 offsets. The client opens a bundle with `AssetBundle.LoadFromFile(fragment, 0, offset)`.
+- Manifests are text, with `[Version]`, `[Directories]`, `[Paths]`, `[Bundles]`, and `[Groups]` sections. A bundle line is `id,name,crc32,size,pathIds,depIds,downloadModes,alias`. The alias is `sha256(name without extension)` plus the extension, and the 32-hex suffix of a bundle's name is the MD5 of its bytes. Each manifest has a `.version` stamp, `version,size,crc32`, which is where `hotUpdateMsg`'s fields land.
+- The pack holds exactly the bundles whose `downloadModes` include `0` (`Base`): 8,059 of the 36,745 in the `gameres` manifest (v2342), 539 MB of 3.04 GB. Everything else downloads on demand, by download-mode group.
+- Downloads use `<CDN>/hotupdate/com.fun.lastwar.gp/Android/<file>`. A manifest is fetched as the ZIP `<name>_small_v<version>` and CRC-checked against its `.version`. Bundles are fetched by **plain name**; the alias is only the on-device file name. On 2026-10-04, HEAD requests returned 200 for a manifest ZIP and for a bundle by name, and 404 for the same bundle by alias.
+
+<Warning>
+TLS certificate validation is disabled on the XAssetPro bundle download path, its `HttpWebRequest` downloader (static-analysis-only). Integrity there rests on the manifest's CRC-32 alone.
+</Warning>
 
 ## CDN
 

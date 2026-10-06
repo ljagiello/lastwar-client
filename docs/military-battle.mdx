@@ -1,9 +1,9 @@
 ---
 title: "Military, hero & battle"
-description: "Combat resolution is server-authoritative everywhere except one scripted PVE minigame; recovered BattleReport/LwBattleReport proto schemas and the core army/hero/formation commands."
+description: "Combat resolution is server-authoritative for marches, arena, and world combat, while about 20 PVE and mini-game commands self-report their outcome; recovered BattleReport/LwBattleReport proto schemas and the core army/hero/formation commands."
 ---
 
-Combat resolution is server-authoritative everywhere except one scripted PVE minigame, the client sends only identity references (hero uuids, formation ids), never stats or an outcome, and the server ships back a full protobuf-encoded action-by-action combat log.
+Combat resolution is server-authoritative for marches, the arena, and world combat: the client sends only identity references (hero uuids, formation ids), never stats or an outcome, and the server ships back a full protobuf-encoded action-by-action combat log. The exceptions are the PVE stages and mini-game modes, where about 20 commands report a client-computed result.
 
 ## Server authority: proven
 
@@ -18,7 +18,7 @@ self.sfsObj:PutSFSArray("heroes", heroesArray)  -- {index, uuid}, IDENTITY ONLY,
 The client cannot send hero level, rank, skill, or equipment, only uuids the server already has authoritative records for. The response contains a full protobuf combat log; the server decides win/loss, damage, and rewards.
 
 <Warning>
-**One confirmed exception**: The scripted "story stage" PVE minigame (`Net.Msgs.Battle.*`) renders a real-time 3D scene locally and then **self-reports the outcome**: `lw.save.pve.record` sends `isWin` directly, `user.finish.pve.level` sends `isSuccess` directly, no server-computed combat log accompanies either. If building a server (not just a client), this is the one subsystem needing its own out-of-band validation.
+**About 20 exceptions, not one**: The scripted "story stage" PVE minigame (`Net.Msgs.Battle.*`) renders a real-time 3D scene locally and then **self-reports the outcome**: `lw.save.pve.record` sends `isWin` directly, `user.finish.pve.level` sends `isSuccess` directly, and no server-computed combat log accompanies either. The 1.0.364 Lua has about 20 commands of this kind across the PVE and mini-game modes (static-analysis-only), among them `lw.save.sky.battle.stage`, `lw.save.plane.stage`, `lw.save.pve.feature`, `lw.save.towerup.record`, `lw.save.count.record`, `lw.save.monopoly.record`, `end.detect.event.pve`, `parkour.fight.end`, `ghost.parkour.fight.end`, `user.finish.pve.trigger`, and `sync.pve.resource`. Surfing and Ghost Parkour also upload frame logs over HTTPS, outside the game socket, and several of these modes have server-side run validation. This is an inventory of the surface only: forging results is cheating and out of scope for this project. If building a server (not just a client), these are the subsystems needing their own out-of-band validation.
 </Warning>
 
 ## Combat report delivery: two channels
@@ -76,5 +76,5 @@ message LwBattleReport {
 | `hero.exp` / `hero.star.up` / `upgrade.hero.rank` | Hero leveling, star-up, rank-up |
 
 <Note>
-**Duplicate-cmd gotcha**: `MsgDefines.HeroRankUpgrade` and `MsgDefines.UpgradeHeroRank` both resolve to the wire string `"upgrade.hero.rank"`, `MsgMap` is a plain table literal, so the **later** assignment in file order silently wins at runtime. `command_catalog.json` preserves both entries since it's a mechanical dump, not a resolved map; when duplicates collide, trust whichever handler class appears last in `MsgMap.lua`.
+**Duplicate-cmd gotcha**: `MsgDefines.HeroRankUpgrade` and `MsgDefines.UpgradeHeroRank` both resolve to the wire string `"upgrade.hero.rank"`, `MsgMap` is a plain table literal, so the **later** assignment in file order silently wins at runtime. `command_catalog.json` preserves both entries since it's a mechanical dump, not a resolved map; when duplicates collide, trust whichever handler class appears last in `MsgMap.lua`. `SFSNetwork.GetMsgType` uses that one class for both sending and receiving, so in 1.0.364 `upgrade.hero.rank` always goes out as `{uuid: Long, exchange: Int}` (static-analysis-only).
 </Note>

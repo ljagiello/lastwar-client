@@ -907,3 +907,72 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 <Note>
 Full per-domain methodology, source file:line citations, and known gaps are in each extraction agent's own notes, not reproduced here for space, but every entry's `category` column traces back to a specific enum table or data-table column documented that way.
 </Note>
+
+## Wire enum values
+
+These 1.0.364 enums decode numeric fields in `init`, pushes, and claim responses. They come from `Global/EnumType.lua` in the 1.0.364 Lua (static-analysis-only) and aren't part of the 830-entry catalog above. The `RewardType` ids that tag each `reward[]` entry are already in [Resources](#resources-155).
+
+### `NewQueueType`
+
+The `type` of a `queue_new[]` entry, and the `qType` of an `al.call.help` request.
+
+| ID | Queue |
+|---|---|
+| `0` | Default |
+| `1` | Car soldier |
+| `3` | Hospital |
+| `6` | Science (research) |
+| `8` | Foot soldier |
+| `9` | Bow soldier |
+| `34` | Army upgrade |
+| `35` | Domain hospital |
+| `36` | Equipment material |
+| `39` | Field |
+| `40` | Barn |
+| `41`-`43` | Pastures |
+| `104` | Transport |
+| `107` | Equipment |
+| `111`-`115` | Missiles |
+| `116` | Dragon hospital |
+| `117` | Rebirth hospital |
+| `120` | T11 break |
+
+### `CollectRewardType`
+
+The source of a `collect_reward[]` entry, a world reward waiting to be claimed.
+
+| ID | Source | ID | Source |
+|---|---|---|---|
+| `0` | `MONSTER` | `16` | `INVASION_BIG_BOSS_KILL` |
+| `1` | `PLUNDER` | `17` | `INVASION_BIG_BOSS_ATTACK` |
+| `2` | `COLLECT` | `18` | `RALLY_LEADER_BE_ATTACK` |
+| `3` | `PLUNDER_LIMIT` | `19` | `MONSTER_FIRST_KILL_BE_ATTACK` |
+| `4` | `MONSTER_FIRST_KILL` | `20` | `ALLIANCE_PUSH` |
+| `5` | `RALLY_LEADER` | `21` | `DISCOVER_SUPPLIES` |
+| `6` | `RALLY_JOIN` | `22` | `DISCOVER_MARCH_SUPPLIES` |
+| `7` | `RALLY_JOIN_LIMIT` | `24` | `BATTLE_CARD_SKILL_REWARD` |
+| `8` | `FAKE_PLAYER` | `25` | `FLOWER_CHEER_BOX` |
+| `9` | `DESERT` | `26` | `ROB_BANK_STRONGHOLD` |
+| `10` | `DESERT_FIRST` | `27` | `CARD_BOX_REWARD` |
+| `11` | `ALLIANCE_RESOURCE_COLLECT` | `28` | `REPAIR_OUTPOST_REWARD` |
+| `12` | `RALLY_LEADER_FIRST` | `29` | `FORTIFY_CHARGE_REWARD` |
+| `13` | `RALLY_JOIN_FIRST` | `30` | `RALLY_JOIN_CROCODILE_LIMIT` |
+| `14` | `ICE_SUPPLIES` | | |
+| `15` | `INVASION_BIG_BOSS_CRIT` | | |
+
+### Task and claim states
+
+| Enum | Values |
+|---|---|
+| `TaskState` | `-2` NotExist, `-1` NotStart, `0` NoComplete, `1` CanReceive, `2` Received |
+| `AllianceHelpState` (`building_new[].help`) | `0` none, `1` upgrade helped, `2` ruins helped, `3` both |
+| `DetectEventState` (radar) | `0` NOT_FINISH, `1` FINISHED, `2` REWARDED, `3` NOT_IN_WORLD |
+| `SalaryStatus` (alliance salary) | `0` NotAchieved, `1` CanGet, `2` HasGot |
+| `VipPayGoodState` | `3` CanGet, `4` HasGet |
+| `WeekCardPackageStatus` | `2` CanClaim |
+| `HeroMonthCardRewardState` | `1` CAN_RECEIVE, `3` RECEIVED |
+| `ActivityBoxState` | `2` CanOpen |
+| `RedPacketState` | `1` VALID, `0` ALREADY_GET |
+| `EnumActivityStatus` | `2` Open |
+
+Two values collide in this build: `ResourceType.MasteryPoint` and `ResourceType.PAID_GOLD` are both `9002`, and `MarchTargetType` `85` has two names. `EnumType`'s own `VisitorType` doesn't number the visitor queue's `type` field, see [Identity, login & session](/auth#visitor-type-numbering).
