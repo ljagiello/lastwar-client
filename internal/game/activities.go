@@ -18,10 +18,12 @@ import (
 // (ActivityInfoData.FetchActivityConfigData, ActivityInfoData.lua:218-241), and so does
 // activityTypeOf below.
 const (
-	actTypePersonalArms     int32 = 12
 	actTypeAllianceCompete  int32 = 14
+	actTypeMineCave         int32 = 25
+	actTypeArena            int32 = 26
 	actTypeBattlePass       int32 = 27
 	actTypeSevenDay         int32 = 34
+	actTypeTruckActivity    int32 = 110
 	actTypeLuckyRoll        int32 = 124
 	actTypePersonalArmsNew  int32 = 125
 	actTypeGiftBox          int32 = 132
@@ -30,21 +32,24 @@ const (
 	actTypeCooking          int32 = 150
 	actTypeBanquet          int32 = 151
 	actTypeMonopoly         int32 = 153
+	actTypeActTask          int32 = 154
 	actTypeBargainShop      int32 = 155
 	actTypeBlueStore        int32 = 156
 	actTypeSignIn           int32 = 158
 	actTypeSlotMachine      int32 = 159
 	actTypeDecorationGacha  int32 = 173
 	actTypeSevenDayV2       int32 = 174
-	actTypeWinterStorm      int32 = 218
-	actTypeTorchRelay       int32 = 309
-	actTypeHeroMonthCard    int32 = 313
-	actTypeBountyHunter     int32 = 350
-	actTypeSurvivalVipGift  int32 = 380
-	actTypeMineCave         int32 = 25
-	actTypeArena            int32 = 26
-	actTypeTruckActivity    int32 = 110
 	actTypeTrainActivity    int32 = 203
+	actTypeWinterStorm      int32 = 218
+	actTypeSeasonFarmer     int32 = 239
+	actTypeSeasonPreview    int32 = 248
+	actTypeTorchRelay       int32 = 309
+	actTypeBountyHunter     int32 = 350
+	actTypeMonthCardInsure  int32 = 373
+	actTypeSurvivalVipGift  int32 = 380
+	actTypeSeasonMilitary   int32 = 389
+	actTypeCampScience      int32 = 392
+	actTypeCrystalBoss      int32 = 412
 	activityHQBuildingID    int32 = 10100000 // BuildingTypes.FUN_BUILD_MAIN (EnumType.lua:3481)
 	activityOpenToleranceMs int64 = 1000     // CheckIsSend's timeDevintion
 )
@@ -454,7 +459,7 @@ var (
 
 // activityIDsByType and activityNeedHQ are generated from table `activity` in the 1.0.364 tables
 // (39432; identical in live 39516 per coverage/reports/tables.md): the id, type and needMainCityLevel
-// columns, for the types the event features handle (types: 14,27,34,124,125,132,134,142,150,151,153,155,156,158,159,173,174,218,309,313,350,380).
+// columns, for the types the event features handle (types: 14,27,34,124,125,132,134,142,150,151,153,154,155,156,158,159,173,174,218,239,248,309,350,373,380,389,392,412).
 // Regenerate after a table update that adds event ids.
 var activityIDsByType = map[int32][]int32{
 	14: {55000},
@@ -498,6 +503,7 @@ var activityIDsByType = map[int32][]int32{
 	150: {99003},
 	151: {99004, 99014, 99030, 99054, 99084, 99099, 99126, 99149},
 	153: {99011, 99026, 99087, 99102, 99120, 99159, 99174},
+	154: {99010, 99089, 99104, 99122, 99161, 99176},
 	155: {99020, 99040, 99067, 99115, 99183},
 	156: {
 		5301, 5302, 5303, 5304, 5305, 5306, 5307, 5308, 5309, 5310, 1000220, 1000221,
@@ -509,21 +515,23 @@ var activityIDsByType = map[int32][]int32{
 	173: {98629, 98630, 98631, 98632, 98633, 98634, 98635, 98636, 98637},
 	174: {95101, 95102, 95103, 98672, 98673, 98674, 98675, 98676, 98677, 99180},
 	218: {40039},
+	239: {1000058},
+	248: {1000079, 1200016, 1200027, 1200028, 1200060, 1200117},
 	309: {99086, 99101, 99113, 99162},
-	313: {
-		98704, 98705, 98706, 98707, 98708, 98709, 98710, 98711, 98712, 98713, 98714, 98715,
-		98716, 98717,
-	},
 	350: {
 		98800, 98802, 98803, 98804, 98805, 98806, 1030242, 1030251, 1030252, 1030253, 1030254, 1041009,
 		1041010, 1051009, 1051010, 10202131, 10202171, 10202191, 10205041,
 	},
+	373: {1210000},
 	380: {98801},
+	389: {1200101},
+	392: {1200104},
+	412: {80152},
 }
 
 var activityNeedHQ = map[int32]int32{
 	20: 5, 24: 7, 26: 7, 27: 7, 29: 7, 3013: 4, 40039: 10, 50341: 4,
 	50342: 4, 55000: 10, 94001: 4, 95001: 4, 95002: 4, 95003: 4, 95005: 4, 95101: 4,
 	95102: 4, 95103: 4, 98672: 4, 98673: 4, 98674: 4, 98675: 4, 98676: 4, 98677: 4,
-	99024: 4, 99116: 4,
+	99024: 4, 99116: 4, 1210000: 4,
 }

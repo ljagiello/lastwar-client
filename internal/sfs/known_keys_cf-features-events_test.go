@@ -15,6 +15,15 @@ func init() {
 		"index",      // chest index, -1 = every reached chest
 		"stage",      // Alliance Duel chest threshold score
 		"taskId",     // battle-pass task id
+		// quests, card dailies, season features
+		"chapterid",     // main-quest chapter id
+		"cityId",        // season faction-production city id
+		"isLogin",       // get.week.card.info login flag (1)
+		"isShake",       // faction-production animation flag (false)
+		"itemId",        // month-card package id
+		"serverCityArr", // faction-production {serverId, cityId} list
+		"strongholdId",  // season stronghold id
+		"viewLevel",     // S6 military level
 	} {
 		knownNonSensitiveSFSKeys[k] = true
 	}
