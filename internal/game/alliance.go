@@ -21,22 +21,160 @@ import (
 // isOnlyShowDiff) is purely local UI-animation state, never sent. The real
 // client sent an absolute Unix-epoch-milliseconds value
 // (`cmdBaseTime=1783114317664`); this sends the equivalent live value via
-// `time.Now().UnixMilli()`.
+// `time.Now().UnixMilli()`. The real client uses its server-synced clock
+// (UITimeManager:GetServerTime, UILWAlHelpCtrl.lua:25-26); this client keeps
+// no server clock, so the host clock stands in for it.
 //
 // The captured response fell outside the successfully-decoded portion of
 // that capture (the same stream-reassembly artifact seen with the Truck
 // Rewards and visitor.operate captures), so the live response shape has
 // not been directly observed. Reading the Lua handler itself: success is
 // "no errorCode", carrying an optional `accPoint` (accumulated
-// alliance-help point total) -- the call is unconditional and shows a
-// generic "helped" tip even when nothing was actually pending, so it's
-// safe to call on every run regardless of whether any help requests
-// currently exist.
+// alliance-help point total). This sends it unconditionally; collectCore
+// goes through helpAllianceMembers, which first checks there is someone
+// to help.
 func HelpAllianceMembers(conn *session.GameConn) error {
 	const cmd = "al.help.all"
 	params := sfs.NewSFSObject()
 	params.PutLong("cmdBaseTime", time.Now().UnixMilli())
 	_, err := session.SendAndWait(conn, "alliance help-all response", cmd, params)
+	return err
+}
+
+// helpAllianceMembers sends al.help.all only when another member has an open help request, as the
+// real help window does (UILWAlHelpCtrl.lua:15-29: it sends only when some listed request has
+// isSelf == false, else shows tip 393023). It lists the requests first with `al.show.help {}`,
+// whose reply carries `helpArr` (AllianceHelpDataManager.lua:47-78; see openHelpRequests). Without
+// init (in.Raw nil) it sends al.help.all unconditionally, as before this gating existed. The
+// HUD/chat help bubbles in the real client also send al.help.all unconditionally, but only while
+// they are showing, which is the same condition.
+func helpAllianceMembers(conn *session.GameConn, in *Init) error {
+	if in == nil || in.Raw == nil {
+		return HelpAllianceMembers(conn)
+	}
+	msg, err := session.SendAndWait(conn, "alliance help list response", "al.show.help", sfs.NewSFSObject())
+	if err != nil {
+		return err
+	}
+	listed, open := openHelpRequests(msg.Params, ownUID(in))
+	if open == 0 {
+		slog.Info("no other member's help request is open; skipping al.help.all", "listed", listed)
+		return nil
+	}
+	slog.Info("helping alliance members", "listed", listed, "open", open)
+	return HelpAllianceMembers(conn)
+}
+
+// openHelpRequests counts al.show.help's helpArr entries and, of those, the open requests of other
+// members. The wire field names are AllianceHelpInfo.lua's ParseData: helpId, senderId, stats,
+// and the lowercase nowcount/maxcount. An entry is another member's when its senderId differs from
+// ownUID: CheckStats (AllianceHelpInfo.lua:108-114) recomputes `stats` that way and ignores the
+// server's value, so the server's stats (0 = own) is only the fallback when ownUID or senderId is
+// unknown. It is open while nowcount < maxcount; the Lua defaults a missing maxcount to 0
+// (finished), but an entry without maxcount counts as open here, so a renamed field cannot
+// silently stop the helping.
+func openHelpRequests(resp *sfs.SFSObject, ownUID string) (listed, open int) {
+	for _, h := range objectsField(resp, "helpArr") {
+		if idString(h, "helpId") == "" {
+			continue
+		}
+		listed++
+		if sender := idString(h, "senderId"); ownUID != "" && sender != "" {
+			if sender == ownUID {
+				continue
+			}
+		} else if stats, ok := numberField(h, "stats"); ok && stats == 0 {
+			continue
+		}
+		if maxCount, ok := numberField(h, "maxcount"); ok {
+			if nowCount, _ := numberField(h, "nowcount"); nowCount >= maxCount {
+				continue
+			}
+		}
+		open++
+	}
+	return listed, open
+}
+
+// ownUID is the player's uid from init.user.uid, as a string ("" when absent).
+func ownUID(in *Init) string {
+	return idString(in.Object("user"), "uid")
+}
+
+// allianceGiftPremiumMinLevel is DataConfig alliance_gift.k5: the alliance gift level from which
+// the gift window offers Premium "Claim All" (UILWAllianceGiftView.lua:296-297; table item row
+// alliance_gift, k5 = 15 in 39432 and the live 39516). init.dataConfig cannot change it in
+// practice: DataConfig:InitFromNet re-applies the local table over the server's copy
+// (DataConfig.lua:47-68).
+const allianceGiftPremiumMinLevel = 15
+
+// claimAllianceGifts claims the alliance gifts the way the real gift window offers them:
+//
+//   - nothing at all when init's allianceNewMail (the unclaimed gift count, InitMessage.lua:153) is 0;
+//   - otherwise it lists the gifts with `alliance.reward.list {index: 0, len: 1000}`
+//     (UILWAllianceGiftCtrl.lua:17), whose reply carries the gift level `onLevel` and the
+//     per-type waiting counts `info.redPoint1`/`info.redPoint2` (AllianceGiftDataManager.lua);
+//   - Premium (type 1) only at gift level >= allianceGiftPremiumMinLevel with redPoint1 > 0;
+//   - Regular (type 2) when redPoint2 > 0.
+//
+// A missing redPoint counts as waiting. If the list fails, only Regular is claimed, since Premium
+// needs the level, which init does not carry. Without init (in.Raw nil) both types are claimed
+// blind, as before this gating existed. This never sends alliance.reward.remove/allremove. Below
+// level 15 the real client claims Premium gifts one at a time (alliance.reward.receive); that is
+// not done here. Static: the server's reply to a Premium claim-all below level 15 has not been
+// observed.
+func claimAllianceGifts(conn *session.GameConn, in *Init) error {
+	if in == nil || in.Raw == nil {
+		return ClaimAllianceGifts(conn)
+	}
+	if n, ok := numberField(in.Raw, "allianceNewMail"); ok && n == 0 {
+		slog.Info("no alliance gifts waiting (init allianceNewMail=0); skipping gift claims")
+		return nil
+	}
+	params := sfs.NewSFSObject()
+	params.PutInt("index", 0)
+	params.PutInt("len", 1000)
+	msg, err := session.SendAndWait(conn, "alliance gift list response", "alliance.reward.list", params)
+	if err != nil {
+		if session.ContainsNonTimeoutNetError(err) {
+			return err
+		}
+		slog.Warn("alliance gift list failed; claiming Regular gifts only", "error", err)
+		return errors.Join(err, claimAllianceGiftType(conn, allianceGiftRegular))
+	}
+	level, levelOK := numberField(msg.Params, "onLevel")
+	info := objectField(msg.Params, "info")
+	premium := giftsWaiting(info, "redPoint1")
+	regular := giftsWaiting(info, "redPoint2")
+	claimPremium := premium && levelOK && level >= allianceGiftPremiumMinLevel
+	slog.Info("alliance gift eligibility", "giftLevel", level, "giftLevelKnown", levelOK, "premiumWaiting", premium,
+		"regularWaiting", regular, "claimPremium", claimPremium, "claimRegular", regular)
+
+	var errs []error
+	if claimPremium {
+		err := claimAllianceGiftType(conn, allianceGiftPremium)
+		errs = append(errs, err)
+		if session.ContainsNonTimeoutNetError(err) {
+			return errors.Join(errs...)
+		}
+	}
+	if regular {
+		errs = append(errs, claimAllianceGiftType(conn, allianceGiftRegular))
+	}
+	return errors.Join(errs...)
+}
+
+// giftsWaiting reports whether the gift list's redPoint<type> count is above 0, or absent.
+func giftsWaiting(info *sfs.SFSObject, key string) bool {
+	n, ok := numberField(info, key)
+	return !ok || n > 0
+}
+
+// claimAllianceGiftType sends one `alliance.reward.allreceive {type}`.
+func claimAllianceGiftType(conn *session.GameConn, giftType int32) error {
+	params := sfs.NewSFSObject()
+	params.PutInt("type", giftType)
+	_, err := session.SendAndWait(conn, fmt.Sprintf("alliance gift claim response (type %d)", giftType), "alliance.reward.allreceive", params)
 	return err
 }
 
@@ -67,20 +205,16 @@ const (
 // (per-gift uuid/receiveTime pairs), `receiveNum`, and `reward` -- but the
 // call is only meaningfully separated from a no-op by `receiveResult == 1`
 // and a non-empty `reward`; nothing in the handler treats calling this
-// with zero pending gifts of a given type as an error, so it's safe to
-// call both types unconditionally on every run.
+// with zero pending gifts of a given type as an error (live, with nothing
+// pending, both types answered receiveResult=0).
 //
-// Honestly left open (round 16 audit): that safety argument is a static read
-// of the decompiled handler, not a live-captured confirmation for type=1
-// specifically -- unlike VIP's daily claims (vip.go, errorCode 120289) and
-// the alliance tech donate cooldown (errorCode 120471 below), there is no
-// benignErrorCodes entry backing the type=1 (Premium) call, since no
-// Premium-ineligible response has actually been captured to know what its
-// errorCode (if any) looks like. If a future run ever surfaces an
-// unexpected fatal error specifically on the type=1 branch, capture it and
-// register the real code here rather than guessing at one now.
+// This claims both types unconditionally, which is CollectAll's behaviour
+// without init. collectCore goes through claimAllianceGifts, which applies
+// the real client's gates, including the gift-level gate on Premium. Left
+// open (round 16 audit): no Premium-ineligible response has been captured,
+// so there is no benignErrorCodes entry for type=1; if one surfaces, capture
+// it and register the real code rather than guessing at one now.
 func ClaimAllianceGifts(conn *session.GameConn) error {
-	const cmd = "alliance.reward.allreceive"
 	var errs []error
 	// The 2 gift types are independent (neither scoped to the other's outcome), so an ordinary
 	// decoded business-logic errorCode failure on one must not stop the other from being
@@ -94,9 +228,7 @@ func ClaimAllianceGifts(conn *session.GameConn) error {
 	// the exact same way. Mirrors CollectAll's identical errors.As-against-net.Error early-abort
 	// (buildings.go) and ClaimAllMail's (mail.go).
 	for _, giftType := range []int32{allianceGiftPremium, allianceGiftRegular} {
-		params := sfs.NewSFSObject()
-		params.PutInt("type", giftType)
-		_, err := session.SendAndWait(conn, fmt.Sprintf("alliance gift claim response (type %d)", giftType), cmd, params)
+		err := claimAllianceGiftType(conn, giftType)
 		errs = append(errs, err)
 		var netErr net.Error
 		if errors.As(err, &netErr) && !netErr.Timeout() {
@@ -131,45 +263,33 @@ func ClaimAllianceGifts(conn *session.GameConn) error {
 // `1` was ever observed), but it's the value the real client sent for a
 // successful donation, so it's reused as-is.
 //
-// Deliberately NOT implemented: the gem-cost "Unlimited Attempts" button
-// (`al.science.donate.gold {scienceId}`, no `option` field) and the
-// "hold the button longer for a multiplier" UI behavior the user
-// described. Reading both donate messages' OnCreate, neither has a
-// count/times/multiplier field on the wire -- holding the button is
-// client-side auto-repeat, firing the same single-donation request
-// multiple times while held, not a batched server call. The free/coin
-// donate path this function uses is rate-limited server-side to
-// `maxNum=30` per day (confirmed live via `al.science.refreshNum`), so
-// only one attempt makes sense per `-collect` run.
+// Charges (corrected for 1.0.364): `al.science.refreshNum {scienceId}` and
+// every donate reply carry `maxNum` (30, the size of a regenerating charge
+// pool, not a daily count), `useNum` -- the charges REMAINING despite its
+// name (AllianceScienceDataManager.lua:87-89, GetResDonateRestCount returns
+// it) -- and `timePoint`/`refreshTimeBlock` (1,200,000 ms): one charge comes
+// back per block. The real client refuses to send a donation once useNum
+// reaches 0 and shows locale 120471 itself, "Donation Count has reached its
+// limit, please wait" (AlScienceDonateInfo.lua:415-419,
+// UIAllianceScienceInfoCtrl.lua:141-146); while charges remain it donates
+// back to back (holding the button repeats the same single-donation
+// request). So errorCode 120471, whose server text reads "Donate science CD
+// time is not finish", means the charges are used up, not a per-donation
+// cooldown. That fits the live observations: two runs 3 minutes apart both
+// donated (with a `maxdonate.count` field stepping 6 -> 5), and the earlier
+// 120471 (docs/live-validation.mdx) came minutes after the real client had
+// donated, consistent with its charges being spent. 120471 is registered in
+// conn.go's benignErrorCodes, so it is a benign no-op here.
 //
-// CORRECTED AGAIN, fourth audit cycle: the previous ("third audit cycle")
-// version of this correction drew the wrong conclusion from a real
-// observation. It ran two `-collect` runs roughly 3 minutes apart, both of
-// which donated successfully (`state=1`, `donateCDTime=0` both times, only
-// the response's `maxdonate.count` field decrementing 6 -> 5), and
-// concluded that `refreshTimeBlock=1200000` (20 minutes) wasn't a
-// per-donation cooldown at all -- only the `maxNum=30` daily count noted
-// above gates repeat donations. The raw observation was fine; the
-// conclusion wasn't. docs/live-validation.mdx documents an earlier
-// `al.science.donate` capture, from that same live-testing session, that
-// got back a real cooldown error -- `errorCode=120471, "Donate science CD
-// time is not finish"` -- because the real account had donated minutes
-// earlier. A per-donation cooldown does exist; the two successful test
-// runs just didn't happen to land inside its window. This project still
-// hasn't independently re-measured the cooldown's actual duration (whether
-// `refreshTimeBlock=1200000` is really it or something else) -- only that
-// it's real and has a known errorCode now. `120471` is registered in
-// conn.go's benignErrorCodes, so hitting it during `-collect` is correctly
-// treated as a benign no-op rather than a hard failure. The daily
-// `maxNum=30` count remains a separate, independent gate from this
-// per-donation cooldown; what errorCode (if any) the server returns once
-// that daily count hits 0 is still unconfirmed -- deliberately not
-// simulated by exhausting the real account's daily donations just to
-// capture it. The gem-cost path has no such
-// cooldown (`useGoldNum`/`maxGoldNum` both came back as 999999999, i.e.
-// unlimited) but spends real premium currency per use, so it's
-// deliberately left out rather than auto-spending gems without being
-// asked.
+// This sends one donation per run, the default: each donation spends the
+// player's resources. The opt-in feature alliance-donate-all
+// (feature_alliance_donate_all.go) spends every remaining charge instead.
+// Deliberately NOT implemented: the gem-cost "Unlimited Attempts" button
+// (`al.science.donate.gold {scienceId}`, no `option` field;
+// `useGoldNum`/`maxGoldNum` came back as 999999999), since it spends
+// premium currency per use. When no tech is recommended the real UI
+// suggests the highest-progress open one (FindCanRecommendScience); this
+// donates only to an explicitly recommended tech.
 func DonateRecommendedAllianceTech(conn *session.GameConn) error {
 	const refreshCmd = "science.data.refresh"
 	msg, err := session.SendAndWait(conn, "alliance tech tree fetch", refreshCmd, sfs.NewSFSObject())
