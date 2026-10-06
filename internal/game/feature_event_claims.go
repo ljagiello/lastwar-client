@@ -72,6 +72,7 @@ const (
 	eventTaskCanReceive    = 1
 	sevenDayV2TasksPerDay  = 3
 	sevenDayV2DaySeconds   = 86400
+	redBossSilentError     = "E100172"
 	redBossClaimProgress   = 1
 	redBossClaimAchievemnt = 2
 )
@@ -98,6 +99,9 @@ func init() {
 	session.RegisterBenignErrorCode(evAlreadyExecuted, redBossClaimAllCmd, redBossDailyCmd, winterStormClaimCmd, sevenDayAllCmd,
 		sevenDayOneCmd, sevenDayV2TaskCmd, sevenDayV2ScoreCmd, bountyHunterDropCmd, actTaskRewardCmd, actScoreRewardCmd,
 		flowerTrainCmd, eventArenas[0].rewardCmd, eventArenas[1].rewardCmd)
+	// The crystal-boss handlers show every errorCode as a tip except this one, which they drop
+	// silently (CrystalBossMessageHelper.lua:2-11).
+	session.RegisterBenignErrorCode(redBossSilentError, redBossClaimAllCmd, redBossDailyCmd)
 }
 
 func runEventClaims(conn *session.GameConn, in *Init) error {

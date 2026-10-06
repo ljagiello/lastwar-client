@@ -216,6 +216,23 @@ func TestEventClaimsArenaAndFlowerTrain(t *testing.T) {
 	}
 }
 
+func TestEventClaimsCrystalBossSilentErrorIsBenign(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, _ := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		r := sfs.NewSFSObject()
+		switch cmd {
+		case redBossProgressCmd:
+			r.PutInt("claimableCount", 1)
+		case redBossClaimAllCmd:
+			return evErr(redBossSilentError)
+		}
+		return r
+	})
+	if err := runEventClaims(conn, evInit(30, evActivity(80152))); err != nil {
+		t.Errorf("E100172 on red.boss.claim.all must be benign, got %v", err)
+	}
+}
+
 func TestEventClaimsBenignAndFailure(t *testing.T) {
 	withEvNow(t, evTestNow)
 	conn, _ := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {

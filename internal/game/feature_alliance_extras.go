@@ -73,10 +73,8 @@ func runAllianceExtras(conn *session.GameConn, in *Init) error {
 		// a reply (success, or the benign already-claimed code) means the quest reward is taken
 		participated = b.send("alliance star quest reward", allianceStarQuestCmd, sfs.NewSFSObject()) != nil
 	}
-	if v, ok := msg.Params.Get("scratchClaimed"); ok && participated && !b.dead {
-		if claimed, _ := v.Val.(bool); !claimed {
-			b.send("alliance star scratch card", allianceStarScratchCmd, sfs.NewSFSObject())
-		}
+	if msg.Params.Has("scratchClaimed") && !evBool(msg.Params, "scratchClaimed") && participated && !b.dead {
+		b.send("alliance star scratch card", allianceStarScratchCmd, sfs.NewSFSObject())
 	}
 	return b.err()
 }
