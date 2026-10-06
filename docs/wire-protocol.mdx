@@ -156,7 +156,7 @@ The APK carries two SFS2X C# libraries, and only one of them is live in 1.0.364 
 - **BaseUtils** holds the game's own socket layer and framing (`NetConnection`, `NetPacket` for sending, `NetPacketNew` for receiving), which replaces SFS2X's BitSwarm. There's no `BitSwarmManager` anywhere on the shipping path.
 - **Smartfox2xLw** is a 2024 in-house fork of SmartFox2X stripped down to a codec. It's dead code: the only reference to it is a placeholder field that's never assigned, and its system controller has an empty handler table, so it can't even process `Login`. Earlier versions of this page cited it; the citations now point at SmartFox2X and BaseUtils.
 
-`noUpdateAssemblies.json` pins SmartFox2X to the APK copy, so the codec changes only with an app release. BaseUtils, which writes the actual frames, can still be replaced through a hot update.
+`noUpdateAssemblies.json` pins SmartFox2X to the APK copy, so the codec changes only with an app release, unless a hot update replaces that pin list. BaseUtils, which writes the actual frames, can still be replaced through a hot update.
 
 ## Validated against the official client: `sfs2x-api` (npm)
 
