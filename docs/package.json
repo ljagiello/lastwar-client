@@ -8,7 +8,7 @@
     "broken-links": "mint broken-links"
   },
   "devDependencies": {
-    "mint": "^4.2.935"
+    "mint": "^4.2.970"
   },
   "overrides": {
     "sharp": "^0.35.3",
