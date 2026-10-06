@@ -214,9 +214,10 @@ func newTestExtMsg(cmd string, errorCode any) *ExtensionMessage {
 }
 
 // newTestExtMsgWithStatus is newTestExtMsg plus an optional "status" int field, for exercising
-// classifyResponse's status=0 benign heuristic (which, unlike errorCode, only fires for a
-// specific cmd -- see TestClassifyResponse). hasStatus distinguishes "no status field at all"
-// from "status=0" -- both need to be tested separately, and a bare int can't represent "absent".
+// classifyResponse's building.production.collect status rule (collectStatusIsNoOp, which, unlike
+// errorCode, only fires for a specific cmd -- see TestClassifyResponse). hasStatus distinguishes
+// "no status field at all" from "status=0" -- they classify differently, and a bare int can't
+// represent "absent".
 func newTestExtMsgWithStatus(cmd string, errorCode any, status int32, hasStatus bool) *ExtensionMessage {
 	msg := newTestExtMsg(cmd, errorCode)
 	if hasStatus {
@@ -230,27 +231,27 @@ func TestLogCommandResultClassification(t *testing.T) {
 	// actually take (round 26: the previous "all three" wording only covered outcomeSuccess,
 	// outcomeBenign-with-a-code, and outcomeFailure -- missing logCommandResult's inner else,
 	// the outcomeBenign-with-an-EMPTY-errorCode case, i.e. the building.production.collect
-	// status=0-with-no-errorCode log line -- which was untested by this test, or any other test
+	// status-missing-or-minus-1 log line -- which was untested by this test, or any other test
 	// in the suite):
 	//   1. outcomeSuccess
 	//   2. outcomeBenign with a non-empty errorCode
-	//   3. outcomeBenign with no errorCode (the status=0 heuristic, via newTestExtMsgWithStatus)
+	//   3. outcomeBenign with no errorCode (status -1, via newTestExtMsgWithStatus)
 	//   4. outcomeFailure
 	// Classification logic itself is asserted precisely by TestClassifyResponse above; this just
 	// runs each branch through the real logger without panicking. Both benign cases must use their
 	// actual documented cmd (building.production.collect) -- since both the errorCode scoping and
-	// the status=0 heuristic are cmd-scoped, pairing either with an arbitrary "test.cmd" would
+	// the status rule are cmd-scoped, pairing either with an arbitrary "test.cmd" would
 	// silently exercise a different branch than intended.
 	logCommandResult("test success", newTestExtMsg("test.cmd", nil))
 	logCommandResult("test benign", newTestExtMsg("building.production.collect", "602026"))
-	logCommandResult("test benign no code", newTestExtMsgWithStatus("building.production.collect", nil, 0, true))
+	logCommandResult("test benign no code", newTestExtMsgWithStatus("building.production.collect", nil, -1, true))
 	logCommandResult("test real failure", newTestExtMsg("test.cmd", "999999"))
 }
 
 // TestClassifyResponse asserts classifyResponse's actual (outcome, code) return value directly,
-// including that the status=0-with-no-errorCode benign heuristic is scoped to
-// building.production.collect only -- for every other command a status=0 response with no
-// errorCode is a real success, not a no-op (see classifyResponse's doc comment in conn.go) -- and
+// including the building.production.collect status rule (collectStatusIsNoOp, conn.go: missing or
+// -1 is a no-op, any other status is a collection, per ProductLineManager.lua:596-606) and that it
+// is scoped to that cmd only -- for every other command a status field means nothing here -- and
 // that every benignErrorCodes entry is likewise scoped to its own documented cmd(s): the same
 // numeric/string errorCode value on an unrelated cmd must fall through to outcomeFailure rather
 // than being silently reclassified as outcomeBenign.
@@ -280,15 +281,46 @@ func TestClassifyResponse(t *testing.T) {
 			wantCode:    "",
 		},
 		{
-			name:        "no errorCode, status=0, cmd=building.production.collect -> benign",
+			name:        "no errorCode, status=1, cmd=building.production.collect -> success (every live collection)",
+			cmd:         "building.production.collect",
+			status:      1,
+			hasStatus:   true,
+			wantOutcome: outcomeSuccess,
+			wantCode:    "",
+		},
+		{
+			name:        "no errorCode, status=0, cmd=building.production.collect -> success (Lua: only missing or -1 is a no-op)",
 			cmd:         "building.production.collect",
 			status:      0,
+			hasStatus:   true,
+			wantOutcome: outcomeSuccess,
+			wantCode:    "",
+		},
+		{
+			name:        "no errorCode, status=-1, cmd=building.production.collect -> benign",
+			cmd:         "building.production.collect",
+			status:      -1,
 			hasStatus:   true,
 			wantOutcome: outcomeBenign,
 			wantCode:    "",
 		},
 		{
-			name:        "no errorCode, status=0, other cmd -> success (heuristic must not apply globally)",
+			name:        "no errorCode, no status field, cmd=building.production.collect -> benign",
+			cmd:         "building.production.collect",
+			hasStatus:   false,
+			wantOutcome: outcomeBenign,
+			wantCode:    "",
+		},
+		{
+			name:        "no errorCode, status=-1, other cmd -> success (status rule must not apply globally)",
+			cmd:         "mail.reward.batch",
+			status:      -1,
+			hasStatus:   true,
+			wantOutcome: outcomeSuccess,
+			wantCode:    "",
+		},
+		{
+			name:        "no errorCode, status=0, other cmd -> success",
 			cmd:         "mail.reward.batch",
 			status:      0,
 			hasStatus:   true,
@@ -386,6 +418,10 @@ func TestClassifyResponseWrongTypedStatusIsNotBenign(t *testing.T) {
 			name: "status is a bool, not an int",
 			put:  func(p *sfs.SFSObject) { p.PutBool("status", false) },
 		},
+		{
+			name: "status is the string \"-1\", not an int",
+			put:  func(p *sfs.SFSObject) { p.PutUtfString("status", "-1") },
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -395,12 +431,24 @@ func TestClassifyResponseWrongTypedStatusIsNotBenign(t *testing.T) {
 
 			gotOutcome, gotCode := classifyResponse(msg)
 			if gotOutcome == outcomeBenign {
-				t.Errorf("classifyResponse() = (%v, %q), want NOT outcomeBenign -- a wrong-typed status field must not be misclassified as the benign status==0 case (GetInt's zero-value coercion must not be trusted without a type check first)", gotOutcome, gotCode)
+				t.Errorf("classifyResponse() = (%v, %q), want NOT outcomeBenign -- a wrong-typed status field must not be misclassified as the benign no-op case (GetInt's zero-value coercion must not be trusted without a type check first)", gotOutcome, gotCode)
 			}
 			if gotOutcome != outcomeSuccess {
-				t.Errorf("classifyResponse() = (%v, %q), want outcomeSuccess (no errorCode present, and a wrong-typed status must be treated as if status were absent)", gotOutcome, gotCode)
+				t.Errorf("classifyResponse() = (%v, %q), want outcomeSuccess (no errorCode present, and a present wrong-typed status is not -1 -- Lua's == does not coerce -- so the real client takes its success path)", gotOutcome, gotCode)
 			}
 		})
+	}
+}
+
+// TestClassifyResponseNullStatusIsNoOp: an SFS null status reaches Lua as nil, so
+// `(message.status or -1) == -1` holds and the real client shows tip 602026 without collecting.
+// It must classify like a missing status, not like a wrong-typed one.
+func TestClassifyResponseNullStatusIsNoOp(t *testing.T) {
+	params := sfs.NewSFSObject()
+	params.PutValue("status", sfs.SFSValue{Type: sfs.SFSNull, Val: nil})
+	msg := &ExtensionMessage{Cmd: "building.production.collect", Params: params}
+	if gotOutcome, gotCode := classifyResponse(msg); gotOutcome != outcomeBenign || gotCode != "" {
+		t.Errorf("classifyResponse() = (%v, %q), want (outcomeBenign, \"\")", gotOutcome, gotCode)
 	}
 }
 

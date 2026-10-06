@@ -363,7 +363,7 @@ func TestHandleInteractiveLineSendsBareCommandWithNoSpace(t *testing.T) {
 	if g.cmd != "some.command" {
 		t.Errorf("Cmd = %q, want some.command", g.cmd)
 	}
-	if n := len(g.params.Keys()); n != 0 {
+	if n := len(session.ParamKeysWithoutID(g.params)); n != 0 {
 		t.Errorf("params has %d entries, want 0 for a bare command with no JSON", n)
 	}
 }

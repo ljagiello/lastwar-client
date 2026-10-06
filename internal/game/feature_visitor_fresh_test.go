@@ -76,7 +76,7 @@ func TestVisitorFreshSendsWhenQueueHasRoom(t *testing.T) {
 			if err != nil {
 				t.Fatalf("refreshVisitors() = %v, want nil", err)
 			}
-			if len(got) != 1 || got[0].cmd != "visitor.fresh" || len(got[0].params.Keys()) != 0 {
+			if len(got) != 1 || got[0].cmd != "visitor.fresh" || len(session.ParamKeysWithoutID(got[0].params)) != 0 {
 				t.Fatalf("server saw %v, want one visitor.fresh with no params", got)
 			}
 			if want := `msg="visitor-fresh: next visitor scheduled" uid=424242 eventId=2003 type=2 typeName=GIFT greetable=true`; !strings.Contains(buf.String(), want) {

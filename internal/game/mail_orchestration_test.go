@@ -1526,16 +1526,16 @@ func TestClaimAllMailItemCountBatching(t *testing.T) {
 	assertBatchesCoverExactly(t, "reward-claim", rewardBatches, []int{100, 1}, wantUids)
 }
 
-// TestClaimAllMailByteLengthBatching forces the maxUIDsBytes=60000 byte-length cap well under the
-// 100-item count cap: 11 same-type unclaimed mail entries with 6499-byte uids (6500 bytes each
+// TestClaimAllMailByteLengthBatching forces the maxUIDsBytes=30000 byte-length cap well under the
+// 100-item count cap: 11 same-type unclaimed mail entries with 3249-byte uids (3250 bytes each
 // once the joining comma is counted) must split 9-then-2, since a 10th uid would push the batch
-// to 65000 > 60000 bytes. Exercises both the read-status loop and the reward-claim loop, which
+// to 32500 > 30000 bytes. Exercises both the read-status loop and the reward-claim loop, which
 // share the same cap after this round's fix.
 func TestClaimAllMailByteLengthBatching(t *testing.T) {
 	client, server := session.NewPipeGameConnPair(t)
 
 	const total = 11
-	const uidLen = 6499
+	const uidLen = 3249
 	const mailType = int32(5)
 	var wantUids []string
 	var mails []*sfs.SFSObject
@@ -1578,9 +1578,9 @@ func TestClaimAllMailByteLengthBatching(t *testing.T) {
 // TestBatchByCountAndBytesExactByteBoundary is the round-47 regression test for the MINOR finding
 // that batchByCountAndBytes' byte-budget guard (mail.go: `batchBytes+len(uids[end])+1 <= maxBytes`)
 // had no test pinning its exact boundary -- TestClaimAllMailByteLengthBatching above is the closest
-// existing coverage, but its uid lengths (6499 bytes, batches topping out at 58500 of the real
-// maxUIDsBytes=60000) never land the running total on maxBytes or maxBytes+1 exactly, leaving a
-// margin of 1500-6500 bytes on either side. Calls batchByCountAndBytes directly (it's already a
+// existing coverage, but its uid lengths (3249 bytes, batches topping out at 29250 of the real
+// maxUIDsBytes=30000) never land the running total on maxBytes or maxBytes+1 exactly, leaving a
+// margin of 750-3250 bytes on either side. Calls batchByCountAndBytes directly (it's already a
 // standalone, network-free function -- no fake server needed) with uid lengths engineered so the
 // running total after the second uid lands EXACTLY at maxBytes (must still be admitted into the
 // first batch) or exactly maxBytes+1 (must be excluded, starting a new batch).

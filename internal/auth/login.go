@@ -207,7 +207,7 @@ func redirectUid(siObj *sfs.SFSObject, context string) string {
 // 1MiB whole-HTTP-body gsl.MaxGSLResponseSize cap, or an SFS2X serverInfo redirect field that can
 // arrive tagged sfs.SFSText (bounded only by packet.go's 64MiB sfs.MaxFrameSize) -- GetString cannot tell
 // that tag apart from the 65535-byte-capped sfs.SFSUtfString tag it also decodes to the identical Go
-// string type for. sfs.WriteUtfString (sfsobject.go) hard-rejects anything over 65535 bytes, so an
+// string type for. sfs.WriteUtfString (sfsobject.go) hard-rejects anything over 32767 bytes, so an
 // oversized value reaching PutUtfString fails sfs.EncodeObject/SendEnvelope, and that purely local
 // encode failure gets wrapped in sendStageError (conn.go), which deliberately, by design, forces
 // Timeout()==false -- indistinguishable from a genuine dead connection to every caller. field/
@@ -673,21 +673,15 @@ func accountLoginNewParams(email, code, pf, deviceID, airKey string) *sfs.SFSObj
 	return p
 }
 
-// checkDeviceChangeID is the _id sent with check.device.change. The real client numbers every
-// request from one per-connection counter starting at 2 after Login's 1; this client has no such
-// counter yet (MASTER §5.1 #19), and the server only echoes the value back.
-const checkDeviceChangeID = 2
-
 // SendCheckDeviceChange sends check.device.change {_id}, which the real client sends once after
 // every init (InitMessage, A-CS:82264; CheckDeviceChangeMessage, A-CS:81038-81062) without waiting
 // on it; it reads the reply's bool `r` whenever it arrives and ignores it. Live (real client,
 // 2026-10-04 capture) the reply was r:false 0.58 s after login. This is send-only as well: the
 // reply is skipped by whichever wait reads it next (visible at debug level as "skipped push ...
-// cmd=check.device.change"), so it adds no latency. The error reports a failed send only.
+// cmd=check.device.change"), so it adds no latency. The error reports a failed send only. The
+// _id comes from SendExtension's per-connection request sequence (MASTER §5.1 #19).
 func SendCheckDeviceChange(conn *session.GameConn) error {
-	p := sfs.NewSFSObject()
-	p.PutInt("_id", checkDeviceChangeID)
-	if err := conn.SendExtension("check.device.change", p); err != nil {
+	if err := conn.SendExtension("check.device.change", nil); err != nil {
 		return session.SendStageError{Err: err}
 	}
 	slog.Info("sent check.device.change")

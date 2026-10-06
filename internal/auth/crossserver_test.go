@@ -1101,7 +1101,9 @@ func withFailingDial(t *testing.T, n int, err error) {
 		if dialErr != nil {
 			return nil, dialErr
 		}
-		conn.SetRawConn(&writeFailAfterConn{Conn: conn.RawConn(), n: n, err: err})
+		// n+1: the first write on every dialed connection is StartHeartbeat's immediate ping, so n
+		// keeps counting only the login-path sends this helper targets.
+		conn.SetRawConn(&writeFailAfterConn{Conn: conn.RawConn(), n: n + 1, err: err})
 		return conn, nil
 	}
 	t.Cleanup(func() { dialGame = orig })

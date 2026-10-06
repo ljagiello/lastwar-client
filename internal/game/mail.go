@@ -137,7 +137,7 @@ const maxMailRewardTypesPerRun = 300
 // BATCHES batchByCountAndBytes produces. batchByCountAndBytes always admits at least one uid per
 // batch even if that uid alone exceeds maxUIDsBytes (see its own doc comment), and a mail uid is a
 // server-supplied string bounded only by the wire format's 65535-byte string-length limit -- well
-// over maxUIDsBytes(60000) -- so a peer returning mail entries with maximal-length uids can force
+// over maxUIDsBytes(30000) -- so a peer returning mail entries with maximal-length uids can force
 // every batch down to a single item, turning maxAggregateMailPerFetch(2000) items into up to 2000
 // sequential round trips instead of the ~20 batches (2000/readBatchSize=100) normal pagination
 // produces. Same category of ceiling, and the same value/rationale, as maxMailRewardTypesPerRun
@@ -153,7 +153,7 @@ const maxMailBatchesPerLoop = 300
 // those two caps bounds the sum across the whole outer loop. A hostile peer can spread up to
 // maxAggregateMailPerFetch(2000) unclaimed-reward mail entries across up to
 // maxMailRewardTypesPerRun(300) distinct types (~6-7 entries per type) each with a uid long
-// enough (up to maxMailUidLen=65535, still well over maxUIDsBytes=60000) to force
+// enough (up to maxMailUidLen=32767, still over maxUIDsBytes=30000) to force
 // batchByCountAndBytes into one uid per batch -- with only ~6-7 batches per type, no single type
 // ever reaches maxMailBatchesPerLoop's own 300-batch truncation, but the SUM across 300 types
 // still reaches roughly 2000 mail.reward.batch round trips, each able to cost up to a full
@@ -174,7 +174,7 @@ const maxMailRewardBatchesPerRun = 300
 // own maxUIDsBytes budget (see its own doc comment), so an oversized uid became its own singleton
 // batch and reached sfs.WriteUtfString (sfsobject.go) when ClaimAllMail re-encoded it into a
 // mail.read.status.betch/mail.reward.batch request's "uids" field -- sfs.WriteUtfString hard-errors for
-// any string over 65535 bytes, a PURELY LOCAL encode failure with no involvement of the network at
+// any string over 32767 bytes, a PURELY LOCAL encode failure with no involvement of the network at
 // all. That local error is wrapped in sendStageError (conn.go), whose Timeout() is hardcoded false
 // by design (see its own doc comment: this is intentional, covering "a local encode error from
 // deeper in SendExtension/SendEnvelope" alongside genuine write failures) -- so ClaimAllMail's own
@@ -183,8 +183,8 @@ const maxMailRewardBatchesPerRun = 300
 // (buildings.go), every other -collect action scheduled after it in the same run. Set at exactly
 // the wire format's own hard limit -- any uid this function would otherwise accept is guaranteed
 // re-encodable by sfs.WriteUtfString later, closing the gap at its source instead of only softening the
-// downstream misclassification.
-const maxMailUidLen = 65535
+// downstream misclassification. Tracks sfs.MaxUtfStringBytes (32767, the SFS2X WriteUTF cap).
+const maxMailUidLen = sfs.MaxUtfStringBytes
 
 // ListMail fetches the account's mail via `chat.get.system.mails`,
 // following the real client's own request shape
@@ -330,7 +330,7 @@ func ListMail(conn *session.GameConn) ([]Mail, error) {
 			break
 		}
 		// Round-46 fix: lastUid gets re-sent verbatim as the next page's clientseq via
-		// PutUtfString (sfs.WriteUtfString's own 65535-byte hard cap), but GetString can't
+		// PutUtfString (sfs.WriteUtfString's own 32767-byte hard cap), but GetString can't
 		// distinguish the 65535-byte-capped sfs.SFSUtfString wire tag from the far larger sfs.SFSText
 		// tag -- the identical wire-tag-equivalence gap round 45 closed for the per-entry mail
 		// uid field (maxMailUidLen, above). Left unguarded here, an oversized lastUid would
@@ -496,7 +496,7 @@ func ClaimAllMail(conn *session.GameConn) error {
 	}
 	// readBatchSize caps how many mail uids go into a single "mail.read.status.betch" or
 	// "mail.reward.batch" request. maxUIDsBytes additionally caps the byte length of each
-	// batch's joined "uids" string, keeping it safely under the wire format's 65535-byte
+	// batch's joined "uids" string, keeping it safely under the encoder's 32767-byte
 	// string-length limit -- past that, sfsobject.go's encoder (sfs.WriteUtfString) now returns a
 	// clean error rather than panicking, but that's still a batch-encode failure that drops the
 	// whole batch for this run, so it's worth avoiding rather than merely surviving.
@@ -505,9 +505,10 @@ func ClaimAllMail(conn *session.GameConn) error {
 	// many same-type unclaimed rewards -- can blow the joined length even well under 100 items.
 	// Shared by both batch loops below (via batchByCountAndBytes) since both send a comma-joined
 	// "uids" field subject to the same limit.
+	// maxUIDsBytes stays under sfs.MaxUtfStringBytes (32767), the encoder's actual string cap.
 	const (
 		readBatchSize = 100
-		maxUIDsBytes  = 60000
+		maxUIDsBytes  = 30000
 	)
 	offset := 0
 	readFailed := false

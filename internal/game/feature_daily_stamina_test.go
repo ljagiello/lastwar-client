@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 )
 
@@ -41,7 +42,7 @@ func TestDailyStaminaClaimsWhenCooldownPassed(t *testing.T) {
 	if got := fake.cmds(); !slices.Equal(got, want) {
 		t.Errorf("sent %v, want %v", got, want)
 	}
-	if n := len(fake.requests()[1].Params.Keys()); n != 0 {
+	if n := len(session.ParamKeysWithoutID(fake.requests()[1].Params)); n != 0 {
 		t.Errorf("claim carried %d params, want none", n)
 	}
 }

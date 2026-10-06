@@ -378,6 +378,7 @@ func Run() {
 	result, err := auth.Login(auth.LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake})
 	if err != nil {
 		slog.Error("login failed", "error", err)
+		exitIfSessionEnded(err, nil)
 		exitIfReauthNeeded(err)
 		// Exit code 2 (rather than the generic 1) specifically marks a
 		// confirmed server-side auth rejection (ErrAuthRejected) -- the
@@ -417,6 +418,7 @@ func Run() {
 		}
 		if fbErr != nil {
 			slog.Error("fetch buildings failed", "error", fbErr)
+			exitIfSessionEnded(fbErr, conn)
 			// See shouldAbortBeforeInteractive's own doc comment: this call site is reached over
 			// a connection Login() itself already established and used successfully, so a
 			// FetchBuildings failure here that isn't evidence of a genuinely dead connection
@@ -449,6 +451,7 @@ func Run() {
 		slog.Info("collecting resources")
 		if err := game.CollectAll(conn, buildings, visitors); err != nil {
 			slog.Error("collect run had failures", "error", err)
+			exitIfSessionEnded(err, conn)
 			if shouldAbortBeforeInteractive(err, *interactive != "") {
 				// See the identical round-40 fix's doc comment on the sibling os.Exit(1) above.
 				_ = conn.Close()
@@ -548,6 +551,27 @@ func shouldAbortBeforeInteractive(err error, interactiveRequested bool) bool {
 		return true
 	}
 	return !interactiveRequested
+}
+
+// exitCodeSessionEnded is the exit code for a run the server ended with a terminal push
+// (session.ErrSessionEnded): kicked by a login elsewhere, a maintenance stop, or init.error. It is
+// distinct from 1 (generic) and 2 (stale session) so a cron wrapper can tell "do not retry before
+// the next scheduled run" apart from both without parsing the log.
+const exitCodeSessionEnded = 3
+
+// exitIfSessionEnded exits with exitCodeSessionEnded when err carries session.ErrSessionEnded,
+// and returns otherwise. The real client never reconnects after these pushes, so this exits even
+// when -interactive was requested. conn may be nil (a failed login has none to close).
+func exitIfSessionEnded(err error, conn *session.GameConn) {
+	if !errors.Is(err, session.ErrSessionEnded) {
+		return
+	}
+	slog.Error("the server ended this session; exiting without reconnecting, the next scheduled run starts a fresh one",
+		"error", err, "exitCode", exitCodeSessionEnded)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	os.Exit(exitCodeSessionEnded)
 }
 
 // decodeModeIgnoredFlags returns which of the given visited (explicitly set on the command line)
@@ -1201,6 +1225,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	})
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
+		exitIfSessionEnded(err, nil)
 		if errors.Is(err, session.ErrTokenRejected) {
 			slog.Error("the session config's access token has been rotated server-side; every run will fail until it is replaced. " +
 				"Recapture: run `tcpdump -i en0 -w login.pcap 'tcp and not port 443'`, cold-start the real app until its main screen loads, " +
@@ -1256,6 +1281,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	buildings := initPush.Buildings
 	if err != nil {
 		slog.Error("fetch buildings failed", "error", err)
+		exitIfSessionEnded(err, conn)
 		// See shouldAbortBeforeInteractive's own doc comment: the exact same bug class round 25
 		// closed for CollectAll's two call sites -- a FetchBuildings failure here that isn't
 		// evidence of a genuinely dead connection (e.g. a decode/parse failure on one bad frame,
@@ -1276,6 +1302,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	if o.runFeature != "" {
 		if err := game.RunFeatures(conn, initPush, nil, o.runFeature); err != nil {
 			slog.Error("feature run failed", "feature", o.runFeature, "error", err)
+			exitIfSessionEnded(err, conn)
 			_ = conn.Close()
 			os.Exit(1)
 		}
@@ -1289,6 +1316,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		slog.Info("collecting resources")
 		if err := game.Collect(conn, initPush, o.features); err != nil {
 			slog.Error("collect run had failures", "error", err)
+			exitIfSessionEnded(err, conn)
 			if shouldAbortBeforeInteractive(err, o.interactive != "") {
 				// See the identical round-40 fix's doc comment on the sibling os.Exit(1) above.
 				_ = conn.Close()

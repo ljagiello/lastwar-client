@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 )
 
@@ -77,7 +78,7 @@ func TestFreeChestsClaimsAllThreeWhenDue(t *testing.T) {
 	if p := reqs[2].Params; p.GetInt("isLogin") != 1 {
 		t.Errorf("week card info params = %v, want isLogin 1", p)
 	}
-	if len(reqs[1].Params.Keys())+len(reqs[3].Params.Keys()) != 0 {
+	if len(session.ParamKeysWithoutID(reqs[1].Params))+len(session.ParamKeysWithoutID(reqs[3].Params)) != 0 {
 		t.Error("the weekly and week-card claims must carry no params")
 	}
 }

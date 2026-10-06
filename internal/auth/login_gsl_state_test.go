@@ -393,8 +393,9 @@ func TestSendCheckDeviceChange(t *testing.T) {
 	if msg.Cmd != "check.device.change" {
 		t.Errorf("cmd = %q, want check.device.change", msg.Cmd)
 	}
-	if keys := msg.Params.Keys(); len(keys) != 1 || keys[0] != "_id" || msg.Params.GetInt("_id") != checkDeviceChangeID {
-		t.Errorf("params = %s, want only _id=%d", msg.Params.StringRedacted(), checkDeviceChangeID)
+	// The first request on a fresh connection gets _id 2 (Login took 1).
+	if keys := msg.Params.Keys(); len(keys) != 1 || keys[0] != "_id" || msg.Params.GetInt("_id") != 2 {
+		t.Errorf("params = %s, want only _id=2", msg.Params.StringRedacted())
 	}
 	if _, err := session.SendAndWait(client, "next", "next.cmd", sfs.NewSFSObject()); err != nil {
 		t.Errorf("next command after check.device.change: %v", err)

@@ -1,6 +1,7 @@
 package sfs
 
 import (
+	"bytes"
 	"math"
 	"strings"
 	"testing"
@@ -8,7 +9,7 @@ import (
 
 // TestEncodeObjectOversizedStringReturnsError proves the WriteUtfString/int16Count panic-on-
 // oversized-input bug is fixed: EncodeObject must return an error, not crash the process, when a
-// value string exceeds the wire format's 2-byte length-prefix limit (65535 bytes). This chain
+// value string exceeds MaxUtfStringBytes (the SFS2X WriteUTF cap, 32767 bytes). This chain
 // (EncodeObject -> writeTaggedValue -> writeValuePayload -> WriteUtfString) is reachable from
 // server-controlled data with zero recover() anywhere in this repo, so a panic here previously
 // meant any oversized value could crash the whole process.
@@ -49,22 +50,22 @@ func TestEncodeObjectOversizedNestedStringReturnsError(t *testing.T) {
 }
 
 // TestEncodeObjectStringExactlyMaxLenSucceeds is the round-45 regression test for the MINOR
-// finding that WriteUtfString's own 65535-byte length-prefix cap (sfsobject.go: `if len(b) >
-// 65535`) had no exact-boundary test -- distinct from int16Count's separate item-COUNT cap
+// finding that WriteUtfString's own length cap (sfsobject.go: `if len(b) > MaxUtfStringBytes`)
+// had no exact-boundary test -- distinct from int16Count's separate item-COUNT cap
 // (round 44's TestEncodeObjectExactlyMaxArrayLengthSucceeds covers that one, not this one).
 // TestEncodeObjectOversizedStringReturnsError/TestEncodeObjectOversizedNestedStringReturnsError
 // above only prove a 70000-byte string (comfortably over the cap) is rejected, never that exactly
-// 65535 bytes -- the boundary value itself -- still encodes and round-trips through DecodeObject
-// successfully.
+// MaxUtfStringBytes -- the boundary value itself -- still encodes and round-trips through
+// DecodeObject successfully.
 func TestEncodeObjectStringExactlyMaxLenSucceeds(t *testing.T) {
-	want := strings.Repeat("z", 65535)
+	want := strings.Repeat("z", MaxUtfStringBytes)
 
 	o := NewSFSObject()
 	o.PutUtfString("s", want)
 
 	encoded, err := EncodeObject(o)
 	if err != nil {
-		t.Fatalf("EncodeObject() error = %v, want nil for exactly 65535 bytes (the boundary value, not over the cap)", err)
+		t.Fatalf("EncodeObject() error = %v, want nil for exactly %d bytes (the boundary value, not over the cap)", err, MaxUtfStringBytes)
 	}
 
 	decoded, err := DecodeObject(encoded)
@@ -73,6 +74,50 @@ func TestEncodeObjectStringExactlyMaxLenSucceeds(t *testing.T) {
 	}
 	if got := decoded.GetString("s"); got != want {
 		t.Errorf("decoded string length = %d, want %d", len(got), len(want))
+	}
+}
+
+// TestWriteUtfStringCapMatchesSFS2XWriteUTF pins the 32767-byte cap to the game's own SFS2X
+// codec: ByteArray.WriteUTF throws above short.MaxValue bytes (SmartFox2X.decompiled.cs:
+// 20369-20380), even though the u16 length prefix could carry up to 65535. One byte over the cap
+// must fail -- as a value, as an object key, and inside a UTF string array -- since all three are
+// written through WriteUtfString, as they are through WriteUTF in the real client. A rejected
+// string must not leave a partial length prefix in the buffer.
+func TestWriteUtfStringCapMatchesSFS2XWriteUTF(t *testing.T) {
+	if MaxUtfStringBytes != 32767 {
+		t.Fatalf("MaxUtfStringBytes = %d, want 32767 (short.MaxValue, the SFS2X WriteUTF cap)", MaxUtfStringBytes)
+	}
+	over := strings.Repeat("o", MaxUtfStringBytes+1)
+
+	var buf bytes.Buffer
+	if err := WriteUtfString(&buf, over); err == nil {
+		t.Fatal("WriteUtfString accepted a 32768-byte string, want an error")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("WriteUtfString wrote %d bytes for a rejected string, want 0", buf.Len())
+	}
+
+	// The cap counts UTF-8 bytes, not runes: 10923 three-byte runes are 32769 bytes.
+	if err := WriteUtfString(&buf, strings.Repeat("€", 10923)); err == nil {
+		t.Error("WriteUtfString accepted 32769 bytes of multi-byte runes, want an error")
+	}
+
+	value := NewSFSObject()
+	value.PutUtfString("s", over)
+	if _, err := EncodeObject(value); err == nil {
+		t.Error("EncodeObject accepted a 32768-byte UTF string value, want an error")
+	}
+
+	key := NewSFSObject()
+	key.PutInt(over, 1)
+	if _, err := EncodeObject(key); err == nil {
+		t.Error("EncodeObject accepted a 32768-byte object key, want an error")
+	}
+
+	arr := NewSFSObject()
+	arr.PutValue("a", SFSValue{sfsUtfStringArray, []string{"ok", over}})
+	if _, err := EncodeObject(arr); err == nil {
+		t.Error("EncodeObject accepted a 32768-byte UTF string array item, want an error")
 	}
 }
 
