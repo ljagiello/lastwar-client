@@ -138,20 +138,38 @@ func TodayDuel(conn *session.GameConn, in *Init) *DuelDay {
 		if d := parseDuelDay(info, evNow()); d != nil {
 			return d
 		}
+		if !info.Has("eventList") {
+			slog.Warn("alliance duel: event info reply has no eventList", "activity", a.ID, "requestId", a.IDString(), "entryKeys", a.Raw.Keys())
+			slog.Debug("alliance duel: init activity entry", "entry", a.Raw.StringRedacted())
+		}
 	}
 	return nil
 }
 
-// parseDuelDay picks the eventList entry of type 15 whose begintime <= now < endtime.
+// duelEntryWindow is an eventList entry's day window in unix ms. ActivityEventInfo:ParseData reads
+// begintime/endtime (ActivityEventInfo.lua:69-74), but the live entry (2026-10-06) carries the
+// window as st/et instead, the fields RefreshActivityTime reads (ActivityListDataManager.lua:
+// 1193-1198); either pair is accepted, begintime/endtime first.
+func duelEntryWindow(e *sfs.SFSObject) (begin, end int64, ok bool) {
+	for _, k := range [][2]string{{"begintime", "endtime"}, {"st", "et"}} {
+		b, ok1 := evNum(e, k[0])
+		en, ok2 := evNum(e, k[1])
+		if ok1 && ok2 {
+			return b, en, true
+		}
+	}
+	return 0, 0, false
+}
+
+// parseDuelDay picks the eventList entry of type 15 whose window contains now.
 func parseDuelDay(info *sfs.SFSObject, now time.Time) *DuelDay {
 	ms := now.UnixMilli()
 	for _, e := range evObjects(info, "eventList") {
 		if t, ok := evNum(e, "t"); !ok || t != allianceDuelEventType {
 			continue
 		}
-		begin, ok1 := evNum(e, "begintime")
-		end, ok2 := evNum(e, "endtime")
-		if !ok1 || !ok2 || ms < begin || ms >= end {
+		begin, end, ok := duelEntryWindow(e)
+		if !ok || ms < begin || ms >= end {
 			continue
 		}
 		d := &DuelDay{End: time.UnixMilli(end)}

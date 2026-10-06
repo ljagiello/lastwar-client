@@ -9,7 +9,8 @@ import (
 	"lastwar-client/internal/sfs"
 )
 
-// duelEntry builds one eventList entry like hero.event.info.get {activityId:"55000"} returns.
+// duelEntry builds one eventList entry like hero.event.info.get {activityId:"70000"} returns live,
+// with the day window in st/et.
 func duelEntry(theme int32, score string, begin, end time.Time) *sfs.SFSObject {
 	e := sfs.NewSFSObject()
 	e.PutInt("t", allianceDuelEventType)
@@ -17,8 +18,8 @@ func duelEntry(theme int32, score string, begin, end time.Time) *sfs.SFSObject {
 	e.PutUtfString("actId", "act-1")
 	e.PutUtfString("score", score)
 	e.PutUtfString("target", "40000|150000|540000")
-	e.PutLong("begintime", begin.UnixMilli())
-	e.PutLong("endtime", end.UnixMilli())
+	e.PutLong("st", begin.UnixMilli())
+	e.PutLong("et", end.UnixMilli())
 	us := sfs.NewSFSObject()
 	us.PutLong("score", 60000)
 	e.PutSFSObject("userScore", us)
@@ -62,19 +63,41 @@ func TestParseDuelDayStrictAndScores(t *testing.T) {
 	if !base.Scores(DuelScoreSpeedUp, DuelQueueBuild) || base.Scores(DuelScoreSpeedUp, DuelQueueResearch) {
 		t.Error("base expansion must score construction speed-ups only")
 	}
+	// The client's own begintime/endtime pair (ActivityEventInfo.lua:69-74) is read too.
+	old := sfs.NewSFSObject()
+	old.PutInt("t", allianceDuelEventType)
+	old.PutInt("eventId", DuelThemeScience)
+	old.PutUtfString("score", "90301")
+	if d := parseDuelDay(duelInfo(old), now); d != nil {
+		t.Errorf("an entry with no window must not count as today: %+v", d)
+	}
+	old.PutLong("begintime", now.Add(-time.Hour).UnixMilli())
+	old.PutLong("endtime", now.Add(time.Hour).UnixMilli())
+	if d := parseDuelDay(duelInfo(old), now); d == nil || d.Theme != DuelThemeScience {
+		t.Errorf("a begintime/endtime entry must parse: %+v", d)
+	}
 }
 
-// duelFake serves an open duel activity whose info reply is the given entries.
+// duelActivity is the duel's init entry as the live push carries it: id 55000 (the activity row)
+// with activityid "70000" (the heroactivity row), the id hero.event.info.get must ask for.
+func duelActivity() *sfs.SFSObject {
+	a := evActivity(55000)
+	a.PutUtfString("activityid", "70000")
+	return a
+}
+
+// duelFake serves an open duel activity whose info reply is the given entries. Like the live
+// server, it answers a request for the table id "55000" with a bare success and no eventList.
 func duelFake(t *testing.T, entries ...*sfs.SFSObject) (*session.GameConn, *Init) {
 	t.Helper()
 	withEvNow(t, evTestNow)
 	conn, _ := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
-		if cmd == "hero.event.info.get" && p.GetString("activityId") == "55000" {
+		if cmd == "hero.event.info.get" && p.GetString("activityId") == "70000" {
 			return duelInfo(entries...)
 		}
 		return evOK()
 	})
-	return conn, evInit(30, evActivity(55000))
+	return conn, evInit(30, duelActivity())
 }
 
 func TestDuelHeldPolicy(t *testing.T) {

@@ -203,8 +203,8 @@ func claimAllianceDuel(s *ActivitySweep, b *evBatch, in *Init, a Activity) {
 	}
 }
 
-// allianceDuelCurrentEvent picks today's eventList entry: the one whose begintime/endtime (ms)
-// contain now, else the last one, which is what the client keeps.
+// allianceDuelCurrentEvent picks today's eventList entry: the one whose window (duelEntryWindow,
+// ms) contains now, else the last one, which is what the client keeps.
 func allianceDuelCurrentEvent(info *sfs.SFSObject) *sfs.SFSObject {
 	events := evObjects(info, "eventList")
 	if len(events) == 0 {
@@ -212,9 +212,7 @@ func allianceDuelCurrentEvent(info *sfs.SFSObject) *sfs.SFSObject {
 	}
 	now := evNow().UnixMilli()
 	for _, e := range events {
-		begin, ok1 := evNum(e, "begintime")
-		end, ok2 := evNum(e, "endtime")
-		if ok1 && ok2 && begin <= now && now < end {
+		if begin, end, ok := duelEntryWindow(e); ok && begin <= now && now < end {
 			return e
 		}
 	}
