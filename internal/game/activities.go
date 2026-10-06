@@ -242,6 +242,26 @@ func (s *ActivitySweep) Open(types ...int32) []Activity {
 	return out
 }
 
+// All returns every parsed activity of the given types, open or not, by id.
+func (s *ActivitySweep) All(types ...int32) []Activity {
+	if s == nil {
+		return nil
+	}
+	var out []Activity
+	for _, a := range s.all {
+		if len(types) == 0 || slices.Contains(types, a.Type) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// Forget drops the cached cmd reply for a, so the next Info call fetches it again (after a claim
+// changed it).
+func (s *ActivitySweep) Forget(cmd string, a Activity) {
+	delete(s.replies, cmd+"#"+a.IDString())
+}
+
 // EventInfo returns the activity's hero.event.info.get reply, the detail request
 // ActivityListDataManager:AddOneActivity sends for most event types. Its activityId is a
 // UtfString, unlike the Int every claim takes (ActivityEventInfoGetMessage.lua:4-6). A reply with
@@ -335,6 +355,82 @@ func evClaimedToday(in *Init, ts int64) (claimed, ok bool) {
 		return false, true
 	}
 	return !evUnix(ts).Before(start), true
+}
+
+// evNum reads a numeric field the server may send as any integer type, a double or a decimal
+// string (the Lua tonumber()s them all alike). ok is false when it is absent or not a number.
+func evNum(o *sfs.SFSObject, key string) (int64, bool) {
+	v, ok := o.Get(key)
+	if !ok {
+		return 0, false
+	}
+	switch n := v.Val.(type) {
+	case int64, int32, int16, byte:
+		return o.GetLong(key), true
+	case float64:
+		return int64(n), true
+	case float32:
+		return int64(n), true
+	case string:
+		f, err := strconv.ParseFloat(n, 64)
+		if err != nil {
+			return 0, false
+		}
+		return int64(f), true
+	}
+	return 0, false
+}
+
+// evString reads a field the server may send as a string or a number, as a string.
+func evString(o *sfs.SFSObject, key string) string {
+	v, ok := o.Get(key)
+	if !ok {
+		return ""
+	}
+	if s, ok := v.Val.(string); ok {
+		return s
+	}
+	if n, ok := evNum(o, key); ok {
+		return strconv.FormatInt(n, 10)
+	}
+	return ""
+}
+
+// evObjects returns the object elements of the array under key, skipping anything else.
+func evObjects(o *sfs.SFSObject, key string) []*sfs.SFSObject {
+	v, ok := o.Get(key)
+	if !ok {
+		return nil
+	}
+	a, _ := v.Val.(*sfs.SFSArray)
+	if a == nil {
+		return nil
+	}
+	var out []*sfs.SFSObject
+	for _, it := range a.Items() {
+		if e, ok := it.Val.(*sfs.SFSObject); ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// evObject returns the object under key, or nil.
+func evObject(o *sfs.SFSObject, key string) *sfs.SFSObject {
+	v, ok := o.Get(key)
+	if !ok {
+		return nil
+	}
+	e, _ := v.Val.(*sfs.SFSObject)
+	return e
+}
+
+// evInitEffect is init effect[id] (EffectData:InitFromNet reads `effect` as id -> value,
+// EffectData.lua:51-55, 254-257). The client's GetGameEffect adds alliance, city, server and
+// season sources on top, so this is a lower bound.
+func evInitEffect(in *Init, id int) int64 {
+	n, _ := evNum(in.Object("effect"), strconv.Itoa(id))
+	return n
 }
 
 // activityTypeOf returns the EnumActivity type of activity id from table `activity`.
