@@ -3,7 +3,7 @@ title: "Findings & further work"
 description: "Every question flagged during the client-building effort and how it was resolved, plus the questions that remain open."
 ---
 
-Every question flagged during the client-building effort, and how it was resolved. Of the original 8 open items, a dedicated multi-agent research pass closed 6 outright, and live testing against production (see [Live validation against production](/live-validation)) closed the remaining 2. Two more items (enum numeric values, ShuMei/ACE enforcement) surfaced and were closed during that same live-testing pass, outside the original 8. The 1.0.364 analysis and live work in October 2026 then closed eight more questions and opened several new ones, and a full-coverage pass over the 1.0.364 APK corrected 21 claims across these docs (see the full coverage analysis below). This page tracks all of them, plus the narrow follow-on work that remains.
+Every question flagged during the client-building effort, and how it was resolved. Of the original 8 open items, a dedicated multi-agent research pass closed 6 outright, and live testing against production (see [Live validation against production](/live-validation)) closed the remaining 2. Two more items (enum numeric values, ShuMei/ACE enforcement) surfaced and were closed during that same live-testing pass, outside the original 8. The 1.0.364 analysis and live work in October 2026 then closed ten more questions and opened several new ones, and a full-coverage pass over the 1.0.364 APK corrected 21 claims across these docs (see the full coverage analysis below). This page tracks all of them, plus the narrow follow-on work that remains.
 
 ## Status at a glance
 
@@ -36,6 +36,13 @@ This table exists so a future update can change just the relevant row without re
 | Where `resVersion`'s last two parts come from | **Resolved**: local table and locale versions | 1.0.364 C# + live testing |
 | Whether the Tactical Chip Factory collects with `chip.collect` or `building.camp.collect` | **Open** | |
 | Whether the live `init` carries `real_timezone_offset` | **Open** | |
+| Which id the Alliance Duel detail read takes | **Resolved**: the entry's `activityid`, `"70000"` | 1.0.364 Lua + live testing |
+| The duel `eventList` day-window fields | **Resolved**: `st`/`et` live, not `begintime`/`endtime` | Live testing |
+| Whether an items-only `build.ccd.m.new` touches diamonds | **Resolved**: no, `remainGold` unchanged, items listed in `itemCostArr` | Live testing |
+| When each duel action books its points (start, finish, or claim) | **Open** | |
+| Whether unclaimed duel chests are mailed | **Open** | |
+| Whether a finished radar task survives its `endTime` | **Open** | |
+| Whether an empty or over-count `itemIDs` is charged in diamonds | **Open** | |
 
 ## Full coverage analysis (1.0.364)
 
@@ -91,6 +98,8 @@ The full row-level indexes (commands, claim commands, send sites, systems, table
 - ~~**What the mail claim's `type` holds**~~: **Resolved** for the real client: an internal mail group id sent as a UtfString. `goclient` sends the raw mail type as an Int, and the server accepts it (confirmed live). Which value the server reads stays open. See [Alliance, chat & mail](/alliance-chat-mail).
 - ~~**Where `resVersion`'s last two parts come from**~~: **Resolved** they're local state. The C# builds the tail from `CURRENT_TABLE_VERSION` and `LOCALE_VERSION`, the newest table and locale on the device, built-in or downloaded (static-analysis-only). Check-version does return `table_version` and `locale`, but only for `table_env=table_online`, which `goclient` doesn't send (confirmed live on 2026-10-05); that request returned 39516 and 23570, the iOS app's tail. See [Startup, version-check & hot-update](/bootstrap#resversion).
 - ~~**What the forward header's id means**~~: **Resolved** statically: it's the zone number, `ParseSid("APS783") = 783` in `BaseUtils`, which matches the `0x030F` in the 2026-10-04 capture. A second capture on another zone would confirm it live.
+- ~~**Which id the Alliance Duel detail read takes**~~: **Resolved** the `init` entry's `activityid`, not its `id`. The duel's entry is `{id: 55000, activityid: "70000"}`, and `ActivityInfoData` lets `activityid` override `id` (static-analysis-only). Asked for `"55000"`, the server answers a bare `{success=true}`; asked for `"70000"`, it returns the full `eventList` (both confirmed live on 2026-10-06). The live entries carry their day window as `st`/`et`. See [Alliance Duel](/alliance-duel).
+- ~~**Whether an items-only speed-up touches diamonds**~~: **Resolved** for `build.ccd.m.new`. With only `itemIDs`, the reply's `remainGold` equaled the starting balance and `itemCostArr` listed every item spent (confirmed live on 2026-10-06). `queue.ccd.m.new` and `building.camp.accel` haven't been sent live yet. See [Live validation against production](/live-validation#alliance-duel-and-duel-spend-commands).
 - ~~**Whether `at.time` is an issue time or an expiry**~~: **Resolved** an issue time. A GSL `opt=login` response on 2026-10-04 carried `at.time` and `rt.time` equal to the moment of issue, in unix seconds (confirmed live), consistent with the 1.0.364 client's 30-day refresh rule. Whether the server also expires tokens on its own, and so what caused the 2026-10-02 rotation, stays open. See [Live validation against production](/live-validation).
 
 ## Open questions
@@ -106,6 +115,10 @@ These came out of the 1.0.364 static analysis and the October 2026 live work. St
 - **Does the live `init` carry `real_timezone_offset`?** The C# applies it only when present, and the Lua falls back to UTC without it, which would move its day boundary from 02:00 to 00:00 UTC while `tomorrow` stays at 02:00. The 2026-10-04 capture shows the key in the `Login` response; listing the top-level keys of a captured `init` would settle it. See [Identity, login & session](/auth#server-day-and-daily-reset).
 - **Does the server check `platform` on `opt=refresh`?** The real iOS client sends `platform=iOS`; `goclient` always sends `Android`. A refresh token is scarce, so this hasn't been tested.
 - **`status=0` from `building.production.collect`.** The Lua treats only a missing or `-1` status as failure; every live success has carried `status=1`.
+- **When does each Alliance Duel action book its points?** For radar tasks, UR secret tasks, power gains, and troop training, the points could land at the start, the finish, or the claim. The client's own radar Claim All dialog points at the claim for radar tasks (static-analysis-only). `goclient` now logs every `push.act.score.obtain` with the request sent before it, which answers this per action from ordinary runs. See [Alliance Duel](/alliance-duel#the-score-push).
+- **Are unclaimed duel chests mailed at the day's end?** A mail template for it exists in the locale; no live observation yet.
+- **Does a finished radar task survive its `endTime`?** Finished (state `1`) tasks are listed with an `endTime` like unstarted ones. Whether the server drops them at that time decides how long a finished task can wait unclaimed.
+- **Is an empty or over-count `itemIDs` charged in diamonds?** An empty `itemIDs` on `queue.ccd.m.new` is the client's own diamond instant finish (`ArmyManager.lua:199-203`). What the server does with more items than are owned is unknown. `goclient` never sends either, so this stays a static reading.
 
 ## Resolved by live testing
 

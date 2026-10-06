@@ -23,6 +23,9 @@ Everything documented elsewhere in this dossier up to this point was static anal
 | Following a `serverInfo` zone-migration redirect (real server merge, not a test scenario) | **Confirmed** live, reconnected across a real `APS783` → `APS8092` merge with zero manual intervention after the fix; three distinct bugs found and fixed along the way, see "A real server merge exposed three real redirect-following bugs" below |
 | Recovering from a server-side token rotation (`ec=28`, `ep=[E011]`) | **Confirmed** live on 2026-10-04: a fresh capture of the real app, turned into a session config by `pcap -session-out`, restored the scheduled runs, see "The 2026-10-02 token rotation" below |
 | Falling back through a zone's gateway list | **Confirmed** live: with an unreachable TEST-NET address as the first gateway, the dial timed out after 10 s and login succeeded through the next one, see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe) |
+| Reading today's Alliance Duel entry (`hero.event.info.get {activityId: "70000"}`) | **Confirmed** live on 2026-10-06: the theme, scoring ids, chest thresholds and day window, after two fixes (ask for the entry's `activityid`; read `st`/`et`), see "Alliance Duel and duel spend commands" below |
+| Items-only construction speed-up (`build.ccd.m.new {itemIDs}`) | **Confirmed** live on 2026-10-06: items spent per `itemCostArr`, `remainGold` unchanged, the build timer shortened, see below |
+| Radar Help Teammates (`detect.event.help.start` / `.end`) | **Confirmed** live on 2026-10-06: the tasks were listed as finished afterwards, unclaimed, see below |
 
 ## The reconnect wall
 
@@ -357,6 +360,73 @@ Claiming a reward sends `mail.reward.batch {uids, type}` per category, grouped b
 </Info>
 
 Wired into the Go client as `ClaimAllMail` (`mail.go`), called automatically on every `-collect` run. Live-tested end to end after the fix: a full mailbox of 350 real entries, correctly paginated across 4 pages, all successfully marked read in one run. The reward claim has since run against real unclaimed rewards too: `mail.reward.batch` returns `{success=true}`, and each unclaimed mail is gone after one run.
+
+## Alliance Duel and duel spend commands
+
+<Check>
+  **Confirmed live on 2026-10-06** (a Tuesday, Base Expansion), through `goclient`'s `-run` path against the real account. Field names and shapes only; values that identify the account are left out. The protocol background is on [Alliance Duel](/alliance-duel).
+</Check>
+
+### Duel detection: `activityid`, not `id`
+
+The first live run of the duel scheduler reported "no duel day running" on a duel day. Two things were wrong, and both were only visible live:
+
+- **The detail read asked for the wrong id.** The duel's `init` entry is `{id: 55000, activityid: "70000", name, startTime, endTime, readyTime, matchGroupId, uuid}`. The client sends `activityid` when an entry has one (`ActivityInfoData.lua:126-128, 160-161`). `hero.event.info.get {activityId: "55000"}` got a bare `{success=true}` and nothing else, even with the session held open for another 10 seconds. `{activityId: "70000"}` got the full reply: `{activityId, type: 15, ranking, isFix, eventList}`.
+- **The day window is `st`/`et`.** The live `eventList` entry has no `begintime`/`endtime`, the fields the client's `ActivityEventInfo:ParseData` reads first.
+
+After both fixes, the status line read the right theme (`110001`), the eight scoring ids, all nine chest thresholds, and a day end of 02:00 UTC. `-run radar-claims` was then refused with "today's duel theme (Base Expansion) doesn't score it". The arms-race duel-chest claim had used the same read, so it had never seen duel data either.
+
+### `build.ccd.m.new`, items only
+
+```text
+request: build.ccd.m.new {bUUID: Long, isFixRuins: false, itemIDs: "200211;25"}
+reply:   {remainGold, finished: false, isFixRuins: false,
+          itemCostArr: [{itemId: 200211, costNum: 25, count: 0}],
+          buildInfo: {uuid, bId, lv, state, sT, uT, qS, pEndT, hp, pId, help, gValT, lCT, lStaT, AssignedHero[]}}
+```
+
+- **Diamonds:** `remainGold` equaled the balance from `init` `user.gold`.
+- **Items:** `itemCostArr` lists each item spent: `costNum` is how many were used, `count` how many remain.
+- **Timer:** `buildInfo.uT` came back earlier by the item time.
+- **Duel score:** read again on a fresh login, it rose by 150 per item-minute. That's the score row's 50 multiplied by the account's duel effects, matching the client's `units × points × (1 + Σ effects)`.
+
+`queue.ccd.m.new` and `building.camp.accel` are static-analysis-only so far.
+
+### Radar: Help Teammates, executed and left unclaimed
+
+```text
+get.detect.info {openWnd: false}
+  → {worldMainPoint, detectInfo: {level, eventNum, nextRefreshTime, specialOpsNum, recoverTime, type2Data, …},
+     events: [{uuid, eventId, type, state, cost, num, pointId, startTime, endTime, reward, helpInfo, …}]}
+detect.event.help.start {uuid, eventType: 18}   → {uuid}
+detect.event.help.end   {uuid, eventType: 18}   → {success=true}
+```
+
+- Each event's `type` matched the `detect_event` table's type for its `eventId`, for every listed task.
+- After `help.end`, three Help Teammates tasks were listed in state `1` (finished), each with `cost` now `1`.
+- Stamina fell by 10 per task, read from `init` `playerInfo.stamina` on the next login.
+- No `receive.detect.event.reward` was sent.
+- `detectInfo.eventNum` is the stock and `nextRefreshTime` the next refresh, in ms. The next refresh time moved by about 50 minutes between two reads 8 minutes apart, with the help tasks run in between, so it isn't a fixed wall-clock schedule.
+
+### Other reply shapes seen
+
+- **`lottery.hero.card`** with `useFree: 1` replied `{id, isTen, totalLottery, lotteryHero: [{id, num, type}], dailyFree, dailyFreeLimit, dailyFreeNextFreshTime, pityType, pityCurProtectNum, pityProProtectNum, pityMaxProtectNum, pityProType, pityProNum, wishPityCurNum, …}` and no itemised `reward`.
+- **`worker.lottery.info {officerId}`** returns `nextFreeTime` in ms.
+- **`al.science.donate`** replies `{scienceId, useNum, maxNum, refreshTimeBlock, donateAvailable, dp, point, para1, para2, gold, allianceId, maxdonate: {count}, options: {…}}`. It carries the diamond balance as `gold`.
+- **`al.science.refreshNum`** replies `{scienceId, useNum, maxNum, useGoldNum, maxGoldNum, goldNum, timePoint, refreshTimeBlock}`.
+- **`hero.dispatch.list`** replies `{todayAssistNum, todayStealNum, ls: [{uuid, heroList, completionTime, actEndTime, ownerId, allianceId, conditionIndex, followCount, stealInfoList, …}]}`, with **no** `gold` field. A diamond check after a dispatch can't read the balance from it.
+
+### Recruit ticket goods
+
+Static-analysis-only, from the `goods` table and DataConfig:
+
+| Goods id | Name |
+|---|---|
+| 230006 | Hero Recruitment Ticket |
+| 230015 | Survivor Recruitment Ticket. DataConfig `worker_recruit_1`: `k2 = "1;10"` (single and ten-pull counts), `k3 = 230015` (the client's fallback ticket, `WorkerLotteryInfo.lua:18-24`) |
+| 230014 | Miracle Token, for the Miracle Spin and Hero Shard Roulette; not a recruit ticket |
+
+Init `items` entries carry the goods id as `itemId` or `goodsId` and the count as `count`, `num`, or `itemLeftCnt` (`ItemInfo.lua:40-64`).
 
 ## Root cause: packet-decode bugs, not protocol or anti-fraud gates
 

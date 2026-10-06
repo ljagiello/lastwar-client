@@ -1,0 +1,207 @@
+---
+title: "Alliance Duel"
+description: "How the client finds today's Alliance Duel (VS) entry, the activityid it must ask for, the live eventList fields, the score table behind each day's scoring list, the score push, and how goclient's duel-aware features read it."
+---
+
+The Alliance Duel ("VS") is a weekly alliance-versus-alliance event with one theme per server day. The client learns today's theme, scoring list, and chest thresholds from one detail read of activity `55000`. This page covers that read as the wire shows it, the tables that give the scoring list its meaning, and how `goclient`'s features use it. Facts confirmed against production on 2026-10-06 are marked **confirmed live**; everything else is static-analysis-only, from the 1.0.364 Lua and tables.
+
+## Finding today's entry
+
+### The init activity entry
+
+The `init` push's `activity` map carries the duel as activity `55000` (type 14, `EnumActivity.AllianceCompete`). Confirmed live, the entry is:
+
+```text
+activity["55000"] = {
+  id:           55000,           // the activity table row (type 14)
+  activityid:   "70000",         // the heroactivity row: the id the detail read must send
+  name:         "370026",        // locale key of today's theme name
+  startTime, endTime:  <ms>,     // today's server-day window
+  readyTime:    <ms>,
+  matchGroupId: <int>,
+  uuid:         <32 hex chars>   // equals today's eventList actId
+}
+```
+
+It's the only entry in the live `activity` map, among the types `goclient` knows, that carries an `activityid` different from its `id` (confirmed live, 2026-10-06).
+
+### The detail read must send `activityid`
+
+`ActivityInfoData:ParseActivityData` sets `activityId` from the entry's `id`, then overrides it with `activityid` when one is present (`ActivityInfoData.lua:126-128, 160-161`). `AddOneActivity` sends that value for the duel, as a UtfString (`ActivityListDataManager.lua:158-163`):
+
+```text
+hero.event.info.get {activityId: "70000"}     // not "55000"
+```
+
+Confirmed live: asked for `"55000"`, the server answers with a bare `{success=true}` and no `eventList`, and no second message follows. The client would ignore that reply anyway: `ActivityEventInfoGetMessage` processes a reply only when it has no `success` key (`ActivityEventInfoGetMessage.lua:26`). Asked for `"70000"`, the reply carries the data directly.
+
+### The reply
+
+Top level, confirmed live: `activityId` (`"70000"`), `type` (`15`, the duel event type), `ranking`, `isFix`, and `eventList`. The client routes it by `type == 15` (`ActivityListDataManager.lua:1180-1186`).
+
+Each `eventList` entry, field names as confirmed live:
+
+| Field | Meaning |
+|---|---|
+| `st`, `et` | The day window, unix ms. **The live entry has no `begintime`/`endtime`**, the pair `ActivityEventInfo:ParseData` reads first (`ActivityEventInfo.lua:69-74`); `st`/`et` are the fields `RefreshActivityTime` reads (`ActivityListDataManager.lua:1193-1198`). Read either pair, `begintime`/`endtime` first |
+| `rt` | Ready time, ms |
+| `t` | Event type, `15` |
+| `eventId` | The theme: a `heroevent` row, `110000`-`110005` |
+| `actId`, `actName`, `actDesc` | Today's event id (used by the chest claim) and locale keys |
+| `score` | `\|`-joined `score` table ids: today's scoring list |
+| `target` | `\|`-joined chest thresholds, ascending. Live: nine values, `40000\|150000\|540000\|660000\|1000000\|2300000\|2600000\|3600000\|7200000` |
+| `value`, `reward`, `reward_science` | Per-chest valuation, per-chest reward lists, and the tech that unlocks each chest |
+| `userScore` | `{score, rewardFlagList, newRewardFlagList, finishFlag, canRwdFlag, level, actId, hardMode, refreshTime, sendReward, uid}`: today's points and chest flags |
+| `vsAllianceInfo[]` | One entry per side: `{allianceId, alName, abbr, icon, power, serverId, win, winScore, alScore, scoreHistory[{score, day}], mvpPlayer{uid, name, pic, picVer, monthCardEndTime}}` |
+| `fightStartTime`, `fightEndTime`, `weekEndTime` | War-day and week boundaries, ms |
+| `minDayScore`, `minWeekScore` | Victory-mail floors |
+| `winReward`, `winWeekReward` | Daily and weekly win rewards |
+| `isCrossFight`, `crossFight`, `canAttackCity` | War-day flags |
+| `nextId`, `nextName` | Empty in the live reply |
+
+Pick the entry with `t == 15` whose window contains now. Don't fall back to another entry: a stale entry's scoring list belongs to another day.
+
+### The week
+
+`TB:heroactivity#70000`, the type-15 row, maps the server weekday to a theme (static-analysis-only):
+
+| Server weekday | `eventId` | Theme |
+|---|---|---|
+| Mon | 110000 | Radar Training |
+| Tue | 110001 | Base Expansion |
+| Wed | 110002 | Age of Science |
+| Thu | 110003 | Train Heroes |
+| Fri | 110004 | Total Mobilization |
+| Sat | 110005 | Enemy Buster |
+| Sun | none | Rest day: no entry, the detail read has no current entry |
+
+The server day starts at 02:00 UTC, see [Identity, login & session](/auth#server-day-and-daily-reset). Confirmed live on Tuesday 2026-10-06: theme `110001`, with the window ending at 02:00 UTC.
+
+## The scoring list
+
+Each id in `score` is a row of the `score` table: `{id, type, value, points}`, where `type` is a `ScoreType`, `value` narrows it, and `points` is the base award per unit. The client gates its duel prompts by score type, not by theme (`AllianceCompeteDataManager.lua:631-654`). Its predicted award is `units × points × (1 + Σ effects)` (`GetAllyDuelScoreInfo.lua:39-43`).
+
+Score types `goclient` uses (`ScoreType`, `EnumType.lua:15728-15744`, plus table types):
+
+| Type | Meaning | `value` |
+|---:|---|---|
+| 4 | Train one unit | unit tier |
+| 20 | Shop | |
+| 23 | Building power up | |
+| 42 | Recruit one hero | |
+| 51 | One minute of speed-up | the queue sped up: `4` training, `6` research, `7` construction, `9` healing (`SpeedScoreValue`) |
+| 82 | Complete one radar task | |
+| 98 | Dispatch a UR trade truck | |
+| 99 | Perform a UR secret task | |
+| 119 | Use an item | `itemId\|count` |
+| 120 | Recruit one survivor | |
+
+Type 51 is keyed by the queue an item is used on, not by the item's own kind.
+
+The 2026-10-06 (Base Expansion) entry listed eight ids, confirmed live:
+
+| Id | Type / value | Base points |
+|---|---|---:|
+| 90201 | 51 / `7` (construction speed-up, per minute) | 50 |
+| 90202 | 23 | 10 |
+| 90203 | 98 / `5` | 100,000 |
+| 90204 | 99 / `5` | 75,000 |
+| 90000 | 20 | 30 |
+| 100910 | 120 | 1,500 |
+| 110301 | 119 / `801000\|1` | 1 |
+| 110302 | 119 / `801001\|1` | 2,500 |
+
+`goclient` embeds the whole table (1,475 rows, table version 39432) in `internal/game/duel_scores_gen.go`. The generator, `internal/game/genduelscores`, reads a decoded `score.json`, checks six known rows before writing, and refuses another table or shifted columns:
+
+```bash
+go generate ./internal/game    # with LASTWAR_TABLES and LASTWAR_TABLE_VERSION set
+```
+
+## The score push
+
+`push.act.score.obtain` reports earned points for score events: Arms Race always, and the Alliance Duel when `type == 15` (`PushActScoreObtainMessage.lua:6-16`; static-analysis-only). The duel branch feeds `GetDuelScoreManager:PushScoreChangeByType`, which reads the added points and the alliance total. Nothing in the client waits for it.
+
+`goclient` logs every one at Info as `activity score obtained`, with `afterCmd` set to the last request sent on the connection. A push that arrives after a run's last read isn't seen.
+
+## Chest claims
+
+A chest is claimed with the day's `actId` and the chest's threshold (static-analysis-only):
+
+```text
+accept.personal.reward {actId: UtfString, stage: Int (the target value), eventType: 15}
+```
+
+A chest is claimable when `userScore.score` has reached its target, its flag isn't in `newRewardFlagList`, and its index is within the number of chests the account's tech unlocks (3, 6, 9, or 12). Confirmed live: `newRewardFlagList` is a comma-joined list of claimed chest indexes, for example `1,2,3`.
+
+## How goclient uses it
+
+Every optional feature in `goclient` can declare the duel score types it earns (`Feature.Duel`, a list of `{Type, Value}`; an empty `Value` matches any). A feature with `Hold` set runs only on a day whose entry lists one of those types. With no current entry (Sunday, not in an alliance, the read failed) a held feature stays held. `-list-features` shows each feature's policy as `duel:hold`, `duel:always`, or `duel:-`.
+
+- **`duelPolicy`** in the session config overrides a feature's default: `{"duelPolicy": {"radar-claims": "always"}}`. Valid values are `hold` and `always`.
+- **`-run <feature>`** of a held feature is refused with the reason; **`-run-anyway`** runs it regardless. A spend feature still checks today's scoring list inside its run, so `-run-anyway` on a non-scoring day sends nothing.
+- **Status line:** with any feature enabled, every run logs one `alliance duel` line: theme, score, next chest, and day end.
+
+The duel-aware features are all off by default; see the README for the full list:
+
+| Feature | Duel policy | What it sends |
+|---|---|---|
+| `radar-claims` | hold, type 82 | `receive.detect.event.reward` for finished radar tasks |
+| `free-recruits` | always, types 42 / 120 | `useFree: 1` pulls only |
+| `duel-speedups` | hold, type 51 / `4` `6` `7` `9` | owned speed-up items on running jobs, see [Speed-ups](#speed-ups) |
+| `duel-recruit-tickets` | hold, types 42 / 120 | ticket pulls, only while a ticket is held |
+| `duel-troop-training` | hold, types 4 / 51 `4` | `building.camp.training` on idle camps |
+| `secret-tasks-start` | always, type 99 | `hero.dispatch.start` for UR tasks |
+| `radar-execute` | always, type 82 | march-free radar task flows, see [Radar tasks](#radar-tasks) |
+| `radar-overflow` | (gates internally) | `receive.detect.event.reward` for tasks the next refresh would push past the stock cap |
+
+`duel-speedups-plan`, `secret-tasks-start-plan`, and `radar-inventory` are read-only previews.
+
+### Speed-ups
+
+The speed panel sends items in the items-only form (`UISpeedView.lua:1540-1586`):
+
+```text
+build.ccd.m.new     {bUUID: Long, isFixRuins: false, itemIDs: "tmpl;n|tmpl;n"}   // construction
+queue.ccd.m.new     {qUUID: Long, itemIDs: "tmpl;n|..."}                          // research, hospital
+building.camp.accel {uuid: Long, itemId: "tmpl;n|..."}                            // camp training
+```
+
+- **The diamond forms** are a `useGold` key (`BuildCcdMNewMessage.lua:12-16`, `QueueCcdMNewMessage.lua:10-12`, `BuildingCampAccelMessage.lua:9-11`) and, for `queue.ccd.m.new`, an empty `itemIDs`, which is the client's own instant finish (`ArmyManager.lua:199-203`). `golloesSpeedTime` spends a different free-time pool.
+- **No `isGold` on the wire.** The UI passes `isGold` to `queue.ccd.m.new`, but the message class never puts it on the wire (`QueueCcdMNewMessage.lua:3-17`).
+- **`goclient`'s guard.** `duel-speedups` refuses any key outside the three items-only sets above, an empty or malformed item string, and a count above the owned count from init `items`. It also stops for the rest of the process if a reply shows the diamond balance falling or lacks `itemCostArr` for the items sent.
+
+Speed-up goods (`goods` table, static-analysis-only): `type2` is the menu, `para3` the seconds.
+
+| Ids | `type2` | Seconds |
+|---|---:|---|
+| 200200-200207 | 1, universal | 60, 300, 900, 3,600, 10,800, 28,800, 86,400, 432,000 |
+| 200210-200217 | 7, construction | same eight |
+| 200220-200227 | 6, research | same eight |
+| 200230-200235 | 3, training | first six |
+| 200240-200245 | 4, healing | first six |
+
+### Radar tasks
+
+`radar-execute` runs the client's Quick Execute flows for the march-free task types `{6, 18, 26, 44}`, only while init `dataConfig` turns on `radar_quick_operation_switch` (`RadarFakeUIMarchManager.lua:105-111`):
+
+```text
+detect.event.batch.put.point.in.world {uuidList: "uuid|uuid"}       // state 3 → 0
+start.pick.garbage {uuid} … ≥ 3 s … finish.sampling {uuid}          // types 6, 26; 44 adds finish.visitor
+detect.event.help.start {uuid, eventType: 18} … detect.event.help.end {uuid, eventType: 18}
+start.detect.event.talk {uuid} … end.detect.event.talk {uuid}       // type 14: finishes and claims at once
+```
+
+- **Never sent:** `reset.detect.event` (a diamond re-roll), any battle or march type, and any client-computed result.
+- **Help stamina:** a Help Teammates task costs 10 stamina unless its `cost` is `1`.
+- **Day gating:** the talk flow runs only on days whose entry lists type 82, because it claims as it finishes.
+
+`radar-overflow` computes the overflow the next refresh would cause, `eventNum + N − max(show − slots, 0) − maxNum`, from `detect_level`'s `detect_show_num`, `detect_max_num`, and `refresh` (`UIDetectEventCtrl.lua:371-394`). It claims that many finished tasks, oldest first. It sends nothing on days that list type 82. It also sends nothing when the next refresh lands after the server day ends and the next day's theme lists type 82 (Base Expansion, Train Heroes, and the Sunday rest day precede such days); that case depends on a run shortly after 02:00 UTC.
+
+## Open questions
+
+- **When each duel action books its points.** Start, finish, or claim, per action type: radar tasks, UR secret tasks, power gains, and training. The client's own Claim All dialog points at the claim for radar tasks (en `detect_quick_reward_confirm_text`), and the `push.act.score.obtain` log is in place to settle each one live.
+- **Are unclaimed chests mailed at the day's end?** A mail template exists; it isn't confirmed.
+- **Does a finished radar task survive its `endTime`?** The live task list shows finished (state 1) tasks carrying an `endTime` like unstarted ones.
+- **Is an empty or over-count `itemIDs` charged in diamonds?** `goclient` never sends either, so this stays a static reading.
+
+See also [Live validation against production](/live-validation#alliance-duel-and-duel-spend-commands) for the reply shapes these features have round-tripped.

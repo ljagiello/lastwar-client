@@ -145,9 +145,16 @@ this repo or commit it anywhere).
 # has been validated live. List them with their state, run one once to validate it, then turn
 # it on in the session config's "features" map, e.g. {"features": {"daily-quests": true}}.
 # Features marked OPT-IN change something visible or a player choice (likes, help requests,
-# free pulls, troop conversion) and are never turned on by default:
+# free pulls, troop conversion, spending items or tickets) and are never turned on by default:
 ./lastwar-client -list-features
 ./lastwar-client -run daily-quests
+
+# Alliance Duel gating (docs/alliance-duel.mdx). A feature can declare the duel score types it
+# earns; with "hold" it runs only on a day whose duel entry lists one of them (-list-features
+# shows duel:hold / duel:always / duel:-). Override per feature in the session config:
+#   {"features": {"radar-claims": true}, "duelPolicy": {"radar-claims": "always"}}
+# -run of a held feature on a day that doesn't list its types is refused; -run-anyway runs it.
+./lastwar-client -run radar-claims -run-anyway
 
 # Stay connected and issue ad-hoc test commands without re-authenticating. NOTE: since
 # -collect isn't passed here, the full building list still prints to stdout once at
@@ -178,6 +185,29 @@ Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, 
 loginKey) independent of the session config, so repeated guest/email-flow runs present a consistent
 device to the server. Delete those files to start fully fresh.
 
+### Duel-aware features
+
+These read today's Alliance Duel entry; `-list-features` prints the full set. All are off by default.
+The spending ones send only owned items or tickets, refuse any diamond parameter, and stop for the
+rest of the process if a reply shows the diamond balance falling. See
+[docs/alliance-duel.mdx](docs/alliance-duel.mdx) for the wire details.
+
+| Feature | What it does |
+|---|---|
+| `duel-speedups` | Applies owned speed-up items (`build.ccd.m.new`, `queue.ccd.m.new`, `building.camp.accel`, items-only form) to running jobs whose queue today's entry lists under score type 51 |
+| `duel-speedups-plan` | Read-only: logs the speed-up calls `duel-speedups` would send |
+| `duel-recruit-tickets` | Spends held hero or survivor recruit tickets (`lottery.hero.card` / `lottery.worker.card`, `useFree: 0`) on days whose entry lists recruit types 42 / 120 |
+| `duel-troop-training` | Starts `building.camp.training` in idle Military Camps, at the highest unlocked tier and a count the food and iron in `init` cover, on Total Mobilization / Enemy Buster days |
+| `secret-tasks-start` | Starts not-yet-started UR Secret Tasks (`hero.dispatch.start`) with idle heroes picked the way the client's Quick Join does; never refreshes a task |
+| `secret-tasks-start-plan` | Read-only: logs which task it would start with which heroes |
+| `radar-execute` | Runs the client's Quick Execute flows for march-free radar tasks (sampling, visitor, Help Teammates above a stamina reserve) and leaves them finished; the talk flow, which claims as it finishes, only on days whose entry lists type 82 |
+| `radar-overflow` | On days whose entry doesn't list type 82, claims only the finished radar tasks the next refresh would push past the stock cap |
+| `radar-inventory` | Read-only: logs every radar task with its type and state, and what the two features above would do with it |
+
+Every run with a feature enabled logs one `alliance duel` line (theme, score, next chest, day end),
+and every `push.act.score.obtain` the server sends is logged as `activity score obtained` with the
+request sent just before it.
+
 ## Running unattended (cron)
 
 Confirmed live: `-collect` on a schedule, on a separate machine from wherever the session config
@@ -199,6 +229,19 @@ HOME=/home/user
 0 */3 * * * /home/user/lastwar-client/lastwar-client -collect >> /home/user/lastwar-client/logs/collect.log 2>&1
 CRONEOF"
 ```
+
+The server day, and with it the Alliance Duel day, rolls over at 02:00 UTC. Features gated on today's
+duel entry only see the new day from the first run after that. A run a few minutes after the rollover
+needs an extra entry. Cron uses the host's local time; for a host on US Pacific time (19:00 PDT /
+18:00 PST), this one fires at 02:05 UTC in both summer and winter time, and the other of its two runs
+is an ordinary extra pass:
+
+```
+5 18,19 * * * /home/user/lastwar-client/lastwar-client -collect >> /home/user/lastwar-client/logs/collect.log 2>&1
+```
+
+`radar-overflow` relies on such a run: on the day before a day that lists radar tasks, it leaves the
+overflow unclaimed when the next refresh falls after the rollover.
 
 Two things worth checking after setup, not just once but as ongoing habits:
 
