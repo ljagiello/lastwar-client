@@ -78,6 +78,38 @@ func radarOverflowPlan(snap *detectSnapshot) (radarOverflow, []detectEvent, erro
 	return o, finished[:min(int64(len(finished)), o.k)], nil
 }
 
+// radarDayEnd is when today's server day ends: the duel entry's et, else init tomorrow's anchor.
+func radarDayEnd(in *Init, d *DuelDay) (time.Time, bool) {
+	if d != nil && !d.End.IsZero() {
+		return d.End, true
+	}
+	start, ok := in.ServerDayStart(evNow())
+	return start.Add(24 * time.Hour), ok
+}
+
+// radarTomorrowScores reports whether the next server day's duel scores radar tasks. The week is
+// fixed (TB:heroactivity#70000, DUEL.md §1.2) and radar task 90402 scores on Mon, Wed and Fri
+// (§5.2), so the day after Base Expansion (Tue), Train Heroes (Thu) or the Sunday rest day does.
+// Sunday has no duel entry; it is told by the server day's weekday (the date of the day start,
+// 02:00 UTC).
+func radarTomorrowScores(conn *session.GameConn, in *Init) bool {
+	if d := TodayDuel(conn, in); d != nil {
+		return d.Theme == DuelThemeBase || d.Theme == DuelThemeHeroes
+	}
+	start, ok := in.ServerDayStart(evNow())
+	return ok && start.UTC().Weekday() == time.Sunday
+}
+
+// radarOverflowHeld reports whether the overflow claims wait for tomorrow: the next refresh lands
+// after today's server day ends and tomorrow scores radar tasks. Then a run just after the day
+// starts claims everything for points (radar-claims), which frees the slots and stock before that
+// refresh (live 2026-10-06: the refresh came 12 minutes into Wednesday). This needs a run in that
+// window; the cron entry for it is in docs (5 18,19 * * *, which is 02:05 UTC in PST and PDT).
+func radarOverflowHeld(conn *session.GameConn, in *Init, snap *detectSnapshot) (time.Time, bool) {
+	end, ok := radarDayEnd(in, TodayDuel(conn, in))
+	return end, ok && snap.nextRefresh >= end.UnixMilli() && radarTomorrowScores(conn, in)
+}
+
 func runRadarOverflow(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil {
 		slog.Info("radar-overflow: no init push; skipping")
@@ -100,6 +132,11 @@ func runRadarOverflow(conn *session.GameConn, in *Init) error {
 		"slots", plan.slots, "showSlots", plan.show, "refreshN", plan.refreshN, "overflow", max(plan.k, 0),
 		"nextRefresh", time.UnixMilli(snap.nextRefresh).UTC().Format(time.RFC3339))
 	if plan.k <= 0 {
+		return nil
+	}
+	if end, held := radarOverflowHeld(conn, in, snap); held {
+		slog.Info("radar-overflow: the next refresh lands after today's duel day ends and tomorrow scores radar tasks; "+
+			"holding the claims for the day-start run", "overflow", plan.k, "dayEnds", end.UTC().Format(time.RFC3339))
 		return nil
 	}
 	if int64(len(picks)) < plan.k {

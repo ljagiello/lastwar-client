@@ -124,3 +124,34 @@ func TestRadarOverflowShortOfFinishedTasks(t *testing.T) {
 		t.Errorf("claimed %v, want [2 1]", got)
 	}
 }
+
+func TestRadarOverflowHoldsWhenTomorrowScoresAndTheRefreshIsAfterTheDayEnd(t *testing.T) {
+	// Live 2026-10-06: Tuesday (Base Expansion), stock at its cap, and the next refresh 12 minutes
+	// after Wednesday's radar day starts. The day-start run claims for points first, so nothing is
+	// claimed today. On Saturday (Enemy Buster) the next day is the Sunday rest day, so the
+	// overflow is claimed.
+	tasks := fullSlots(12, finishedAt(1, 100, time.Hour), finishedAt(2, 101, 2*time.Hour))
+	late := func(theme int32) ([]*sfs.SFSObject, *sfs.SFSObject) {
+		end := evTestNow.Add(time.Hour)
+		info := detectReply(16, 40, tasks...)
+		dv, _ := info.Get("detectInfo")
+		dv.Val.(*sfs.SFSObject).PutLong("nextRefreshTime", end.Add(12*time.Minute).UnixMilli())
+		return []*sfs.SFSObject{duelEntry(theme, "90201", evTestNow.Add(-time.Hour), end)}, info
+	}
+	duel, info := late(DuelThemeBase)
+	conn, fake := startRadarFake(t, duel, []*sfs.SFSObject{info}, nil)
+	if err := runRadarOverflow(conn, radarTestInit(110, true)); err != nil {
+		t.Fatal(err)
+	}
+	if got := radarUUIDs(fake, radarEventCmd); len(got) != 0 {
+		t.Errorf("claimed %v on the day before a radar day, want none", got)
+	}
+	duel, info = late(DuelThemeEnemyBuster)
+	conn, fake = startRadarFake(t, duel, []*sfs.SFSObject{info}, nil)
+	if err := runRadarOverflow(conn, radarTestInit(110, true)); err != nil {
+		t.Fatal(err)
+	}
+	if got := radarUUIDs(fake, radarEventCmd); !slices.Equal(got, []int64{2, 1}) {
+		t.Errorf("claimed %v on Saturday, want the overflow [2 1]", got)
+	}
+}

@@ -31,7 +31,7 @@ func detectReply(level, eventNum int64, events ...*sfs.SFSObject) *sfs.SFSObject
 	d := sfs.NewSFSObject()
 	d.PutInt("level", int32(level))
 	d.PutInt("eventNum", int32(eventNum))
-	d.PutLong("nextRefreshTime", time.Now().Add(3*time.Hour).UnixMilli())
+	d.PutLong("nextRefreshTime", evTestNow.Add(30*time.Minute).UnixMilli()) // within the fakes' duel day
 	r.PutSFSObject("detectInfo", d)
 	arr := sfs.NewSFSArray()
 	for _, e := range events {
