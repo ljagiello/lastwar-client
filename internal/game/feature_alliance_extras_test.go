@@ -9,7 +9,7 @@ import (
 )
 
 // allianceInit is an Init in an alliance, with switches on and the star ceremony running.
-func allianceInit(switches ...string) *Init {
+func evAllianceInit(switches ...string) *Init {
 	in := evInit(30)
 	u := sfs.NewSFSObject()
 	u.PutUtfString("allianceId", "fake-alliance")
@@ -47,7 +47,7 @@ func TestAllianceExtrasQuestThenScratch(t *testing.T) {
 		}
 		return evOK()
 	})
-	if err := runAllianceExtras(conn, allianceInit("alliance_star")); err != nil {
+	if err := runAllianceExtras(conn, evAllianceInit("alliance_star")); err != nil {
 		t.Fatal(err)
 	}
 	want := "alliance.star.gain.activity.info.new,alliance.star.gain.ceremony.info.new," +
@@ -66,19 +66,19 @@ func TestAllianceExtrasNothingDue(t *testing.T) {
 		info *sfs.SFSObject
 		want string
 	}{
-		{"switch off", allianceInit(), starCeremony(false, nil), ""},
+		{"switch off", evAllianceInit(), starCeremony(false, nil), ""},
 		{"ceremony over", func() *Init {
-			in := allianceInit("alliance_star")
+			in := evAllianceInit("alliance_star")
 			in.Raw.PutLong("allianceStarEndTime", evTestNow.Add(-time.Hour).UnixMilli())
 			return in
 		}(), starCeremony(false, nil), ""},
 		{"all claimed", func() *Init {
-			in := allianceInit("alliance_star")
+			in := evAllianceInit("alliance_star")
 			in.Raw.PutBool("allianceStarNotify", true)
 			return in
 		}(), starCeremony(true, &yes), "alliance.star.gain.ceremony.info.new"},
 		{"no scratch card", func() *Init {
-			in := allianceInit("alliance_star")
+			in := evAllianceInit("alliance_star")
 			in.Raw.PutBool("allianceStarNotify", true)
 			return in
 		}(), starCeremony(true, nil), "alliance.star.gain.ceremony.info.new"},
@@ -105,7 +105,7 @@ func TestAllianceExtrasBenignQuestStillScratches(t *testing.T) {
 		}
 		return evErr("E4")
 	})
-	in := allianceInit("alliance_star")
+	in := evAllianceInit("alliance_star")
 	in.Raw.PutBool("allianceStarNotify", true)
 	err := runAllianceExtras(conn, in)
 	if err == nil || !strings.Contains(err.Error(), "E4") || strings.Contains(err.Error(), evAlreadyExecuted) {

@@ -51,7 +51,7 @@ func TestAllianceLikesLikesEligibleEntriesWhileTheyPay(t *testing.T) {
 		r.PutInt("count", left)
 		return r
 	})
-	if err := runAllianceLikes(conn, allianceInit()); err != nil {
+	if err := runAllianceLikes(conn, evAllianceInit()); err != nil {
 		t.Fatal(err)
 	}
 	likes := fake.only(congratulationLikeCmd)
@@ -75,7 +75,7 @@ func TestAllianceLikesNoAllianceOrNoneLeft(t *testing.T) {
 	if err := runAllianceLikes(conn, evInit(30)); err != nil || len(fake.requests()) != 0 {
 		t.Errorf("no alliance: err %v, sent %v", err, fake.cmds())
 	}
-	if err := runAllianceLikes(conn, allianceInit()); err != nil {
+	if err := runAllianceLikes(conn, evAllianceInit()); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(fake.cmds(), ","); got != congratulationListCmd {
@@ -94,7 +94,7 @@ func TestAllianceLikesBenignAndFailure(t *testing.T) {
 		}
 		return evErr("E2")
 	})
-	err := runAllianceLikes(conn, allianceInit())
+	err := runAllianceLikes(conn, evAllianceInit())
 	if err == nil || !strings.Contains(err.Error(), "E2") || strings.Contains(err.Error(), evAlreadyExecuted) {
 		t.Errorf("err = %v, want only the E2 failure", err)
 	}
