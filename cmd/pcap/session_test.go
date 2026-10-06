@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -135,7 +136,7 @@ func TestRunSessionOutWritesAcceptedLogin(t *testing.T) {
 		DeviceID: testDevice, ShumeiBoxId: testShumei, AccessToken: testToken, IOSMode: true,
 		AppVersion: "1.0.344", VersionCode: "786",
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("session config mismatch:\n got %+v\nwant %+v", got, want) // test-only fake values
 	}
 }

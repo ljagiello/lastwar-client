@@ -38,6 +38,9 @@ type SessionConfig struct {
 	RefreshToken     string `json:"refreshToken,omitempty"`
 	AccessTokenTime  int64  `json:"accessTokenTime,omitempty"`
 	RefreshTokenTime int64  `json:"refreshTokenTime,omitempty"`
+	// Features turns optional automations (game.Feature) on or off by name; a feature not listed
+	// keeps its default (off unless validated live). See -list-features.
+	Features map[string]bool `json:"features,omitempty"`
 }
 
 // String/GoString are the round-48 regression fix for the MAJOR finding that SessionConfig --

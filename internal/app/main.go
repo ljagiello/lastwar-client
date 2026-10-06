@@ -90,6 +90,8 @@ func Run() {
 	decodeLabel := fs.String("decode-label", "", "prefix label for -decode-stream output lines, e.g. \"c2s\" or \"s2c\" (default: \"stream\")")
 	logLevel := fs.String("log-level", "info", "log verbosity: debug, info, warn (or its alias warning), or error")
 	version := fs.Bool("version", false, "print build info and exit")
+	runFeature := fs.String("run", "", "after login, run only this optional feature (see -list-features) once, even if the session config doesn't enable it, log its responses, and exit -- the live validation step before enabling a feature in the session config")
+	listFeatures := fs.Bool("list-features", false, "list the optional features (name, default, whether the session config enables it) and exit")
 	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: after -email verification has bound this client's own device (state under $LASTWAR_STATE_DIR, else the home directory), trade its persisted loginKey for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit. As of 2026-10-04 the game server rejects a Login with the result (ec=28/E005), see auth.OwnDeviceSession")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag.ContinueOnError still runs the same failf/usage path flag.ExitOnError does
@@ -283,8 +285,9 @@ func Run() {
 		cfg, cfgSource = loadEffectiveConfig(*configPath)
 	}
 	var cfgAppVersion, cfgVersionCode string
+	var cfgFeatures map[string]bool
 	if cfg != nil {
-		cfgAppVersion, cfgVersionCode = cfg.AppVersion, cfg.VersionCode
+		cfgAppVersion, cfgVersionCode, cfgFeatures = cfg.AppVersion, cfg.VersionCode, cfg.Features
 		slog.Info("loaded session config", "path", cfgSource)
 		// Round 33 fix (originally scoped to -cs-ip/-cs-port/-cs-gameuid only; round 34 extends it
 		// to -cs-zone/-cs-deviceid/-cs-shumei/-cs-at, the four siblings round 33 missed):
@@ -332,6 +335,10 @@ func Run() {
 		*csIOS = mergeExplicitOrConfigBool(*csIOS, csIOSSetExplicitly, cfg.IOSMode)
 	}
 	warnIfExplicitConfigPathNotFound(cfg, *configPath, *noConfig)
+	if *listFeatures {
+		printFeatures(os.Stdout, cfgFeatures)
+		return
+	}
 
 	// Symmetric to the -email/-code-pipe-ignored warnings just below (for the opposite direction):
 	// if any -cs-* flag OTHER than -cs-ip/-cs-rt was explicitly set on the command line but the
@@ -357,6 +364,7 @@ func Run() {
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
 			iosMode: *csIOS, appVersion: cfgAppVersion, versionCode: cfgVersionCode,
+			features: cfgFeatures, runFeature: *runFeature,
 			interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
 			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
@@ -620,7 +628,7 @@ var stringFlagSwallowGuardNames = map[string]bool{
 	"cs-ip": true, "cs-zone": true, "cs-gameuid": true, "cs-deviceid": true,
 	"cs-shumei": true, "cs-rt": true, "cs-at": true,
 	"config": true, "decode-stream": true, "decode-label": true, "log-level": true,
-	"own-device-session": true,
+	"own-device-session": true, "run": true,
 }
 
 // detectSwallowedFlagValue is the pure decision at the heart of round 25's Fix 1 (the MAJOR
@@ -836,7 +844,9 @@ func printVersion() {
 
 type crossServerTestOpts struct {
 	ip, zone, gameUid, deviceID, shumeiBoxId, rt, at, interactive string
-	appVersion, versionCode                                       string // session config only; see SessionConfig.AppVersion
+	appVersion, versionCode                                       string          // session config only; see SessionConfig.AppVersion
+	features                                                      map[string]bool // session config only; see SessionConfig.Features
+	runFeature                                                    string          // -run: run just this feature, then exit
 	port                                                          int
 	handshake, iosMode, collect, listBuildings                    bool
 	configSavePath                                                string // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
@@ -1209,6 +1219,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 						GameUid: result.GameUid, DeviceID: deviceID,
 						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
 						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
+						Features: o.features,
 					}
 					if err := SaveSessionConfig(updated, o.configSavePath); err != nil {
 						slog.Warn("failed to persist redirected server address to session config", "path", o.configSavePath, "error", err)
@@ -1221,7 +1232,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 
 	slog.Info("fetching building list (push.init.build)")
-	buildings, visitors, err := game.FetchBuildings(conn, 15*time.Second)
+	initPush, err := game.FetchInit(conn, 15*time.Second)
+	buildings := initPush.Buildings
 	if err != nil {
 		slog.Error("fetch buildings failed", "error", err)
 		// See shouldAbortBeforeInteractive's own doc comment: the exact same bug class round 25
@@ -1238,12 +1250,21 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 	slog.Info("got buildings", "count", len(buildings))
+	if o.runFeature != "" {
+		if err := game.RunFeatures(conn, initPush, nil, o.runFeature); err != nil {
+			slog.Error("feature run failed", "feature", o.runFeature, "error", err)
+			_ = conn.Close()
+			os.Exit(1)
+		}
+		slog.Info("client exiting")
+		return
+	}
 	if o.listBuildings || !o.collect {
 		game.PrintBuildings(buildings)
 	}
 	if o.collect {
 		slog.Info("collecting resources")
-		if err := game.CollectAll(conn, buildings, visitors); err != nil {
+		if err := game.Collect(conn, initPush, o.features); err != nil {
 			slog.Error("collect run had failures", "error", err)
 			if shouldAbortBeforeInteractive(err, o.interactive != "") {
 				// See the identical round-40 fix's doc comment on the sibling os.Exit(1) above.

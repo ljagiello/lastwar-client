@@ -39,7 +39,7 @@ func TestOsExitAfterDeferredConnCloseCallsCloseExplicitlyFirst(t *testing.T) {
 
 	re := regexp.MustCompile(`conn\.Close\(\)\s*\n\s*os\.Exit\(1\)`)
 	matches := re.FindAll(src, -1)
-	const want = 4 // Run()'s two post-defer os.Exit(1) sites + runCrossServerTest()'s two
+	const want = 5 // Run()'s two post-defer os.Exit(1) sites + runCrossServerTest()'s three (incl. -run)
 	if len(matches) != want {
 		t.Errorf("found %d conn.Close()-immediately-before-os.Exit(1) sites in main.go, want %d -- every os.Exit(1) reached after `defer conn.Close()` registers must call conn.Close() explicitly first, since os.Exit skips deferred functions", len(matches), want)
 	}

@@ -309,6 +309,19 @@ func checkNonMatchingEnvelopeCap(nonMatchingEnvelopes *int) error {
 // Training Base collect via a queue-item uuid vs a direct building-uuid
 // action.
 func FetchBuildings(conn *session.GameConn, timeout time.Duration) ([]Building, []Visitor, error) {
+	return fetchInit(conn, timeout, nil)
+}
+
+// FetchInit is FetchBuildings that also keeps the whole init push (see Init), which every
+// feature beyond building collection reads its eligibility from.
+func FetchInit(conn *session.GameConn, timeout time.Duration) (*Init, error) {
+	var raw *sfs.SFSObject
+	buildings, visitors, err := fetchInit(conn, timeout, &raw)
+	return &Init{Raw: raw, Buildings: buildings, Visitors: visitors}, err
+}
+
+// fetchInit implements FetchBuildings and FetchInit; raw, when non-nil, receives the init push.
+func fetchInit(conn *session.GameConn, timeout time.Duration, raw **sfs.SFSObject) ([]Building, []Visitor, error) {
 	var buildings []Building
 	var visitors []Visitor
 	// originalDeadline is the caller's actual budget (main.go passes 12s/15s at its two call
@@ -495,6 +508,9 @@ func FetchBuildings(conn *session.GameConn, timeout time.Duration) ([]Building, 
 			// push.
 			gotInitBuild = true
 			gotAuthoritativeInit = true
+			if raw != nil {
+				*raw = msg.Params
+			}
 			for _, b := range ParseInitBuildings(msg.Params) {
 				appendBuilding(b)
 			}
@@ -784,6 +800,14 @@ const MaxAggregateBuildingsPerFetch = 300
 // ClaimVIPDailyFreebie) -- none of the eight is building-uuid-scoped, so
 // none can go through the same per-building loop below.
 func CollectAll(conn *session.GameConn, buildings []Building, visitors []Visitor) error {
+	return collectCore(conn, &Init{Buildings: buildings, Visitors: visitors})
+}
+
+// collectCore is CollectAll with the whole init push available to the core actions (in.Raw is
+// nil when called through CollectAll, and the actions then behave as they did before init
+// gating existed).
+func collectCore(conn *session.GameConn, in *Init) error {
+	buildings, visitors := in.Buildings, in.Visitors
 	var errs []error
 
 	// The 8 fixed sub-actions plus one closure per collectible building below are each

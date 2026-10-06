@@ -255,6 +255,18 @@ var benignErrorCodes = map[string][]string{
 	"120471":             {"al.science.donate"},                               // alliance.go: al.science.donate cooldown -- "Donate science CD time is not finish"
 }
 
+// RegisterBenignErrorCode marks errorCode as an expected no-op for the given cmds, with the same
+// cmd scoping as benignErrorCodes. Feature files call it from init() for their own "already
+// claimed" codes, so each feature owns its codes instead of editing the map above. Not safe for
+// use after init.
+func RegisterBenignErrorCode(code string, cmds ...string) {
+	for _, c := range cmds {
+		if !slices.Contains(benignErrorCodes[code], c) {
+			benignErrorCodes[code] = append(benignErrorCodes[code], c)
+		}
+	}
+}
+
 // commandOutcome classifies a collect/claim response into one of three buckets: a real success,
 // a benign no-op (an expected cooldown/already-claimed/not-yet-arrived errorCode, or -- for
 // building.production.collect specifically -- a status=0 response with no errorCode; buildings.go's
