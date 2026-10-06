@@ -16,10 +16,10 @@ for the current confirmed-vs-unconfirmed picture. Preview the docs locally with 
 
 - **Fully working, live-confirmed:** GSL crypto, SFS2X packet framing (including Zstandard
   decompression), SFSObject codec, brand-new-guest-account login, email-verification account
-  binding, resource collection across 13 confirmed building types (Farmland, Iron Mine, Gold Mine,
-  Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory, and
-  the four Season 6 Spore Factory tiers, 7 more types are wired in but still unconfirmed, see the
-  building-type table in `docs/live-validation.mdx`), and a growing set of account-level
+  binding, resource collection across 14 confirmed building types (Farmland, Iron Mine, Gold Mine,
+  Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory,
+  Tactical Institute, and the four Season 6 Spore Factory tiers; the 1.0.364 Crystal Factory and
+  Season 6 week-card building are wired in but unconfirmed), and a growing set of account-level
   automations: the "Armed Truck"/"Overlord" idle rewards, greeting city visitors, bulk-helping alliance
   members, claiming all mail and alliance gifts, donating to the alliance's currently-recommended
   tech, and both once-a-day VIP claims.
@@ -83,24 +83,46 @@ whatever the config file says, for one-off tests.
   "deviceId": "your-real-device-id_n3d",
   "shumeiBoxId": "your-real-shumei-fingerprint-token",
   "accessToken": "your-real-access-token-from-a-captured-login",
-  "iosMode": true
+  "iosMode": true,
+  "appVersion": "1.0.344",
+  "versionCode": "786"
 }
 ```
 
 **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in,
-since the SFS2X game socket is plain TCP with no TLS) and decode the `Login` request, see
-`docs/capturing-and-decoding-traffic.mdx` for the exact methodology. `gameUid`/`ip`/`port`/`zone`
+since the SFS2X game socket is plain TCP with no TLS) and let `go run ./cmd/pcap -in login.pcap
+-session-out ~/.lastwar_goclient_session.json` write this file from the captured `Login` (see
+"Recovering" below, and `docs/capturing-and-decoding-traffic.mdx` for the manual methodology). `gameUid`/`ip`/`port`/`zone`
 also show up in a GSL `getserverlist` response's `serverList[]` entries. The access token is not
-single-use, but it *is* bound to the platform identity (`iosMode`) it was issued under, and it will
+single-use, but it *is* bound to the platform identity (`iosMode`) and build (`appVersion`/
+`versionCode`, optional, defaulting to the built-in values) it was issued under, and it will
 eventually need refreshing from a fresh capture.
 
 **Recognizing an expired token, confirmed live:** every command starts failing with
 `CROSS-SERVER LOGIN FAILED: ec=28 full={ep=[E011], ec=28}`, the connection succeeds, but login
 itself is rejected, so nothing downstream even gets attempted. Don't confuse this with a single
 flaky run: it was 100% reproducible across 16 consecutive scheduled runs (every 3 hours for ~42
-hours) until the credentials were refreshed. Fixing it needs a fresh capture, same as initial setup
-,  and in the one real recurrence so far, `shumeiBoxId` had also changed, not just `accessToken`, so
-re-extract both from the new capture rather than assuming only the token moved.
+hours) until the credentials were refreshed. Fixing it needs a fresh capture, same as initial setup.
+In both real recurrences so far (2026-08-16 and 2026-10-02), `shumeiBoxId` had also changed, not just
+`accessToken`, and the 2026-10-02 one happened server-side with no other login on that device.
+The client now logs a dedicated "access token has been rotated" error for this case (exit code 2).
+
+**Recovering, one command after the capture:** start a capture (no `sudo` needed if Wireshark's
+ChmodBPF is installed; use the real interface, `-i any` needs root on macOS), cold-start the real
+app until its main screen loads, quit it, then let `pcap` write the session config:
+
+```
+tcpdump -i en0 -w login.pcap 'tcp and not port 443 and not port 22'
+go run ./cmd/pcap -in login.pcap -session-out ~/.lastwar_goclient_session.json
+```
+
+`-session-out` finds the Login the server *accepted* (the real app first races the zone port on
+several gateways with `a=29` probes; those are skipped), writes `ip`/`port`/`zone`/`gameUid`/
+`deviceId`/`shumeiBoxId`/`accessToken`/`iosMode` plus the `appVersion`/`versionCode` the token was
+issued under, with mode 0600, and prints only field lengths, never values. Recording the build
+matters: a token is bound to it, so once the real app updates, a fresh token only works if the
+Login claims that same build (without these two fields, iOS mode falls back to the 1.0.344/786
+build the original capture showed).
 
 **This file contains live credentials for a real account, keep it out of version control** (it's
 already outside the repo, in your home directory, and `chmod 600`'d above; don't move it into

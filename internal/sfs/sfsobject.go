@@ -304,8 +304,12 @@ var SensitiveSFSKeys = map[string]bool{
 	"accessToken": true,
 	"airKey":      true,
 	"shumeiBoxId": true,
-	"pw":          true,
-	"password":    true,
+	// shumeiId is the ShuMei device fingerprint the server pushes back right after Login
+	// (push.shumei.id, seen live 2026-10-04) -- same sensitivity as shumeiBoxId. Without this the
+	// "observed other push" log line wrote it to the collect log in cleartext.
+	"shumeiId": true,
+	"pw":       true,
+	"password": true,
 	// verifyCode is the live one-time email-verification code account.login.new sends to
 	// complete login (see login.go's finishParams.PutUtfString("verifyCode", code)).
 	"verifyCode": true,
@@ -328,13 +332,14 @@ var SensitiveSFSKeys = map[string]bool{
 	// this stays as defense-in-depth in case a future field embeds something sensitive inside
 	// this or another opaque string value.
 	"ta": true,
-	// mail is the operator's own real email address, put there by login.go's email-verification
-	// flow (PutUtfString("mail", opts.Email), both the account.login.send.verify.code and
-	// account.login.new call sites). It's PII -- the account operator's own email address -- not
-	// a bearer credential, but is added defensively so any current/future StringRedacted() dump
-	// of a request/response carrying this field masks it instead of printing a real email
-	// address in cleartext.
-	"mail": true,
+	// mail and email are the operator's own real email address under the two key names the
+	// protocol uses for it: "mail" in the client's requests (login.go's email-verification flow,
+	// PutUtfString("mail", opts.Email) for account.login.send.verify.code and account.login.new),
+	// "email" in the server's init push (init.user.email, seen live 2026-10-04). Matching is by exact
+	// key name, so each spelling needs its own entry. PII rather than a bearer credential, masked so
+	// StringRedacted() dumps (-decode-stream, cmd/pcap -decode) never print it in cleartext.
+	"mail":  true,
+	"email": true,
 	// un is the classic SFS2X username field -- the server's real returned account username
 	// (env.Content.GetString("un") on the base zone Login response, checked in login.go). Same PII
 	// class as mail immediately above: the operator's own real account name, not a bearer

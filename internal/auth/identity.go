@@ -143,7 +143,13 @@ func (d deviceIdentity) GoString() string { return d.String() }
 // full round-53 rationale. Value receiver, same reasoning as String()/GoString() above.
 func (d deviceIdentity) LogValue() slog.Value { return slog.StringValue(d.String()) }
 
+// StateFilePath is where a persisted credential/state file lives: $LASTWAR_STATE_DIR when set (so
+// several independent device identities -- e.g. the cron's own device next to a config captured
+// from the real app -- can coexist on one machine), otherwise the home directory.
 func StateFilePath(name string) string {
+	if dir := os.Getenv("LASTWAR_STATE_DIR"); dir != "" {
+		return filepath.Join(dir, name)
+	}
 	dir, err := os.UserHomeDir()
 	if err != nil {
 		dir = "."
@@ -488,6 +494,14 @@ type LoginParamsInput struct {
 	// claiming a different Platform/package gets ec=28/E005, even though
 	// the token itself, un, and every other field are valid and accepted.
 	IOSMode bool
+
+	// AppVersion/VersionCode, when non-empty, replace the build identity BuildLoginParams would
+	// otherwise send (gsl.AppVersion/gsl.VersionCode, or the iOS capture's 1.0.344/786 under
+	// IOSMode). A token is bound to the build it was issued under (confirmed live, see IOSMode's
+	// comment), so once the real app updates, a token captured from it only works if these carry
+	// that capture's appVersion/versionCode -- cmd/pcap -session-out records both.
+	AppVersion  string
+	VersionCode string
 }
 
 // String/GoString are the round-48 regression fix for the MINOR finding that LoginParamsInput --
@@ -574,6 +588,12 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		// PackageName, so a fresh capture is needed if the real client's
 		// build ever moves on.
 		effectiveAppVersion, effectiveVersionCode = "1.0.344", "786"
+	}
+	if in.AppVersion != "" {
+		effectiveAppVersion = in.AppVersion
+	}
+	if in.VersionCode != "" {
+		effectiveVersionCode = in.VersionCode
 	}
 	ta := "{}"
 	if in.IOSMode {

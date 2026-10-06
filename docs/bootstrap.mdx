@@ -14,40 +14,81 @@ Cold start walks an 18-state machine from splash screen to a live game connectio
 | 3 | `CheckResVersion` | **Version check**: races N hosts in parallel, first success wins |
 | 4–5 | `DownloadManifest` / `DownloadUpdate` | Downloads/patches asset bundles, table data, and the Lua bundle |
 | 6 | `LoadDataTable` | Loads config tables + localization into memory |
-| 7 | `GetServerList` | **GSL request**: RSA+AES hybrid handshake ([Gate-server RSA+AES handshake](/gate-server-crypto)), only if no cached server |
-| 9 | `ConnectGame` | Opens the SFS2X TCP/WS connection to the chosen `ip:port` |
+| 7 | `GetServerList` | **GSL request**: RSA+AES hybrid handshake ([Gate-server RSA+AES handshake](/gate-server-crypto)), on every cold start in 1.0.364 |
+| 9 | `ConnectGame` | Races every gateway in the zone's list and keeps the first to answer (see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe)) |
 | 10 | `Login` | SFS2X `Login` request (see [Identity, login & session](/auth)) |
 | 12 | `LoadScene` → `EnterGame` | Loads the actual game scene |
 
-A returning user with a cached, still-valid `ip/port/zone` skips straight from step 6 to step 9; the RSA+AES GSL dance only runs on first launch or when the cache is stale/rejected.
+In 1.0.364, `CheckResVersion` clears the cached server IP, port, and connection type on every cold start, so `StartConnect` never finds a cached server and the GSL (Gate Server List) call always runs (static-analysis-only). The cached `ip/port/zone` short-cut from state 6 to state 9 still exists, but only a mid-session reconnect, such as following a `serverInfo` redirect, takes it. See [Identity, login & session](/auth#token-lifecycle) for what the GSL call does with the stored tokens.
 
 ## Check-version endpoint
 
 ```text
 GET {host}/gameservice/getlsu3dversion.php
 ?packageName=com.fun.lastwar.gp&platform=...&appVersion=...
-&gm=0&server=&uid=&deviceId=&table_env=...&buildId=...
+&gm=0&server=<cached zone>&uid=&deviceId=&table_env=table_online&buildId=<versionCode>
 &returnJson=1&unityVersion=440
 ```
 
-Host list (first success wins, ~5% of devices A/B-bucketed to an `ea-` variant by `GrayUtils.GetPercentageFromMd5`: `MD5(deviceId)` read as a little-endian uint64, `mod 100 + 1 <= 5`):
+In 1.0.364, `table_env` is `table_online` and `server` carries the cached zone (static-analysis-only). `goclient` sends both empty, and the server answers anyway (confirmed live).
+
+Host list (requests go out to every host in parallel and the first success wins; on total failure the client retries the same list once). About 5% of devices are A/B-bucketed to the `ea-` hosts by `GrayUtils.GetPercentageFromMd5`: `MD5(deviceId)` read as a little-endian uint64, `mod 100 + 1 <= 5`.
 
 ```text
 https://lastwar-serverlist-cf.lastwarapp.net
 https://lastwar-serverlist-us-aws-ali.lastwargame.com
 https://lastwar-serverlist-us-gcp-ali.lastwargame.com
+
+# ea- bucket
+https://lastwar-serverlist-ea-us-aws.lastwargame.com
+https://lastwar-serverlist-ea-us-gcp.lastwargame.com
 ```
+
+`goclient` tries the three online hosts one after another, not in parallel.
 
 Whichever host answers becomes the base URL for every subsequent call in this bootstrap (`getserverlist.php`, `getnotice.php`, `probe.php`); there is no separate "gate server" discovery step.
 
+A response counts as valid when it has a non-empty `code` (which the client treats as an error), or when `updateType` is in `0`..`3` and `hotUpdateMsg` is non-empty. The 1.0.364 parser (`CheckResVersionState`) reads these fields:
+
 | Response field | Meaning |
 |---|---|
+| `code` | Error: the client throws and falls back to the versions packaged in the app |
 | `resMsg` | Base64 DER RSA public key (no PEM armor), feeds the GSL crypto, see [Gate-server RSA+AES handshake](/gate-server-crypto). **Not hardcoded**, delivered fresh every check. |
-| `updateType` | `0`=none, `1`/`3`=optional, `2`=force-update (blocking dialog) |
-| `hotUpdateMsg` | `;`-separated `name,version,crc,size`, asset-bundle manifest versions |
-| `lwfile2` | Version descriptor specifically for the Lua bundle |
-| `table_version` | `version,size,md5[,crc][;patch chain]` for the game-data table archive |
-| `client_config` | Server-pushed feature-flag bitset (`ClientSwitch.IsOn(N)` gates throughout the client) |
+| `updateType` | See the table below |
+| `downloadurl` | Store link shown with a forced update |
+| `hotUpdateMsg` | `;`-separated `name,version,crc,size`, asset-bundle manifest versions (`GameRes`, `DataTable`, `Lua`, `Download`, `PackageRes`, `DllRes`) |
+| `lwfile2` | The Lua bundle: `version\|bzSize\|bzCrc[\|rawSize\|rawCrc];oldVer\|patchSize\|patchCrc;...`. A patch downloads only when the local version equals one of the `oldVer` entries |
+| `table_version` | `version,size,md5[,crc][;patch chain]` for the game-data table archive. Parsed by the C#, but absent from the live iOS response on 2026-10-04 |
+| `locale` | `version,lang1,lang2,...`. Parsed by the C#, but absent from the live iOS response on 2026-10-04 |
+| `client_config` | Server-pushed feature flags: `\|`-separated `"0"`/`"1"` values indexed by switch id (`ClientSwitch.IsOn(N)` gates throughout the client). See [SFS2X wire protocol](/wire-protocol#server-controlled-transport-switches) for the ones that change the wire |
+| `checkok` | Present only in review mode; the client then skips the table and locale updates |
+| `warmup` | Opaque asset pre-download list; not protocol-relevant |
+| `firstLaunchForceUpdateMsg` | Read only in a first-launch skip-update experiment; not protocol-relevant |
+
+That's every field the parser handles. A live response carries fewer: the iOS check-version response for 1.0.344 (786), fetched on 2026-10-04, held only `client_config`, `downloadurl`, `firstLaunchForceUpdateMsg`, `hotUpdateMsg`, `lwfile2`, `resMsg`, `updateType`, and `warmup`.
+
+`updateType` meanings (1.0.364 C#):
+
+| Value | Meaning |
+|---|---|
+| `0` | Proceed to download and hot-update |
+| `1` | Optional store-update dialog: update or continue |
+| `2` | Forced update, blocking. The server no longer accepts this build |
+| `3` | Falls into the `default` branch, so it behaves exactly like `0`. The `Login` response handler also rewrites `3` to `0` |
+
+The `Login` response can carry `updateType` too; with `2`, the client enters its app-update state instead of waiting for `init`. On 2026-10-04 the iOS 1.0.344 app got `updateType=3` from both check-version and `Login`, with the `Login` response naming `new_version` `1.0.350` (observed live). `goclient` now logs a warning when check-version returns `updateType=2`, since `Login`s claiming that build are likely to start failing too.
+
+## resVersion
+
+`Login`'s `resVersion` is `GetResVersion()` in the 1.0.364 C# (static-analysis-only):
+
+```text
+{GameRes}.{DllRes}_{lwfile2 version}F_{table_version}.{locale}
+```
+
+In the C#, each part is the first field of the matching check-version entry: the `GameRes` and `DllRes` versions from `hotUpdateMsg`, the first `|` field of `lwfile2`, and the first `,` field of `table_version` and `locale`.
+
+Only the `{GameRes}.{DllRes}_{lwfile2 version}F` prefix can be derived from a live response. The real iOS app sent `2159.1505_821F_39516.23570` on 2026-10-04, and that day's check-version response returned `GameRes` 2159, `DllRes` 1505, and `lwfile2` version 821, matching the prefix. It carried no `table_version` or `locale` field, and neither 39516 nor 23570 appears anywhere in it. The tail's source is unknown (local state or another endpoint), and its mapping to `table_version` and `locale` is static-analysis-only. `goclient` sends `"0"`, which the server has accepted for months.
 
 ## Hot-update transport & patch format
 
@@ -79,3 +120,23 @@ https://lastwar-cdn.akamaized.net/hotupdate/     (primary)
 https://lastwar-cdn.lastwarapp.net/hotupdate/    (fallback)
 https://cdn.lastwar.com/hotupdate/               (fallback)
 ```
+
+The client rotates through the fallback bases on retry. The Lua bundle sits at a predictable path under each base (`NetworkURLConfig.GetDownloadURL`, `LWLuaFileUtil`):
+
+```text
+https://lastwar-cdn.akamaized.net/hotupdate/<app id>/<Android|iOS>/LWScripts_<version>_u440.bz2
+https://lastwar-cdn.akamaized.net/hotupdate/<app id>/<Android|iOS>/LWScripts_<new>_<old>_u440.patch
+```
+
+`<app id>` is the bundle identifier: `com.fun.lastwar.gp` for Android, `com.lastwar.ios` for iOS. The `.bz2` is plain bzip2, not ChaCha-wrapped; if a download ever is wrapped (`PRB`), the client unwraps it first. On disk, the client re-encrypts the bundle as `LWLF` file version 2, which never affects the CDN payload. Old versions stay hosted: every version probed between 780 and 826 returned HTTP 200 on 2026-10-04.
+
+Lua bundle versions seen on 2026-10-04:
+
+| Bundle | `LWLF` version | Chunks |
+|---|---|---|
+| 1.0.351 APK baseline (recovered from the CDN) | 793 | 18,514 |
+| 1.0.364 APK (tag `20260921_1892_App`) | 825 | 18,733 |
+| Live Android (newest hosted; 827 and 830 returned 404) | 826 | 18,740 |
+| Live iOS (matches the iOS app's `lwfile2`) | 821 | 18,740 |
+
+At the command-catalog level, both live bundles match the 1.0.364 APK. Their differences are debug-only UI modules, a removed diagnostic, and a handful of changed chunks outside `Net/`. Every request schema `goclient` uses is identical across all four versions, see [Command reference](/command-reference).

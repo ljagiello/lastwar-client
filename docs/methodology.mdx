@@ -53,3 +53,7 @@ Once patched, this recovered readable Lua source for all 2,855 `Net/`+`Common/` 
 | `assets/table/table_*.data` | 18.6 MB | 1,279 decompiled Lua data tables |
 | base APK Java/Kotlin (dex) | ~42.3 MB | 16,867 files via jadx |
 | native libs, `lib/arm64-v8a/` | 7 relevant of 23 | Symbol/string survey only, no disassembly |
+
+### Re-running the pipeline on 1.0.364
+
+The same three techniques worked unchanged on 1.0.364 (versionCode 1892, posted 2026-09-23). All 118 hot-update `.mdl` files decoded with the same single-byte XOR scheme, and the patched unluac decompiled every one of the 18,733 chunks in the `LWLF` bundle (version 825, tag `20260921_1892_App`) with zero failures. The signing certificate is byte-identical to 1.0.351's. Older Lua bundles stay hosted on the CDN, which is how the 1.0.351 baseline (`LWLF` 793, 18,514 chunks) was recovered for an exact diff, see [Startup, version-check & hot-update](/bootstrap).

@@ -9,16 +9,30 @@ It works at all because the SFS2X game socket is **plain TCP with no TLS**. Capt
 
 ## Step 1: capture
 
-Run `tcpdump` against the known game/CDN hosts and the SFS2X port, then launch and use the real app (`/Applications/Last War.app` on macOS, or the equivalent iOS/Android install) while it's running:
+Run `tcpdump` with a filter that keeps every TCP flow except HTTPS and SSH, then launch and use the real app (`/Applications/Last War.app` on macOS, or the equivalent iOS/Android install) while it's running:
 
 ```bash
-sudo tcpdump -i any -w capture.pcap \
-  'host 104.17.133.15 or host 104.17.132.15 or host 172.65.210.24 or \
-   host 3.33.246.23 or host 15.197.233.176 or host 34.145.128.94 or \
-   port 19292 or port 17783 or port 6088 or port 25092'
+tcpdump -i en0 -w capture.pcap 'tcp and not port 443 and not port 22'
 ```
 
-The host list is every server IP this project has seen the client actually talk to (GSL HTTP endpoints, CDN, and SFS2X game servers); the port list catches every SFS2X game port seen across captures so far. Keep the filter broad; a capture with some irrelevant traffic in it costs nothing at the decode step, but a filter that's too narrow silently drops the packets you actually need.
+This filter catches every SFS2X gateway the client races, IPv6 ones included, without knowing their addresses or the zone's current port. Capture on the real network interface (`en0` above; `networksetup -listallhardwareports` lists yours). On macOS:
+
+- You don't need `sudo` if Wireshark's ChmodBPF helper is installed, since it gives your user read access to the `/dev/bpf*` devices.
+- `-i any` needs root on macOS, even with ChmodBPF.
+
+Port 443 is excluded because everything on it is TLS, which this pipeline can't decode. That includes the GSL (Gate Server List) call, so a capture never contains the GSL response or the values that only arrive there (`at.time`, `rt`).
+
+If you need a narrower capture, filter on the known hosts and ports instead:
+
+```bash
+tcpdump -i en0 -w capture.pcap \
+  'host 104.17.133.15 or host 104.17.132.15 or host 172.65.210.24 or \
+   host 3.33.246.23 or host 15.197.233.176 or host 34.145.128.94 or \
+   host 136.107.113.253 or host 166.117.204.28 or \
+   port 19292 or port 17783 or port 6088 or port 25092 or port 10783'
+```
+
+The host list is every IPv4 server address this project has seen the client actually talk to (GSL HTTP endpoints, CDN, and SFS2X gateways); the port list catches every SFS2X game port seen across captures so far. It misses IPv6 gateways, such as the Cloudflare one the client raced on 2026-10-04. Keep the filter broad; a capture with some irrelevant traffic in it costs nothing at the decode step, but a filter that's too narrow silently drops the packets you actually need.
 
 <Info>
   **Why the host list has held up better than the port list.** An account can get moved to a different zone server-side, confirmed live via a real server merge that moved this project's account from zone `APS783` to `APS8092` with an entirely different port (`17783` → `25092`) mid-session (see [Live validation against production](/live-validation#a-real-server-merge-exposed-three-real-redirect-following-bugs) for the client-side fix this required). The *port* is zone-specific and will drift every time this happens, there's no way to keep it current in a static list. The *host* IPs above turned out to be shared CDN/infra-level addresses rather than zone-specific ones: the post-merge zone's actual game-server host (`lastwar-game-cf.lastwarapp.net`) resolved to `172.65.210.24`, already on this list. Since the filter is a flat OR, `host 172.65.210.24` alone captured the new zone's traffic on its new port without the port list needing to know about it. That's not guaranteed to hold forever, if you're capturing after your own account has moved zones and traffic isn't showing up, re-resolve the current game-server hostnames (they're in a login response's `serverInfo` field, or already-resolved in your session config after a redirect) and add any genuinely new IP to the host list.
@@ -28,7 +42,7 @@ The host list is every server IP this project has seen the client actually talk 
 
 ## Step 2: find the game socket
 
-A single capture typically contains several TCP streams: the real game session, a handful of short-lived "losing" connection attempts (the client races several GSL-provided candidate hosts and keeps only one), and unrelated TLS side-channels (chat, logging, CDN). The `pcap` tool lists them, decodable **plain** streams first, then encrypted **tls** ones:
+A single capture typically contains several TCP streams: the real game session, a few short-lived "losing" gateway connections, and unrelated TLS side-channels (chat, logging, CDN). The losing connections come from the gateway race: in the 2026-10-04 capture, the real client opened three gateways on the zone port at once (two IPv4, one Cloudflare IPv6), sent an `a=29` probe on each, logged in on the first to answer, and closed the other two about 30 ms later. Each losing stream holds one probe and one pong, see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe). The `pcap` tool lists them, decodable **plain** streams first, then encrypted **tls** ones:
 
 ```bash
 go build -o pcap ./cmd/pcap
@@ -77,6 +91,47 @@ Pass `-client <ip>` to `pcap` to override the auto-detected client side if the h
 ## Reading the output
 
 Each decoded line is one SFS2X extension-call envelope: `c` is the SFSObject's top-level wrapper (`1` = extension call, `0` = system/heartbeat), `a` is the sub-action, and `p` holds the actual payload; for extension calls, `p.c` is the command name and `p.p` is its params object. Client→server calls almost always carry `_id`, an ever-incrementing per-connection request id; the matching server response echoes the same `_id`. See [Wire protocol](/wire-protocol) for the full packet-envelope and SFSObject binary format this output is decoded from, and [Command reference](/command-reference) for what a given `p.c` command name actually does.
+
+## Recovering from a rotated token
+
+When every run fails with `ec=28`, `ep=[E011]`, the server no longer accepts the session config's access token. The fix is a fresh capture of the real app logging in, and `pcap -session-out` turns that capture straight into a session config. Confirmed live on 2026-10-04: this procedure restored the scheduled runs after the 2026-10-02 rotation (see [Live validation against production](/live-validation)).
+
+<Steps>
+  <Step title="Start the capture">
+    ```bash
+    tcpdump -i en0 -w login.pcap 'tcp and not port 443 and not port 22'
+    ```
+  </Step>
+  <Step title="Cold-start the real app">
+    Quit the real app completely, launch it, and wait until its main screen loads, so the capture holds the whole connect-and-login sequence. Then quit the app and stop `tcpdump`.
+  </Step>
+  <Step title="Write the session config">
+    ```bash
+    go run ./cmd/pcap -in login.pcap -session-out ~/.lastwar_goclient_session.json
+    ```
+  </Step>
+  <Step title="Verify">
+    ```bash
+    ./lastwar-client -collect
+    ```
+  </Step>
+</Steps>
+
+What `-session-out` does:
+
+- It searches every plain (non-TLS) stream, or only the one you name with `-stream`.
+- It picks the `Login` request (`c=0, a=1`) whose server reply carries no `ec`. It reports streams whose `Login` was rejected or never answered, and skips the `a=29` probe streams.
+- It writes `ip`, `port`, `zone`, `gameUid`, `deviceId`, `shumeiBoxId`, `accessToken`, and `iosMode` (from `platform="0"`), plus the `appVersion` and `versionCode` the token was issued under. It overwrites the destination and sets mode `0600`, tightening an existing file's mode too.
+- It appends every other gateway that answered a probe on the same port to `ip` as a `|`-delimited fallback list, after the gateway the accepted `Login` went through.
+- It prints `ip`, `port`, `zone`, `iosMode`, `appVersion`, and `versionCode`, but only the **lengths** of `gameUid`, `deviceId`, `shumeiBoxId`, and `accessToken`, so its output is safe to paste into an issue.
+- It refuses when more than one stream holds an accepted `Login` (for example, the app relaunched mid-capture), because the conversations carry no timestamps to tell which is freshest. Pick one with `-stream`.
+- It fails if the accepted `Login` is missing `zn`, `gameUid`, `deviceId`, or `at`. It copies `shumeiBoxId` when present but doesn't require it, since the server doesn't either: a captured session also reconnects with it empty (confirmed live, 2026-10-04).
+
+Recording the build matters. An access token is bound to the identity it was issued under, build included (confirmed live, see [Live validation against production](/live-validation#solved-a-field-by-field-identity-mismatch-not-anti-fraud)). Once the real app updates, a fresh token only works if `goclient`'s `Login` claims that same `appVersion` and `versionCode`. Without the two fields, iOS mode falls back to the 1.0.344 (786) build of the original capture.
+
+<Warning>
+  The written file holds live credentials for a real account. Keep it outside the repository, as the default path in your home directory already is.
+</Warning>
 
 ## Known limitation: some captures stop decoding partway through
 

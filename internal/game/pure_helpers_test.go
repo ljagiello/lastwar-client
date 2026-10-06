@@ -4,28 +4,39 @@ import (
 	"bytes"
 	"lastwar-client/internal/sfs"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 )
 
 func TestCollectibleBuildings(t *testing.T) {
-	newBuilding := func(uuid int64, bId int32) Building {
+	newBuilding := func(uuid int64, bId int32, producing bool) Building {
 		o := sfs.NewSFSObject()
 		o.PutLong("uuid", uuid)
 		o.PutInt("bId", bId)
+		if producing {
+			o.PutLong("prodST", 1791171134420)
+		}
 		return Building{Raw: o}
 	}
 	buildings := []Building{
-		newBuilding(1, BuildingFarmland),
-		newBuilding(2, 99999999), // not a recognized collectible type
-		newBuilding(3, BuildingIronMine),
+		newBuilding(1, BuildingFarmland, true),
+		newBuilding(2, 99999999, true), // not a recognized collectible type
+		newBuilding(3, BuildingIronMine, true),
+		newBuilding(4, BuildingGoldMine, false),        // no production cycle running
+		newBuilding(5, BuildingTruckStation1, true),    // not a production line (342/342 live no-ops)
+		newBuilding(6, BuildingTacticalCenter, true),   // not a production line
+		newBuilding(7, BuildingArmamentInst, true),     // not a production line
+		newBuilding(8, BuildingCrystalFactory, true),   // new production line in 1.0.364
+		newBuilding(9, BuildingSporeFactoryCard, true), // Season 6 week-card farm building
 	}
 	got := collectibleBuildings(buildings)
-	if len(got) != 2 {
-		t.Fatalf("got %d collectible buildings, want 2", len(got))
+	var uuids []int64
+	for _, b := range got {
+		uuids = append(uuids, b.Uuid())
 	}
-	if got[0].Uuid() != 1 || got[1].Uuid() != 3 {
-		t.Errorf("unexpected uuids: %d, %d", got[0].Uuid(), got[1].Uuid())
+	if want := []int64{1, 3, 8, 9}; !slices.Equal(uuids, want) {
+		t.Errorf("collectible uuids = %v, want %v", uuids, want)
 	}
 }
 

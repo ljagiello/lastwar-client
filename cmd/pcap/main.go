@@ -5,6 +5,7 @@
 //	pcap -in capture.pcap -list                       # list TCP conversations, pick one
 //	pcap -in capture.pcap -stream 0 -decode           # reassemble + decode it inline
 //	pcap -in capture.pcap -stream 0 -out stream0      # write stream0_c2s.bin / stream0_s2c.bin
+//	pcap -in capture.pcap -session-out session.json   # real app's accepted Login -> session config
 //
 // The game socket is the busiest conversation, so it sorts to index 0 in -list.
 // The client side is auto-detected (the SYN sender, or the private-IP endpoint);
@@ -32,9 +33,16 @@ func main() {
 	clientStr := flag.String("client", "", "client-side IP (default: auto-detect the connection initiator)")
 	out := flag.String("out", "", "write <prefix>_c2s.bin and <prefix>_s2c.bin")
 	decode := flag.Bool("decode", false, "decode the reassembled stream inline instead of writing .bin files")
+	sessionOut := flag.String("session-out", "", "write the reconnect credentials from the capture's server-accepted Login to this session config JSON (0600; values are never printed). Searches every plain stream unless -stream is given")
 	flag.Parse()
 
-	if err := run(*in, *list, *stream, *clientStr, *out, *decode); err != nil {
+	var err error
+	if *sessionOut != "" {
+		err = runSessionOut(*in, *stream, *clientStr, *sessionOut)
+	} else {
+		err = run(*in, *list, *stream, *clientStr, *out, *decode)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "pcap:", err)
 		os.Exit(1)
 	}
