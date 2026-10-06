@@ -142,6 +142,18 @@ func FakeInitPushServer(zoneSeen chan<- string) func(*GameConn) {
 	}
 }
 
+// ParamKeysWithoutID returns p's keys minus the `_id` request sequence number SendExtension adds
+// to every request, for fake servers that assert on exactly which parameters a command carries.
+func ParamKeysWithoutID(p *sfs.SFSObject) []string {
+	var keys []string
+	for _, k := range p.Keys() {
+		if k != "_id" {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
 // ReadNextExtension reads envelopes off server until one decodes as an extension message,
 // silently skipping anything else -- in practice the client's own heartbeat pingpong (system
 // controller, sent every 4s per conn.go's StartHeartbeat), which TestLoginEmailVerificationPath's

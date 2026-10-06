@@ -9,6 +9,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,10 +42,21 @@ type GameConn struct {
 	reader *bufio.Reader
 	wmu    sync.Mutex
 
+	// extSent counts SendExtension calls on this connection; SendExtension derives each request's
+	// `_id` from it (see loginFutureID). A fresh GameConn per dial gives the per-connection reset
+	// the real client's FutureManager.reset() does on reconnect.
+	extSent atomic.Int32
+
 	stopHeartbeat chan struct{}
 	closeOnce     sync.Once
 	closeErr      error
 }
+
+// loginFutureID is the `_id` the SFS Login request carries (BuildLoginParams' FutureID, always 1).
+// The real client draws Login's `_id` and every later request's from one counter,
+// FutureManager.getFutureId() (Interlocked.Increment, Assembly-CSharp.decompiled.cs:672057-672066),
+// so the first extension request after Login is 2.
+const loginFutureID = 1
 
 // writeTimeout bounds every socket write via SendEnvelope. Without it, a
 // half-open connection can block Write indefinitely while holding wmu --
@@ -139,14 +151,30 @@ func (c *GameConn) SendEnvelope(controller byte, action int16, content *sfs.SFSO
 
 // SendExtension sends a client->server `cmd` extension request, matching
 // SFSNetwork.SendMessage(cmd, ...) -- dossier §04/§06.
+//
+// Every request carries an Int `_id` from one per-connection sequence that continues after
+// Login's 1, as NetworkManager.SendLuaMessage and BaseMessage.CSSetData do
+// (PutInt("_id", getFutureId()), Assembly-CSharp.decompiled.cs:76702-76722, 80810-80812). The
+// server echoes `_id` and adds `_time` on the response; live, every real-client request carries
+// one except login.ext. A caller that already set `_id` keeps it (login.go's login.init fallback
+// sends 2), but the sequence still advances so the next request never reuses that number. The
+// caller's params are copied, not modified, so a params object can be reused across sends.
 func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
-	if params == nil {
-		params = sfs.NewSFSObject()
+	id := c.extSent.Add(1) + loginFutureID
+	withID := sfs.NewSFSObject()
+	if params != nil {
+		for _, k := range params.Keys() {
+			v, _ := params.Get(k)
+			withID.PutValue(k, v)
+		}
+	}
+	if !withID.Has("_id") {
+		withID.PutInt("_id", id)
 	}
 	extContent := sfs.NewSFSObject()
 	extContent.PutUtfString("c", cmd)
 	extContent.PutInt("r", -1)
-	extContent.PutSFSObject("p", params)
+	extContent.PutSFSObject("p", withID)
 	return c.SendEnvelope(ControllerExtension, ActionCallExtension, extContent)
 }
 

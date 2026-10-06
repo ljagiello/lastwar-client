@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 )
 
@@ -63,7 +64,7 @@ func TestRailwayCargoClaimsArrivedTrucksOnce(t *testing.T) {
 	if got := fake.cmds(); !slices.Equal(got, []string{railwayBatchCmd}) {
 		t.Fatalf("sent %v, want one train.batch.reward", got)
 	}
-	if n := len(fake.requests()[0].Params.Keys()); n != 0 {
+	if n := len(session.ParamKeysWithoutID(fake.requests()[0].Params)); n != 0 {
 		t.Errorf("train.batch.reward carried %d params, want none", n)
 	}
 }

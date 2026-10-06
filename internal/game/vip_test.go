@@ -28,7 +28,7 @@ func TestClaimVIPDailyLoginScoreSendsExactCmdAndEmptyParams(t *testing.T) {
 			return
 		}
 		gotCmd = msg.Cmd
-		gotParamCount = len(msg.Params.Keys())
+		gotParamCount = len(session.ParamKeysWithoutID(msg.Params))
 		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension(msg.Cmd, resp)
@@ -87,7 +87,7 @@ func TestClaimVIPDailyFreebieSendsExactCmdAndEmptyParams(t *testing.T) {
 			return
 		}
 		gotCmd = msg.Cmd
-		gotParamCount = len(msg.Params.Keys())
+		gotParamCount = len(session.ParamKeysWithoutID(msg.Params))
 		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendExtension(msg.Cmd, resp)
