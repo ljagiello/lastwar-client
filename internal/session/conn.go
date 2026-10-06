@@ -297,11 +297,10 @@ func RegisterBenignErrorCode(code string, cmds ...string) {
 
 // commandOutcome classifies a collect/claim response into one of three buckets: a real success,
 // a benign no-op (an expected cooldown/already-claimed/not-yet-arrived errorCode, or -- for
-// building.production.collect specifically -- a status=0 response with no errorCode; buildings.go's
-// own doc comments treat status=1, not just errorCode-absence, as the real proof a collection
-// succeeded, and docs/live-validation.mdx only ever observed status=1 or errorCode=602026 from that
-// command). Other command families have no documented evidence of ever emitting a status field, so
-// the status=0 heuristic does not apply to them and they fall through to outcomeSuccess instead.
+// building.production.collect specifically -- a response with no errorCode whose status says
+// nothing was collected; see collectStatusIsNoOp). Other command families have no documented
+// evidence of ever emitting a status field, so the status rule does not apply to them and they
+// fall through to outcomeSuccess instead.
 type commandOutcome int
 
 const (
@@ -310,29 +309,46 @@ const (
 	outcomeFailure
 )
 
+// collectStatusIsNoOp reports whether a building.production.collect response that carries no
+// errorCode still collected nothing. It follows the real client exactly:
+// ProductLineManager.HandleCollect does `if (message.status or -1) == -1` → tip 602026 ("Production
+// in progress. Please wait.") and returns without touching the building
+// (DataCenter/ProductLine/ProductLineManager.lua:596-606). So a missing (or null) status and
+// status -1 are no-ops, the same outcome as errorCode 602026. Every other value -- 1 on every live
+// success so far, and 0, which has never been seen live -- takes the client's success path.
+//
+// Before 1.0.364's Lua was read, this treated status=0 as the no-op and a missing status as success,
+// a guess with no evidence behind it either way. Only the log level depends on this: SendAndWait
+// returns an error for outcomeFailure alone, so no exit code or abort decision changes.
+//
+// A present but wrong-typed status (a string, a double) is not -1 in Lua either -- Lua's == does
+// not coerce -- so it is success here too, with a Warn. Round 29's rule still holds: GetInt's
+// zero-value coercion is never trusted without a type check, so a malformed status cannot land in
+// the benign bucket (TestClassifyResponseWrongTypedStatusIsNotBenign, conn_test.go).
+func collectStatusIsNoOp(params *sfs.SFSObject) bool {
+	v, ok := params.Get("status")
+	if !ok || v.Val == nil {
+		return true
+	}
+	if !SFSFieldKindAccepts(SFSFieldKindInt, v.Val) {
+		WarnIfWrongTypedField(params, "status", "building.production.collect status check", SFSFieldKindInt)
+		return false
+	}
+	return params.GetInt("status") == -1
+}
+
 // classifyResponse determines a response's outcome and, for a benign or real failure, the
-// errorCode (empty string for the building.production.collect status=0-with-no-errorCode benign
-// case). An errorCode present in benignErrorCodes is only outcomeBenign when msg.Cmd matches one
-// of that code's documented cmds (see benignErrorCodes' doc comment) -- mirroring how the
-// status=0 heuristic above is itself scoped to building.production.collect -- so a genuine
+// errorCode (empty string for the building.production.collect no-errorCode benign case, see
+// collectStatusIsNoOp). An errorCode present in benignErrorCodes is only outcomeBenign when
+// msg.Cmd matches one of that code's documented cmds (see benignErrorCodes' doc comment) --
+// mirroring how the status rule is itself scoped to building.production.collect -- so a genuine
 // failure on an unrelated cmd that happens to share one of these numeric errorCode values still
 // falls through to outcomeFailure. This is the single place both logCommandResult and SendAndWait
 // derive their behavior from, so the two can never drift out of sync with each other.
-//
-// Round 29: the status check below uses RequireFieldType (buildings.go), not a bare
-// Has("status")+GetInt("status")==0 pair, for the same reason RequireFieldType exists at all --
-// GetInt silently coerces ANY non-int-shaped value to int32(0), so a present-but-wrong-typed
-// status field used to satisfy Has()+GetInt()==0 exactly like a genuine status=0 would, folding a
-// malformed/wrong-typed response into this same benign bucket. RequireFieldType treats a
-// wrong-typed status exactly like a missing one -- false here, falling through to outcomeSuccess
-// -- so only a status field that actually decoded as an int, and is genuinely 0, takes this
-// branch. See TestClassifyResponseWrongTypedStatusIsNotBenign (conn_test.go).
 func classifyResponse(msg *ExtensionMessage) (commandOutcome, string) {
 	ec, has := msg.Params.Get("errorCode")
 	if !has {
-		if msg.Cmd == "building.production.collect" &&
-			RequireFieldType(msg.Params, "status", "building.production.collect", SFSFieldKindInt) &&
-			msg.Params.GetInt("status") == 0 {
+		if msg.Cmd == "building.production.collect" && collectStatusIsNoOp(msg.Params) {
 			return outcomeBenign, ""
 		}
 		return outcomeSuccess, ""
@@ -355,7 +371,7 @@ func logCommandResult(label string, msg *ExtensionMessage) {
 		if code != "" {
 			slog.Warn(label+" no-op (expected)", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.String())
 		} else {
-			slog.Warn(label+" no-op (status=0, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.String())
+			slog.Warn(label+" no-op (status missing or -1, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.StringRedacted())
 		}
 	case outcomeFailure:
 		slog.Error(label+" failed", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.StringRedacted())
