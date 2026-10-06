@@ -18,7 +18,7 @@ func TestAllianceDonateAllIsRegisteredOptIn(t *testing.T) {
 	if f.DefaultOn {
 		t.Error("alliance-donate-all must be DefaultOn: false (it spends resources)")
 	}
-	if !strings.Contains(f.Summary, "opt-in") {
+	if !strings.HasPrefix(f.Summary, "OPT-IN:") {
 		t.Errorf("Summary %q must say opt-in", f.Summary)
 	}
 }

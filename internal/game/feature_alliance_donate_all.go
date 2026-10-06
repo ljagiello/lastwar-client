@@ -11,7 +11,7 @@ import (
 func init() {
 	registerFeature(Feature{
 		Name:      "alliance-donate-all",
-		Summary:   "opt-in: spend every remaining alliance tech donation charge on the recommended tech (each donation costs resources)",
+		Summary:   "OPT-IN: spend every remaining alliance tech donation charge on the recommended tech (each donation costs resources)",
 		DefaultOn: false,
 		Run:       func(conn *session.GameConn, _ *Init) error { return donateAllAllianceTech(conn) },
 	})
