@@ -246,8 +246,16 @@ func runDuelRecruitTickets(conn *session.GameConn, in *Init) error {
 		ledger[duelRecruitWorkerTicket] = held[duelRecruitWorkerTicket]
 	}
 	if len(ledger) == 0 {
+		// The recruit tickets are goods 2300xx; listing the ones held shows a ticket id this
+		// feature doesn't know (a pool's item_extraInfo override) rather than "none".
+		tickets := map[string]int64{}
+		for id, n := range held {
+			if strings.HasPrefix(id, "2300") && len(id) == 6 {
+				tickets[id] = n
+			}
+		}
 		slog.Info("duel-recruit-tickets: no recruit ticket held for today's recruit type", "theme", d.ThemeName(),
-			"hero", hero, "survivor", survivor)
+			"hero", hero, "survivor", survivor, "ticketItemsHeld", fmt.Sprint(tickets))
 		return nil
 	}
 	g, err := newDuelSpendGuard(conn, in, "duel-recruit-tickets")
