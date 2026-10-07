@@ -346,3 +346,16 @@ func TestTreasureHuntPrimaryPrize(t *testing.T) {
 		t.Errorf("due = %v, want [10] (level 10 reached, 5 claimed)", due)
 	}
 }
+
+func TestTreasureHuntDigFailureStopsThatActivityOnly(t *testing.T) {
+	withEvNow(t, evTestNow)
+	f := &thFake{id: 3009, level: 1, big: 1, grandAt: 99, digErr: "E9"}
+	conn, fake := startEvFake(t, f.reply)
+	err := runTreasureHunt(conn, digsInit(10, evActivity(3009), evActivity(5104)))
+	if err == nil || !strings.Contains(err.Error(), "E9") {
+		t.Fatalf("err = %v, want the failed dig reported", err)
+	}
+	if n := len(fake.only(treasureHuntDigCmd)); n != 2 {
+		t.Errorf("sent %d digs, want one per activity: %v", n, fake.cmds())
+	}
+}

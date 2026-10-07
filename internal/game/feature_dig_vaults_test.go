@@ -411,3 +411,29 @@ func TestDigVaultGeometry(t *testing.T) {
 		t.Errorf("pickStone = %d, want 3 (relic complete, first unopened)", pos)
 	}
 }
+
+func TestDigVaultClaimFailureKeepsGoing(t *testing.T) {
+	withEvNow(t, evTestNow)
+	mk := func(uuid int64) *vaultState {
+		v := newVault(uuid, 15001)
+		v.rewardState = 1
+		v.opened[3] = "1001"
+		v.blocks = [][2]int64{{60013, 3}}
+		return v
+	}
+	f := &vaultFake{vaults: map[int64]*vaultState{1: mk(1), 2: mk(2)}}
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == offSeasonDigBlockCmd && p.GetLong("uuid") == 1 {
+			return evErr("E9")
+		}
+		return f.reply(cmd, p)
+	})
+	err := runOffSeasonDigs(conn, digsInit(0, evActivity(80052)), false)
+	if err == nil || !strings.Contains(err.Error(), "E9") {
+		t.Fatalf("err = %v, want the failed claim reported", err)
+	}
+	claims := fake.only(offSeasonDigBlockCmd)
+	if len(claims) != 2 || claims[1].Params.GetLong("uuid") != 2 {
+		t.Errorf("sent %v, want vault 2 claimed after vault 1 failed", fake.cmds())
+	}
+}
