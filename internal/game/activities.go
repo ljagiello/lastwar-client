@@ -25,6 +25,8 @@ const (
 	actTypeSevenDay         int32 = 34
 	actTypeTruckActivity    int32 = 110
 	actTypeLuckyRoll        int32 = 124
+	actTypeTreasureHunt     int32 = 130
+	actTypeTreasureHuntNew  int32 = 139
 	actTypePersonalArmsNew  int32 = 125
 	actTypeGiftBox          int32 = 132
 	actTypeLuckyShop        int32 = 134
@@ -39,10 +41,13 @@ const (
 	actTypeSlotMachine      int32 = 159
 	actTypeDecorationGacha  int32 = 173
 	actTypeSevenDayV2       int32 = 174
+	actTypeAllyDrill        int32 = 202
 	actTypeTrainActivity    int32 = 203
 	actTypeWinterStorm      int32 = 218
 	actTypeSeasonFarmer     int32 = 239
+	actTypeDiggingGame      int32 = 241
 	actTypeSeasonPreview    int32 = 248
+	actTypeOffSeasonDig     int32 = 260
 	actTypeTorchRelay       int32 = 309
 	actTypeBountyHunter     int32 = 350
 	actTypeMonthCardInsure  int32 = 373
@@ -507,7 +512,7 @@ var (
 
 // activityIDsByType and activityNeedHQ are generated from table `activity` in the 1.0.364 tables
 // (39432; identical in live 39516 per coverage/reports/tables.md): the id, type and needMainCityLevel
-// columns, for the types the event features handle (types: 14,27,34,124,125,132,134,142,150,151,153,154,155,156,158,159,173,174,218,239,248,309,350,373,380,389,392,412).
+// columns, for the types the event features handle (types: 14,27,34,124,125,130,132,134,139,142,150,151,153,154,155,156,158,159,173,174,202,218,239,241,248,260,309,350,373,380,389,392,412).
 // Regenerate after a table update that adds event ids.
 var activityIDsByType = map[int32][]int32{
 	14: {55000},
@@ -527,12 +532,20 @@ var activityIDsByType = map[int32][]int32{
 		1031004, 1031006, 1041002, 1041004, 1041006, 1051002, 1051004, 1051006,
 	},
 	125: {17, 20, 24, 26, 27, 29},
+	130: {
+		3009, 5104, 6004, 6006, 14003, 94304, 1000228, 1000229, 1000230, 1000274, 1000275, 8130001,
+		8130002, 8130003,
+	},
 	132: {
 		98001, 98005, 98008, 98009, 98010, 98011, 98012, 98013, 98111, 1000217, 1000218, 1000219,
 		1000231, 1000232, 1000265, 1000504, 1000513, 1010217, 1010218, 1010219, 1010220, 1020213, 1030213, 1030232,
 		1030238, 1030239, 1030240, 1030241,
 	},
 	134: {7001},
+	139: {
+		1000289, 1000291, 1000293, 1000295, 1000313, 1000510, 1010237, 1010238, 1010241, 1010242, 1020216, 1030216,
+		1041014, 1051014, 8130004,
+	},
 	142: {
 		5038, 5039, 5405, 70002, 70003, 70004, 70005, 70006, 70007, 70008, 70009, 70010,
 		70011, 70012, 70013, 70014, 70015, 70016, 70017, 70018, 70019, 70020, 70021, 70022,
@@ -562,9 +575,12 @@ var activityIDsByType = map[int32][]int32{
 	159: {99047, 99050, 99070, 99071, 99080, 99095, 99130, 99138, 99145, 99186, 99196},
 	173: {98629, 98630, 98631, 98632, 98633, 98634, 98635, 98636, 98637},
 	174: {95101, 95102, 95103, 98672, 98673, 98674, 98675, 98676, 98677, 99180},
+	202: {94301, 94302, 94313, 94314, 94317},
 	218: {40039},
 	239: {1000058},
+	241: {1000070},
 	248: {1000079, 1200016, 1200027, 1200028, 1200060, 1200117},
+	260: {80052, 80053, 80054, 80055, 80056, 80057},
 	309: {99086, 99101, 99113, 99162},
 	350: {
 		98800, 98802, 98803, 98804, 98805, 98806, 1030242, 1030251, 1030252, 1030253, 1030254, 1041009,
