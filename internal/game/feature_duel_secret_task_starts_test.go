@@ -116,6 +116,20 @@ func (s *stServer) reply(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		}
 		resp.PutSFSArray("ls", arr)
 		return resp
+	case secretTaskStartsPlaceCmd:
+		// The reply is the task with its new point (DispatchPutPointInWorldMessage.lua:8-16).
+		uuid := p.GetLong("uuid")
+		resp := sfs.NewSFSObject()
+		for i := range s.tasks {
+			if s.tasks[i].uuid == uuid {
+				s.tasks[i].point = stNear
+				resp.PutLong("uuid", uuid)
+				resp.PutInt("cfgId", int32(s.tasks[i].cfgID))
+				resp.PutInt("pointId", int32(stNear))
+				resp.PutLong("completionTime", 0)
+			}
+		}
+		return resp
 	case secretTaskStartsCmd:
 		s.starts++
 		if code := s.startErr[s.starts]; code != "" {
@@ -145,8 +159,8 @@ func stRun(t *testing.T, in *Init, s *stServer, dryRun bool) (*rewardFake, error
 	conn, fake := startRewardFake(t, s.reply)
 	err := secretTaskStartsRun(conn, in, dryRun)
 	for _, c := range fake.cmds() {
-		if c != secretTasksListCmd && c != secretTaskStartsCmd {
-			t.Errorf("sent %s; only hero.dispatch.list and hero.dispatch.start are allowed", c)
+		if c != secretTasksListCmd && c != secretTaskStartsCmd && c != secretTaskStartsPlaceCmd {
+			t.Errorf("sent %s; only hero.dispatch.list, put.point.in.world and start are allowed", c)
 		}
 	}
 	return fake, err
@@ -475,5 +489,32 @@ func TestSecretTaskStartsRegistration(t *testing.T) {
 	}
 	if p, ok := featureRegistry[secretTaskStartsPlanName]; !ok || p.DefaultOn || len(p.Duel) != 0 {
 		t.Errorf("%s registered as %+v; want an off-by-default read-only preview", secretTaskStartsPlanName, p)
+	}
+}
+
+func TestSecretTaskStartsPlacesAnUnplacedTaskFirst(t *testing.T) {
+	// Live 2026-10-07: new tasks are listed with pointId 0 until placed on the map.
+	in := stInit(2, 1000, stHeroRow{1, stHeroUR, 40, 7})
+	s := &stServer{tasks: []stTask{{uuid: 21, cfgID: stTaskUR, point: 0}}, listGold: []int64{1000}, startGold: -1}
+	fake, err := stRun(t, in, s, false)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	want := []string{secretTasksListCmd, secretTaskStartsPlaceCmd, secretTaskStartsCmd, secretTasksListCmd}
+	if got := fake.cmds(); !slices.Equal(got, want) {
+		t.Fatalf("sent %v, want %v", got, want)
+	}
+	if got := stStarts(fake)[0].GetLong("marchDuration"); got != 2167 {
+		t.Errorf("marchDuration = %d, want 2167 from the placed point", got)
+	}
+
+	// The plan places nothing: it says it would.
+	s = &stServer{tasks: []stTask{{uuid: 21, cfgID: stTaskUR, point: 0}}, listGold: []int64{1000}, startGold: -1}
+	fake, err = stRun(t, in, s, true)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if got := fake.cmds(); !slices.Equal(got, []string{secretTasksListCmd}) {
+		t.Errorf("plan sent %v, want only the list", got)
 	}
 }

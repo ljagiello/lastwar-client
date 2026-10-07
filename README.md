@@ -243,14 +243,18 @@ CRONEOF"
 ```
 
 The server day, and with it the Alliance Duel day, rolls over at 02:00 UTC. Features gated on today's
-duel entry only see the new day from the first run after that. A run a few minutes after the rollover
-needs an extra entry. Cron uses the host's local time; for a host on US Pacific time (19:00 PDT /
-18:00 PST), this one fires at 02:05 UTC in both summer and winter time, and the other of its two runs
-is an ordinary extra pass:
+duel entry only see the new day from the first run after that. Instead of adding entries (every login
+signs the account out of any other device), offset the 3-hourly schedule so one run lands a few
+minutes after the rollover. Cron uses the host's local time; for a host on US Pacific time:
 
 ```
-5 18,19 * * * /home/user/lastwar-client/lastwar-client -collect >> /home/user/lastwar-client/logs/collect.log 2>&1
+# PDT (UTC-7): 01:05, 04:05, ... 19:05 (= 02:05 UTC), 22:05
+5 1-22/3 * * * /home/user/lastwar-client/lastwar-client -collect >> /home/user/lastwar-client/logs/collect.log 2>&1
+# PST (UTC-8): 00:05, 03:05, ... 18:05 (= 02:05 UTC), 21:05
+5 0-21/3 * * * /home/user/lastwar-client/lastwar-client -collect >> /home/user/lastwar-client/logs/collect.log 2>&1
 ```
+
+Use the line for the current season only.
 
 `radar-overflow` relies on such a run: on the day before a day that lists radar tasks, it leaves the
 overflow unclaimed when the next refresh falls after the rollover.

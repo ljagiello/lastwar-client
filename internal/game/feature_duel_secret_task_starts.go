@@ -63,6 +63,7 @@ const (
 	secretTaskStartsName      = "secret-tasks-start"
 	secretTaskStartsPlanName  = "secret-tasks-start-plan"
 	secretTaskStartsCmd       = "hero.dispatch.start"
+	secretTaskStartsPlaceCmd  = "hero.dispatch.put.point.in.world"
 	secretTaskStartsMaxPerRun = 2
 
 	// secretTaskStartsMinColor is the lowest lw_dispatch_tasks.color started: 5 is UR, the
@@ -516,6 +517,23 @@ func secretTaskStartsDecide(t secretTaskStartsTask, heroes []secretTaskStartsHer
 	return pick, march + secretTaskStartsSerializerPad, ""
 }
 
+// secretTaskStartsPlace puts a task without a map point on the world map and returns its new point
+// from the reply, which is the task itself (UpdateOneSingleTask(message),
+// DispatchPutPointInWorldMessage.lua:8-16). The placement is free.
+func secretTaskStartsPlace(conn *session.GameConn, uuid int64) (int64, error) {
+	p := sfs.NewSFSObject()
+	p.PutLong("uuid", uuid)
+	msg, err := session.SendAndWait(conn, fmt.Sprintf("secret task %d placed on the map", uuid), secretTaskStartsPlaceCmd, p)
+	if err != nil {
+		return 0, err
+	}
+	point, _ := claimInt(msg.Params, "pointId")
+	if _, _, tile := secretTaskStartsTile(point); !tile {
+		return 0, fmt.Errorf("%s for task %d returned no usable pointId (%d)", secretTaskStartsPlaceCmd, uuid, point)
+	}
+	return point, nil
+}
+
 // secretTaskStartsGold reads the diamond balance from a hero.dispatch.list reply, else init
 // user.gold (only that field of user is read; user holds PII). src names where it came from.
 func secretTaskStartsGold(list *sfs.SFSObject, in *Init) (gold int64, src string, ok bool) {
@@ -606,13 +624,39 @@ func secretTaskStartsRun(conn *session.GameConn, in *Init, dryRun bool) error {
 			note("skipped: no free dispatch slot", "running", running, "maxSlots", maxSlots)
 			continue
 		}
+		// A new task has no map point yet (pointId 0, live 2026-10-07). The client's Go button then
+		// sends hero.dispatch.put.point.in.world {uuid} and takes the task, with its new pointId, from
+		// the reply (DispatchTaskItem.lua:481-505; DispatchPutPointInWorldMessage.lua:4-16); only
+		// then can the formation view start it.
+		placed := true
+		if _, _, tile := secretTaskStartsTile(t.pointID); !tile {
+			if dryRun {
+				placed = false
+				t.pointID = home // a stand-in so the hero pick can be shown; the march is computed after placement
+			} else {
+				p, err := secretTaskStartsPlace(conn, t.uuid)
+				if err != nil {
+					note("skipped: placing it on the map failed", "error", err)
+					errs = append(errs, err)
+					if session.ContainsNonTimeoutNetError(err) {
+						return errors.Join(errs...)
+					}
+					continue
+				}
+				t.pointID = p
+			}
+		}
 		pick, march, why := secretTaskStartsDecide(t, heroes, used, home)
 		if why != "" {
 			note("skipped: " + why)
 			continue
 		}
 		if dryRun {
-			note("WOULD start", "heroList", pick, "marchDuration", march)
+			if !placed {
+				note("WOULD place it on the map (hero.dispatch.put.point.in.world), then start", "heroList", pick)
+			} else {
+				note("WOULD start", "heroList", pick, "marchDuration", march)
+			}
 			attempts++
 			running++
 			for _, u := range pick {

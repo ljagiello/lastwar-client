@@ -104,7 +104,7 @@ func radarTomorrowScores(conn *session.GameConn, in *Init) bool {
 // after today's server day ends and tomorrow scores radar tasks. Then a run just after the day
 // starts claims everything for points (radar-claims), which frees the slots and stock before that
 // refresh (live 2026-10-06: the refresh came 12 minutes into Wednesday). This needs a run in that
-// window; the cron entry for it is in docs (5 18,19 * * *, which is 02:05 UTC in PST and PDT).
+// window: a 3-hourly cron offset to land at 02:05 UTC (README, "Running unattended").
 func radarOverflowHeld(conn *session.GameConn, in *Init, snap *detectSnapshot) (time.Time, bool) {
 	end, ok := radarDayEnd(in, TodayDuel(conn, in))
 	return end, ok && snap.nextRefresh >= end.UnixMilli() && radarTomorrowScores(conn, in)
