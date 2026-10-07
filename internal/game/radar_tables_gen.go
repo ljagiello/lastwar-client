@@ -208,6 +208,18 @@ var radarEventTypeRanges = []radarTypeRange{
 	{lo: 1026304, hi: 1026305, typ: 20},
 }
 
+// radarTreasureCaps maps the treasure event ids (detect_event types 19, 23 and 38) to the number of
+// players who may claim the dug treasure, para2's second field, as runs of consecutive ids, sorted by id.
+var radarTreasureCaps = []radarCapRange{
+	{lo: 25001, hi: 25198, cap: 20},
+	{lo: 27000, hi: 27002, cap: 20},
+	{lo: 27004, hi: 27005, cap: 20},
+	{lo: 27013, hi: 27014, cap: 20},
+	{lo: 27015, hi: 27015, cap: 50},
+	{lo: 505601, hi: 505601, cap: 100},
+	{lo: 1025001, hi: 1025168, cap: 10},
+}
+
 // radarLevels is detect_level by radar level: shown slots (detect_show_num), stock cap
 // (detect_max_num) and regeneration (refresh: refreshN events every refreshMin minutes).
 var radarLevels = map[int64]radarLevelRow{

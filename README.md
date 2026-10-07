@@ -211,6 +211,8 @@ All are off by default. Every dig write passes a per-command key allowlist that 
 |---|---|
 | `fireworks-scan` | Read-only: lists the firework chests on alliance members' HQ tiles (`al.rank`, then `world.get.block`), with other players shown only as `member#<rank index>` |
 | `fireworks` | The same scan, then `get.fireworks.gift` for each eligible chest: under 120 minutes old, not full, from a current member; 1 s apart; stops at the daily cap |
+| `alliance-treasures-plan` | Read-only: reads the world blocks around every member HQ (at least 30 tiles each way) and lists the radar treasures allies dug (the alliance chat's "treasure ... has been dug up!"), each with its verdict and its distance from the owner's HQ |
+| `alliance-treasures` | The same scan, then `detect.event.claim.treasure` for each treasure that is dug, not expired, from your alliance, not yours, not full and not already claimed by you; 1 s apart; stops on any unexpected error |
 | `treasure-digs` / `-plan` | Radar-ruin, city-ruin and Secret Vault dig boards: claims the free hammer when the board offers it, opens bricks with owned hammers only, and claims the chests |
 | `treasure-hunt` / `-plan` | Treasure Hunt events (v1/v2): digs with owned pickaxes only and claims the tier and stored rewards |
 | `season-dig`, `offseason-dig`, `alliance-boss-dig` / `-plan` | Alliance dig vaults: opens your one free stone and claims relic and personal rewards |

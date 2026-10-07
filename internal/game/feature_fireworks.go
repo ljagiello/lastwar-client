@@ -49,6 +49,9 @@ import (
 // Unverified live: whether the server answers world.get.block, with field 54, for a session that
 // never entered the world scene. A firework claim scores in no Alliance Duel score row
 // (TB:score has no firework type or value), so neither feature declares Duel.
+//
+// Steps 1-3 are allianceTileScan, which alliance-treasures also uses, reading more blocks around
+// each HQ.
 
 const (
 	fireworksRankCmd  = "al.rank"
@@ -150,11 +153,22 @@ type fwBlockRequest struct {
 // ascending order, at most 160 per request (the client sends the first 160 new blocks and the
 // rest on the next update). Each request's leftBottom/rightTop is the rectangle around its
 // blocks, computed like the client's viewport corners, and x/y, the camera tile, is its centre.
-func fwPlanBlocks(points []int64) []fwBlockRequest {
+func fwPlanBlocks(points []int64) []fwBlockRequest { return fwPlanBlocksAround(points, 0) }
+
+// fwPlanBlocksAround is fwPlanBlocks for each point's block and every block within radius blocks
+// of it in each direction, clipped to the map.
+func fwPlanBlocksAround(points []int64, radius int) []fwBlockRequest {
 	set := map[int]bool{}
 	for _, p := range points {
-		if x, y, ok := fwTilePos(p); ok {
-			set[fwBlockIndex(x, y)] = true
+		x, y, ok := fwTilePos(p)
+		if !ok {
+			continue
+		}
+		bx, by := x/fwBlockSize, y/fwBlockSize
+		for ny := max(by-radius, 0); ny <= min(by+radius, fwBlockCount-1); ny++ {
+			for nx := max(bx-radius, 0); nx <= min(bx+radius, fwBlockCount-1); nx++ {
+				set[ny*fwBlockCount+nx] = true
+			}
 		}
 	}
 	var out []fwBlockRequest
@@ -307,9 +321,13 @@ type fwBox struct {
 	AllianceID string
 }
 
-// fwScan is one read of the members' HQ tiles.
+// fwScan is one read of the members' HQ tiles. name prefixes its log lines; server is the map
+// read. pointTypes counts the decoded points by reply key ("points", "alInfos") and pointType;
+// treasures are the treasure points (pointType 21) found, each once.
 type fwScan struct {
+	name               string
 	allianceID, ownUID string
+	server             int64
 	roster             fwRoster
 	blocks, requests   int
 	failed             int
@@ -319,6 +337,8 @@ type fwScan struct {
 	memberHQs          map[string]bool
 	giftLists, shows   int
 	boxes              []fwBox
+	pointTypes         map[string]map[int32]int
+	treasures          []worldPoint
 	now                time.Time
 	serverClock        bool
 }
@@ -336,43 +356,52 @@ func fwAllianceID(in *Init) string {
 // fireworksScan reads the members' HQ tiles. It returns nil when there is nothing to scan, and a
 // partial scan with the error when some block request failed.
 func fireworksScan(conn *session.GameConn, in *Init) (*fwScan, error) {
+	return allianceTileScan(conn, in, "fireworks", 0)
+}
+
+// allianceTileScan reads the world blocks holding the members' HQs and, with radius > 0, every
+// block within radius blocks of each, logging as name. It returns nil when there is nothing to
+// scan, and a partial scan with the error when some block request failed.
+func allianceTileScan(conn *session.GameConn, in *Init, name string, radius int) (*fwScan, error) {
 	if in == nil || in.Raw == nil {
-		slog.Info("fireworks: no init push; skipping")
+		slog.Info(name + ": no init push; skipping")
 		return nil, nil
 	}
-	sc := &fwScan{allianceID: fwAllianceID(in), ownUID: ownUID(in), memberHQs: map[string]bool{}, now: evNow()}
+	sc := &fwScan{name: name, allianceID: fwAllianceID(in), ownUID: ownUID(in), memberHQs: map[string]bool{},
+		pointTypes: map[string]map[int32]int{}, now: evNow()}
 	if sc.allianceID == "" {
-		slog.Info("fireworks: not in an alliance; skipping")
+		slog.Info(name + ": not in an alliance; skipping")
 		return nil, nil
 	}
 	p := sfs.NewSFSObject()
 	p.PutUtfString("allianceId", sc.allianceID)
-	resp, code, err := fwRequest(conn, "fireworks: alliance member list", fireworksRankCmd, p)
+	resp, code, err := fwRequest(conn, name+": alliance member list", fireworksRankCmd, p)
 	if err != nil {
 		return nil, err
 	}
 	if code != "" {
-		return nil, fmt.Errorf("fireworks: %s: errorCode=%s", fireworksRankCmd, code)
+		return nil, fmt.Errorf("%s: %s: errorCode=%s", name, fireworksRankCmd, code)
 	}
 	list := evObjects(resp, "list")
 	server, ok := fwOwnServer(in, list, sc.ownUID)
 	if !ok {
-		slog.Warn("fireworks: own server unknown (no init user.serverId); skipping")
+		slog.Warn(name + ": own server unknown (no init user.serverId); skipping")
 		return nil, nil
 	}
+	sc.server = server
 	sc.roster = fwParseRoster(list, server)
-	slog.Info("fireworks: alliance roster", "members", sc.roster.listed, "hqsToScan", len(sc.roster.points),
+	slog.Info(name+": alliance roster", "members", sc.roster.listed, "hqsToScan", len(sc.roster.points),
 		"noPoint", sc.roster.noPoint, "onOtherServer", sc.roster.away, "outsideMap", sc.roster.outsideMap, "server", server)
-	reqs := fwPlanBlocks(sc.roster.points)
+	reqs := fwPlanBlocksAround(sc.roster.points, radius)
 	if len(reqs) == 0 {
-		slog.Info("fireworks: no member HQ on this server's map to read")
+		slog.Info(name + ": no member HQ on this server's map to read")
 		return nil, nil
 	}
 	var errs []error
 	for i, r := range reqs {
 		sc.blocks += len(r.Index)
 		sc.requests++
-		label := fmt.Sprintf("fireworks: world blocks %d/%d", i+1, len(reqs))
+		label := fmt.Sprintf("%s: world blocks %d/%d", name, i+1, len(reqs))
 		resp, code, err := fwRequest(conn, label, fireworksBlockCmd, fwBlockParams(r, server, i == 0, evNow()))
 		if err != nil {
 			sc.failed++
@@ -385,15 +414,16 @@ func fireworksScan(conn *session.GameConn, in *Init) (*fwScan, error) {
 		if code != "" {
 			sc.failed++
 			slog.Warn(label+" failed", "cmd", fireworksBlockCmd, "errorCode", code)
-			errs = append(errs, fmt.Errorf("fireworks: %s: errorCode=%s", fireworksBlockCmd, code))
+			errs = append(errs, fmt.Errorf("%s: %s: errorCode=%s", name, fireworksBlockCmd, code))
 			continue
 		}
 		sc.read(resp)
 	}
-	slog.Info("fireworks: member HQ tiles read", "requests", sc.requests, "failedRequests", sc.failed, "blocks", sc.blocks,
-		"points", sc.points, "alInfos", sc.alInfos, "decodeErrors", sc.decodeErrors, "buildings", sc.buildings,
+	slog.Info(name+": member HQ tiles read", "requests", sc.requests, "failedRequests", sc.failed, "blocks", sc.blocks,
+		"blockRadius", radius, "points", sc.points, "alInfos", sc.alInfos, "decodeErrors", sc.decodeErrors, "buildings", sc.buildings,
 		"memberHQs", len(sc.memberHQs), "hqsScanned", len(sc.roster.points), "field54Present", sc.giftLists > 0,
-		"giftLists", sc.giftLists, "fireworkShows", sc.shows, "chests", len(sc.boxes), "serverClock", sc.serverClock)
+		"giftLists", sc.giftLists, "fireworkShows", sc.shows, "chests", len(sc.boxes), "treasurePoints", len(sc.treasures),
+		"serverClock", sc.serverClock)
 	return sc, errors.Join(errs...)
 }
 
@@ -433,17 +463,26 @@ func (sc *fwScan) decodeBlobs(o *sfs.SFSObject, key string) int {
 		pt, err := decodeWorldPoint(b)
 		if err != nil {
 			sc.decodeErrors++
-			slog.Debug("fireworks: undecodable world point", "key", key, "bytes", len(b), "error", err)
+			slog.Debug(sc.name+": undecodable world point", "key", key, "bytes", len(b), "error", err)
 			continue
 		}
+		if sc.pointTypes[key] == nil {
+			sc.pointTypes[key] = map[int32]int{}
+		}
+		sc.pointTypes[key][pt.PointType]++
 		sc.add(pt)
 	}
 	return n
 }
 
-// add records a decoded point's building and chests; a chest seen twice (points and alInfos) is
-// kept once.
+// add records a decoded point's treasure, building and chests; a treasure or chest seen twice
+// (points and alInfos) is kept once.
 func (sc *fwScan) add(pt worldPoint) {
+	if t := pt.Treasure; t != nil && !slices.ContainsFunc(sc.treasures, func(o worldPoint) bool {
+		return o.ID == pt.ID && o.Treasure.UUID == t.UUID
+	}) {
+		sc.treasures = append(sc.treasures, pt)
+	}
 	bi := pt.Build
 	if bi == nil {
 		return

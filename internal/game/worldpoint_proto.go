@@ -3,6 +3,7 @@ package game
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // A minimal protobuf wire reader for the world-tile blobs world.get.block returns (points[] and
@@ -11,11 +12,15 @@ import (
 // fields of WorldPointInfo.proto (1.0.364 assets/proto) are read; everything else is skipped by
 // wire type:
 //
-//	WorldPointInfo { 1 id:int32 (tile index), 3 buildInfo:BuildInfo, 102 serverId:int32 }   (proto:429-460)
+//	WorldPointInfo { 1 id:int32 (tile index), 2 pointType:int32, 3 buildInfo:BuildInfo,
+//	                 11 treasurePointInfo:TreasurePointInfo, 100 uuid:int64, 102 serverId:int32 } (proto:429-460)
 //	BuildInfo      { 1 ownerUid:string, 2 uuid:int64, 3 buildId:int32, 7 allianceId:string,
 //	                 53 fireworks: repeated FireWorksInfo, 54 fireWorksGiftList: repeated FireWorksGift } (proto:3-60)
 //	FireWorksGift  { 1 uuid:int64, 2 configId:int32, 3 num:int32, 4 max:int32, 5 sendTime:int64 (ms),
 //	                 6 sendUid:string, 10 index:int32 }                                      (proto:707-715)
+//	TreasurePointInfo { 1 uuid:int64, 2 ownerUid:string, 3 eventId:string, 4 completionTime:int64 (ms),
+//	                 5 allianceId:string, 7 rewardUserList: repeated string, 10 complete:bool,
+//	                 13 expireTime:int64 (ms), 14 type:int32, 15 createTime:int64, 18 multiple:int32 } (proto:603-624)
 //
 // Field 54 is tag 434 (bytes B2 03), field 53 tag 426 (AA 03). Malformed input returns an error,
 // never a panic: the bytes come from the network.
@@ -113,12 +118,42 @@ func pbWant(field uint64, got, want int) error {
 	return nil
 }
 
-// worldPoint is the part of a WorldPointInfo the fireworks scan reads. Build is nil for a point
-// without buildInfo (resources, monsters, ...).
+// worldPoint is the part of a WorldPointInfo the alliance tile scan reads. Build is nil for a point
+// without buildInfo (resources, monsters, ...), and Treasure for one without treasurePointInfo.
+// UUID is the point's own uuid, the client's PointInfo.uuid (Assembly-CSharp.decompiled.cs:175644).
 type worldPoint struct {
-	ID       int32
-	ServerID int32
-	Build    *worldBuild
+	ID        int32
+	PointType int32
+	UUID      int64
+	ServerID  int32
+	Build     *worldBuild
+	Treasure  *worldTreasure
+}
+
+// worldTreasure is the part of a TreasurePointInfo a treasure claim needs. claimers
+// (rewardUserList) are other players' uids: read them only through Claimers and ClaimedBy, never
+// log them.
+type worldTreasure struct {
+	UUID           int64
+	OwnerUID       string
+	EventID        string
+	CompletionTime int64
+	AllianceID     string
+	Complete       bool
+	ExpireTime     int64
+	Type           int32
+	CreateTime     int64
+	Multiple       int32
+	claimers       []string
+}
+
+// Claimers is how many players have claimed the treasure.
+func (t *worldTreasure) Claimers() int { return len(t.claimers) }
+
+// ClaimedBy reports whether uid has claimed it (IsHaveGetReward's rewardUserHashSet,
+// Assembly-CSharp.decompiled.cs:177905-177912).
+func (t *worldTreasure) ClaimedBy(uid string) bool {
+	return uid != "" && slices.Contains(t.claimers, uid)
 }
 
 // worldBuild is the part of a BuildInfo the fireworks scan reads. Shows counts field 53 (the
@@ -152,7 +187,7 @@ func decodeWorldPoint(b []byte) (worldPoint, error) {
 			return p, err
 		}
 		switch field {
-		case 1, 102:
+		case 1, 2, 100, 102:
 			if err := pbWant(field, wire, pbVarint); err != nil {
 				return p, err
 			}
@@ -160,12 +195,17 @@ func decodeWorldPoint(b []byte) (worldPoint, error) {
 			if err != nil {
 				return p, err
 			}
-			if field == 1 {
+			switch field {
+			case 1:
 				p.ID = int32(v)
-			} else {
+			case 2:
+				p.PointType = int32(v)
+			case 100:
+				p.UUID = int64(v)
+			default:
 				p.ServerID = int32(v)
 			}
-		case 3:
+		case 3, 11:
 			if err := pbWant(field, wire, pbBytes); err != nil {
 				return p, err
 			}
@@ -174,6 +214,15 @@ func decodeWorldPoint(b []byte) (worldPoint, error) {
 				return p, err
 			}
 			// A repeated occurrence of a message field merges into the first (protobuf semantics).
+			if field == 11 {
+				if p.Treasure == nil {
+					p.Treasure = &worldTreasure{}
+				}
+				if err := decodeTreasure(msg, p.Treasure); err != nil {
+					return p, fmt.Errorf("treasurePointInfo: %w", err)
+				}
+				continue
+			}
 			if p.Build == nil {
 				p.Build = &worldBuild{}
 			}
@@ -231,6 +280,67 @@ func decodeBuildInfo(b []byte, bi *worldBuild) error {
 				bi.UUID = int64(v)
 			} else {
 				bi.BuildID = int32(v)
+			}
+		default:
+			if err := r.skip(wire); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// decodeTreasure reads a TreasurePointInfo; field 8 (diggingUserList, the diggers) and the rest
+// are skipped.
+func decodeTreasure(b []byte, t *worldTreasure) error {
+	r := &pbReader{b: b}
+	for r.more() {
+		field, wire, err := r.tag()
+		if err != nil {
+			return err
+		}
+		switch field {
+		case 2, 3, 5, 7:
+			if err := pbWant(field, wire, pbBytes); err != nil {
+				return err
+			}
+			v, err := r.bytes()
+			if err != nil {
+				return err
+			}
+			switch field {
+			case 2:
+				t.OwnerUID = string(v)
+			case 3:
+				t.EventID = string(v)
+			case 5:
+				t.AllianceID = string(v)
+			case 7:
+				t.claimers = append(t.claimers, string(v))
+			}
+		case 1, 4, 10, 13, 14, 15, 18:
+			if err := pbWant(field, wire, pbVarint); err != nil {
+				return err
+			}
+			v, err := r.varint()
+			if err != nil {
+				return err
+			}
+			switch field {
+			case 1:
+				t.UUID = int64(v)
+			case 4:
+				t.CompletionTime = int64(v)
+			case 10:
+				t.Complete = v != 0
+			case 13:
+				t.ExpireTime = int64(v)
+			case 14:
+				t.Type = int32(v)
+			case 15:
+				t.CreateTime = int64(v)
+			case 18:
+				t.Multiple = int32(v)
 			}
 		default:
 			if err := r.skip(wire); err != nil {

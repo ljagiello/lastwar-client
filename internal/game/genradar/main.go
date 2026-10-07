@@ -5,6 +5,9 @@
 //     real march or a battle). get.detect.info carries only the eventId; the client looks the type
 //     up in this table (DetectEventInfo.lua:84-87). The 6,603 ids compress to a few hundred runs of
 //     consecutive ids with one type.
+//   - detect_event, again: the claim cap of every treasure event (types 19, 23 and 38), the second
+//     field of para2 ("<reward group>;<cap>"). A dug treasure's world point lets that many players
+//     claim it (TreasurePointInfo.GetRewardMaxNum, Assembly-CSharp.decompiled.cs:177923-177932).
 //   - detect_level: per radar level, the shown slots (detect_show_num), the stock cap
 //     (detect_max_num) and the regeneration ("refresh" = "<minutes>;<events>").
 //
@@ -26,6 +29,7 @@ import (
 	"fmt"
 	"go/format"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"slices"
@@ -47,6 +51,16 @@ type typeRange struct {
 	typ    int64
 }
 
+// capRange is a run of consecutive treasure event ids [lo, hi] that share one claim cap.
+type capRange struct {
+	lo, hi int64
+	cap    int64
+}
+
+// treasureTypes are the detect_event types whose events become claimable treasure points:
+// TREASURE 19, TREASURE_ACTIVITY 23 and OFF_SEASON_TREASURE 38 (EnumType.lua:8512-8552).
+var treasureTypes = []int64{19, 23, 38}
+
 type level struct {
 	id, show, max, refreshMin, refreshN int64
 }
@@ -64,7 +78,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	ranges, n, err := parseEvents(evSrc)
+	ranges, caps, n, err := parseEvents(evSrc)
 	if err != nil {
 		log.Fatalf("genradar: %s: %v", *events, err)
 	}
@@ -76,14 +90,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("genradar: %s: %v", *levels, err)
 	}
-	code, err := render(ranges, n, lvs, *version)
+	code, err := render(ranges, caps, n, lvs, *version)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if err := os.WriteFile(*out, code, 0o644); err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("genradar: wrote %d event ids (%d ranges) and %d levels to %s", n, len(ranges), len(lvs), *out)
+	log.Printf("genradar: wrote %d event ids (%d ranges), %d treasure cap ranges and %d levels to %s", n, len(ranges), len(caps), len(lvs), *out)
 }
 
 // knownEventTypes are (event id -> type) facts from DUEL.md §5.2.5 and the 1.0.364 table that the
@@ -100,6 +114,15 @@ var knownEventTypes = map[int64]int64{
 	400000: 26, // Dominator treatment
 	410000: 35, // cockatrice guide
 	601001: 44, // season visitor
+}
+
+// knownTreasureCaps are (treasure event id -> claim cap) facts from the 1.0.364 table: the radar
+// treasures, 20 claims outside the season-1 ids and 10 in them, and two off-season parties.
+var knownTreasureCaps = map[int64]int64{
+	25001:   20,
+	1025001: 10,
+	27015:   50,
+	505601:  100,
 }
 
 // knownLevels are detect_level rows from DUEL.md §5.2.3.
@@ -141,40 +164,60 @@ func rowValues(i int, r []json.RawMessage) (int64, []json.RawMessage, error) {
 	return id, vals, nil
 }
 
-func parseEvents(src []byte) ([]typeRange, int, error) {
+func parseEvents(src []byte) ([]typeRange, []capRange, int, error) {
 	t, err := decode(src, "detect_event")
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	col, err := column(t, "type")
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
+	}
+	// para2 is marked linked, but the dump resolves it to the text itself (the table's link is
+	// null); parseCap accepts only "<reward group>;<cap>", so an interned index can't pass.
+	capCol, err := linkedColumn(t, "para2")
+	if err != nil {
+		return nil, nil, 0, err
 	}
 	types := map[int64]int64{}
+	caps := map[int64]int64{}
 	for i, r := range t.Rows {
 		id, vals, err := rowValues(i, r)
 		if err != nil {
-			return nil, 0, err
+			return nil, nil, 0, err
 		}
 		typ, ok, err := cell(vals, col)
 		if err != nil || !ok || typ <= 0 || typ > math.MaxInt8 {
-			return nil, 0, fmt.Errorf("event %d: bad type (%v)", id, err)
+			return nil, nil, 0, fmt.Errorf("event %d: bad type (%v)", id, err)
 		}
 		if _, dup := types[id]; dup {
-			return nil, 0, fmt.Errorf("event %d: duplicate id", id)
+			return nil, nil, 0, fmt.Errorf("event %d: duplicate id", id)
 		}
 		types[id] = typ
+		if !slices.Contains(treasureTypes, typ) {
+			continue
+		}
+		para2, err := text(vals, capCol)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("event %d para2: %v", id, err)
+		}
+		n, err := parseCap(para2)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("event %d para2 %q: %v", id, para2, err)
+		}
+		caps[id] = n
 	}
 	for id, want := range knownEventTypes {
 		if got, ok := types[id]; !ok || got != want {
-			return nil, 0, fmt.Errorf("event %d type = %d, want %d (wrong table or shifted column)", id, got, want)
+			return nil, nil, 0, fmt.Errorf("event %d type = %d, want %d (wrong table or shifted column)", id, got, want)
 		}
 	}
-	ids := make([]int64, 0, len(types))
-	for id := range types {
-		ids = append(ids, id)
+	for id, want := range knownTreasureCaps {
+		if got, ok := caps[id]; !ok || got != want {
+			return nil, nil, 0, fmt.Errorf("treasure event %d cap = %d, want %d (wrong table or shifted column)", id, got, want)
+		}
 	}
-	slices.Sort(ids)
+	ids := slices.Sorted(maps.Keys(types))
 	var ranges []typeRange
 	for _, id := range ids {
 		if n := len(ranges); n > 0 && ranges[n-1].hi == id-1 && ranges[n-1].typ == types[id] {
@@ -183,7 +226,33 @@ func parseEvents(src []byte) ([]typeRange, int, error) {
 		}
 		ranges = append(ranges, typeRange{lo: id, hi: id, typ: types[id]})
 	}
-	return ranges, len(ids), nil
+	var capRanges []capRange
+	for _, id := range slices.Sorted(maps.Keys(caps)) {
+		if n := len(capRanges); n > 0 && capRanges[n-1].hi == id-1 && capRanges[n-1].cap == caps[id] {
+			capRanges[n-1].hi = id
+			continue
+		}
+		capRanges = append(capRanges, capRange{lo: id, hi: id, cap: caps[id]})
+	}
+	return ranges, capRanges, len(ids), nil
+}
+
+// parseCap reads para2's "<reward group>;<cap>" (GetRewardMaxNum splits on ';' and takes the
+// second field, Assembly-CSharp.decompiled.cs:177923-177932).
+func parseCap(s string) (int64, error) {
+	parts := strings.Split(strings.TrimSpace(s), ";")
+	if len(parts) != 2 {
+		return 0, errors.New("want <reward group>;<cap>")
+	}
+	group, err1 := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+	n, err2 := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+	if err := errors.Join(err1, err2); err != nil {
+		return 0, err
+	}
+	if group <= 0 || n <= 0 || n > math.MaxInt16 {
+		return 0, errors.New("out-of-range value")
+	}
+	return n, nil
 }
 
 func parseLevels(src []byte) ([]level, error) {
@@ -265,6 +334,20 @@ func column(t table, name string) (int, error) {
 	return int(pos - 1), nil
 }
 
+// linkedColumn is column for a column the index marks linked; the caller must validate every
+// cell's format, since a linked cell could be an index into a value table.
+func linkedColumn(t table, name string) (int, error) {
+	spec, ok := t.Index[name]
+	if !ok || len(spec) < 1 {
+		return 0, fmt.Errorf("no %s column in index", name)
+	}
+	pos, ok, err := number(spec[0])
+	if err != nil || !ok || pos < 1 {
+		return 0, fmt.Errorf("%s: bad column position %s", name, spec[0])
+	}
+	return int(pos - 1), nil
+}
+
 func cell(vals []json.RawMessage, col int) (int64, bool, error) {
 	if col >= len(vals) {
 		return 0, false, nil
@@ -310,7 +393,7 @@ func number(raw json.RawMessage) (int64, bool, error) {
 	return n, true, nil
 }
 
-func render(ranges []typeRange, n int, lvs []level, version string) ([]byte, error) {
+func render(ranges []typeRange, caps []capRange, n int, lvs []level, version string) ([]byte, error) {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "// Code generated by genradar from the detect_event and detect_level data tables (table version %s); DO NOT EDIT.\n\n", version)
 	b.WriteString("package game\n\n")
@@ -319,6 +402,13 @@ func render(ranges []typeRange, n int, lvs []level, version string) ([]byte, err
 	b.WriteString("var radarEventTypeRanges = []radarTypeRange{\n")
 	for _, r := range ranges {
 		fmt.Fprintf(&b, "\t{lo: %d, hi: %d, typ: %d},\n", r.lo, r.hi, r.typ)
+	}
+	b.WriteString("}\n\n")
+	b.WriteString("// radarTreasureCaps maps the treasure event ids (detect_event types 19, 23 and 38) to the number of\n")
+	b.WriteString("// players who may claim the dug treasure, para2's second field, as runs of consecutive ids, sorted by id.\n")
+	b.WriteString("var radarTreasureCaps = []radarCapRange{\n")
+	for _, r := range caps {
+		fmt.Fprintf(&b, "\t{lo: %d, hi: %d, cap: %d},\n", r.lo, r.hi, r.cap)
 	}
 	b.WriteString("}\n\n")
 	b.WriteString("// radarLevels is detect_level by radar level: shown slots (detect_show_num), stock cap\n")
