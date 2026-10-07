@@ -100,16 +100,6 @@ func radarTomorrowScores(conn *session.GameConn, in *Init) bool {
 	return ok && start.UTC().Weekday() == time.Sunday
 }
 
-// radarOverflowHeld reports whether the overflow claims wait for tomorrow: the next refresh lands
-// after today's server day ends and tomorrow scores radar tasks. Then a run just after the day
-// starts claims everything for points (radar-claims), which frees the slots and stock before that
-// refresh (live 2026-10-06: the refresh came 12 minutes into Wednesday). This needs a run in that
-// window: a 3-hourly cron offset to land at 02:05 UTC (README, "Running unattended").
-func radarOverflowHeld(conn *session.GameConn, in *Init, snap *detectSnapshot) (time.Time, bool) {
-	end, ok := radarDayEnd(in, TodayDuel(conn, in))
-	return end, ok && snap.nextRefresh >= end.UnixMilli() && radarTomorrowScores(conn, in)
-}
-
 func runRadarOverflow(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil {
 		slog.Info("radar-overflow: no init push; skipping")
@@ -132,11 +122,6 @@ func runRadarOverflow(conn *session.GameConn, in *Init) error {
 		"slots", plan.slots, "showSlots", plan.show, "refreshN", plan.refreshN, "overflow", max(plan.k, 0),
 		"nextRefresh", time.UnixMilli(snap.nextRefresh).UTC().Format(time.RFC3339))
 	if plan.k <= 0 {
-		return nil
-	}
-	if end, held := radarOverflowHeld(conn, in, snap); held {
-		slog.Info("radar-overflow: the next refresh lands after today's duel day ends and tomorrow scores radar tasks; "+
-			"holding the claims for the day-start run", "overflow", plan.k, "dayEnds", end.UTC().Format(time.RFC3339))
 		return nil
 	}
 	if int64(len(picks)) < plan.k {

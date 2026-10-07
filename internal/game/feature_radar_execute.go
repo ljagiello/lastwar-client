@@ -587,12 +587,9 @@ func runRadarInventory(conn *session.GameConn, in *Init) error {
 	pick := map[int64]bool{}
 	if !radarDay {
 		plan, picks, err := radarOverflowPlan(snap)
-		_, held := radarOverflowHeld(conn, in, snap)
 		switch {
 		case err != nil:
 			overflowWhy = "radar-overflow would claim nothing: " + err.Error()
-		case held && plan.k > 0:
-			overflowWhy = fmt.Sprintf("radar-overflow holds an overflow of %d: the next refresh lands after the day ends and tomorrow scores radar tasks", plan.k)
 		default:
 			overflowWhy = fmt.Sprintf("radar-overflow would claim %d of %d needed (eventNum %d + refresh %d - free slots %d - stock cap %d)",
 				len(picks), max(plan.k, 0), plan.eventNum, plan.refreshN, plan.freeSlots, plan.maxNum)
