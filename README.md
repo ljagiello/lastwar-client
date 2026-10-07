@@ -204,6 +204,18 @@ rest of the process if a reply shows the diamond balance falling. See
 | `radar-overflow` | On days whose entry doesn't list type 82, claims only the finished radar tasks the next refresh would push past the stock cap |
 | `radar-inventory` | Read-only: logs every radar task with its type and state, and what the two features above would do with it |
 
+### Firework and dig features
+
+All are off by default. Every dig write passes a per-command key allowlist that refuses any `buy`, gold or diamond key.
+
+| Feature | What it does |
+|---|---|
+| `fireworks-scan` | Read-only: lists the firework chests on alliance members' HQ tiles (`al.rank`, then `world.get.block`), with other players shown only as `member#<rank index>` |
+| `fireworks` | The same scan, then `get.fireworks.gift` for each eligible chest: under 120 minutes old, not full, from a current member; 1 s apart; stops at the daily cap |
+| `treasure-digs` / `-plan` | Radar-ruin, city-ruin and Secret Vault dig boards: claims the free hammer when the board offers it, opens bricks with owned hammers only, and claims the chests |
+| `treasure-hunt` / `-plan` | Treasure Hunt events (v1/v2): digs with owned pickaxes only and claims the tier and stored rewards |
+| `season-dig`, `offseason-dig`, `alliance-boss-dig` / `-plan` | Alliance dig vaults: opens your one free stone and claims relic and personal rewards |
+
 Every run with a feature enabled logs one `alliance duel` line (theme, score, next chest, day end),
 and every `push.act.score.obtain` the server sends is logged as `activity score obtained` with the
 request sent just before it.

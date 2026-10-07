@@ -428,6 +428,27 @@ Static-analysis-only, from the `goods` table and DataConfig:
 
 Init `items` entries carry the goods id as `itemId` or `goodsId` and the count as `count`, `num`, or `itemLeftCnt` (`ItemInfo.lua:40-64`).
 
+## Firework chests and world tiles over SFS2X
+
+Firework chests normally reach the client as alliance-chat posts 693 and 695 on the separate chat WebSocket. On 2026-10-06 the real account confirmed a game-socket path that needs no chat:
+
+- `get.fireworks.info.list` with no params replies `errorCode=firework_tips_1013` ("Target player is in a different Warzone"). It looks up one player's firework shows; it isn't a chest list.
+- `al.rank {allianceId: Utf}` lists the alliance's members. Each `list[]` entry carries `uid`, `pointId`, `serverId`, `curServerId`, `online`, `offLineTime`, `mainCityLv` and `rank`, among others.
+- `get.al.points {serverId}` replied normally when `serverId` was sent as an SFS2X Long, although the client declares it Int. The server coerced the type here; don't assume it does everywhere.
+- `world.get.block` is sent with the client's typing (`WorldGetBlockMessage`): Int scalars `bigMap`, `x`, `y`, `serverId`, `worldId`, `type`, `viewLvl`, `timeStamp`, `blockSize`, `leftBottom`, `rightTop`; an IntArray `index` of block ids, `(y/10)*100 + x/10` on the 1000×1000 map; and `clearUuidSet` on the first request only. One request covered every member HQ (70 points). Each point's protobuf `WorldPointInfo` decoded, with the HQ's `BuildInfo` carrying the owner uid. **The server answers tile reads from a session that never entered the world scene.**
+- Confirmed live: none yet. The chest list itself is `BuildInfo` field 54 (`fireWorksGiftList {uuid, configId, sendTime, num, max, index}`, tag bytes `B2 03`). No chest was live during the test, so field 54 is static-analysis-only so far.
+- Static-analysis-only: the claim is `get.fireworks.gift {uuid: Long, ownerUid: Utf, type: Int}`, where `type` is 1 for firework configs 671001-671005 and 0 otherwise. The error codes are `firework_tips_1009` (daily cap), `1014` (expired), `1015` (full), `1016` (already claimed) and `1017` (too fast).
+
+## Dig mini-games: what the live account showed
+
+All of these are confirmed live, read-only, on 2026-10-06:
+
+- `get.detect.info` and init carry no radar-ruin or city-ruin dig board when none is active.
+- `hero.dispatch.treasure.v2.get.info {}` replies `rewardList[{isReward, rewardInfo[], target, quality}]` and a score.
+- `alliance.boss.act.info {serverId}` replies `digGameInfo {uid, mapConfigId, rewardState, endTime, uuid}` alongside the drill data. `rewardState=2` means that vault is finished.
+
+Static-analysis-only: the free hammer for a radar-ruin or city-ruin board (`detect.event.dig.game.receive.hammer {eventUuid}`, `building.dig.game.receive.hammer {buildingUuid}`) is offered while the board's `rewardState` is 4 (NotBegin). The dispatch dig's `isHammerGetMax` is the daily cap on hammers received from allies, not this gate (`DigTreasureManager.lua:244-249`).
+
 ## Root cause: packet-decode bugs, not protocol or anti-fraud gates
 
 Both of the "blocked" results elsewhere in this section trace back to the same live packet capture, even though they turned out to be mechanically distinct bugs. The capture: `tcpdump` against the locally installed `/Applications/Last War.app` (the real iOS / Mac Catalyst build) while manually logging into the same real account through the actual app UI. Since the SFS2X game socket is plain TCP with no TLS, this recorded cleartext-after-XOR application data directly, no TLS interception needed. The same `packet.go`/`sfsobject.go` the Go client already used decoded the capture directly, see [Capturing and decoding traffic](/capturing-and-decoding-traffic) for the full reproducible pipeline.
