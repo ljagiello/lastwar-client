@@ -290,6 +290,23 @@ func TestAllianceTreasureVerdicts(t *testing.T) {
 	if a := sc.treasure(noServer.pt); a.server != fwServer || sc.verdict(a, nil) != "" {
 		t.Errorf("no serverId: server %d", a.server)
 	}
+	// Times in seconds read like ms ones.
+	secs := sc.treasures[0]
+	tr := *secs.Treasure
+	tr.Complete, tr.CompletionTime, tr.ExpireTime = false, evTestNow.Add(-time.Minute).Unix(), evTestNow.Add(time.Hour).Unix()
+	secs.Treasure = &tr
+	if why := sc.verdict(sc.treasure(secs), nil); why != "" {
+		t.Errorf("times in seconds: %q", why)
+	}
+	tr.ExpireTime = evTestNow.Add(-time.Second).Unix()
+	if why := sc.verdict(sc.treasure(secs), nil); why != "expired" {
+		t.Errorf("expired in seconds: %q", why)
+	}
+	// Without the player's uid nothing is claimable: own treasures and own claims look like others'.
+	sc.ownUID = ""
+	if why := sc.verdict(sc.treasure(sc.treasures[0]), nil); why != "own uid unknown" {
+		t.Errorf("no own uid: %q", why)
+	}
 }
 
 func TestAllianceTreasuresClaimsOnlyEligible(t *testing.T) {

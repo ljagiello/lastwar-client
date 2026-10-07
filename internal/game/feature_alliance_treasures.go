@@ -173,7 +173,11 @@ func (sc *fwScan) treasure(pt worldPoint) atTreasure {
 func (sc *fwScan) verdict(a atTreasure, answered map[int64]bool) string {
 	t := a.pt.Treasure
 	evType, known := radarEventType(a.eventID)
+	// The client compares both times with its ms clock; evUnix also takes seconds.
+	dug := t.Complete || (t.CompletionTime > 0 && !evUnix(t.CompletionTime).After(sc.now))
 	switch {
+	case sc.ownUID == "":
+		return "own uid unknown" // without it, own treasures and own claims can't be told apart
 	case a.pt.PointType != atPointTypeTreasure:
 		return "not a treasure point"
 	case atTreasureTypes[t.Type] == "":
@@ -190,9 +194,9 @@ func (sc *fwScan) verdict(a atTreasure, answered map[int64]bool) string {
 		return "another alliance's treasure"
 	case a.server != sc.server:
 		return "on another server"
-	case !t.Complete && (t.CompletionTime <= 0 || t.CompletionTime > sc.now.UnixMilli()):
+	case !dug:
 		return "still digging"
-	case t.ExpireTime > 0 && sc.now.UnixMilli() >= t.ExpireTime:
+	case t.ExpireTime > 0 && !sc.now.Before(evUnix(t.ExpireTime)):
 		return "expired"
 	case t.ClaimedBy(sc.ownUID):
 		return "already claimed by you"
@@ -251,7 +255,7 @@ func (sc *fwScan) reviewTreasures(answered map[int64]bool) []atTreasure {
 		}
 		expiresIn := int64(-1)
 		if t.ExpireTime > 0 {
-			expiresIn = int64(time.UnixMilli(t.ExpireTime).Sub(sc.now).Minutes())
+			expiresIn = int64(evUnix(t.ExpireTime).Sub(sc.now).Minutes())
 		}
 		slog.Info(sc.name+": treasure", "uuid", a.uuid, "owner", sc.ref(t.OwnerUID), "ownerRank", owner.Rank,
 			"sameAlliance", t.AllianceID != "" && t.AllianceID == sc.allianceID, "eventId", t.EventID,
