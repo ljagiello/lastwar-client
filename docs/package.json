@@ -8,13 +8,20 @@
     "broken-links": "mint broken-links"
   },
   "devDependencies": {
-    "mint": "^4.2.970"
+    "mint": "^4.2.989"
   },
   "overrides": {
     "sharp": "^0.35.3",
     "qs": "^6.15.3",
     "js-yaml@^4": "^4.3.2",
     "adm-zip": "^0.6.1",
-    "puppeteer": "^25.10.0"
+    "puppeteer": "^25.10.0",
+    "axios": "^1.20.0",
+    "http-cache-semantics": "^4.3.0",
+    "katex": "^0.18.2",
+    "postcss-selector-parser": "^7.1.6",
+    "argparse@^1": "^2.0.1",
+    "fflate": "^0.8.3",
+    "@modelcontextprotocol/sdk": "^1.32.1"
   }
 }
