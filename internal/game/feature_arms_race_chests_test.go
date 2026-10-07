@@ -136,7 +136,7 @@ func allianceDuelTestInfo(score string, target string, claimed string) *sfs.SFSO
 	list.AddSFSObject(ev)
 	list.AddSFSObject(old)
 	info := sfs.NewSFSObject()
-	info.PutUtfString("activityId", "55000")
+	info.PutUtfString("activityId", "70000")
 	info.PutInt("type", allianceDuelEventType)
 	info.PutSFSArray("eventList", list)
 	return info
@@ -145,12 +145,12 @@ func allianceDuelTestInfo(score string, target string, claimed string) *sfs.SFSO
 func TestAllianceDuelClaimsReachedUnclaimedUnlockedChests(t *testing.T) {
 	withEvNow(t, evTestNow)
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
-		if cmd == "hero.event.info.get" {
+		if cmd == "hero.event.info.get" && p.GetString("activityId") == "70000" {
 			return allianceDuelTestInfo("450000", "100000|200000|300000|400000|500000", "1")
 		}
 		return evOK()
 	})
-	in := evInit(30, evActivity(55000))
+	in := evInit(30, duelActivity())
 	eff := sfs.NewSFSObject()
 	eff.PutInt("92001", 1) // 6 chests unlocked
 	in.Raw.PutSFSObject("effect", eff)
@@ -173,19 +173,19 @@ func TestAllianceDuelClaimsReachedUnclaimedUnlockedChests(t *testing.T) {
 func TestAllianceDuelDefaultsToThreeChestsAndNeedsHQ10(t *testing.T) {
 	withEvNow(t, evTestNow)
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
-		if cmd == "hero.event.info.get" {
+		if cmd == "hero.event.info.get" && p.GetString("activityId") == "70000" {
 			return allianceDuelTestInfo("900000", "100000|200000|300000|400000|500000", "")
 		}
 		return evOK()
 	})
-	if err := runArmsRaceChests(conn, evInit(30, evActivity(55000))); err != nil {
+	if err := runArmsRaceChests(conn, evInit(30, duelActivity())); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(fake.only(allianceDuelRewardCmd)); n != 3 {
 		t.Errorf("sent %d duel claims, want 3 (no unlock effect in init)", n)
 	}
 	conn2, fake2 := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
-	if err := runArmsRaceChests(conn2, evInit(9, evActivity(55000))); err != nil {
+	if err := runArmsRaceChests(conn2, evInit(9, duelActivity())); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(fake2.requests()); n != 0 {

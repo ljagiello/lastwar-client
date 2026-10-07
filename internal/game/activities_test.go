@@ -203,6 +203,20 @@ func TestActivitiesNeedHQFromTable(t *testing.T) {
 	}
 }
 
+func TestActivityIDStringPrefersActivityid(t *testing.T) {
+	acts := parseActivities(evInit(30, duelActivity(), evActivity(5401)))
+	got := map[int32]string{}
+	for _, a := range acts {
+		got[a.ID] = a.IDString()
+	}
+	if got[55000] != "70000" {
+		t.Errorf("duel IDString = %q, want the entry's activityid \"70000\" (ActivityInfoData.lua:160-161)", got[55000])
+	}
+	if got[5401] != "5401" {
+		t.Errorf("an entry without activityid must use its id, got %q", got[5401])
+	}
+}
+
 func TestActivitiesArrayAndMissing(t *testing.T) {
 	withEvNow(t, evTestNow)
 	raw := sfs.NewSFSObject()

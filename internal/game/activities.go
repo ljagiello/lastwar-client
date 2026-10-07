@@ -83,8 +83,19 @@ func (a Activity) EndTime() int64 {
 // EndViewTime is the end of the activity's display window in unix ms (0 when absent).
 func (a Activity) EndViewTime() int64 { return a.Raw.GetLong("endViewTime") }
 
-// IDString is the id as hero.event.info.get wants it (UtfString).
-func (a Activity) IDString() string { return strconv.FormatInt(int64(a.ID), 10) }
+// IDString is the id as hero.event.info.get wants it (UtfString): the entry's activityid when it
+// has one, else its id, as ActivityInfoData:ParseActivityData sets the activityId that
+// AddOneActivity sends (ActivityInfoData.lua:126-128, 160-161; ActivityListDataManager.lua:162).
+// Only the Alliance Duel's entry carries one live (id 55000, activityid "70000", its heroactivity
+// row); asked for "55000" the server answers a bare {success=true} with no eventList.
+func (a Activity) IDString() string {
+	if v, ok := a.Raw.Get("activityid"); ok && v.Val != nil {
+		if s := fmt.Sprintf("%v", v.Val); s != "" && s != "0" {
+			return s
+		}
+	}
+	return strconv.FormatInt(int64(a.ID), 10)
+}
 
 // open mirrors ActivityListDataManager:CheckIsSend (ActivityListDataManager.lua:954-966): the
 // client fetches an activity's details only while now is within [startTime-1s, endTime+1s] (a few

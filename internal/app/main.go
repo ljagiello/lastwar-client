@@ -91,6 +91,7 @@ func Run() {
 	logLevel := fs.String("log-level", "info", "log verbosity: debug, info, warn (or its alias warning), or error")
 	version := fs.Bool("version", false, "print build info and exit")
 	runFeature := fs.String("run", "", "after login, run only this optional feature (see -list-features) once, even if the session config doesn't enable it, log its responses, and exit -- the live validation step before enabling a feature in the session config")
+	runAnyway := fs.Bool("run-anyway", false, "with -run, run the feature even when today's Alliance Duel holds it (it scores duel points only on other days)")
 	listFeatures := fs.Bool("list-features", false, "list the optional features (name, default, whether the session config enables it) and exit")
 	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: after -email verification has bound this client's own device (state under $LASTWAR_STATE_DIR, else the home directory), trade its persisted loginKey for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit. As of 2026-10-04 the game server rejects a Login with the result (ec=28/E005), see auth.OwnDeviceSession")
 	if err := fs.Parse(os.Args[1:]); err != nil {
@@ -287,8 +288,10 @@ func Run() {
 	}
 	var cfgAppVersion, cfgVersionCode string
 	var cfgFeatures map[string]bool
+	var cfgDuelPolicy map[string]string
 	if cfg != nil {
 		cfgAppVersion, cfgVersionCode, cfgFeatures = cfg.AppVersion, cfg.VersionCode, cfg.Features
+		cfgDuelPolicy = cfg.DuelPolicy
 		slog.Info("loaded session config", "path", cfgSource)
 		// Round 33 fix (originally scoped to -cs-ip/-cs-port/-cs-gameuid only; round 34 extends it
 		// to -cs-zone/-cs-deviceid/-cs-shumei/-cs-at, the four siblings round 33 missed):
@@ -337,7 +340,7 @@ func Run() {
 	}
 	warnIfExplicitConfigPathNotFound(cfg, *configPath, *noConfig)
 	if *listFeatures {
-		printFeatures(os.Stdout, cfgFeatures)
+		printFeatures(os.Stdout, cfgFeatures, cfgDuelPolicy)
 		return
 	}
 
@@ -365,7 +368,7 @@ func Run() {
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
 			iosMode: *csIOS, appVersion: cfgAppVersion, versionCode: cfgVersionCode,
-			features: cfgFeatures, runFeature: *runFeature,
+			features: cfgFeatures, duelPolicy: cfgDuelPolicy, runFeature: *runFeature, runAnyway: *runAnyway,
 			interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
 			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
@@ -893,9 +896,11 @@ func printVersion() {
 
 type crossServerTestOpts struct {
 	ip, zone, gameUid, deviceID, shumeiBoxId, rt, at, interactive string
-	appVersion, versionCode                                       string          // session config only; see SessionConfig.AppVersion
-	features                                                      map[string]bool // session config only; see SessionConfig.Features
-	runFeature                                                    string          // -run: run just this feature, then exit
+	appVersion, versionCode                                       string            // session config only; see SessionConfig.AppVersion
+	features                                                      map[string]bool   // session config only; see SessionConfig.Features
+	duelPolicy                                                    map[string]string // session config only; see SessionConfig.DuelPolicy
+	runFeature                                                    string            // -run: run just this feature, then exit
+	runAnyway                                                     bool              // -run-anyway
 	port                                                          int
 	handshake, iosMode, collect, listBuildings                    bool
 	configSavePath                                                string // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
@@ -1264,7 +1269,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 						GameUid: result.GameUid, DeviceID: deviceID,
 						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
 						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
-						Features: o.features,
+						Features: o.features, DuelPolicy: o.duelPolicy,
 					}
 					if err := SaveSessionConfig(updated, o.configSavePath); err != nil {
 						slog.Warn("failed to persist redirected server address to session config", "path", o.configSavePath, "error", err)
@@ -1300,7 +1305,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		sendCheckDeviceChange(conn)
 	}
 	if o.runFeature != "" {
-		if err := game.RunFeatures(conn, initPush, nil, o.runFeature); err != nil {
+		if err := game.RunFeatures(conn, initPush, game.FeatureConfig{DuelPolicy: o.duelPolicy, Force: o.runAnyway}, o.runFeature); err != nil {
 			slog.Error("feature run failed", "feature", o.runFeature, "error", err)
 			exitIfSessionEnded(err, conn)
 			_ = conn.Close()
@@ -1314,7 +1319,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 	if o.collect {
 		slog.Info("collecting resources")
-		if err := game.Collect(conn, initPush, o.features); err != nil {
+		if err := game.Collect(conn, initPush, game.FeatureConfig{Enabled: o.features, DuelPolicy: o.duelPolicy}); err != nil {
 			slog.Error("collect run had failures", "error", err)
 			exitIfSessionEnded(err, conn)
 			if shouldAbortBeforeInteractive(err, o.interactive != "") {

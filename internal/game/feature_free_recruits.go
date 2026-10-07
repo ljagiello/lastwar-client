@@ -45,7 +45,10 @@ func init() {
 	registerFeature(Feature{
 		Name:    "free-recruits",
 		Summary: "OPT-IN: take the free hero recruit and free survivor draw when the free timer allows (useFree 1 only)",
-		Run:     runFreeRecruits,
+		// The pulls score in the duel (hero Thu, survivor Tue) but a free pull does not stack, so a
+		// held one would be lost: always run (DUEL.md §5).
+		Duel: []DuelScore{{Type: DuelScoreRecruitHero}, {Type: DuelScoreRecruitSurvivor}},
+		Run:  runFreeRecruits,
 	})
 	session.RegisterBenignErrorCode("120289", freeRecruitsHeroCmd, freeRecruitsWorkerCmd)
 }

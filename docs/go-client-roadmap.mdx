@@ -107,6 +107,15 @@ This section walks through going from a clean checkout to a working `-collect` r
 ### Other ways to run it
 
 ```bash
+# Optional features: list them (name, on/off, default, duel policy), then run one once.
+# Turn one on for -collect with the session config's "features" map.
+./lastwar-client -list-features
+./lastwar-client -run daily-quests
+
+# A feature held for the Alliance Duel is refused on a day whose duel entry doesn't list its
+# score types; -run-anyway runs it regardless (see Alliance Duel):
+./lastwar-client -run radar-claims -run-anyway
+
 # Stay connected and issue ad-hoc test commands without re-authenticating:
 mkfifo /tmp/lw_cmd_pipe
 ./lastwar-client -interactive /tmp/lw_cmd_pipe &
@@ -140,7 +149,9 @@ As of 2026-10-04 the game server rejects a `Login` with the resulting token (`ec
 The definitive, always-current flag list lives in the code itself, run `./lastwar-client -h`,
 or read the flag definitions directly in `main.go`. A duplicated table here has already drifted
 out of sync with the real flags more than once; the root `README.md`'s Usage section covers the
-common cases with a live-tested example for each.
+common cases with a live-tested example for each. The optional-feature flags are `-list-features`,
+`-run <feature>` and `-run-anyway`; the duel gating behind `-run-anyway` is on
+[Alliance Duel](/alliance-duel#how-goclient-uses-it).
 
 ### Project layout
 
