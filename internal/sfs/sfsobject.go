@@ -1250,13 +1250,19 @@ func int32Count(n int, what string) (int32, error) {
 	return int32(n), nil
 }
 
-// WriteUtfString returns an error instead of panicking when s is too long to length-prefix with
-// a 2-byte count -- reachable from server-controlled data (e.g. a batched join of server-supplied
-// values), so it must not crash the process.
+// MaxUtfStringBytes is the longest UTF_STRING (and object key) the SFS2X codec will encode. The
+// length prefix is a u16, but the game's own SmartFox2X ByteArray.WriteUTF throws above
+// short.MaxValue bytes (SmartFox2X.decompiled.cs:20369-20380), so a longer string is something
+// the real client can never send. Static only: whether the server rejects a longer one is untested.
+const MaxUtfStringBytes = 32767
+
+// WriteUtfString returns an error instead of panicking when s is longer than MaxUtfStringBytes --
+// reachable from server-controlled data (e.g. a batched join of server-supplied values), so it
+// must not crash the process. Object keys are written through here too, matching WriteUTF.
 func WriteUtfString(buf *bytes.Buffer, s string) error {
 	b := []byte(s)
-	if len(b) > 65535 {
-		return fmt.Errorf("sfsobject: string too long to encode (%d bytes, max 65535)", len(b))
+	if len(b) > MaxUtfStringBytes {
+		return fmt.Errorf("sfsobject: string too long to encode (%d bytes, max %d)", len(b), MaxUtfStringBytes)
 	}
 	writeUint16(buf, uint16(len(b)))
 	buf.Write(b)

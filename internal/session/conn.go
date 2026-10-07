@@ -9,6 +9,7 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,10 +42,31 @@ type GameConn struct {
 	reader *bufio.Reader
 	wmu    sync.Mutex
 
+	// extSent counts SendExtension calls on this connection; SendExtension derives each request's
+	// `_id` from it (see loginFutureID). A fresh GameConn per dial gives the per-connection reset
+	// the real client's FutureManager.reset() does on reconnect.
+	extSent atomic.Int32
+
+	// ended is set once ReadEnvelope sees a terminal server push (see SessionEndedError). From
+	// then on every read and send on this connection returns it, so nothing else goes out on a
+	// session the server has ended, whichever loop happens to be running.
+	ended atomic.Pointer[SessionEndedError]
+
+	// skipClientPings makes ReadEnvelope drop PingPong requests. Only the fake-server side of
+	// testsupport.go's ServeFakeGameServer/NewInMemoryGameDial sets it, so fake handlers that read
+	// "the next envelope" as Login keep working now that StartHeartbeat pings before Login.
+	skipClientPings bool
+
 	stopHeartbeat chan struct{}
 	closeOnce     sync.Once
 	closeErr      error
 }
+
+// loginFutureID is the `_id` the SFS Login request carries (BuildLoginParams' FutureID, always 1).
+// The real client draws Login's `_id` and every later request's from one counter,
+// FutureManager.getFutureId() (Interlocked.Increment, Assembly-CSharp.decompiled.cs:672057-672066),
+// so the first extension request after Login is 2.
+const loginFutureID = 1
 
 // writeTimeout bounds every socket write via SendEnvelope. Without it, a
 // half-open connection can block Write indefinitely while holding wmu --
@@ -111,8 +133,12 @@ func (c *GameConn) SetReadDeadline(t time.Time) error {
 }
 
 // SendEnvelope builds the outer {c,a,p} sfs.SFSObject, serializes, frames, and
-// writes it to the socket. Safe for concurrent use (heartbeat + main flow).
+// writes it to the socket. Safe for concurrent use (heartbeat + main flow). After a terminal
+// server push it writes nothing and returns that push's SessionEndedError.
 func (c *GameConn) SendEnvelope(controller byte, action int16, content *sfs.SFSObject) error {
+	if e := c.ended.Load(); e != nil {
+		return e
+	}
 	outer := sfs.NewSFSObject()
 	outer.PutByte("c", controller)
 	outer.PutShort("a", action)
@@ -139,19 +165,53 @@ func (c *GameConn) SendEnvelope(controller byte, action int16, content *sfs.SFSO
 
 // SendExtension sends a client->server `cmd` extension request, matching
 // SFSNetwork.SendMessage(cmd, ...) -- dossier §04/§06.
+//
+// Every request carries an Int `_id` from one per-connection sequence that continues after
+// Login's 1, as NetworkManager.SendLuaMessage and BaseMessage.CSSetData do
+// (PutInt("_id", getFutureId()), Assembly-CSharp.decompiled.cs:76702-76722, 80810-80812). The
+// server echoes `_id` and adds `_time` on the response; live, every real-client request carries
+// one except login.ext. A caller that already set `_id` keeps it (login.go's login.init fallback
+// sends 2), but the sequence still advances so the next request never reuses that number. The
+// caller's params are copied, not modified, so a params object can be reused across sends.
 func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
-	if params == nil {
-		params = sfs.NewSFSObject()
+	id := c.extSent.Add(1) + loginFutureID
+	withID := sfs.NewSFSObject()
+	if params != nil {
+		for _, k := range params.Keys() {
+			v, _ := params.Get(k)
+			withID.PutValue(k, v)
+		}
+	}
+	if !withID.Has("_id") {
+		withID.PutInt("_id", id)
 	}
 	extContent := sfs.NewSFSObject()
 	extContent.PutUtfString("c", cmd)
 	extContent.PutInt("r", -1)
-	extContent.PutSFSObject("p", params)
+	extContent.PutSFSObject("p", withID)
 	return c.SendEnvelope(ControllerExtension, ActionCallExtension, extContent)
 }
 
 // ReadEnvelope blocks until the next framed packet arrives and decodes it.
+//
+// A terminal server push (push.user.off, push.server.stop, init.error) comes back as a
+// *SessionEndedError instead of an envelope, and so does every later call. Detecting it here
+// rather than in each read loop means WaitFor/SendAndWait, DoHandshake, login's waitForInitPush
+// and game's FetchInit all stop on it through the dead-connection check they already make.
 func (c *GameConn) ReadEnvelope() (*Envelope, error) {
+	for {
+		env, err := c.readEnvelope()
+		if err == nil && c.skipClientPings && env.Controller == ControllerSystem && env.Action == ActionPingPong {
+			continue
+		}
+		return env, err
+	}
+}
+
+func (c *GameConn) readEnvelope() (*Envelope, error) {
+	if e := c.ended.Load(); e != nil {
+		return nil, e
+	}
 	body, err := sfs.ReadPacket(c.reader)
 	if err != nil {
 		return nil, err
@@ -190,7 +250,43 @@ func (c *GameConn) ReadEnvelope() (*Envelope, error) {
 			slog.Warn("ReadEnvelope: p field is present but not an object", "type", fmt.Sprintf("%T", v.Val))
 		}
 	}
+	if err := c.endIfTerminalPush(env); err != nil {
+		return nil, err
+	}
 	return env, nil
+}
+
+// endIfTerminalPush records and returns a SessionEndedError when env is a terminal server push,
+// and returns nil for anything else. It reads c and p directly rather than through AsExtension so
+// a wrong-typed field is warned about once, by the caller's own AsExtension, not twice.
+func (c *GameConn) endIfTerminalPush(env *Envelope) error {
+	if env.Controller != ControllerExtension || env.Content == nil {
+		return nil
+	}
+	v, ok := env.Content.Get("c")
+	if !ok {
+		return nil
+	}
+	cmd, ok := v.Val.(string)
+	if !ok {
+		return nil
+	}
+	sentinel, ok := terminalPushes[cmd]
+	if !ok {
+		return nil
+	}
+	ended := &SessionEndedError{Cmd: cmd, Err: sentinel}
+	var params *sfs.SFSObject
+	if pv, ok := env.Content.Get("p"); ok {
+		params, _ = pv.Val.(*sfs.SFSObject)
+	}
+	if ec, ok := params.Get("errorCode"); ok && ec.Val != nil {
+		ended.Code = fmt.Sprintf("%v", ec.Val)
+	}
+	c.ended.CompareAndSwap(nil, ended)
+	slog.Error("server ended the session; stopping this run without reconnecting",
+		"cmd", cmd, "errorCode", ended.Code, "push", params.StringRedacted())
+	return c.ended.Load()
 }
 
 // ExtensionMessage is a decoded server->client `cmd` push/response.
@@ -252,16 +348,27 @@ var benignErrorCodes = map[string][]string{
 	"602026":             {"building.production.collect"},                     // buildings.go: "In production, please be patient."
 	"120289":             {"vip.add.login.score", "vip.get.every.day.reward"}, // vip.go: "no score"/"no reward" -- already claimed today
 	"visitor_err_coming": {"visitor.operate"},                                 // visitors.go: visitor not yet arrived/greetable
-	"120471":             {"al.science.donate"},                               // alliance.go: al.science.donate cooldown -- "Donate science CD time is not finish"
+	"120471":             {"al.science.donate"},                               // alliance.go: donation charges used up (useNum 0); server text "Donate science CD time is not finish"
+}
+
+// RegisterBenignErrorCode marks errorCode as an expected no-op for the given cmds, with the same
+// cmd scoping as benignErrorCodes. Feature files call it from init() for their own "already
+// claimed" codes, so each feature owns its codes instead of editing the map above. Not safe for
+// use after init.
+func RegisterBenignErrorCode(code string, cmds ...string) {
+	for _, c := range cmds {
+		if !slices.Contains(benignErrorCodes[code], c) {
+			benignErrorCodes[code] = append(benignErrorCodes[code], c)
+		}
+	}
 }
 
 // commandOutcome classifies a collect/claim response into one of three buckets: a real success,
 // a benign no-op (an expected cooldown/already-claimed/not-yet-arrived errorCode, or -- for
-// building.production.collect specifically -- a status=0 response with no errorCode; buildings.go's
-// own doc comments treat status=1, not just errorCode-absence, as the real proof a collection
-// succeeded, and docs/live-validation.mdx only ever observed status=1 or errorCode=602026 from that
-// command). Other command families have no documented evidence of ever emitting a status field, so
-// the status=0 heuristic does not apply to them and they fall through to outcomeSuccess instead.
+// building.production.collect specifically -- a response with no errorCode whose status says
+// nothing was collected; see collectStatusIsNoOp). Other command families have no documented
+// evidence of ever emitting a status field, so the status rule does not apply to them and they
+// fall through to outcomeSuccess instead.
 type commandOutcome int
 
 const (
@@ -270,29 +377,46 @@ const (
 	outcomeFailure
 )
 
+// collectStatusIsNoOp reports whether a building.production.collect response that carries no
+// errorCode still collected nothing. It follows the real client exactly:
+// ProductLineManager.HandleCollect does `if (message.status or -1) == -1` → tip 602026 ("Production
+// in progress. Please wait.") and returns without touching the building
+// (DataCenter/ProductLine/ProductLineManager.lua:596-606). So a missing (or null) status and
+// status -1 are no-ops, the same outcome as errorCode 602026. Every other value -- 1 on every live
+// success so far, and 0, which has never been seen live -- takes the client's success path.
+//
+// Before 1.0.364's Lua was read, this treated status=0 as the no-op and a missing status as success,
+// a guess with no evidence behind it either way. Only the log level depends on this: SendAndWait
+// returns an error for outcomeFailure alone, so no exit code or abort decision changes.
+//
+// A present but wrong-typed status (a string, a double) is not -1 in Lua either -- Lua's == does
+// not coerce -- so it is success here too, with a Warn. Round 29's rule still holds: GetInt's
+// zero-value coercion is never trusted without a type check, so a malformed status cannot land in
+// the benign bucket (TestClassifyResponseWrongTypedStatusIsNotBenign, conn_test.go).
+func collectStatusIsNoOp(params *sfs.SFSObject) bool {
+	v, ok := params.Get("status")
+	if !ok || v.Val == nil {
+		return true
+	}
+	if !SFSFieldKindAccepts(SFSFieldKindInt, v.Val) {
+		WarnIfWrongTypedField(params, "status", "building.production.collect status check", SFSFieldKindInt)
+		return false
+	}
+	return params.GetInt("status") == -1
+}
+
 // classifyResponse determines a response's outcome and, for a benign or real failure, the
-// errorCode (empty string for the building.production.collect status=0-with-no-errorCode benign
-// case). An errorCode present in benignErrorCodes is only outcomeBenign when msg.Cmd matches one
-// of that code's documented cmds (see benignErrorCodes' doc comment) -- mirroring how the
-// status=0 heuristic above is itself scoped to building.production.collect -- so a genuine
+// errorCode (empty string for the building.production.collect no-errorCode benign case, see
+// collectStatusIsNoOp). An errorCode present in benignErrorCodes is only outcomeBenign when
+// msg.Cmd matches one of that code's documented cmds (see benignErrorCodes' doc comment) --
+// mirroring how the status rule is itself scoped to building.production.collect -- so a genuine
 // failure on an unrelated cmd that happens to share one of these numeric errorCode values still
 // falls through to outcomeFailure. This is the single place both logCommandResult and SendAndWait
 // derive their behavior from, so the two can never drift out of sync with each other.
-//
-// Round 29: the status check below uses RequireFieldType (buildings.go), not a bare
-// Has("status")+GetInt("status")==0 pair, for the same reason RequireFieldType exists at all --
-// GetInt silently coerces ANY non-int-shaped value to int32(0), so a present-but-wrong-typed
-// status field used to satisfy Has()+GetInt()==0 exactly like a genuine status=0 would, folding a
-// malformed/wrong-typed response into this same benign bucket. RequireFieldType treats a
-// wrong-typed status exactly like a missing one -- false here, falling through to outcomeSuccess
-// -- so only a status field that actually decoded as an int, and is genuinely 0, takes this
-// branch. See TestClassifyResponseWrongTypedStatusIsNotBenign (conn_test.go).
 func classifyResponse(msg *ExtensionMessage) (commandOutcome, string) {
 	ec, has := msg.Params.Get("errorCode")
 	if !has {
-		if msg.Cmd == "building.production.collect" &&
-			RequireFieldType(msg.Params, "status", "building.production.collect", SFSFieldKindInt) &&
-			msg.Params.GetInt("status") == 0 {
+		if msg.Cmd == "building.production.collect" && collectStatusIsNoOp(msg.Params) {
 			return outcomeBenign, ""
 		}
 		return outcomeSuccess, ""
@@ -315,7 +439,7 @@ func logCommandResult(label string, msg *ExtensionMessage) {
 		if code != "" {
 			slog.Warn(label+" no-op (expected)", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.String())
 		} else {
-			slog.Warn(label+" no-op (status=0, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.String())
+			slog.Warn(label+" no-op (status missing or -1, no errorCode)", "cmd", msg.Cmd, "response", msg.Params.StringRedacted())
 		}
 	case outcomeFailure:
 		slog.Error(label+" failed", "cmd", msg.Cmd, "errorCode", code, "response", msg.Params.StringRedacted())
@@ -512,9 +636,20 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*sfs.SFSObject, error) {
 // 4000ms, {clientTime: ms}), required to avoid the ~12s server-perceived
 // timeout while we wait on slower steps (e.g. the user fetching an email
 // verification code).
+//
+// The first ping goes out synchronously, before StartHeartbeat returns, so it precedes Login on
+// the wire as the real client's does: NetRawProxy.OnConnection enables its 4000 ms keepalive timer
+// and calls CheckKeepAlive at once (BaseUtils.decompiled.cs:36011-36035), and Login waits for that
+// first pong. The real client's first probe is a CustomPingPong carrying a decoy login template;
+// this one stays the flat {clientTime} the server has always accepted, and Login is not held back
+// for the pong. If the first ping cannot be sent the connection is closed and no loop starts, so
+// the caller's Login send fails.
 func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 	c.stopHeartbeat = make(chan struct{})
 	stopCh := c.stopHeartbeat // snapshot: avoids racing Close()'s concurrent access to the field
+	if !c.sendHeartbeat(start) {
+		return
+	}
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
@@ -523,20 +658,33 @@ func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				pp := sfs.NewSFSObject()
-				pp.PutLong("clientTime", time.Since(start).Milliseconds())
-				if err := c.SendEnvelope(ControllerSystem, ActionPingPong, pp); err != nil {
-					// SendStageError: consistency with SendAndWait/DoHandshake/the login-path send
-					// sites -- this error is never returned across a function boundary or inspected
-					// for Timeout() today (it's logged and the connection is closed unconditionally
-					// either way), so wrapping it has no behavioral effect now, but keeps the
-					// invariant "every direct send-stage error in this package is SendStageError-
-					// wrapped" true package-wide for any future caller that does inspect it.
-					slog.Error("heartbeat send failed -- closing connection", "error", SendStageError{Err: err})
-					_ = c.Close()
+				if !c.sendHeartbeat(start) {
 					return
 				}
 			}
 		}
 	}()
+}
+
+// sendHeartbeat sends one PingPongRequest and reports whether the heartbeat should keep going. A
+// send failure closes the connection.
+func (c *GameConn) sendHeartbeat(start time.Time) bool {
+	pp := sfs.NewSFSObject()
+	pp.PutLong("clientTime", time.Since(start).Milliseconds())
+	err := c.SendEnvelope(ControllerSystem, ActionPingPong, pp)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, ErrSessionEnded) {
+		return false // already logged by ReadEnvelope; the caller exits and closes the conn
+	}
+	// SendStageError: consistency with SendAndWait/DoHandshake/the login-path send
+	// sites -- this error is never returned across a function boundary or inspected
+	// for Timeout() today (it's logged and the connection is closed unconditionally
+	// either way), so wrapping it has no behavioral effect now, but keeps the
+	// invariant "every direct send-stage error in this package is SendStageError-
+	// wrapped" true package-wide for any future caller that does inspect it.
+	slog.Error("heartbeat send failed -- closing connection", "error", SendStageError{Err: err})
+	_ = c.Close()
+	return false
 }

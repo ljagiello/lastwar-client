@@ -5,9 +5,9 @@ description: "How three custom, undocumented file formats were reverse-engineere
 
 Three custom, undocumented formats stood between "an `.xapk` file" and readable source. All three were cracked from first principles, without any prior tooling built for this game.
 
-### 1: HybridCLR assembly de-obfuscation
+### 1: Hot-update assembly de-obfuscation
 
-The 117 hot-update C# assemblies ship as `assets/Assemblies/*.mdl`, renamed, single-byte-XOR-obfuscated `.dll` files. The header is deliberately corrupted just enough to defeat naive static scanners:
+The hot-update C# assemblies ship as `assets/Assemblies/*.mdl`, renamed, single-byte-XOR-obfuscated `.dll` files. At runtime they're loaded by FunPlus's FM_Mono bridge (upstream Mono 6.13.0 behind the il2cpp ABI in `libil2cpp.so`), not by HybridCLR as earlier versions of these docs said; no `hybridclr` or `huatuo` symbol or string exists in any shipped native library (static-analysis-only, see [Native binaries & security](/native-binaries)). The header is deliberately corrupted just enough to defeat naive static scanners:
 
 ```python
 key = raw_bytes[3]          # the XOR key is stored in the file itself
@@ -16,11 +16,11 @@ for i in range(n):
     raw_bytes[i] ^= key       # XOR only the first `key` bytes, the rest is untouched
 ```
 
-All 117 files decoded cleanly to valid PE/.NET assemblies on the first pass; 9 of the most relevant (`Assembly-CSharp.dll`, `SmartFox2X.dll`, `BestHttp.dll`, and friends) were decompiled to C# with [ILSpy](https://github.com/icsharpcode/ILSpy).
+In the 1.0.351 pass, all 117 files decoded cleanly to valid PE/.NET assemblies on the first try; 9 of the most relevant (`Assembly-CSharp.dll`, `SmartFox2X.dll`, `BestHttp.dll`, and friends) were decompiled to C# with [ILSpy](https://github.com/icsharpcode/ILSpy).
 
 ### 2: The `LWLF` Lua bundle container
 
-The 105 MB `assets/lwScripts/LWScripts.data` is a custom archive bundling all 18,514 compiled Lua modules. Format, reverse-engineered by scanning for Lua's bytecode signature and reading backward:
+The 105 MB `assets/lwScripts/LWScripts.data` is a custom archive bundling every compiled Lua module (18,514 in 1.0.351, 18,733 in 1.0.364). Format, reverse-engineered by scanning for Lua's bytecode signature and reading backward:
 
 ```text
 LWLF magic (4B) | fileVersion (u32) | version (u32) | entry_count (u32)
@@ -37,14 +37,16 @@ per entry:
 Every compiled chunk sets the Lua chunk header's `format` byte to `1` instead of the standard `0`, and, the actual obfuscation, **omits the 1-byte "instruction size" field** that stock Lua 5.3 headers always include. Every other header field (int/size_t/integer/float sizes, the `LUAC_INT`/`LUAC_NUM` sanity values) is stock. This is enough to make every off-the-shelf Lua decompiler reject the file outright.
 
 <Info>
-  **Fix**: A two-line patch to [unluac](https://github.com/HansWessels/unluac)'s `LHeaderType.java`, accept `format == 1`, and skip the instruction-size read when it's set, was enough to decompile all 18,514 chunks with a stock unluac release otherwise unmodified. Instruction encoding itself is completely standard Lua 5.1+, so nothing past the header needed touching.
+  **Fix**: A two-line patch to [unluac](https://github.com/HansWessels/unluac)'s `LHeaderType.java`, accept `format == 1`, and skip the instruction-size read when it's set, was enough to decompile all 18,514 chunks of the 1.0.351 bundle with a stock unluac release otherwise unmodified. Instruction encoding itself is completely standard Lua 5.1+, so nothing past the header needed touching.
 </Info>
 
-Once patched, this recovered readable Lua source for all 2,855 `Net/`+`Common/` modules (all 2,777 network command classes, the dispatch core, and the protobuf schemas) and all 1,279 game-data tables, the entire raw material for everything documented below.
+Once patched, this recovered readable Lua source for all 2,855 `Net/`+`Common/` modules of 1.0.351 (all 2,777 network command classes, the dispatch core, and the protobuf schemas) and all 1,279 of its game-data tables, the entire raw material for everything documented below.
 
 ### 4: Game data tables
 
-`assets/table/table_*.data` is, despite the odd filename, a plain ZIP archive (magic `PK\x03\x04`), 1,279 entries, each itself Lua 5.3 bytecode encoding a data-only module (building costs, hero stats, activity config, etc). No new format needed; unluac with the same header patch handled these too.
+`assets/table/table_*.data` is, despite the odd filename, a plain ZIP archive (magic `PK\x03\x04`): 1,279 entries in 1.0.351 and 1,291 in 1.0.364, each itself Lua 5.3 bytecode encoding a data-only module (building costs, hero stats, activity config, etc). No new format needed; unluac with the same header patch handled these too.
+
+The sizes and counts below are from the 1.0.351 pass; the next section has the 1.0.364 numbers.
 
 | Artifact | Raw size | Decoded to |
 |---|---|---|
@@ -56,4 +58,4 @@ Once patched, this recovered readable Lua source for all 2,855 `Net/`+`Common/` 
 
 ### Re-running the pipeline on 1.0.364
 
-The same three techniques worked unchanged on 1.0.364 (versionCode 1892, posted 2026-09-23). All 118 hot-update `.mdl` files decoded with the same single-byte XOR scheme, and the patched unluac decompiled every one of the 18,733 chunks in the `LWLF` bundle (version 825, tag `20260921_1892_App`) with zero failures. The signing certificate is byte-identical to 1.0.351's. Older Lua bundles stay hosted on the CDN, which is how the 1.0.351 baseline (`LWLF` 793, 18,514 chunks) was recovered for an exact diff, see [Startup, version-check & hot-update](/bootstrap).
+The same three techniques worked unchanged on 1.0.364 (versionCode 1892, posted 2026-09-23). All 118 `.mdl` files decoded with the same single-byte XOR scheme, and the patched unluac decompiled every one of the 18,733 chunks in the `LWLF` bundle (version 825, tag `20260921_1892_App`) and all 1,291 data tables with zero failures. Of the 118 assemblies, the `dllres` hot-update manifest lists remote replacements for 117 (`mscorlib` has no entry), and `noUpdateAssemblies.json` (`[{"name":"SmartFox2X"}]`) pins SmartFox2X to the APK copy. The 1.0.364 pass also decompiled all 118 assemblies with ILSpy, not just 9, see [Findings & further work](/findings) for the full coverage method. The signing certificate is byte-identical to 1.0.351's. Older Lua bundles stay hosted on the CDN, which is how the 1.0.351 baseline (`LWLF` 793, 18,514 chunks) was recovered for an exact diff, see [Startup, version-check & hot-update](/bootstrap).

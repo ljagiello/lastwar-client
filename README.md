@@ -141,6 +141,14 @@ this repo or commit it anywhere).
 # Just list buildings without collecting:
 ./lastwar-client -list-buildings
 
+# Optional features (daily quests, free chests, event claims, ...): every one is off until it
+# has been validated live. List them with their state, run one once to validate it, then turn
+# it on in the session config's "features" map, e.g. {"features": {"daily-quests": true}}.
+# Features marked OPT-IN change something visible or a player choice (likes, help requests,
+# free pulls, troop conversion) and are never turned on by default:
+./lastwar-client -list-features
+./lastwar-client -run daily-quests
+
 # Stay connected and issue ad-hoc test commands without re-authenticating. NOTE: since
 # -collect isn't passed here, the full building list still prints to stdout once at
 # startup by default (this is true of every run that omits -collect, not just -interactive
@@ -212,7 +220,11 @@ Two things worth checking after setup, not just once but as ongoing habits:
   (both the plain-login and cross-server-reconnect paths) exit `2` specifically, distinct from
   the generic exit `1` used for other failures -- a cron wrapper can check `$?` directly and
   know to recapture a fresh session (see "Session config" above) without needing to grep the log
-  at all.
+  at all. GSL codes 211/212 ("re-auth needed") also exit `2`.
+- **Exit code 3 means the server ended the session on purpose.** `push.user.off` (the account
+  logged in on another device), `push.server.stop` (maintenance) and `init.error` stop the run
+  without reconnecting, as the real client does. Nothing needs fixing: the next scheduled run
+  starts a fresh session. Playing on another device during a cron run is the usual cause.
 - **`-log-level` controls the JSON log verbosity** (`debug`, `warn`, or its alias `warning`, or `error`; default `info`) --
   handy for trimming a noisy cron log down to warnings/errors only, or turning on `debug` output
   while chasing down a problem run.

@@ -28,6 +28,7 @@ type LoginResult struct {
 	Account   *sfs.SFSObject  // push.account.login.new params, if the email path ran (nil on loginKey fast-path)
 	Buildings []game.Building // populated if the `init` bootstrap push arrived during login (see waitForInitPush)
 	Visitors  []game.Visitor  // populated alongside Buildings, from the same `init` push (see waitForInitPush)
+	GotInit   bool            // the `init` push arrived during login
 }
 
 // LoginOptions configures how Login authenticates.
@@ -54,21 +55,14 @@ func (o LoginOptions) GoString() string { return o.String() }
 // full round-53 rationale.
 func (o LoginOptions) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
-// gslOptFor picks the GSL getserverlist opt for a device identity, per
-// dossier §02.2's opt table, refined empirically:
+// gslOptFor picks the GSL getserverlist opt for a device identity with gsl.ChooseOpt, the real
+// client's opt table. The persisted identity has no access/refresh token, so it comes out as:
 //
 //	loginKey known             -> opt=login (fastest, resolves the real account directly)
 //	gameUid known, no loginKey -> opt=fix
 //	neither known              -> opt=new (brand new device)
 func gslOptFor(ident *deviceIdentity) gsl.GSLOpt {
-	switch {
-	case ident.LoginKey != "":
-		return gsl.GSLOpt{Opt: "login", LoginKey: ident.LoginKey}
-	case ident.GameUid != "":
-		return gsl.GSLOpt{Opt: "fix"}
-	default:
-		return gsl.GSLOpt{Opt: "new"}
-	}
+	return gsl.ChooseOpt(gsl.OptState{LoginKey: ident.LoginKey, GameUid: ident.GameUid}, time.Now())
 }
 
 // buildBaseZoneLoginAddr builds the "host:port" dial address for the base zone SFS2X connection
@@ -189,6 +183,22 @@ func redirectZone(siObj *sfs.SFSObject, context string) string {
 	return capOversizedIdentityField("zone", siObj.GetString("zone"), "", context)
 }
 
+// redirectUid is redirectZone's sibling for the redirect's "uid": the account's gameUid on the new
+// shard, which the real client stores as its GAME_UID ([AT]SetGUID_LoginMsg, A-CS:82803-82809).
+// Absent or empty is silent and means "unchanged"; wrong-typed or oversized warns and is ignored.
+func redirectUid(siObj *sfs.SFSObject, context string) string {
+	v, ok := siObj.Get("uid")
+	if !ok || v.Val == nil {
+		return ""
+	}
+	if !session.SFSFieldKindAccepts(session.SFSFieldKindString, v.Val) {
+		slog.Warn("serverInfo redirect: uid field present but wrong-typed; keeping the current gameUid",
+			"context", context, "goType", fmt.Sprintf("%T", v.Val), "raw", siObj.StringRedacted())
+		return ""
+	}
+	return capOversizedIdentityField("gameUid", siObj.GetString("uid"), "", context)
+}
+
 // capOversizedIdentityField is the round-47 regression fix for the MAJOR finding that zone,
 // gameUid, and accessTok -- unlike loginKey/gameUid/username, which route through
 // SaveLoginKey/SaveGameUid/SaveUsername and got a maxIdentityFieldLen guard in round 46 -- are
@@ -197,15 +207,15 @@ func redirectZone(siObj *sfs.SFSObject, context string) string {
 // 1MiB whole-HTTP-body gsl.MaxGSLResponseSize cap, or an SFS2X serverInfo redirect field that can
 // arrive tagged sfs.SFSText (bounded only by packet.go's 64MiB sfs.MaxFrameSize) -- GetString cannot tell
 // that tag apart from the 65535-byte-capped sfs.SFSUtfString tag it also decodes to the identical Go
-// string type for. sfs.WriteUtfString (sfsobject.go) hard-rejects anything over 65535 bytes, so an
+// string type for. sfs.WriteUtfString (sfsobject.go) hard-rejects anything over 32767 bytes, so an
 // oversized value reaching PutUtfString fails sfs.EncodeObject/SendEnvelope, and that purely local
 // encode failure gets wrapped in sendStageError (conn.go), which deliberately, by design, forces
 // Timeout()==false -- indistinguishable from a genuine dead connection to every caller. field/
 // context name the caller for the log line's benefit; fallback is the value used instead of the
-// oversized one -- callers pass "" at a first-assignment site (nothing to fall back to yet) or the
-// previous value at a mid-redirect refresh site (matching this codebase's existing "treat an
-// anomalous value as unchanged, not corrupting" philosophy, e.g. gsl.GetServerList refresh failures
-// already fall back to the stale token/zone rather than clearing it).
+// oversized one -- callers pass "" both at a first-assignment site (nothing to fall back to yet) and
+// at the serverInfo redirect (redirectZone/redirectUid), where "" means "keep the current value"
+// (matching this codebase's existing "treat an anomalous value as unchanged, not corrupting"
+// philosophy).
 func capOversizedIdentityField(field, value, fallback, context string) string {
 	if len(value) <= maxIdentityFieldLen {
 		return value
@@ -243,7 +253,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	httpClient := gsl.DefaultHTTPClient()
 
 	slog.Info("check-version: fetch RSA pubkey and pick gate host")
-	cv, gateHost, err := gsl.CheckVersion(httpClient)
+	// No zone yet: the persisted identity doesn't record one, so `server` stays empty, as on a
+	// real client's first launch.
+	cv, gateHost, err := gsl.CheckVersion(httpClient, "")
 	if err != nil {
 		return nil, err
 	}
@@ -274,8 +286,10 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		return nil, err
 	}
 	slog.Info("GSL getserverlist response", "code", lsr.Code, "serverListLen", len(lsr.ServerList), "lastLoggedServer", lsr.LastLoggedServer)
-	if len(lsr.ServerList) == 0 {
-		return nil, fmt.Errorf("no servers returned")
+	// The real client fails on any non-zero code and on an empty list (gsl.LoginServerListRespon.Err);
+	// 211/212 wrap gsl.ErrReauthNeeded, which main.go turns into exit code 2.
+	if err := lsr.Err(); err != nil {
+		return nil, fmt.Errorf("login: %w", err)
 	}
 	serverListLogCount := len(lsr.ServerList)
 	if serverListLogCount > maxServerListLogEntries {
@@ -292,7 +306,11 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		slog.Info("access token acquired", "tokenLen", len(accessTok))
 	}
 
-	stateSrv := lsr.ServerList[0]
+	// The account's own role first, then lastLoggedServer, then serverList[0]: on a multi-role
+	// account [0] can be another role, and Login would then succeed while every command times out.
+	stateSrv := lsr.PickServer(ident.GameUid)
+	slog.Info("GSL server selected", "id", stateSrv.ID, "zone", stateSrv.Zone, "lastLoggedServer", lsr.LastLoggedServer)
+	resVersion := ResVersionFor(httpClient, cv, false, "", "", "")
 	zone := capOversizedIdentityField("zone", stateSrv.Zone.String(), "", "login initial GSL response")
 	gameUid := capOversizedIdentityField("gameUid", stateSrv.GameUid.String(), "", "login initial GSL response")
 	if gameUid != "" && gameUid != ident.GameUid {
@@ -339,6 +357,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	var initErr error
 	gotInit := false
 	redirectHops := 0
+	// loginPF is the storefront the base-zone Login claimed; account.login.new repeats it, so the
+	// two always describe the same identity ("AppStore" on iOS, "market_global" on Android).
+	var loginPF string
 
 	for attempt := 1; attempt <= maxLoginAttempts; attempt++ {
 		if attempt > 1 {
@@ -380,13 +401,15 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		// this dossier's static reading assumed -- so ServerInfo.uid is
 		// genuinely empty at this call site in normal operation too.
 		loginParams := BuildLoginParams(LoginParamsInput{
-			FutureID:  1,
-			DeviceID:  ident.DeviceID,
-			AirKey:    ident.AirKey(),
-			GameUid:   "",
-			AccessTok: accessTok,
-			ServerID:  serverID,
+			FutureID:   1,
+			DeviceID:   ident.DeviceID,
+			AirKey:     ident.AirKey(),
+			GameUid:    "",
+			AccessTok:  accessTok,
+			ServerID:   serverID,
+			ResVersion: resVersion,
 		})
+		loginPF = loginParams.GetString("pf")
 		loginContent := sfs.NewSFSObject()
 		loginContent.PutUtfString("zn", zone)
 		loginContent.PutUtfString("un", "")
@@ -452,60 +475,23 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			// for why a wrong-typed zone is a real, non-theoretical desync risk even though
 			// (unlike a wrong-typed ip) it doesn't stop the redirect itself from being followed.
 			newZone := redirectZone(siObj, "login.go base-zone Login")
-			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddr, "newZone", newZone, "oldAddr", addr, "oldZone", zone)
+			// The real client adopts serverInfo.uid as its gameUid and reconnects with the same
+			// at, making no GSL call (LoginMessage.CSHandleResponse, A-CS:82799-82858). A fresh
+			// GSL call here could only disturb token state: it sends platform=Android whatever
+			// identity the token belongs to.
+			newGameUid := redirectUid(siObj, "login.go base-zone Login")
+			slog.Info("serverInfo redirect: reconnecting to new address with the same access token", "newAddr", newAddr, "newZone", newZone,
+				"oldAddr", addr, "oldZone", zone, "newGameUid", newGameUid, "oldGameUid", gameUid, "accessTokLen", len(accessTok))
 			_ = conn.Close()
 			addr = newAddr
 			if newZone != "" {
 				zone = newZone
 				serverID = serverIDFromZone(zone)
 			}
-			// Same suspected single-use-per-connection risk as crossserver.go's
-			// DoCrossServerLogin redirect path (which does the equivalent token
-			// refresh): this closes the connection and redials a brand-new TCP
-			// session, so refresh the access token before reconnecting rather than
-			// carrying the old one forward unverified.
-			slog.Info("fetching fresh access token before following serverInfo redirect (suspected single-use-per-connection)")
-			freshOpt := gslOptFor(ident)
-			freshLsr, err := gsl.GetServerList(httpClient, gateHost, pub, ident.DeviceID, freshOpt, "", ident.GameUid)
-			if err != nil {
-				slog.Error("GSL refresh failed; following redirect with stale token anyway", "error", err)
-			} else {
-				// Only overwrite on a non-empty refreshed token -- mirrors the gameUid guard
-				// just below (same reasoning): freshLsr.At can be non-nil with an empty Token
-				// (gsl.go's gsl.LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped
-				// "at" field, including "{}" or one with no/empty "token", as present via
-				// gsl.LooksLikeJSONObject), and an empty token here is more likely an
-				// unpopulated/degraded refresh response than a real "clear the token"
-				// instruction. Clobbering a known-good, already-working accessTok with "" would
-				// break the very reconnect this refresh exists to support -- round-53 fix, the
-				// identical gap the gameUid guard below was already hardened against.
-				if freshLsr.At != nil {
-					if newAccessTok := capOversizedIdentityField("accessTok", freshLsr.At.Token.String(), accessTok, "login serverInfo redirect GSL refresh"); newAccessTok != "" {
-						accessTok = newAccessTok
-						slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
-					} else {
-						slog.Warn("serverInfo redirect GSL refresh returned an empty access token; keeping the existing one", "tokenLen", len(accessTok))
-					}
-				}
-				// The same refresh response also carries the account's current
-				// gameUid (serverList[0].gameUid) -- propagate it the same way as
-				// accessTok above. Without this, gameUid stays pinned to whatever
-				// it was before this redirect even when the GSL refresh (issued
-				// specifically because this account just got redirected to a new
-				// shard) reports a different one. Only overwrite on a non-empty
-				// value -- an empty gameUid here is more likely an unpopulated
-				// field than a real "clear the uid" instruction, and clobbering a
-				// known-good value with "" is not a safe default to guess at. See
-				// DoCrossServerLogin's matching redirect path in crossserver.go,
-				// which had this same gap.
-				if len(freshLsr.ServerList) > 0 {
-					if newGameUid := capOversizedIdentityField("gameUid", freshLsr.ServerList[0].GameUid.String(), "", "login serverInfo redirect GSL refresh"); newGameUid != "" && newGameUid != gameUid {
-						slog.Info("serverInfo redirect: gameUid changed on GSL refresh", "oldGameUid", gameUid, "newGameUid", newGameUid)
-						gameUid = newGameUid
-						if err := ident.SaveGameUid(gameUid); err != nil {
-							slog.Warn("failed to persist gameUid", "error", err)
-						}
-					}
+			if newGameUid != "" && newGameUid != gameUid {
+				gameUid = newGameUid
+				if err := ident.SaveGameUid(gameUid); err != nil {
+					slog.Warn("failed to persist gameUid", "error", err)
 				}
 			}
 			// A redirect is a deterministic server instruction, not a
@@ -542,7 +528,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		slog.Warn("giving up on init after all attempts; continuing anyway, building list may be empty")
 	}
 
-	result := &LoginResult{Conn: conn, Ident: ident, Buildings: buildings, Visitors: visitors}
+	result := &LoginResult{Conn: conn, Ident: ident, Buildings: buildings, Visitors: visitors, GotInit: gotInit}
 
 	if opt.Opt == "login" {
 		// GSL already resolved the real account via loginKey; the base
@@ -604,13 +590,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	slog.Info("got code", "codeLen", len(code))
 
 	slog.Info("step 8: complete login with account.login.new (type=0, mail+code)")
-	finishParams := sfs.NewSFSObject()
-	finishParams.PutInt("type", 0)
-	finishParams.PutUtfString("mail", opts.Email)
-	finishParams.PutUtfString("verifyCode", code)
-	finishParams.PutUtfString("pf", "market_global")
-	finishParams.PutUtfString("deviceId", ident.DeviceID)
-	finishParams.PutUtfString("airKey", ident.AirKey())
+	finishParams := accountLoginNewParams(opts.Email, code, loginPF, ident.DeviceID, ident.AirKey())
 	if err := conn.SendExtension("account.login.new", finishParams); err != nil {
 		_ = conn.Close()
 		return nil, session.SendStageError{Err: err}
@@ -677,6 +657,35 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 
 	return result, nil
+}
+
+// accountLoginNewParams builds the email-code account.login.new request. pf is the storefront of
+// the identity the base-zone Login presented: the real client sends "AppStore" on iOS and
+// "market_global" on Android (lua §1), so it must follow that identity rather than be fixed.
+func accountLoginNewParams(email, code, pf, deviceID, airKey string) *sfs.SFSObject {
+	p := sfs.NewSFSObject()
+	p.PutInt("type", 0)
+	p.PutUtfString("mail", email)
+	p.PutUtfString("verifyCode", code)
+	p.PutUtfString("pf", pf)
+	p.PutUtfString("deviceId", deviceID)
+	p.PutUtfString("airKey", airKey)
+	return p
+}
+
+// SendCheckDeviceChange sends check.device.change {_id}, which the real client sends once after
+// every init (InitMessage, A-CS:82264; CheckDeviceChangeMessage, A-CS:81038-81062) without waiting
+// on it; it reads the reply's bool `r` whenever it arrives and ignores it. Live (real client,
+// 2026-10-04 capture) the reply was r:false 0.58 s after login. This is send-only as well: the
+// reply is skipped by whichever wait reads it next (visible at debug level as "skipped push ...
+// cmd=check.device.change"), so it adds no latency. The error reports a failed send only. The
+// _id comes from SendExtension's per-connection request sequence (MASTER §5.1 #19).
+func SendCheckDeviceChange(conn *session.GameConn) error {
+	if err := conn.SendExtension("check.device.change", nil); err != nil {
+		return session.SendStageError{Err: err}
+	}
+	slog.Info("sent check.device.change")
+	return nil
 }
 
 // waitForInitPush waits for the bare `init` bootstrap push (report 14 §5:

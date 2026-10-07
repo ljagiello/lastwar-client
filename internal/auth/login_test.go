@@ -82,8 +82,8 @@ func TestLoginOptionsStringGoStringRedact(t *testing.T) {
 // SaveLoginKey/SaveGameUid/SaveUsername and got a maxIdentityFieldLen guard in round 46 -- were
 // re-encoded via PutUtfString with no length check at all. Proves both the exact 65535/65536-byte
 // boundary (mirroring identity.go's own maxIdentityFieldLen boundary test) and both fallback
-// shapes callers actually use: "" at a first-assignment site, and the previous value at a
-// mid-redirect refresh site.
+// shapes the function supports: "" (what every current caller passes) and a previous value, for a
+// caller that must keep the last-known-good value.
 func TestCapOversizedIdentityFieldExactBoundary(t *testing.T) {
 	atCap := strings.Repeat("a", maxIdentityFieldLen)
 	overCap := strings.Repeat("a", maxIdentityFieldLen+1)
@@ -117,7 +117,7 @@ func TestCapOversizedIdentityFieldExactBoundary(t *testing.T) {
 	t.Run("one byte over cap, non-empty fallback: falls back to the previous value", func(t *testing.T) {
 		got := capOversizedIdentityField("accessTok", overCap, "previous-good-token", "test-context")
 		if got != "previous-good-token" {
-			t.Errorf("got %q, want the fallback value %q (a mid-redirect refresh must keep the last-known-good value, not clear it)", got, "previous-good-token")
+			t.Errorf("got %q, want the fallback value %q (a non-empty fallback must be kept, not cleared)", got, "previous-good-token")
 		}
 	})
 }

@@ -117,7 +117,7 @@ The real client's recovery from `E011` needs the refresh token: clear `at`, run 
 
 ### Following a `serverInfo` redirect
 
-When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live), but calls GSL `opt=fix` before redialing, which the real client never does.
+When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live) and now does the same as the real client: it redials with the same `at` and adopts `serverInfo.zone` and `serverInfo.uid`. Earlier versions called GSL `opt=fix` before redialing. Under the iOS identity that call could only swap a working token for an Android-bound one, because `goclient`'s GSL requests claim `platform=Android`.
 
 ### A device of its own
 
@@ -147,6 +147,8 @@ Around and after `init`, the real client sends, in order (observed in the captur
 2. About 45 requests from Lua's `RequestOtherLoginMsg`, nearly all reads: VIP, news, shop, alliance, world, and season info. The capture holds about 224 extension requests in the first 5 s.
 3. `login.ext {info, add}`. `info` is a JSON device description: device name and model, OS version, network type, GPU, and CPU. When `init` carries `add {a, b, data, enc}`, the C# decrypts `data` with a hardcoded AES key, **executes it as Lua**, and returns the result as `add`: a server-pushed, executable integrity challenge. It's documented here as a protocol fact only; reproducing it is out of scope. In the capture, `init` carried `add` and the server answered `login.ext` with `{success:true}`.
 
+4. Nine `mail.delete.batch {type: "auto", uids}` calls about 4.7 s in. The real client auto-deletes mail older than 30 days once a day, see [Alliance, chat & mail](/alliance-chat-mail).
+
 The server also pushes `push.shumei.id {shumeiId}` about 0.5 s after `Login` (observed live). The client caches that value and reports it as `ta.lw_shumei_id` in its next `Login`.
 
 `login.init` is an active pull that the real client never sent in the capture. The C# sends `dataConfigMd5` with it only when non-empty.
@@ -157,23 +159,50 @@ As far as the 1.0.364 Lua shows, none of these requests is a prerequisite for se
 
 | Field | Contents |
 |---|---|
-| `user` | 59 keys, including `uid`, `serverId`, and `deviceBindTimes`. Also holds the account's **email address**: never log `user` unredacted |
+| `user` | 59 keys, including `uid`, `serverId`, and `deviceBindTimes`. `gold`, `gold1`, and `paidGold` are the total, free, and paid diamond balances (static-analysis-only). Also holds the account's **email address**: never log `user` unredacted |
 | `building_new[]` | `uuid`, `bId`, `lv`, `pId`, and the production timers `prodST`, `prodT`, `prodET`, `pEndT`, `prodStatus`, see [City & building](/city-building#which-buildings-are-production-lines) |
-| `visitor` | `{addNum, maxNum, list[]}`. Per the Lua, a visitor whose `startTime` (ms) is still in the future can't be greeted yet |
+| `visitor` | `{addNum, maxNum, list[]}`. Each entry is `{uid, eventId, startTime, visitorId, type, extendInfo, ...}`. Per the Lua, a visitor whose `startTime` (ms) is still in the future can't be greeted yet. `type` isn't the visitor's behaviour, see [Visitor type numbering](#visitor-type-numbering) |
 | `vip.vipInfo` | `level`, `loginDays`, `score`, `loginScoreState`, `everyDayReward`, `endTime`, `privilegeReward` |
-| `tomorrow` | Unix time of the next server-day boundary; every `*_times_expire` field uses the same instant. The `Login` response's `real_timezone_offset` (`-7200` on 2026-10-04) gives the server day's offset |
+| `tomorrow` | Unix time of the next server-day boundary; every `*_times_expire` field uses the same instant. The `Login` response's `real_timezone_offset` (`-7200` on 2026-10-04) gives the server day's offset, see [Server day and daily reset](#server-day-and-daily-reset) |
 | `mixedInfo` | `todayLoginTimes` (counts every login, including each `goclient` run), `scoreSwitch`, `materialBackup`, `popRate` |
 | `freeRewardArr`, `todayFreeStamina`, `lastClaimFreeStaminaTime` | daily freebie and stamina state |
-| `queue_new[]`, `collect_reward[]` | build and research queue timers; pending rewards with expiry |
+| `queue_new[]`, `collect_reward[]` | build and research queue timers; pending rewards with expiry. Field meanings are on [City & building](/city-building#building-and-queue-fields-in-init) |
+| `allianceNewMail` | The number of unclaimed alliance gifts, which drives the client's gift red dot (static-analysis-only) |
+| `dataConfig` | The live override of the `item` table's DataConfig defaults (`k1` to `k30`), replaced wholesale on every `init`, see [Game data tables](/data-tables) |
 | `chatToken` | auth for the separate chat WebSocket, below |
 | `add` | `{a, b, data, enc}`, the integrity-challenge input described above |
 
 No gateway list, session hint, or token expiry appears anywhere in `init`.
 
+### Server day and daily reset
+
+The server day starts at 00:00 server time, which is UTC plus `real_timezone_offset`. With the live offset of `-7200` s, that's **02:00 UTC** every day, and `init.tomorrow` is 02:00 UTC of the next day (observed in the 2026-10-04 capture). The rest of this section is from the 1.0.364 Lua and C#, static-analysis-only:
+
+- Day zero is `now - (now + real_timezone_offset * 1000) mod 86,400,000`, all in ms (`UITimeManager:GetTodayZero`). Weeks start on Monday at the same boundary: Monday 02:00 UTC, live.
+- All server-day math uses UTC plus a fixed offset, so daylight saving time never moves the boundary.
+- There's no "new day" push. The client fires `OnUnDelayPassDay` exactly at the boundary and `OnPassDay` 5 to 15 s later, with random jitter, when 61 DataCenter managers re-fetch their daily state. `OnPassWeek` fires 4 s after Monday's boundary.
+- "Already claimed today" checks compare timestamps with `IsSameDayForServer`, not with 24-hour timers.
+- The C# always sets its next reset from `init.tomorrow`, but applies `real_timezone_offset` only when `init` carries the key. The Lua falls back to `0` (UTC) when the key is absent, which would put its boundary at 00:00 UTC while `tomorrow` stays at 02:00 UTC. The 2026-10-04 capture shows the key in the `Login` response; whether `init` carries it too hasn't been checked. Anchoring on `tomorrow` (day zero = `tomorrow - 86400` s) works either way.
+
+### Visitor type numbering
+
+Two different numberings are both called "visitor type" (static-analysis-only):
+
+| Field | Numbering |
+|---|---|
+| `init.visitor.list[].type` | The **queue type**, from `Scene/CityVisitor/Const.lua`: `0` GEN_BY_TIME, `1` CYCLE_REWARD, `2` STAGE, `4` WORKER_LOTTERY, `5` DOMINATOR, `6` AllianceCongratulation, `8` SystemGift, `11` ActivityVisitor, `12` AllianceInvite, `18` S0_ALLIANCE_BOSS, `19` SURVIVOR_PACK_GiFT, `20` ProtectCoverVisitor |
+| `lw_base_visitor_event[eventId].type` | The **behaviour type**, the global `VisitorType` in `Global/EnumType.lua`: `1` MERCHANT, `2` GIFT, `3` RECRUITMENT, `4` BATTLE, `5` WORKER_LOTTERY, `6` NOTIFY, `7` OPEN_PANEL, `8` ALLIANCE_INVITE_MOVE_CITY, `9` DOMINATOR, `10` SeasonDayGift, `11` VisitorActivity, `12` ALLIANCE_INVITE, `13` DOMINATOR_COCKATRICE, `14` AllianceCongratulation, `15` AD_REMINDER, `16` SKY_BATTLE, `17` PLANE_FEATURE, `18`-`20` S0_ALLIANCE_BOSS, SURVIVOR_PACK_GiFT, ProtectCoverVisitor, `30` SystemGift |
+
+What `visitor.operate {uid, operate}` does depends on the behaviour type, so look it up through the entry's `eventId`, not its `type`. For a MERCHANT (events 1001 and 1002), `operate: 1` **buys** the offered item with resources and `operate: 0` declines. A SystemGift visitor opens a gift-pack window first. Visitors with event ids 6001, 8001, 12001, and the S0-boss and ProtectCover visitors have client-made uids (`eventId + 100000000`) and never reach the server. Across 326 accepts on the real account over three months, every visitor's behaviour type was 2, 3, or 10 (confirmed live).
+
 ## Guest identity is sufficient
 
 No OAuth is required to play: `account.login.new` with `type=1` and only `deviceId`/`airKey`/`pf` is the full "no external provider" path. Social binding (Google Sign-In `type=2`, Apple Game Center `type=4`, Play Games `type=5`) requires obtaining a provider token yourself, out of scope for a headless client, and optional. Per the 1.0.364 Lua, `account.login.new` sends `pf` as `"AppStore"` on iOS and `"market_global"` on Android; `goclient` always sends `market_global`.
 
+### New-device account selection
+
+With `client_config` switch 21 on and no stored `gameUid`, the 1.0.364 C# first connects to the `loginServer {ip, port, ws_ip, ws_port}` that the GSL response names, not to a game zone. The server's `login.push.shumei.exception.level` push then decides whether the account picker offers **New game** (static-analysis-only). That push is an anti-fraud surface, recorded here only as a protocol fact.
+
 ## A second, optional channel: chat
 
-Real-time chat text runs over a **separate WebSocket** (JSON frames, not SFSObject), authenticated with the `chatToken` from the `init` push. Server discovery is its own HTTP bootstrap (`chat_server_links.php`, signed with an MD5 formula keyed on a fixed app id `100017`). Every outbound message is signed: `MD5(uid + json(sortedParams) + sendTime + connectionSign)`. This channel is optional, skip it entirely if the Go client doesn't need real-time chat; "share to chat" and moderation commands still work over the plain SFS socket regardless (see [Alliance, chat & mail](/alliance-chat-mail)).
+Real-time chat text runs over a **separate WebSocket** (JSON frames, not SFSObject), authenticated with the `chatToken` from the `init` push. Server discovery is its own HTTP bootstrap, signed with an MD5 formula keyed on a fixed app id `100017`: `/server/links` on the `lastwar-chat-*` hosts, or `chat_server_links.php` behind a DataConfig switch (see [Alliance, chat & mail](/alliance-chat-mail#chat-websocket-transport)). Every outbound message is signed: `MD5(uid + json(sortedParams) + sendTime + connectionSign)`. This channel is optional, skip it entirely if the Go client doesn't need real-time chat; "share to chat" and moderation commands still work over the plain SFS socket regardless (see [Alliance, chat & mail](/alliance-chat-mail)).

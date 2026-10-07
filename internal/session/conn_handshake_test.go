@@ -507,12 +507,10 @@ func TestDoHandshakeSendFailureIsNonTimeoutNetError(t *testing.T) {
 
 // TestStartHeartbeatSendsPeriodicPingsAndStopsOnClose covers StartHeartbeat's normal loop: pings
 // (controllerSystem/ActionPingPong) go out roughly every `interval`, and closing the GameConn
-// stops the goroutine -- no further pings arrive afterward.
+// stops the goroutine -- no further pings arrive afterward. The reader starts first: the first
+// ping is written synchronously inside StartHeartbeat, and net.Pipe blocks until it is read.
 func TestStartHeartbeatSendsPeriodicPingsAndStopsOnClose(t *testing.T) {
 	client, server := NewPipeGameConnPair(t)
-
-	const interval = 20 * time.Millisecond
-	client.StartHeartbeat(interval, time.Now())
 
 	pings := make(chan time.Time, 16)
 	go func() {
@@ -526,6 +524,9 @@ func TestStartHeartbeatSendsPeriodicPingsAndStopsOnClose(t *testing.T) {
 			}
 		}
 	}()
+
+	const interval = 20 * time.Millisecond
+	client.StartHeartbeat(interval, time.Now())
 
 	const wantPings = 4
 	var times []time.Time
@@ -566,7 +567,14 @@ func TestStartHeartbeatSendsPeriodicPingsAndStopsOnClose(t *testing.T) {
 // access): only GameConn.Close() ever closes it, so seeing it closed is proof StartHeartbeat's
 // error branch actually ran c.Close(), not just that the raw pipe died.
 func TestStartHeartbeatSendFailureClosesConn(t *testing.T) {
-	client, _ := NewPipeGameConnPair(t)
+	client, server := NewPipeGameConnPair(t)
+	go func() {
+		for {
+			if _, err := server.ReadEnvelope(); err != nil {
+				return
+			}
+		}
+	}()
 
 	const interval = 20 * time.Millisecond
 	client.StartHeartbeat(interval, time.Now())
@@ -598,7 +606,6 @@ func TestCloseRacesWithLiveHeartbeatGoroutine(t *testing.T) {
 	client, server := NewPipeGameConnPair(t)
 
 	const interval = 2 * time.Millisecond
-	client.StartHeartbeat(interval, time.Now())
 
 	var pingCount atomic.Int64
 	firstPing := make(chan struct{})
@@ -615,6 +622,7 @@ func TestCloseRacesWithLiveHeartbeatGoroutine(t *testing.T) {
 			}
 		}
 	}()
+	client.StartHeartbeat(interval, time.Now())
 
 	select {
 	case <-firstPing:

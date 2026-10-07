@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"lastwar-client/internal/crypto"
@@ -55,13 +56,99 @@ var CheckVersionHosts = []string{
 // accessor; DownloadURL/HotUpdateMsg are never read anywhere in this codebase, so widening them is
 // behaviorally free, matching AccountServerInfo.WsPort/LoginToken.Time/LoginServerInfo.Uid's own
 // precedent of hardening an unread field purely so it can't take the rest of the struct down.
+//
+// The remaining fields are the rest of what the 1.0.364 client parses (CheckResVersionState,
+// A-CS:9506-9857). TableVersion and Locale only arrive when the request carries
+// table_env=table_online (confirmed live 2026-10-05, coverage tables report). Formats:
+//   - HotUpdateMsg: ";"-separated "name,version,size,crc32" manifest entries (GameRes, DllRes, ...).
+//   - LwFile2: "version|bzSize|bzCrc[|size|crc];patches..." for the Lua bundle.
+//   - TableVersion: "ver,size,md5[,crc][;patch|...]"; Locale: "ver,lang1,lang2,...".
+//   - ClientConfig: "|"-separated "0"/"1" switches indexed by ClientSwitch id (A-CS:44158-44177).
+//   - CheckOK: present only in store-review mode. Warmup, FirstLaunchForceUpdateMsg: asset
+//     pre-download and first-launch experiment data, not protocol-relevant.
 type CheckVersionResponse struct {
-	Code         FlexString `json:"code"`
-	Msg          FlexString `json:"msg"`
-	UpdateType   FlexString `json:"updateType"`
-	DownloadURL  FlexString `json:"downloadurl"`
-	ResMsg       FlexString `json:"resMsg"`
-	HotUpdateMsg FlexString `json:"hotUpdateMsg"`
+	Code                      FlexString `json:"code"`
+	Msg                       FlexString `json:"msg"`
+	UpdateType                FlexString `json:"updateType"`
+	DownloadURL               FlexString `json:"downloadurl"`
+	ResMsg                    FlexString `json:"resMsg"`
+	HotUpdateMsg              FlexString `json:"hotUpdateMsg"`
+	LwFile2                   FlexString `json:"lwfile2"`
+	TableVersion              FlexString `json:"table_version"`
+	Locale                    FlexString `json:"locale"`
+	ClientConfig              FlexString `json:"client_config"`
+	CheckOK                   FlexString `json:"checkok"`
+	Warmup                    FlexString `json:"warmup"`
+	FirstLaunchForceUpdateMsg FlexString `json:"firstLaunchForceUpdateMsg"`
+}
+
+// ResVersion derives the Login `resVersion` a fully hot-updated client at this check-version's
+// state reports: "{GameRes}.{DllRes}_{lwfile2 version}F_{table_version}.{locale}"
+// (GetResVersion, A-CS:49098-49105; "F" marks the LWLF Lua bundle format). Each part is the first
+// field of its source: the live iOS 1.0.344 values (GameRes 2159, DllRes 1505, lwfile2 821, table
+// 39516, locale 23570) give "2159.1505_821F_39516.23570", the resVersion the real iOS app sent in
+// the 2026-10-04 capture. It returns "" when any part is missing or not a plain number of at most
+// 9 digits (TableVersion and Locale are absent without table_env=table_online); callers then keep
+// sending "0", which the server has accepted for months.
+func (cv *CheckVersionResponse) ResVersion() string {
+	if cv == nil {
+		return ""
+	}
+	gameRes := hotUpdateManifestVersion(cv.HotUpdateMsg.String(), "gameres")
+	dllRes := hotUpdateManifestVersion(cv.HotUpdateMsg.String(), "dllres")
+	lua := leadingField(cv.LwFile2.String(), "|")
+	table := leadingField(cv.TableVersion.String(), ",")
+	locale := leadingField(cv.Locale.String(), ",")
+	for _, part := range []string{gameRes, dllRes, lua, table, locale} {
+		if !isVersionNumber(part) {
+			return ""
+		}
+	}
+	return gameRes + "." + dllRes + "_" + lua + "F_" + table + "." + locale
+}
+
+// hotUpdateManifestVersion returns the version (second field) of the hotUpdateMsg entry named
+// name, matched case-insensitively: the reply says "GameRes"/"DllRes" and the client looks the
+// manifests up as "gameres"/"dllres".
+func hotUpdateManifestVersion(hotUpdateMsg, name string) string {
+	for entry := range strings.SplitSeq(hotUpdateMsg, ";") {
+		fields := strings.Split(strings.TrimSpace(entry), ",")
+		if len(fields) >= 2 && strings.EqualFold(fields[0], name) {
+			return strings.TrimSpace(fields[1])
+		}
+	}
+	return ""
+}
+
+// leadingField returns the first sep-delimited field of the first ";"-delimited segment of s.
+func leadingField(s, sep string) string {
+	segment, _, _ := strings.Cut(s, ";")
+	field, _, _ := strings.Cut(segment, sep)
+	return strings.TrimSpace(field)
+}
+
+// isVersionNumber reports whether s is 1-9 ASCII digits. Real versions have 3-5; the cap keeps a
+// malformed reply from growing the Login field.
+func isVersionNumber(s string) bool {
+	if s == "" || len(s) > 9 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ClientSwitchOn reports whether client_config switch id is "1". Out-of-range ids are off, as in
+// ClientSwitch.IsOn.
+func (cv *CheckVersionResponse) ClientSwitchOn(id int) bool {
+	if cv == nil || id < 0 {
+		return false
+	}
+	switches := strings.Split(cv.ClientConfig.String(), "|")
+	return id < len(switches) && strings.TrimSpace(switches[id]) == "1"
 }
 
 // FlexString accepts a JSON field that the server sometimes encodes as a
@@ -120,23 +207,53 @@ func (f FlexString) Int(key string) int {
 	return n
 }
 
-// CheckVersion tries the known gate hosts in order (NOT concurrently, despite earlier wording --
-// this is a plain sequential fallback: each host gets the full httpClient timeout before moving
-// to the next) and returns the first successful response along with which host answered (that
-// host becomes the base URL for every subsequent GSL call -- dossier §02.1).
-func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error) {
+// ClientBuild is the client build a check-version request claims to be.
+type ClientBuild struct {
+	PackageName string
+	Platform    string // "Android" or "iOS", as GameUtility.GetPlatformName() spells it
+	AppVersion  string
+	VersionCode string // sent as buildId
+}
+
+// AndroidBuild is the build this client presents by default: the constants above.
+var AndroidBuild = ClientBuild{PackageName: PackageName, Platform: Platform, AppVersion: AppVersion, VersionCode: VersionCode}
+
+// tableEnv is ClientConfig.TableEnvName, "table_" + TABLE_ENV, where TABLE_ENV is "online" in a
+// shipping build (A-CS:14094, 43157).
+const tableEnv = "table_online"
+
+// CheckVersion fetches check-version as AndroidBuild. zone is the session's zone ("APS783"), sent
+// as `server` the way the real client sends its cached SERVER_ZONE, or "" when not known yet.
+func CheckVersion(httpClient *http.Client, zone string) (*CheckVersionResponse, string, error) {
+	return CheckVersionAs(httpClient, AndroidBuild, zone)
+}
+
+// checkVersionQuery builds the getlsu3dversion.php query the 1.0.364 client sends
+// (GetCheckVersionURL, A-CS:14083-14097). uid and deviceId are always empty here: check-version is
+// anonymous for this client, and nothing identifying is ever put into it.
+func checkVersionQuery(build ClientBuild, zone string) url.Values {
 	q := url.Values{}
-	q.Set("packageName", PackageName)
-	q.Set("platform", Platform)
-	q.Set("appVersion", AppVersion)
+	q.Set("packageName", build.PackageName)
+	q.Set("platform", build.Platform)
+	q.Set("appVersion", build.AppVersion)
 	q.Set("gm", "0")
-	q.Set("server", "")
+	q.Set("server", zone)
 	q.Set("uid", "")
 	q.Set("deviceId", "")
-	q.Set("table_env", "")
-	q.Set("buildId", VersionCode)
+	q.Set("table_env", tableEnv)
+	q.Set("buildId", build.VersionCode)
 	q.Set("returnJson", "1")
 	q.Set("unityVersion", unityVer)
+	return q
+}
+
+// CheckVersionAs tries the known gate hosts in order (NOT concurrently, despite earlier wording --
+// this is a plain sequential fallback: each host gets the full httpClient timeout before moving
+// to the next) and returns the first successful response along with which host answered (that
+// host becomes the base URL for every subsequent GSL call -- dossier §02.1). build is the client
+// build the request claims; zone is as for CheckVersion.
+func CheckVersionAs(httpClient *http.Client, build ClientBuild, zone string) (*CheckVersionResponse, string, error) {
+	q := checkVersionQuery(build, zone)
 
 	// Round-42 fix: every continue branch below now also logs its own host+error at Warn before
 	// moving to the next host, closing a real diagnostic gap -- previously only `lastErr` (the
@@ -194,9 +311,18 @@ func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error
 		// (CheckResVersionState in the 1.0.364 C#). A forced update means the server has stopped
 		// accepting this build, so Logins claiming it are likely to start failing too.
 		if cv.UpdateType == "2" {
-			slog.Warn("check-version: the server demands a forced update of this build; bump gsl.AppVersion/VersionCode to the current release",
-				"appVersion", AppVersion, "versionCode", VersionCode)
+			slog.Warn("check-version: the server demands a forced update of this build; move to the current release (gsl.AppVersion/VersionCode, or the session config's appVersion/versionCode)",
+				"packageName", build.PackageName, "appVersion", build.AppVersion, "versionCode", build.VersionCode)
 		}
+		// Switches that change the wire protocol (ClientSwitch, A-CS:44058-44152): 4/5 turn the
+		// new packet class and Zstd off, 26 moves the game socket to WebSocket, 29 adds the
+		// forward header to every frame, 44 falls back to WebSocket on every 2nd connect retry.
+		// This client implements none of them. Logged at Info, not Warn: their live values are
+		// not known yet (29 may already be on, MASTER §5.1 #22), and Go works as it is.
+		slog.Info("check-version: tables and client switches", "packageName", build.PackageName, "updateType", cv.UpdateType,
+			"hasTableVersion", cv.TableVersion != "", "hasLocale", cv.Locale != "",
+			"disableNewNetPacket4", cv.ClientSwitchOn(4), "disableZstd5", cv.ClientSwitchOn(5),
+			"serverWS26", cv.ClientSwitchOn(26), "crossForward29", cv.ClientSwitchOn(29), "wsFallback44", cv.ClientSwitchOn(44))
 		return &cv, host, nil
 	}
 	return nil, "", fmt.Errorf("all check-version hosts failed, last error: %w", lastErr)
@@ -215,9 +341,8 @@ func CheckVersion(httpClient *http.Client) (*CheckVersionResponse, string, error
 // Token is FlexString, not a bare string -- round-43 fix, closing the LAST remaining bare-typed
 // field in this entire GetServerList/CheckVersion response family (LoginServerInfo,
 // AccountServerInfo, LoginServerListRespon, and now LoginToken have all had every field widened
-// across rounds 33-43). Token is actively read at 4 call sites (login.go's primary Login path and
-// its mid-redirect GSL refresh, crossserver.go's DoCrossServerLogin redirect refresh, and main.go's
-// standalone -cs-rt command), all now converted to the pre-existing FlexString.String() accessor.
+// across rounds 33-43). Token is read by login.go's primary Login path, owndevice.go and main.go's
+// standalone -cs-rt command, all through the FlexString.String() accessor.
 type LoginToken struct {
 	Token FlexString `json:"token"`
 	Time  FlexString `json:"time"`
@@ -321,16 +446,9 @@ type AccountServerInfo struct {
 }
 
 type LoginServerListRespon struct {
-	// Code is logged on every call site (see login.go and main.go's "GSL getserverlist
-	// response"/"GSL refresh response" log lines) but, unlike CheckVersionResponse.Code (checked
-	// against "" in CheckVersion above), it is NOT checked for a rejection value here: this
-	// endpoint's own success-vs-rejection code values haven't been confirmed live yet -- no
-	// captured getserverlist.php response with a real rejection has been observed, and this
-	// project's own history has twice been burned by guessing at unconfirmed server behavior
-	// instead of waiting for evidence. Left deliberately open rather than guessed at, mirroring
-	// alliance.go's honestly-left-open donation-cooldown gap (see
-	// DonateRecommendedAllianceTech's doc comment) -- a future round should add a check here once
-	// a real rejection response for this specific endpoint has actually been captured.
+	// Code is the GSL result code; Err (below) maps it the way the 1.0.364 client does. The
+	// codes come from static analysis only: no rejected getserverlist.php reply has been
+	// captured live yet.
 	//
 	// Code is FlexString, not a bare int, matching CheckVersionResponse.Code and
 	// LoginServerInfo.Status: this project has confirmed live that CheckVersionResponse.Code (a
@@ -419,6 +537,84 @@ func (l *LoginServerListRespon) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// GSL result errors. The 1.0.364 client accepts a getserverlist.php reply only when code == 0 and
+// serverList is non-empty, and handles the failures as below (A-CS:12465-12495, 12665-12705;
+// static only).
+var (
+	// ErrReauthNeeded is wrapped by the 211 and 212 errors: the server no longer accepts this
+	// device's at/rt/loginKey, and only a fresh login (email verification, then a new loginKey or
+	// a fresh capture of the real app) gets new ones.
+	ErrReauthNeeded = errors.New("re-auth needed")
+	// ErrCredentialsInvalid is code 211: the client clears at, rt and loginKey ([AT]ClearAT_211).
+	ErrCredentialsInvalid = fmt.Errorf("GSL code 211, at/rt/loginKey invalid: %w", ErrReauthNeeded)
+	// ErrAccountMappingInvalid is code 212: the client also clears the uid and server info
+	// ([AT]ClearGUID&AT_212).
+	ErrAccountMappingInvalid = fmt.Errorf("GSL code 212, at/rt/loginKey and the uid/server mapping invalid: %w", ErrReauthNeeded)
+	// ErrNotAvailable is code 201 (E116_201): the client shows "not available" and quits.
+	ErrNotAvailable = errors.New("GSL code 201, not available")
+	// ErrEnvelopeCrypto is code 213 (E213, ERROR_CHECK_SERVER_LIST_ENCRYPT).
+	ErrEnvelopeCrypto = errors.New("GSL code 213, request envelope encryption error")
+	// ErrRejected is any other non-zero code (the client's generic E116).
+	ErrRejected = errors.New("GSL rejected the request")
+	// ErrEmptyServerList is code 0 with no server entries (E120).
+	ErrEmptyServerList = errors.New("GSL returned no servers (E120)")
+)
+
+// Err returns nil for an accepted reply (code 0, or absent, which the client's JsonUtility also
+// reads as 0, plus a non-empty server list), and otherwise one of the errors above, wrapped with the
+// code. Call it after GetServerList, which has already applied ApplyLoginServerFallback.
+func (l *LoginServerListRespon) Err() error {
+	code := strings.TrimSpace(l.Code.String())
+	var err error
+	switch code {
+	case "", "0":
+		if len(l.ServerList) != 0 {
+			return nil
+		}
+		err = ErrEmptyServerList
+	case "201":
+		err = ErrNotAvailable
+	case "211":
+		err = ErrCredentialsInvalid
+	case "212":
+		err = ErrAccountMappingInvalid
+	case "213":
+		err = ErrEnvelopeCrypto
+	default:
+		err = ErrRejected
+	}
+	if len(code) > 16 {
+		code = code[:16] + "..."
+	}
+	return fmt.Errorf("getserverlist.php: code=%q: %w", code, err)
+}
+
+// PickServer returns the server entry to log in to, or nil when the list is empty: the entry
+// carrying gameUid (when gameUid is known), else the one whose id is lastLoggedServer, else the
+// first. The real client picks GetLastLoggedServerInfo() ?? serverList[0] (A-CS:12730-12734,
+// 77709-77722), where lastLoggedServer 0 means none; matching the account's own gameUid first keeps
+// a multi-role account on the role this client has been playing.
+func (l *LoginServerListRespon) PickServer(gameUid string) *LoginServerInfo {
+	if len(l.ServerList) == 0 {
+		return nil
+	}
+	if gameUid != "" {
+		for i := range l.ServerList {
+			if l.ServerList[i].GameUid.String() == gameUid {
+				return &l.ServerList[i]
+			}
+		}
+	}
+	if last := strings.TrimSpace(l.LastLoggedServer.String()); last != "" && last != "0" {
+		for i := range l.ServerList {
+			if strings.TrimSpace(l.ServerList[i].ID.String()) == last {
+				return &l.ServerList[i]
+			}
+		}
+	}
+	return &l.ServerList[0]
+}
+
 // LooksLikeJSONObject reports whether raw is a non-empty JSON value whose first non-whitespace
 // byte is '{' -- used by LoginServerListRespon's UnmarshalJSON above to distinguish a genuine
 // object (decode normally) from `null`/absent (leave nil, no error) or an unexpected non-object
@@ -449,9 +645,9 @@ func looksLikeJSONArray(raw json.RawMessage) bool {
 // response with an empty ServerList (populated or not). Per this project's standing rule
 // against guessing at unconfirmed server behavior, the fallback is deliberately conservative:
 //   - it only fires for opt=new, matching AccountServerInfo's own documented scope exactly --
-//     GetServerList's opt=fix/opt=refresh/opt=login callers (crossserver.go's DoCrossServerLogin
-//     redirect-refresh, main.go's -cs-rt refresh, login.go's own opt=login/opt=fix paths) see
-//     zero behavior change from this function;
+//     GetServerList's opt=fix/opt=refresh/opt=login callers (main.go's -cs-rt refresh,
+//     owndevice.go's opt=login, login.go's own opt=login/opt=fix paths) see zero behavior change
+//     from this function;
 //   - it only fires when ServerList is genuinely empty, so it never touches, reorders, or
 //     shadows a populated ServerList;
 //   - it never invents data AccountServerInfo doesn't carry. Notably, AccountServerInfo has no
@@ -526,11 +722,59 @@ func FindServerInfo(content *sfs.SFSObject) *sfs.SFSObject {
 	return nil
 }
 
-// GSLOpt selects which `opt` value to send, per dossier §02.2 / §05.
+// GSLOpt selects which `opt` value to send, per dossier §02.2 / §05. Opt "" sends no opt field at
+// all, which is what the real client does while it holds a fresh at and an rt (see ChooseOpt).
 type GSLOpt struct {
 	Opt      string // "new" | "login" | "fix" | "refresh" | ""
 	LoginKey string
 	Rt       string
+}
+
+// accessTokenRefreshAge is how old at.time may get before the real client refreshes the access
+// token: 2592000 s, 30 days.
+const accessTokenRefreshAge = 30 * 24 * time.Hour
+
+// OptState is the persisted credential state the real client picks its GSL opt from
+// (AccountCredentialManager.AuthTokens plus ServerInfo.uid).
+type OptState struct {
+	LoginKey      string
+	GameUid       string
+	AccessTok     string
+	AccessTokTime int64 // GSL at.time: unix seconds, read by the client as the issue time; 0 = unknown
+	RefreshTok    string
+}
+
+func (s OptState) String() string   { return "[REDACTED OptState]" }
+func (s OptState) GoString() string { return s.String() }
+
+// LogValue makes OptState satisfy slog.LogValuer, like every other credential-bearing type here.
+func (s OptState) LogValue() slog.Value { return slog.StringValue(s.String()) }
+
+// ChooseOpt is the 1.0.364 client's GSL opt table (GetServerListRequest/GetServerList,
+// A-CS:77091-77266; static only):
+//
+//	loginKey set                          -> opt=login, loginKey=<loginKey>
+//	no gameUid                            -> opt=new
+//	no rt                                 -> opt=fix
+//	at empty, or at.time is >= 30 days old -> opt=refresh, rt=<rt>
+//	otherwise                             -> no opt field
+//
+// An unknown at.time (0) never counts as stale, as in the client. Without an rt this reduces to
+// login, then new, then fix.
+func ChooseOpt(s OptState, now time.Time) GSLOpt {
+	switch {
+	case s.LoginKey != "":
+		return GSLOpt{Opt: "login", LoginKey: s.LoginKey}
+	case s.GameUid == "":
+		return GSLOpt{Opt: "new"}
+	case s.RefreshTok == "":
+		return GSLOpt{Opt: "fix"}
+	}
+	stale := s.AccessTokTime > 0 && now.Unix()-s.AccessTokTime >= int64(accessTokenRefreshAge/time.Second)
+	if s.AccessTok == "" || stale {
+		return GSLOpt{Opt: "refresh", Rt: s.RefreshTok}
+	}
+	return GSLOpt{}
 }
 
 // String/GoString are the round-48 regression fix for the MINOR finding that GSLOpt -- which
@@ -654,12 +898,8 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 		// json.Unmarshal(body, &lsr) below against the ORIGINAL top-level envelope (shaped like
 		// {"bin":"",...}), which has none of LoginServerListRespon's fields -- unknown/extra
 		// keys are silently ignored by encoding/json, so lsr would end up completely
-		// zero-valued with a nil error. Both real call sites (login.go's initial GSL call and
-		// the serverInfo-redirect access-token refresh path) treat a nil error as success; the
-		// refresh path in particular never logs anything in that case -- neither the "fresh
-		// access token acquired" success line nor the "GSL refresh failed" fallback line fires,
-		// making it a fully silent no-op. Fail loud instead: this is a decode failure, not an
-		// empty-but-valid response.
+		// zero-valued with a nil error, which a caller could mistake for a real (if empty)
+		// reply. Fail loud instead: this is a decode failure, not an empty-but-valid response.
 		return nil, fmt.Errorf("GSL response: bin field present but empty")
 	}
 	if err := json.Unmarshal(body, &lsr); err != nil {

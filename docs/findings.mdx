@@ -3,7 +3,7 @@ title: "Findings & further work"
 description: "Every question flagged during the client-building effort and how it was resolved, plus the questions that remain open."
 ---
 
-Every question flagged during the client-building effort, and how it was resolved. Of the original 8 open items, a dedicated multi-agent research pass closed 6 outright, and live testing against production (see [Live validation against production](/live-validation)) closed the remaining 2. Two more items (enum numeric values, ShuMei/ACE enforcement) surfaced and were closed during that same live-testing pass, outside the original 8. The 1.0.364 analysis and live work in October 2026 then closed six more questions and opened several new ones. This page tracks all of them, plus the narrow follow-on work that remains.
+Every question flagged during the client-building effort, and how it was resolved. Of the original 8 open items, a dedicated multi-agent research pass closed 6 outright, and live testing against production (see [Live validation against production](/live-validation)) closed the remaining 2. Two more items (enum numeric values, ShuMei/ACE enforcement) surfaced and were closed during that same live-testing pass, outside the original 8. The 1.0.364 analysis and live work in October 2026 then closed eight more questions and opened several new ones, and a full-coverage pass over the 1.0.364 APK corrected 21 claims across these docs (see the full coverage analysis below). This page tracks all of them, plus the narrow follow-on work that remains.
 
 ## Status at a glance
 
@@ -28,12 +28,59 @@ This table exists so a future update can change just the relevant row without re
 | What the mail claim's `type` holds | **Resolved** for the real client; what the server reads is open | 1.0.364 Lua + live testing |
 | Minimal required `ta` content | **Open** | |
 | Whether `dataConfigMd5` persists across sessions | **Open** | |
-| What the forward header's 2-byte id means | **Open** | |
+| What the forward header's 2-byte id means | **Resolved** (static): the zone number | 1.0.364 C# + live capture |
 | Whether GSL `opt=refresh` rotates `rt` | **Open** | |
 | Whether two devices can hold working sessions for one account | **Open** | |
 | Whether `at.time` is an issue time or an expiry | **Resolved**: an issue time | Live testing |
 | Why an own-device `Login` gets `E005` | **Open** | |
-| Where `resVersion`'s last two parts come from | **Open** | |
+| Where `resVersion`'s last two parts come from | **Resolved**: local table and locale versions | 1.0.364 C# + live testing |
+| Whether the Tactical Chip Factory collects with `chip.collect` or `building.camp.collect` | **Open** | |
+| Whether the live `init` carries `real_timezone_offset` | **Open** | |
+
+## Full coverage analysis (1.0.364)
+
+In October 2026, eleven analysis agents went through the whole 1.0.364 APK with one rule: every unit gets accounted for. All of it is static analysis; a fact counts as live only where a line says so.
+
+### Method
+
+- **A ledger of units.** A script enumerated every unit of the APK into six ledgers: Lua modules, data tables, C# assemblies, Java packages, native libraries, and other files (resources, asset containers, manifests). That's **22,401 units**. Each agent claimed its units by group, and a checker verified that every unit was claimed. The final check reported `covered 22401/22401` with no problems. Its 11 "large group" flags are templated families (generated `Message` classes, Android resource directories, the `lw_monster` split tables), listed for review, not failures.
+- **Four levels of coverage.** Every unit reached the first two:
+  1. **Decompiled or parsed** into readable source or structured data: all 18,733 Lua modules (patched unluac), all 1,291 data tables (decompiled and executed into JSON), all 118 C# assemblies (ILSpy), the base APK's Java (jadx; one method body failed), and all 8,059 bundled UnityFS bundles. The native libraries were **not** decompiled: they got a symbol and string survey plus targeted arm64 disassemblies.
+  2. **Mechanically indexed:** a script wrote a row for the unit into an index without anyone reading it, for example one row per command with its request params and SFS2X types, per C# type, per data table, and per bundle.
+  3. **Summarized at group level** (`summarized`): the unit is covered by its group's write-up, which came from the index plus a read of the group's key files. That's 17,574 units, typically views, list cells, templated `Message` classes, vendor and platform libraries, resources, and art.
+  4. **Read line by line** (`read`): 4,827 units, the logic layers: protocol, state managers, controllers, and bootstrap.
+
+| Ledger | Units | Read | Summarized |
+|---|---:|---:|---:|
+| Lua modules | 18,733 | 4,493 | 14,240 |
+| Other files | 1,813 | 241 | 1,572 |
+| Data tables | 1,291 | 26 | 1,265 |
+| Java packages | 407 | 45 | 362 |
+| C# assemblies | 118 | 22 | 96 |
+| Native libraries | 39 | 0 | 39 |
+| **All** | **22,401** | **4,827** | **17,574** |
+
+"Covered" doesn't mean "read". The main caveats: no native library was read, only surveyed; 3,022 of the 3,104 `Message` classes were parsed by script, and hand-checked samples matched on request params in 84 of 84 cases and on response fields in 77 of 84; and inside Assembly-CSharp, 130 types (about 11,500 lines) were read line by line while the other 3,539 were summarized from the type index and key methods. Anti-cheat and anti-fraud code (Tencent ACE, ShuMei, `psh`, the `init.add` challenge, `login.ext`, the probe template, and client-computed mini-game validation) was inventoried as a surface only, never analysed.
+
+### Headline results
+
+- **The command surface, fully indexed.** 3,115 `MsgDefines` commands, each with its request params and SFS2X types, the response fields its handler reads, and every one of its 4,561 send sites with the guards around them. 54 more commands exist only in C#, and the chat table adds 133 wire names. See [Command reference](/command-reference).
+- **159 game systems mapped**, each with its managers, `init` fields, pushes, commands, timers, and resets.
+- **21 corrections to these docs**, now applied. The largest:
+  - The C# runtime is FM_Mono (Mono 6.13.0), not HybridCLR.
+  - The world map does stream a viewport, through C#-owned block pulls, and season maps are 3000×3000.
+  - `hotUpdateMsg` is `name,version,size,crc32`, and `resVersion`'s tail is local state.
+  - The native chat transport behind `CalcChatSign` is unreachable, and the two `readygo.tech` cleartext endpoints are dead.
+  - `free.building.upgrade.finish` and `queue.finish` are free collects, not paid instant finishes.
+  - About 20 commands, not one, report client-computed battle results.
+  - The alliance chat room id is deterministic, and `Scene/LWHummerScene` is the Armed Truck reward's own 3D scene.
+  - The SFS2X library in use is SmartFox2X 1.7.8 plus the game's own `BaseUtils` transport; `Smartfox2xLw` is dead code.
+- **New protocol facts**, added to the pages they belong on: the server-day boundary and reset events, the reward payload shape, error conventions, the XAssetPro container, the table CDN and split-table layout, the WebSocket preamble, the chat transport, the mini-game PvP transport, and the C#/Lua dispatch order.
+- **A claim catalogue**: 558 claim-like requests, each with its parameters and the guard at its first send site, hand-traced for 55 of them. Most aren't in these docs; [Command reference](/command-reference) summarizes the conventions they share.
+- **A never-automate inventory**: rewarded ads (the Android build ships no ad SDK at all), rating and survey rewards, account and role deletion, payments and diamond spends, irreversible moves, and client-reported results. Several share a wire name with a free claim and differ by one parameter, so they're catalogued to keep them out of automation by accident.
+- **Two live checks.** Check-version returns `table_version` and `locale` only for `table_env=table_online`, and the live table set 39516 differs from the APK's 39432 in rows only, not in schema (both confirmed live on 2026-10-05).
+
+The full row-level indexes (commands, claim commands, send sites, systems, tables, bundles, C# types) live with the analysis artifacts outside this repo and can be regenerated with the method above.
 
 ## Resolved in the 1.0.364 pass
 
@@ -42,6 +89,8 @@ This table exists so a future update can change just the relevant row without re
 - ~~**Tactical Center, Armament Institute, and Truck Station I-IV**~~: **Resolved** they aren't production lines. They returned `602026` on all 342 scheduled runs and never `status=1` (confirmed live), and none is in the 1.0.364 Lua's `ProductLineBuilds`. A `602026` response therefore doesn't confirm a command pairing. See [City & building](/city-building#which-buildings-are-production-lines).
 - ~~**The `120471` per-donation cooldown**~~: **Resolved** it isn't a cooldown. The free donate path holds regenerating charges (`useNum` of `maxNum`, refilled every `refreshTimeBlock`), and `120471` means none is left (static-analysis-only). See [Alliance, chat & mail](/alliance-chat-mail).
 - ~~**What the mail claim's `type` holds**~~: **Resolved** for the real client: an internal mail group id sent as a UtfString. `goclient` sends the raw mail type as an Int, and the server accepts it (confirmed live). Which value the server reads stays open. See [Alliance, chat & mail](/alliance-chat-mail).
+- ~~**Where `resVersion`'s last two parts come from**~~: **Resolved** they're local state. The C# builds the tail from `CURRENT_TABLE_VERSION` and `LOCALE_VERSION`, the newest table and locale on the device, built-in or downloaded (static-analysis-only). Check-version does return `table_version` and `locale`, but only for `table_env=table_online`, which `goclient` doesn't send (confirmed live on 2026-10-05); that request returned 39516 and 23570, the iOS app's tail. See [Startup, version-check & hot-update](/bootstrap#resversion).
+- ~~**What the forward header's id means**~~: **Resolved** statically: it's the zone number, `ParseSid("APS783") = 783` in `BaseUtils`, which matches the `0x030F` in the 2026-10-04 capture. A second capture on another zone would confirm it live.
 - ~~**Whether `at.time` is an issue time or an expiry**~~: **Resolved** an issue time. A GSL `opt=login` response on 2026-10-04 carried `at.time` and `rt.time` equal to the moment of issue, in unix seconds (confirmed live), consistent with the 1.0.364 client's 30-day refresh rule. Whether the server also expires tokens on its own, and so what caused the 2026-10-02 rotation, stays open. See [Live validation against production](/live-validation).
 
 ## Open questions
@@ -50,11 +99,11 @@ These came out of the 1.0.364 static analysis and the October 2026 live work. St
 
 - **Minimal `ta` content.** Reconnect works with `ta`'s device sub-fields blank (confirmed live), but which of its other keys the server reads hasn't been isolated.
 - **`dataConfigMd5` persistence.** The real client sends a server-issued value; in the 2026-10-04 capture it equaled `init.add.a` from the same session. Comparing `init.add.a` across two captures of the same app build would show whether the client persists it or the server echoes back whatever arrives. This is an integrity surface, so the question is about understanding the protocol, not about sending the value.
-- **The forward header's id.** Every client-to-server frame in one capture carried `0x030F`, the zone's server id 783. A second capture, ideally on another zone, would confirm whether it's always the target server id. The server accepts frames without it.
 - **Does `opt=refresh` rotate `rt`?** The real client stores whatever non-empty `rt` arrives. If a refresh rotates `rt`, a token pair shared between the real app and a Go client keeps working only for whichever side refreshes first.
 - **Can two devices hold working sessions for one account?** This decides whether a Go client with its own device identity could keep its own tokens alongside the real app's. The 1.0.364 role-switch flow (email verification, `loginKey`, GSL `opt=login`) is how a device gets its own pair, and GSL did issue one to a newly bound Go-generated device on 2026-10-04 (confirmed live). Whether that leaves other devices' tokens valid is unknown, and that device's `Login` was rejected (next item).
 - **Why does an own-device `Login` get `E005`?** On 2026-10-04 the base-zone `Login` with the own device's token and `goclient`'s Android identity (1.0.364/1892, `un` = `gameUid`, `shumeiBoxId` empty) was rejected with `ec=28`, `ep=[E005]`, reproducing reconnect-wall row 2 (confirmed live). ShuMei is ruled out, since a captured iOS session logs in with an empty `shumeiBoxId`. The candidates are the Android identity on this account or server, the Go-generated `deviceId`'s shape (32 hex characters plus `_n3d`, where the real client's has 40), and how far the server trusts a freshly bound device. Testing stopped there on purpose rather than probing a server-side gate by trial and error. See [Identity, login & session](/auth#a-device-of-its-own).
-- **Where do `resVersion`'s last two parts come from?** The C# builds them from check-version's `table_version` and `locale`, but the live iOS check-version response on 2026-10-04 carried neither field, and neither number appears in it. See [Startup, version-check & hot-update](/bootstrap#resversion).
+- **Which command collects the Tactical Chip Factory?** The 1.0.364 Lua reads both ways: `BuildBubbleManager` sends `building.camp.collect {uuid}` for chip buildings, and the factory's own UI sends `chip.collect {}`. One read of the factory's `building_new` entry in a captured `init`, then one capture of the real collect tap, would settle it. See [City & building](/city-building).
+- **Does the live `init` carry `real_timezone_offset`?** The C# applies it only when present, and the Lua falls back to UTC without it, which would move its day boundary from 02:00 to 00:00 UTC while `tomorrow` stays at 02:00. The 2026-10-04 capture shows the key in the `Login` response; listing the top-level keys of a captured `init` would settle it. See [Identity, login & session](/auth#server-day-and-daily-reset).
 - **Does the server check `platform` on `opt=refresh`?** The real iOS client sends `platform=iOS`; `goclient` always sends `Android`. A refresh token is scarce, so this hasn't been tested.
 - **`status=0` from `building.production.collect`.** The Lua treats only a missing or `-1` status as failure; every live success has carried `status=1`.
 
@@ -74,7 +123,7 @@ Full findings, with file:line citations into the client source, follow below.
 - ~~**March "recall home" encoding**~~: **Resolved** not a coordinate sentinel, it's the literal enum constant `MarchTargetType.BACK_HOME = 3` (`Global_EnumType.lua:3945`), sent in the ordinary `target` field of `world.march.change` (the same command used to redirect a march anywhere), with `path` set back to the player's home-city tile. Full call chain traced from the UI button through to the wire request.
 - ~~**`WorldPointInfo.proto`'s actual transport**~~: **Resolved** the "no confirmed call site" framing was outdated: `world.get.new` and `world.get.block`'s response field `points` (an array of raw byte blobs) is decoded via `WorldPointInfo.Parser.ParseFrom` in `WorldPointManager.ParseWorldGetBlock`, feeding the ~30 concrete point-type classes that render the world map. A second, nested call site decodes march destination points the same way.
 - ~~**Four unrecoverable proto schemas**~~: **Resolved** all four (`ScoreProgressInfo`, `WorldCityRankMail`, `LwScoutReport`, `ShieldInfo`) were fully recoverable, and not where prior analysis stopped looking, see the callout below.
-- ~~**`libxlua.so`'s `CalcChatSign`/AES/MD5 helpers**~~: **Resolved** the "no call site" claim was a tooling false-negative (this environment's `grep` is `ugrep`, which silently skips binary files without `-a`). The real call site was already sitting in report 06 (`ChatNetManager:InitWebSocketInst`, an alternate native-transport branch). Direct ARM64 disassembly of the native function (it ships unstripped, with symbols) confirms it's exactly `MD5(MD5(appId+uid) + timestamp)`, plain, unkeyed, textbook MD5, byte-identical to the already-known C# formula. Proprietary-crypto risk downgraded from "unknown" to confirmed **none**.
+- ~~**`libxlua.so`'s `CalcChatSign`/AES/MD5 helpers**~~: **Resolved** the "no call site" claim was a tooling false-negative (this environment's `grep` is `ugrep`, which silently skips binary files without `-a`). The real call site was already sitting in report 06 (`ChatNetManager:InitWebSocketInst`, an alternate native-transport branch). That branch turned out to be unreachable in 1.0.364: only the armeabi-v7a `libxlua` registers `rg_websocket`, arm64's `luaopen_native` doesn't, and `LuaEntry:__InitCModule()`, the only code that would expose the native socket, is never called, so chat always uses the C# `ChatService` (static-analysis-only). The formula finding stands. Direct ARM64 disassembly of the native function (it ships unstripped, with symbols) confirms it's exactly `MD5(MD5(appId+uid) + timestamp)`, plain, unkeyed, textbook MD5, byte-identical to the already-known C# formula. Proprietary-crypto risk downgraded from "unknown" to confirmed **none**.
 - ~~**`PlayerInfo:GetABTestTableName`**~~: **Resolved** not a hash or local computation, it's a single server-pushed integer, `monopoly_ab`, delivered in the post-login `Init` payload's `user` object. Each value (1, 2, 3, 5, 6, 7, 8, 9, 10, 13, 16, 18 in this build) is a reserved slot for one named A/B test; the function's `Is<TestName>B()` checks compare against it directly. A reimplementation cannot derive this offline, it must be read from a real login response.
 - ~~**Season vs. Activity domain boundary**~~: **Resolved** (accuracy-measured, not just re-asserted): a genuine random sample of 100 commands (50 Season, 50 Activity) checked against actual handler code came back **97% label-defensible**. The 3 confirmed misclassifications aren't random noise, they're all cases where a single feature's sibling commands got torn across both domains because the classifier operates per-command/per-folder rather than per-`DataCenter`-manager (e.g. the Desert Storm fishing minigame's 8 commands split ~50/50 because one cmd string happened to contain `"fish.pond"`, a substring the classifier's ordered rule list catches before the generic `"season"` fallback).
 

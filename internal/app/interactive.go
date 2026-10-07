@@ -368,6 +368,7 @@ func handleInteractiveLine(conn *session.GameConn, line string) {
 		// were ever changed to only fatally exit on a genuine non-timeout net.Error, mirroring
 		// the Timeout()-gated check the very next lines already apply to waitForCmd's error).
 		slog.Error("send failed -- connection appears dead, exiting interactive mode", "error", session.SendStageError{Err: err})
+		exitIfSessionEnded(err, conn) // a terminal server push exits 3, like the batch paths
 		// See RunInteractive's own round-41 fix doc comment: os.Exit skips the caller's `defer
 		// conn.Close()`, so close explicitly before exiting instead of relying on it.
 		_ = conn.Close()
@@ -401,6 +402,7 @@ func handleInteractiveLine(conn *session.GameConn, line string) {
 			return
 		}
 		slog.Error("response wait failed -- connection appears dead, exiting interactive mode", "error", err)
+		exitIfSessionEnded(err, conn) // a terminal server push exits 3, like the batch paths
 		// See the identical round-41 fix's doc comment on the sibling os.Exit(1) above.
 		_ = conn.Close()
 		os.Exit(1)

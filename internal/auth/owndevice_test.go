@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -48,8 +49,8 @@ func TestOwnDeviceSessionFromRejects(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ownDeviceSessionFrom(gslReply(t, body), "dev", "uid"); err == nil {
 				t.Error("expected an error")
-			} else if name == "gsl code 211" && !strings.Contains(err.Error(), "211") {
-				t.Errorf("error %q should name the GSL code", err)
+			} else if name == "gsl code 211" && (!strings.Contains(err.Error(), "211") || !errors.Is(err, gsl.ErrReauthNeeded)) {
+				t.Errorf("error %q should name the GSL code and wrap gsl.ErrReauthNeeded", err)
 			}
 		})
 	}

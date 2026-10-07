@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"slices"
+	"strconv"
 	"time"
 )
 
@@ -124,6 +125,51 @@ const (
 	BuildingCrystalFactory    int32 = 10310000 // LW_BUILD_CRYSTAL_STONE -- new in 1.0.364, in ProductLineBuilds; unconfirmed live
 )
 
+// The other seasons' farm families, all production lines in the 1.0.364 client (Global/EnumType.lua
+// ProductLineBuilds, plus each season_weekcard row's farm_building/farm_building_weekcard) and all
+// unconfirmed live: the account tested so far is in Season 6, which owns only the Spore Factory
+// family above. Each week-card building is the farm the season week card unlocks (see
+// seasonWeekCardBuildings).
+const (
+	BuildingSeason1Farm1       int32 = 761000 // LW_BUILDING_SEASON_FARMLAND_CTIY_1
+	BuildingSeason1Farm2       int32 = 762000 // LW_BUILDING_SEASON_FARMLAND_CTIY_2
+	BuildingSeason1Farm3       int32 = 763000 // LW_BUILDING_SEASON_FARMLAND_CTIY_3
+	BuildingSeason1FarmCard    int32 = 764000 // LW_BUILDING_SEASON_FARMLAND_CTIY_4 -- Season 1 week-card farm (season_weekcard 10002)
+	BuildingSeason1Farm5       int32 = 765000 // LW_BUILDING_SEASON_FARMLAND_CTIY_5
+	BuildingSeason2Farm1       int32 = 771000 // LW_BUILDING_SEASON2_FARMLAND_CTIY_1
+	BuildingSeason2Farm2       int32 = 772000 // LW_BUILDING_SEASON2_FARMLAND_CTIY_2
+	BuildingSeason2Farm3       int32 = 773000 // LW_BUILDING_SEASON2_FARMLAND_CTIY_3
+	BuildingSeason2Farm4       int32 = 774000 // LW_BUILDING_SEASON2_FARMLAND_CTIY_4
+	BuildingSeason2FarmCard    int32 = 775000 // LW_BUILDING_SEASON2_FARMLAND_CTIY_5 -- Season 2 week-card farm (season_weekcard 10003)
+	BuildingBlessingFountain1  int32 = 781000 // LW_BUILDING_BLESSING_FOUNTAIN_1 -- Season 3
+	BuildingBlessingFountain2  int32 = 782000 // LW_BUILDING_BLESSING_FOUNTAIN_2
+	BuildingBlessingFountain3  int32 = 783000 // LW_BUILDING_BLESSING_FOUNTAIN_3
+	BuildingBlessingFountain4  int32 = 784000 // LW_BUILDING_BLESSING_FOUNTAIN_4
+	BuildingBlessingFountainWC int32 = 785000 // LW_BUILDING_BLESSING_FOUNTAIN_5 -- Season 3 week-card farm (season_weekcard 10004)
+	BuildingSeason4Quartz1     int32 = 801000 // LW_BUILD_SEASON4_QUARTZ_FACTORY1
+	BuildingSeason4Quartz2     int32 = 802000 // LW_BUILD_SEASON4_QUARTZ_FACTORY2
+	BuildingSeason4Quartz3     int32 = 803000 // LW_BUILD_SEASON4_QUARTZ_FACTORY3
+	BuildingSeason4Quartz4     int32 = 804000 // LW_BUILD_SEASON4_QUARTZ_FACTORY4
+	BuildingSeason4QuartzCard  int32 = 805000 // LW_BUILD_SEASON4_WEEK_CARD -- Season 4 week-card farm (season_weekcard 10005)
+	BuildingSeason5City1       int32 = 822000 // LW_BUILDING_SEASON5_CTIY_1
+	BuildingSeason5City2       int32 = 823000 // LW_BUILDING_SEASON5_CTIY_2
+	BuildingSeason5City3       int32 = 824000 // LW_BUILDING_SEASON5_CTIY_3
+	BuildingSeason5City4       int32 = 825000 // LW_BUILDING_SEASON5_CTIY_4
+	BuildingSeason5CityCard    int32 = 826000 // LW_BUILDING_SEASON5_CTIY_5 -- Season 5 week-card farm (season_weekcard 10006)
+)
+
+// seasonWeekCardBuildings is the client's SeasonWeekCardCityBuildingMap (Util/BuildingUtils.lua:355-362),
+// which matches every season_weekcard row's farm_building_weekcard. The client refuses to collect
+// these once the season has settled (ProductLineManager.lua:545-552); see weekCardSettled.
+var seasonWeekCardBuildings = map[int32]bool{
+	BuildingSeason1FarmCard:    true,
+	BuildingSeason2FarmCard:    true,
+	BuildingBlessingFountainWC: true,
+	BuildingSeason4QuartzCard:  true,
+	BuildingSeason5CityCard:    true,
+	BuildingSporeFactoryCard:   true,
+}
+
 var buildingNames = map[int32]string{
 	10100000:                  "Headquarters",
 	10107000:                  "Wall",
@@ -160,6 +206,32 @@ var buildingNames = map[int32]string{
 	10124000:                  "Hospital",
 	10106000:                  "Alliance Center",
 	10114000:                  "Radar",
+
+	BuildingSeason1Farm1:       "Season 1 Farm I",
+	BuildingSeason1Farm2:       "Season 1 Farm II",
+	BuildingSeason1Farm3:       "Season 1 Farm III",
+	BuildingSeason1FarmCard:    "Season 1 Farm (Week Card)",
+	BuildingSeason1Farm5:       "Season 1 Farm V",
+	BuildingSeason2Farm1:       "Season 2 Farm I",
+	BuildingSeason2Farm2:       "Season 2 Farm II",
+	BuildingSeason2Farm3:       "Season 2 Farm III",
+	BuildingSeason2Farm4:       "Season 2 Farm IV",
+	BuildingSeason2FarmCard:    "Season 2 Farm (Week Card)",
+	BuildingBlessingFountain1:  "Blessing Fountain I",
+	BuildingBlessingFountain2:  "Blessing Fountain II",
+	BuildingBlessingFountain3:  "Blessing Fountain III",
+	BuildingBlessingFountain4:  "Blessing Fountain IV",
+	BuildingBlessingFountainWC: "Blessing Fountain (Week Card)",
+	BuildingSeason4Quartz1:     "Season 4 Quartz Factory I",
+	BuildingSeason4Quartz2:     "Season 4 Quartz Factory II",
+	BuildingSeason4Quartz3:     "Season 4 Quartz Factory III",
+	BuildingSeason4Quartz4:     "Season 4 Quartz Factory IV",
+	BuildingSeason4QuartzCard:  "Season 4 Quartz Factory (Week Card)",
+	BuildingSeason5City1:       "Season 5 Farm I",
+	BuildingSeason5City2:       "Season 5 Farm II",
+	BuildingSeason5City3:       "Season 5 Farm III",
+	BuildingSeason5City4:       "Season 5 Farm IV",
+	BuildingSeason5CityCard:    "Season 5 Farm (Week Card)",
 }
 
 // BuildingNameOf returns a friendly name for a known base type id, or the
@@ -309,6 +381,19 @@ func checkNonMatchingEnvelopeCap(nonMatchingEnvelopes *int) error {
 // Training Base collect via a queue-item uuid vs a direct building-uuid
 // action.
 func FetchBuildings(conn *session.GameConn, timeout time.Duration) ([]Building, []Visitor, error) {
+	return fetchInit(conn, timeout, nil)
+}
+
+// FetchInit is FetchBuildings that also keeps the whole init push (see Init), which every
+// feature beyond building collection reads its eligibility from.
+func FetchInit(conn *session.GameConn, timeout time.Duration) (*Init, error) {
+	var raw *sfs.SFSObject
+	buildings, visitors, err := fetchInit(conn, timeout, &raw)
+	return &Init{Raw: raw, Buildings: buildings, Visitors: visitors}, err
+}
+
+// fetchInit implements FetchBuildings and FetchInit; raw, when non-nil, receives the init push.
+func fetchInit(conn *session.GameConn, timeout time.Duration, raw **sfs.SFSObject) ([]Building, []Visitor, error) {
 	var buildings []Building
 	var visitors []Visitor
 	// originalDeadline is the caller's actual budget (main.go passes 12s/15s at its two call
@@ -495,6 +580,9 @@ func FetchBuildings(conn *session.GameConn, timeout time.Duration) ([]Building, 
 			// push.
 			gotInitBuild = true
 			gotAuthoritativeInit = true
+			if raw != nil {
+				*raw = msg.Params
+			}
 			for _, b := range ParseInitBuildings(msg.Params) {
 				appendBuilding(b)
 			}
@@ -687,8 +775,10 @@ func PrintBuildings(buildings []Building) {
 // Workshop, Training Base, Oil Well, Drone Parts Workshop, Component
 // Factory, and the four Spore Factory tiers.
 //
-// Tactical Institute has since collected live too. Crystal Factory and the
-// Spore Factory week-card building are unconfirmed (1.0.364 Lua only).
+// Tactical Institute has since collected live too. Crystal Factory, the
+// Spore Factory week-card building and the other seasons' farm families
+// (S1, S2, the S3 Blessing Fountain, S4 and S5) are unconfirmed (1.0.364 Lua
+// only; static).
 // Tactical Center, Armament Institute and the four Truck Station tiers are
 // deliberately absent: they are not production lines (see the const block).
 func collectCmdFor(bId int32) (cmd string, ok bool) {
@@ -696,7 +786,12 @@ func collectCmdFor(bId int32) (cmd string, ok bool) {
 	case BuildingFarmland, BuildingIronMine, BuildingGoldMine, BuildingSmelter, BuildingMaterialWorkshop, BuildingTrainingBase,
 		BuildingOilWell, BuildingDronePartsShop,
 		BuildingSporeFactory1, BuildingSporeFactory2, BuildingSporeFactory3, BuildingSporeFactory4, BuildingSporeFactoryCard,
-		BuildingComponentFactory, BuildingTacticalInstitute, BuildingCrystalFactory:
+		BuildingComponentFactory, BuildingTacticalInstitute, BuildingCrystalFactory,
+		BuildingSeason1Farm1, BuildingSeason1Farm2, BuildingSeason1Farm3, BuildingSeason1FarmCard, BuildingSeason1Farm5,
+		BuildingSeason2Farm1, BuildingSeason2Farm2, BuildingSeason2Farm3, BuildingSeason2Farm4, BuildingSeason2FarmCard,
+		BuildingBlessingFountain1, BuildingBlessingFountain2, BuildingBlessingFountain3, BuildingBlessingFountain4, BuildingBlessingFountainWC,
+		BuildingSeason4Quartz1, BuildingSeason4Quartz2, BuildingSeason4Quartz3, BuildingSeason4Quartz4, BuildingSeason4QuartzCard,
+		BuildingSeason5City1, BuildingSeason5City2, BuildingSeason5City3, BuildingSeason5City4, BuildingSeason5CityCard:
 		return "building.production.collect", true
 	default:
 		return "", false
@@ -714,11 +809,18 @@ func collectCmdFor(bId int32) (cmd string, ok bool) {
 // `lw.pve.idle.reward`, with an `action` field: 0 = peek at what's
 // accumulated without claiming it, 1 = claim it. The real client's own
 // capture called action=0, then action=1, then action=0 again (an
-// immediate refresh showing the pool reset to empty) -- mirrored here.
+// immediate refresh showing the pool reset to empty); this sends only the
+// first two, since the trailing peek just redraws the panel.
 // Confirmed live: the action=1 response includes real post-collection
 // account `total` values for each resource, and a follow-up action=0
 // call showed `reward=[]`, proving the accumulated pool was actually
 // drained, not just echoed back.
+//
+// Cadence: both pools stop filling after DataConfig stage_idle_reward.k2 /
+// dominator_idle_reward.k2 = 28,800 s (8 h) plus effect LW_STAGE_ADDTIME
+// (static, from the data tables), so a run must happen at least every 8 h
+// or output is lost. The deployed cron runs every 3 h, well inside that, so
+// the peek-then-claim on every run needs no extra gating.
 func CollectIdleReward(conn *session.GameConn) error {
 	const cmd = "lw.pve.idle.reward"
 	peek := sfs.NewSFSObject()
@@ -778,15 +880,31 @@ const MaxAggregateBuildingsPerFetch = 300
 // idle reward (see CollectIdleReward), any present visitors (see
 // GreetVisitors), pending alliance member help requests (see
 // HelpAllianceMembers), unclaimed mail (see ClaimAllMail), unclaimed
-// alliance gifts (see ClaimAllianceGifts), a free donation toward whichever
+// alliance gifts (see ClaimAllianceGifts), one resource donation toward whichever
 // alliance tech is currently recommended (see DonateRecommendedAllianceTech),
 // and the two once-per-day VIP claims (see ClaimVIPDailyLoginScore and
 // ClaimVIPDailyFreebie) -- none of the eight is building-uuid-scoped, so
 // none can go through the same per-building loop below.
 func CollectAll(conn *session.GameConn, buildings []Building, visitors []Visitor) error {
+	return collectCore(conn, &Init{Buildings: buildings, Visitors: visitors})
+}
+
+// collectCore is CollectAll with the whole init push available to the core actions (in.Raw is
+// nil when called through CollectAll, and the actions then behave as they did before init
+// gating existed). With in.Raw set, the real client's gates apply: al.help.all only when another
+// member has an open request (helpAllianceMembers), the gift claims only when gifts are waiting
+// and Premium only at gift level 15 (claimAllianceGifts), the VIP claims only on their init flags
+// (claimVIPDailies), and buildings only once a production tick has completed and, for week-card
+// farms, before the season settles (readyBuildings).
+func collectCore(conn *session.GameConn, in *Init) error {
+	if in == nil {
+		in = &Init{}
+	}
+	buildings, visitors := in.Buildings, in.Visitors
+	now := time.Now()
 	var errs []error
 
-	// The 8 fixed sub-actions plus one closure per collectible building below are each
+	// The fixed sub-actions plus one closure per collectible building below are each
 	// independent (none scoped to any other's outcome), so an ordinary decoded business-logic
 	// errorCode failure in one must not stop the rest from running -- every error, regardless of
 	// kind, still gets appended to errs rather than returned immediately, same as before this
@@ -829,14 +947,16 @@ func CollectAll(conn *session.GameConn, buildings []Building, visitors []Visitor
 		func() error { return CollectIdleReward(conn) },
 		func() error { return GreetVisitors(conn, visitors) },
 		func() error { return ClaimAllMail(conn) },
-		func() error { return HelpAllianceMembers(conn) },
-		func() error { return ClaimAllianceGifts(conn) },
+		func() error { return helpAllianceMembers(conn, in) },
+		func() error { return claimAllianceGifts(conn, in) },
 		func() error { return DonateRecommendedAllianceTech(conn) },
-		func() error { return ClaimVIPDailyLoginScore(conn) },
-		func() error { return ClaimVIPDailyFreebie(conn) },
+		func() error { return claimVIPDailies(conn, in, now) },
 	}
 
 	toCollect := collectibleBuildings(buildings)
+	if in.Raw != nil {
+		toCollect = readyBuildings(toCollect, in, now)
+	}
 	if len(toCollect) == 0 {
 		slog.Info("no matching collectible buildings found on this account")
 	} else if len(toCollect) > maxCollectibleBuildingsPerRun {
@@ -878,4 +998,179 @@ func collectibleBuildings(buildings []Building) []Building {
 		}
 	}
 	return out
+}
+
+//go:generate go run ./genproduction -in ${LASTWAR_TABLES}/building.json -version ${LASTWAR_TABLE_VERSION} -out production_gen.go
+
+// productionLevel is one building table row's production columns (see productionTable in
+// production_gen.go, generated from the 1.0.364 APK's table 39432; `building` is byte-identical in
+// the live table 39516, and building_B, the AB-test copy some accounts read, has the same
+// produce_time and para1 in all 1,505 production rows).
+type productionLevel struct {
+	tickMs int64 // produce_time: milliseconds per output tick
+	capS   int64 // para1: the line's max production time in seconds; it stops filling at prodET
+}
+
+// readyBuildings drops the collectible buildings the real client would not send a collect for
+// right now, so a run stops drawing 602026 "in production, please be patient" replies:
+//
+//   - a season week-card farm once the season has settled (weekCardSettleTime);
+//   - a building with nothing stored yet (productionReady).
+//
+// Each skip is logged with the values that decided it.
+func readyBuildings(buildings []Building, in *Init, now time.Time) []Building {
+	settle := weekCardSettleTime(in)
+	var out []Building
+	for _, b := range buildings {
+		name := BuildingNameOf(b.BId())
+		if seasonWeekCardBuildings[b.BId()] && settle > 0 && now.UnixMilli() >= settle {
+			slog.Info("skipping week-card farm: the season has settled", "name", name, "uuid", b.Uuid(), "seasonSettleTime", settle)
+			continue
+		}
+		ready, nextTick := productionReady(b, now)
+		if !ready {
+			slog.Info("skipping collect: no production tick has completed since the last collect", "name", name, "uuid", b.Uuid(), "buildingLevel", b.Level(), "nextTickAt", nextTick.UTC())
+			continue
+		}
+		if et, ok := numberField(b.Raw, "prodET"); ok && et > 0 && now.UnixMilli() >= int64(et) {
+			lvl := productionTable[b.BId()+b.Level()]
+			slog.Info("production line is full and stopped filling at prodET", "name", name, "uuid", b.Uuid(), "prodET", time.UnixMilli(int64(et)).UTC(), "maxProductionSeconds", lvl.capS)
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// productionReady reports whether b has output stored at now, mirroring ProductLineManager.lua
+// (OnCollectClick :537-567 sends a collect only when TryCollectRes's stored amount is above 0):
+//
+//	stored = prodExtend + perTick * floor((min(prodET, now) - prodT) / produce_time)
+//
+// perTick is always positive, so stored > 0 exactly when prodExtend > 0 or a full tick has
+// completed. Before counting, GetNextCollectTime (:287-314) aligns prodT down onto the tick grid
+// from prodST while the line is running; that is mirrored too, since it can only make a building
+// ready sooner. Once now is past prodET (the line is full), the client also counts a partial last
+// tick (:355-357, num*(prodET-prodT)//produce_time), so a full line with prodT < prodET counts as
+// ready. Anything unknown -- a building or level missing from productionTable, an absent or
+// non-numeric prodT/prodET, an unreadable prodExtend -- counts as ready, the behaviour before this
+// gate. nextTick is when the next tick completes, set only when ready is false. All times are unix
+// milliseconds.
+func productionReady(b Building, now time.Time) (ready bool, nextTick time.Time) {
+	lvl, known := productionTable[b.BId()+b.Level()]
+	if !known || lvl.tickMs <= 0 {
+		return true, time.Time{}
+	}
+	if b.Raw.Has("prodExtend") {
+		if stored, ok := numberField(b.Raw, "prodExtend"); !ok || stored > 0 {
+			return true, time.Time{}
+		}
+	}
+	t, okT := numberField(b.Raw, "prodT")
+	et, okET := numberField(b.Raw, "prodET")
+	if !okT || !okET || t <= 0 || et <= 0 {
+		return true, time.Time{}
+	}
+	nowMs, prodT, prodET := now.UnixMilli(), int64(t), int64(et)
+	if nowMs >= prodET {
+		return prodT < prodET, time.Time{}
+	}
+	if st, ok := numberField(b.Raw, "prodST"); ok && prodT >= int64(st) {
+		prodT = int64(st) + (prodT-int64(st))/lvl.tickMs*lvl.tickMs
+	}
+	if nowMs-prodT >= lvl.tickMs {
+		return true, time.Time{}
+	}
+	return false, time.UnixMilli(prodT + lvl.tickMs)
+}
+
+// weekCardSettleTime returns the season settle time (unix ms) the client refuses week-card farm
+// collects after: SeasonDataManager:GetSeasonSettleTime reads it from init.playerServerSeasonInfo,
+// the player's own season (SeasonDataManager.lua:308-313, 1047-1051). MASTER.md names
+// curServerSeasonInfo, the season of the server the player is on; the two differ only across
+// servers, and the Lua uses the player's. 0 means unknown: the client then refuses every week-card
+// collect (SeasonInfoTemplate:GetSeasonSettleTime returns seasonSettleTime or 0), but this keeps
+// collecting rather than drop output on a field it could not read.
+func weekCardSettleTime(in *Init) int64 {
+	n, ok := numberField(in.Object("playerServerSeasonInfo"), "seasonSettleTime")
+	if !ok || n <= 0 {
+		return 0
+	}
+	return int64(n)
+}
+
+// objectField returns the object nested under key in o, or nil; nil-safe like Init.Object.
+func objectField(o *sfs.SFSObject, key string) *sfs.SFSObject {
+	v, ok := o.Get(key)
+	if !ok {
+		return nil
+	}
+	nested, _ := v.Val.(*sfs.SFSObject)
+	return nested
+}
+
+// objectsField returns the object elements of the array nested under key in o, skipping anything
+// else; nil-safe like Init.Objects.
+func objectsField(o *sfs.SFSObject, key string) []*sfs.SFSObject {
+	v, ok := o.Get(key)
+	if !ok {
+		return nil
+	}
+	arr, _ := v.Val.(*sfs.SFSArray)
+	if arr == nil {
+		return nil
+	}
+	var out []*sfs.SFSObject
+	for _, it := range arr.Items() {
+		if obj, ok := it.Val.(*sfs.SFSObject); ok {
+			out = append(out, obj)
+		}
+	}
+	return out
+}
+
+// idString reads an id field sent as either a string or an integer, as a decimal string ("" when
+// absent or of another type), so ids can be compared without knowing the wire type.
+func idString(o *sfs.SFSObject, key string) string {
+	v, ok := o.Get(key)
+	if !ok {
+		return ""
+	}
+	switch n := v.Val.(type) {
+	case string:
+		return n
+	case int64:
+		return strconv.FormatInt(n, 10)
+	case int32:
+		return strconv.FormatInt(int64(n), 10)
+	case int16:
+		return strconv.FormatInt(int64(n), 10)
+	case byte:
+		return strconv.FormatInt(int64(n), 10)
+	}
+	return ""
+}
+
+// numberField reads a numeric field of any SFS integer or floating-point type. ok is false when
+// the field is absent or not a number; unlike session.RequireFieldType it logs nothing, since the
+// callers treat a missing optional field as unknown rather than as a malformed entry.
+func numberField(o *sfs.SFSObject, key string) (float64, bool) {
+	v, ok := o.Get(key)
+	if !ok {
+		return 0, false
+	}
+	switch n := v.Val.(type) {
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int16:
+		return float64(n), true
+	case byte:
+		return float64(n), true
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	}
+	return 0, false
 }

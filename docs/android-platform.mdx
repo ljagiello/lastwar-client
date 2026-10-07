@@ -28,8 +28,23 @@ A war-strategy game asking for `CAMERA`/`RECORD_AUDIO`/calendar access looks sus
 | Ad mediation | **None found**: no AppLovin/ironSource/Unity Ads/AdMob anywhere. Monetization is IAP-only. |
 
 <Warning>
-**Cleartext HTTP, by design.** `usesCleartextTraffic="true"` is set at the manifest level; two FunPlus-owned endpoints (`analyse-aps.readygo.tech` push-analytics beacons, `upload-img-aps.readygo.tech/get_apk_ver.php` a side-loaded self-update check) are called over plain HTTP. Neither gates gameplay; both are safe to skip for a Go client.
+**Cleartext HTTP is allowed, but the two cleartext endpoints are dead in 1.0.364.** `usesCleartextTraffic="true"` is set at the manifest level, and the network security config permits cleartext with system CAs only. The app still contains two FunPlus-owned plain-HTTP endpoints, but neither is called by this build (static-analysis-only):
+
+- `analyse-aps.readygo.tech/{postback,clientevent}.php`, push-analytics beacons, lives in `RecordHttpUtil`, which has no callers, and the `PushRecordManager.RecordToHttp*` methods have empty bodies.
+- `upload-img-aps.readygo.tech/get_apk_ver.php`, a side-loaded self-update check, runs only for the package `com.readygo.aps.gp`, not `com.fun.lastwar.gp`.
+
+Neither gates gameplay; a Go client can ignore both. Earlier versions of this page said both were called.
 </Warning>
+
+## Remote kill switch
+
+At startup, `libil2cpp.so` calls into the Java class `ConfigFetch`, which fetches a remote flag over a raw `SSLSocket` with a spoofed `okhttp/3.12.1` User-Agent (static-analysis-only; the call site is inferred from class, method, and base64 URL strings in the `.so`):
+
+```text
+GET https://storage.googleapis.com/remote-config-analytics/<base64(package name)>?t=<ms>
+```
+
+The integer body goes to the native `Java_com_common_ConfigFetch_setConfig`, which calls `exit(0)` when the value is `1` on a release build (`2` on a debug build), confirmed by arm64 disassembly. It's a vendor kill switch for the app process, not part of the game protocol, and a Go client never needs it. Whether the request even resolves is open: `Base64.DEFAULT` appends a newline to the encoded package name.
 
 ## The JNI split for anti-cheat is worth knowing
 

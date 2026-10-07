@@ -2,19 +2,13 @@ package auth
 
 import (
 	"bytes"
-	"crypto/rand"
-	"crypto/rsa"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 	"lastwar-client/internal/testutil"
 	"log/slog"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -430,10 +424,9 @@ func TestDoCrossServerLoginSingleRedirect(t *testing.T) {
 	if result.Zone != "APS2" {
 		t.Errorf("Zone = %q, want %q (the post-redirect zone)", result.Zone, "APS2")
 	}
-	// No HTTPClient/RSAPub/GateHost was given, so the GSL-refresh step can't run and
-	// AccessTok should fall back to being reused unrefreshed (logged, not an error).
+	// The redirect reuses the same access token, as the real client does.
 	if result.AccessTok != "tok-1" {
-		t.Errorf("AccessTok = %q, want %q (no GSL client given, so reused unrefreshed)", result.AccessTok, "tok-1")
+		t.Errorf("AccessTok = %q, want %q (the same token is reused across the redirect)", result.AccessTok, "tok-1")
 	}
 	if gotZoneOnSecondServer != "APS2" {
 		t.Errorf("second server saw Login zn=%q, want %q (the redialed Login should use the new zone)", gotZoneOnSecondServer, "APS2")
@@ -820,309 +813,141 @@ func TestDoCrossServerLoginAcceptsZoneGameUidAccessTokExactlyAtCap(t *testing.T)
 	}
 }
 
-// TestDoCrossServerLoginRedirectRefreshesGameUid exercises the major fix in crossserver.go's
-// serverInfo redirect block: the mid-redirect GSL refresh (opt=fix) returns a fresh serverList
-// entry alongside the fresh access token, and its gameUid must be propagated into p.GameUid --
-// not just the access token -- so the redialed Login carries the account's current gameUid
-// instead of a stale one. Both places gameUid appears on the wire (the top-level Login `un`
-// field and the nested login-params `gameUid` field, per identity.go's BuildLoginParams) are
-// checked on the post-redirect connection.
-func TestDoCrossServerLoginRedirectRefreshesGameUid(t *testing.T) {
-	const oldGameUid = "uid-old"
-	const newGameUid = "uid-new"
-	const newAccessTok = "tok-fresh"
-
-	// Fake GSL HTTP server: same plaintext-response fallback gsl.GetServerList already supports
-	// (see gsl_http_test.go's TestGetServerListAgainstFakeServer) -- returns a fresh access
-	// token plus a serverList entry carrying an updated gameUid, simulating an account that
-	// moved to a new gameUid as part of the same migration that triggered the redirect below.
-	gslServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{GameUid: newGameUid}},
-			At:         &gsl.LoginToken{Token: newAccessTok},
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	t.Cleanup(gslServer.Close)
-
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
+// putRedirectServerInfoUid is putRedirectServerInfo plus the redirect's "uid", set by setUid
+// (nil leaves it absent) so a test can also send it wrong-typed.
+func putRedirectServerInfoUid(addr, zone string, setUid func(si *sfs.SFSObject)) *sfs.SFSObject {
+	resp := putRedirectServerInfo(addr, zone)
+	if setUid != nil {
+		si, _ := resp.Get("serverInfo")
+		setUid(si.Val.(*sfs.SFSObject))
 	}
+	return resp
+}
 
-	gotUn := make(chan string, 1)
-	gotParamsGameUid := make(chan string, 1)
-	newAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+// loginSeen is what a fake game server records from the Login it receives.
+type loginSeen struct{ un, gameUid, at string }
+
+// recordingLoginServer accepts one Login, reports what it carried on seen, and replies success.
+func recordingLoginServer(seen chan<- loginSeen) func(*session.GameConn) {
+	return func(server *session.GameConn) {
 		env, err := server.ReadEnvelope()
 		if err != nil {
 			return
 		}
-		gotUn <- env.Content.GetString("un")
+		got := loginSeen{un: env.Content.GetString("un")}
 		if pv, ok := env.Content.Get("p"); ok {
 			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
-				gotParamsGameUid <- pObj.GetString("gameUid")
+				got.gameUid, got.at = pObj.GetString("gameUid"), pObj.GetString("at")
 			}
 		}
+		seen <- got
 		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp)
-	})
+	}
+}
 
+// TestDoCrossServerLoginRedirectAdoptsServerInfoUid covers the redirect the way the real client
+// follows it (LoginMessage.CSHandleResponse, A-CS:82799-82858): serverInfo.uid becomes the gameUid
+// on the redialed Login (`un` and p.gameUid), and the redial carries the SAME access token. There
+// is no GSL plumbing on CrossServerLoginParams any more, so no token refresh can happen in between.
+func TestDoCrossServerLoginRedirectAdoptsServerInfoUid(t *testing.T) {
+	const oldGameUid, newGameUid, accessTok = "uid-old", "uid-new", "tok-1"
+
+	seen := make(chan loginSeen, 1)
+	newAddr := session.StartFakeGameServer(t, recordingLoginServer(seen))
 	oldAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, putRedirectServerInfo(newAddr, "APS2"))
+		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin,
+			putRedirectServerInfoUid(newAddr, "APS2", func(si *sfs.SFSObject) { si.PutUtfString("uid", newGameUid) }))
 	})
 	host, port := testutil.SplitHostPortInt(t, oldAddr)
 
-	p := CrossServerLoginParams{
-		IP:         host,
-		Port:       port,
-		Zone:       "APS1",
-		GameUid:    oldGameUid,
-		DeviceID:   "dev-1",
-		AirKey:     "airkey-1",
-		AccessTok:  "tok-1",
-		HTTPClient: gsl.DefaultHTTPClient(),
-		RSAPub:     &priv.PublicKey,
-		GateHost:   gslServer.URL,
-	}
-	result, err := DoCrossServerLogin(p)
+	result, err := DoCrossServerLogin(CrossServerLoginParams{
+		IP: host, Port: port, Zone: "APS1", GameUid: oldGameUid,
+		DeviceID: "dev-1", AirKey: "airkey-1", AccessTok: accessTok,
+	})
 	if err != nil {
 		t.Fatalf("DoCrossServerLogin: %v", err)
 	}
 	defer func() { _ = result.Conn.Close() }()
 
-	if result.Zone != "APS2" {
-		t.Errorf("Zone = %q, want %q (the post-redirect zone)", result.Zone, "APS2")
+	if result.Zone != "APS2" || result.GameUid != newGameUid || result.AccessTok != accessTok {
+		t.Errorf("result zone/gameUid/at = %q/%q/%q, want APS2/%q/%q (serverInfo zone and uid adopted, token reused)",
+			result.Zone, result.GameUid, result.AccessTok, newGameUid, accessTok)
 	}
-	if result.AccessTok != newAccessTok {
-		t.Errorf("AccessTok = %q, want %q (refreshed via GSL)", result.AccessTok, newAccessTok)
-	}
-
 	select {
-	case un := <-gotUn:
-		if un != newGameUid {
-			t.Errorf("post-redirect Login `un` = %q, want %q (refreshed gameUid, not the stale input one)", un, newGameUid)
+	case got := <-seen:
+		if got.un != newGameUid || got.gameUid != newGameUid {
+			t.Errorf("redialed Login un=%q p.gameUid=%q, want both %q (serverInfo.uid)", got.un, got.gameUid, newGameUid)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("post-redirect fake server never received a Login request")
-	}
-	select {
-	case gu := <-gotParamsGameUid:
-		if gu != newGameUid {
-			t.Errorf("post-redirect Login params.gameUid = %q, want %q (refreshed gameUid, not the stale input one)", gu, newGameUid)
+		if got.at != accessTok {
+			t.Errorf("redialed Login p.at = %q, want the same token %q", got.at, accessTok)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("post-redirect fake server never received a Login request")
 	}
 }
 
-// TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized is
-// TestDoCrossServerLoginRedirectRefreshesGameUid's sibling for an oversized (rather than
-// legitimate) mid-redirect GSL refresh: an oversized accessTok/gameUid returned by the opt=fix
-// refresh must fall back to the PREVIOUS value (capOversizedIdentityField, login.go) instead of
-// ever reaching PutUtfString with a value sfs.WriteUtfString would hard-reject, which would otherwise
-// fail the post-redirect Login's encode step and get misclassified by sendStageError (conn.go) as
-// a genuine dead connection.
-func TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized(t *testing.T) {
+// TestDoCrossServerLoginRedirectKeepsGameUidOnBadUid covers a serverInfo.uid that must not replace
+// the gameUid: absent (silently), wrong-typed or oversized (each with a Warn). The redirect itself
+// is still followed with the old gameUid.
+func TestDoCrossServerLoginRedirectKeepsGameUidOnBadUid(t *testing.T) {
 	const oldGameUid = "uid-old"
-	const oldAccessTok = "tok-1"
-	oversizedGameUid := strings.Repeat("g", maxIdentityFieldLen+1)
-	oversizedAccessTok := gsl.FlexString(strings.Repeat("t", maxIdentityFieldLen+1))
-
-	gslServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := gsl.LoginServerListRespon{
-			Code:       "0",
-			ServerList: []gsl.LoginServerInfo{{GameUid: gsl.FlexString(oversizedGameUid)}},
-			At:         &gsl.LoginToken{Token: oversizedAccessTok},
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	t.Cleanup(gslServer.Close)
-
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
+	cases := []struct {
+		name    string
+		setUid  func(si *sfs.SFSObject)
+		wantLog string
+	}{
+		{"absent", nil, ""},
+		{"empty", func(si *sfs.SFSObject) { si.PutUtfString("uid", "") }, ""},
+		{"wrong-typed", func(si *sfs.SFSObject) { si.PutInt("uid", 42) }, "uid field present but wrong-typed"},
+		{"oversized", func(si *sfs.SFSObject) {
+			si.PutValue("uid", sfs.SFSValue{Type: sfs.SFSText, Val: strings.Repeat("g", maxIdentityFieldLen+1)})
+		}, "gameUid exceeds identity field length cap"},
 	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			seen := make(chan loginSeen, 1)
+			newAddr := session.StartFakeGameServer(t, recordingLoginServer(seen))
+			oldAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+				if _, err := server.ReadEnvelope(); err != nil {
+					return
+				}
+				_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, putRedirectServerInfoUid(newAddr, "APS2", c.setUid))
+			})
+			host, port := testutil.SplitHostPortInt(t, oldAddr)
 
-	gotUn := make(chan string, 1)
-	gotParamsAt := make(chan string, 1)
-	newAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
-		env, err := server.ReadEnvelope()
-		if err != nil {
-			return
-		}
-		gotUn <- env.Content.GetString("un")
-		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
-				gotParamsAt <- pObj.GetString("at")
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			result, err := DoCrossServerLogin(CrossServerLoginParams{
+				IP: host, Port: port, Zone: "APS1", GameUid: oldGameUid,
+				DeviceID: "dev-1", AirKey: "airkey-1", AccessTok: "tok-1",
+			})
+			slog.SetDefault(orig)
+			if err != nil {
+				t.Fatalf("DoCrossServerLogin: %v", err)
 			}
-		}
-		resp := sfs.NewSFSObject()
-		resp.PutBool("success", true)
-		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp)
-	})
+			defer func() { _ = result.Conn.Close() }()
 
-	oldAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
-		if _, err := server.ReadEnvelope(); err != nil {
-			return
-		}
-		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, putRedirectServerInfo(newAddr, "APS2"))
-	})
-	host, port := testutil.SplitHostPortInt(t, oldAddr)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
-	p := CrossServerLoginParams{
-		IP:         host,
-		Port:       port,
-		Zone:       "APS1",
-		GameUid:    oldGameUid,
-		DeviceID:   "dev-1",
-		AirKey:     "airkey-1",
-		AccessTok:  oldAccessTok,
-		HTTPClient: gsl.DefaultHTTPClient(),
-		RSAPub:     &priv.PublicKey,
-		GateHost:   gslServer.URL,
-	}
-	result, err := DoCrossServerLogin(p)
-
-	slog.SetDefault(orig)
-
-	if err != nil {
-		t.Fatalf("DoCrossServerLogin: %v (an oversized refreshed gameUid/accessTok must fall back to the previous value, not fail the login)", err)
-	}
-	defer func() { _ = result.Conn.Close() }()
-
-	if result.AccessTok != oldAccessTok {
-		t.Errorf("AccessTok = %q, want %q (the oversized refreshed token must be rejected, keeping the previous one)", result.AccessTok, oldAccessTok)
-	}
-	if result.GameUid != oldGameUid {
-		t.Errorf("GameUid = %q, want %q (the oversized refreshed gameUid must be rejected, keeping the previous one)", result.GameUid, oldGameUid)
-	}
-
-	select {
-	case un := <-gotUn:
-		if un != oldGameUid {
-			t.Errorf("post-redirect Login `un` = %q, want %q (the stale, still-valid gameUid)", un, oldGameUid)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("post-redirect fake server never received a Login request")
-	}
-	select {
-	case at := <-gotParamsAt:
-		if at != oldAccessTok {
-			t.Errorf("post-redirect Login params.at = %q, want %q (the stale, still-valid access token)", at, oldAccessTok)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("post-redirect fake server never received a Login request")
-	}
-
-	logged := buf.String()
-	if !strings.Contains(logged, "gameUid exceeds identity field length cap") {
-		t.Errorf("expected a Warn about the oversized refreshed gameUid, got:\n%s", logged)
-	}
-	if !strings.Contains(logged, "accessTok exceeds identity field length cap") {
-		t.Errorf("expected a Warn about the oversized refreshed accessTok, got:\n%s", logged)
-	}
-}
-
-// TestDoCrossServerLoginRedirectRefreshKeepsOldAccessTokWhenEmpty is the round-53 regression test
-// for the MAJOR finding that DoCrossServerLogin's mid-redirect GSL refresh had the exact same
-// unguarded p.AccessTok = capOversizedIdentityField(...) overwrite as login.go's matching redirect
-// path, while its own adjacent gameUid reassignment was already correctly guarded against exactly
-// this shape. gsl.go's gsl.LoginServerListRespon.UnmarshalJSON treats any JSON-object-shaped "at"
-// field as present via gsl.LooksLikeJSONObject, including "{}" or one with no/empty "token" -- a
-// plausible shape for a degraded or rejected opt=fix refresh response. Mirrors
-// TestDoCrossServerLoginRedirectRefreshKeepsOldValuesWhenOversized's technique, substituting an
-// empty-token gsl.LoginToken for the mid-redirect refresh response instead of an oversized one.
-func TestDoCrossServerLoginRedirectRefreshKeepsOldAccessTokWhenEmpty(t *testing.T) {
-	const oldAccessTok = "tok-1-good"
-
-	gslServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := gsl.LoginServerListRespon{
-			Code: "0",
-			At:   &gsl.LoginToken{Token: ""}, // present but empty -- the shape under test
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	t.Cleanup(gslServer.Close)
-
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate RSA key: %v", err)
-	}
-
-	gotParamsAt := make(chan string, 1)
-	newAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
-		env, err := server.ReadEnvelope()
-		if err != nil {
-			return
-		}
-		if pv, ok := env.Content.Get("p"); ok {
-			if pObj, ok := pv.Val.(*sfs.SFSObject); ok {
-				gotParamsAt <- pObj.GetString("at")
+			if result.GameUid != oldGameUid {
+				t.Errorf("GameUid = %q, want %q kept", result.GameUid, oldGameUid)
 			}
-		}
-		resp := sfs.NewSFSObject()
-		resp.PutBool("success", true)
-		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp)
-	})
-
-	oldAddr := session.StartFakeGameServer(t, func(server *session.GameConn) {
-		if _, err := server.ReadEnvelope(); err != nil {
-			return
-		}
-		_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, putRedirectServerInfo(newAddr, "APS2"))
-	})
-	host, port := testutil.SplitHostPortInt(t, oldAddr)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
-	p := CrossServerLoginParams{
-		IP:         host,
-		Port:       port,
-		Zone:       "APS1",
-		GameUid:    "uid-1",
-		DeviceID:   "dev-1",
-		AirKey:     "airkey-1",
-		AccessTok:  oldAccessTok,
-		HTTPClient: gsl.DefaultHTTPClient(),
-		RSAPub:     &priv.PublicKey,
-		GateHost:   gslServer.URL,
-	}
-	result, err := DoCrossServerLogin(p)
-
-	slog.SetDefault(orig)
-
-	if err != nil {
-		t.Fatalf("DoCrossServerLogin: %v (an empty refreshed accessTok must fall back to the previous token, not fail the login)", err)
-	}
-	defer func() { _ = result.Conn.Close() }()
-
-	if result.AccessTok != oldAccessTok {
-		t.Errorf("AccessTok = %q, want %q (an empty refreshed token must never clobber the previous one)", result.AccessTok, oldAccessTok)
-	}
-
-	select {
-	case at := <-gotParamsAt:
-		if at != oldAccessTok {
-			t.Errorf("post-redirect Login params.at = %q, want %q (the stale, still-valid access token)", at, oldAccessTok)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("post-redirect fake server never received a Login request")
-	}
-
-	logged := buf.String()
-	if !strings.Contains(logged, "returned an empty access token; keeping the existing one") {
-		t.Errorf("expected a Warn about the empty refreshed accessTok, got:\n%s", logged)
+			select {
+			case got := <-seen:
+				if got.un != oldGameUid {
+					t.Errorf("redialed Login un = %q, want %q kept", got.un, oldGameUid)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("post-redirect fake server never received a Login request")
+			}
+			if c.wantLog != "" && !strings.Contains(buf.String(), c.wantLog) {
+				t.Errorf("log lacks %q:\n%s", c.wantLog, buf.String())
+			}
+		})
 	}
 }
 
@@ -1276,7 +1101,9 @@ func withFailingDial(t *testing.T, n int, err error) {
 		if dialErr != nil {
 			return nil, dialErr
 		}
-		conn.SetRawConn(&writeFailAfterConn{Conn: conn.RawConn(), n: n, err: err})
+		// n+1: the first write on every dialed connection is StartHeartbeat's immediate ping, so n
+		// keeps counting only the login-path sends this helper targets.
+		conn.SetRawConn(&writeFailAfterConn{Conn: conn.RawConn(), n: n + 1, err: err})
 		return conn, nil
 	}
 	t.Cleanup(func() { dialGame = orig })

@@ -15,16 +15,9 @@ import (
 	"time"
 )
 
-// TestVisitorStartTime is the round-51 regression test for Visitor.StartTime() (visitors.go),
-// which had zero test coverage and zero callers -- unlike its sibling accessors Uid()/EventId()/
-// VisitorId(), which are all exercised indirectly through GreetVisitors/ParseInitVisitors tests via
-// NewTestVisitor above (deliberately built without a startTime field, since GreetVisitors itself
-// never reads it). StartTime's own doc comment explains it's kept for a future GreetVisitors
-// enhancement (skipping a still-arriving visitor_err_coming visitor before ever sending the doomed
-// operate call) -- pins down that it reads the "startTime" key specifically (not a typo like
-// "eventId", and via GetLong like its Uid() sibling, not GetInt) directly, since GetLong itself is
-// already well-tested elsewhere and the only thing worth proving here is this one-line wrapper's
-// own field-name/accessor choice.
+// TestVisitorStartTime pins down that Visitor.StartTime() (visitors.go) reads the "startTime" key
+// via GetLong. GreetVisitors' arrival check (visitorArrived) and visitor-fresh both depend on it;
+// NewTestVisitor fixtures carry no startTime, which reads as already arrived.
 func TestVisitorStartTime(t *testing.T) {
 	raw := sfs.NewSFSObject()
 	raw.PutLong("startTime", 1234567890)
@@ -296,7 +289,7 @@ func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T
 		for i := range wantVisitors {
 			v := sfs.NewSFSObject()
 			v.PutLong("uid", int64(5000+i))
-			v.PutInt("eventId", 2000+int32(i))
+			v.PutInt("eventId", 2001+int32(i)) // 2001-2008: GIFT visitors, on the greet allowlist
 			v.PutInt("visitorId", 6)
 			list.AddSFSObject(v)
 		}

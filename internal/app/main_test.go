@@ -39,7 +39,7 @@ func TestOsExitAfterDeferredConnCloseCallsCloseExplicitlyFirst(t *testing.T) {
 
 	re := regexp.MustCompile(`conn\.Close\(\)\s*\n\s*os\.Exit\(1\)`)
 	matches := re.FindAll(src, -1)
-	const want = 4 // Run()'s two post-defer os.Exit(1) sites + runCrossServerTest()'s two
+	const want = 5 // Run()'s two post-defer os.Exit(1) sites + runCrossServerTest()'s three (incl. -run)
 	if len(matches) != want {
 		t.Errorf("found %d conn.Close()-immediately-before-os.Exit(1) sites in main.go, want %d -- every os.Exit(1) reached after `defer conn.Close()` registers must call conn.Close() explicitly first, since os.Exit skips deferred functions", len(matches), want)
 	}
@@ -722,7 +722,9 @@ func mainCollectInteractiveFakeGameServer() func(*session.GameConn) {
 			return
 		}
 
-		const wantRequests = 9
+		// 9 collect requests plus the check.device.change Run() sends after init (answered by the
+		// default branch below; the client never waits for it).
+		const wantRequests = 10
 		for range wantRequests {
 			env, err := server.ReadEnvelope()
 			if err != nil {
@@ -1026,7 +1028,7 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*session
 
 		v := sfs.NewSFSObject()
 		v.PutLong("uid", 777)
-		v.PutInt("eventId", 1)
+		v.PutInt("eventId", 2001) // a GIFT visitor: GreetVisitors skips eventIds not on its allowlist
 		list := sfs.NewSFSArray()
 		list.AddSFSObject(v)
 		visitorObj := sfs.NewSFSObject()
@@ -1055,7 +1057,9 @@ func mainZeroBuildingsFallbackFakeGameServer(gotVisitorUID *int64) func(*session
 		// expected request, AsExtension() returns ok=false for it, and the handler gives up --
 		// leaving the connection to eventually read as a genuine EOF/dead-connection failure to
 		// the client's next real request instead of the benign push this actually was.
-		const wantRequests = 10
+		// One more for the check.device.change Run() sends after init (answered by the default
+		// branch below; the client never waits for it).
+		const wantRequests = 11
 		for range wantRequests {
 			msg, err := session.ReadNextExtension(server)
 			if err != nil {

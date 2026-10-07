@@ -1,9 +1,9 @@
 ---
 title: "Game data tables"
-description: "The shape, container format, and categorized index of the 1,279 balance/config Lua data tables shipped alongside the client."
+description: "The shape, container format, CDN path, split-table layout, and categorized index of the balance/config Lua data tables shipped alongside the client: 1,291 in 1.0.364."
 ---
 
-1,279 balance/config tables, each a data-only Lua module compiled from what is clearly a spreadsheet pipeline: positional row arrays, a column-index descriptor, and a string-interning pool for repeated values.
+1,291 balance/config tables in 1.0.364 (table version 39432, 1,049,915 rows), and 1,298 in the live set 39516. Each is a data-only Lua module compiled from what is clearly a spreadsheet pipeline: positional row arrays, a column-index descriptor, and a string-interning pool for repeated values. 1.0.351 shipped 1,279.
 
 ## Table shape
 
@@ -14,15 +14,64 @@ T.vExt  = { "1;30|14;30", ... }   -- interned strings, referenced by 1-based ind
 T.link  = { [1]={9,512025}, [2]={512026,535161} }  -- split-table partition ranges, for the largest tables
 ```
 
-Only 4 field types exist across the entire 1,279-table corpus: `string`, `number`, `array`, `table`. Compound values are packed strings, almost universally `id;count` pairs joined by `|`. Very large tables (world monster spawns, army data) are physically split across sibling files, resolved via the `link` range table.
+Only 4 field types exist across the whole corpus: `string`, `number`, `array`, `table`. In 1.0.364 the column declarations break down as 8,641 `string`, 5,166 `number`, 587 `array`, and 78 `table`. Compound values are packed strings, almost universally `id;count` pairs joined by `|`. Very large tables (world monster spawns, army data) are physically split across sibling files, resolved via the `link` range table, see [Split tables](#split-tables) below.
 
 ## Container & versioning
 
-A plain ZIP, one flat-namespace entry per table name, the odd `.data` extension is misleading; `unzip -l` works on it directly. Local version manifest, one line: `version,size,md5,timestamp`, matching the filename `table_{version}_{md5}.data`. Table updates are tracked and patched (bsdiff) fully independently of the Lua bundle and asset bundles.
+A plain ZIP, one flat-namespace entry per table name, the odd `.data` extension is misleading; `unzip -l` works on it directly. The local version manifest is one line, `version,size,md5,crc32`, matching the filename `table_{version}_{md5}.data`. The 4th field is the archive's CRC32, not a timestamp: the 1.0.364 APK's `table/version` is `39432,19332173,<md5>,1911068049`, and both the MD5 and the CRC32 match the shipped archive. `ApplyUpdate` checks the size and CRC after patching (static-analysis-only). Table updates are tracked and patched (bsdiff) fully independently of the Lua bundle and asset bundles.
 
-The 1.0.364 C# reads the current table version from a check-version `table_version` field (`version,size,md5[,crc][;patch chain]`) and requests the online table set with `table_env=table_online` (see [Startup, version-check & hot-update](/bootstrap)). The 1.0.364 APK ships table version 39432 and locale 23557. On 2026-10-04 the iOS app's `resVersion` ended in `39516.23570`, which the C# maps to the table and locale versions, but that day's iOS check-version response carried no `table_version` or `locale` field at all. Where the live client gets those numbers is open. The live tables weren't fetched, and their CDN path hasn't been derived. The only table read for the 1.0.364 pass was `season_weekcard`, whose `farm_building` and `farm_building_weekcard` columns name each season week card's production buildings (see [City & building](/city-building#which-buildings-are-production-lines)).
+The 1.0.364 C# reads the current table version from the check-version `table_version` field (`version,size,md5[,crc][;patch chain]`). The server returns that field, and `locale`, only when the request carries `table_env=table_online`, which the real client always sends (confirmed live on 2026-10-05, see [Startup, version-check & hot-update](/bootstrap)). The 1.0.364 APK ships table version 39432 and locale 23557. On 2026-10-05 the server named table 39516 and locale 23570, the same numbers the iOS app's `resVersion` ended in on 2026-10-04: that tail is the device's local table and locale versions, see [resVersion](/bootstrap#resversion). Android and iOS got the identical `table_version` and `locale` (confirmed live).
 
-## Categorized index (1,279 tables)
+The 1.0.364 coverage pass decompiled and loaded all 1,291 tables, read 26 of them row by row (building production, VIP, daily tasks, visitors, alliance gifts, subscriptions, dispatch, train, and DataConfig), and covered the rest from their schemas, sample rows, and reader modules. `season_weekcard`'s `farm_building` and `farm_building_weekcard` columns name each season week card's production buildings (see [City & building](/city-building#which-buildings-are-production-lines)).
+
+### Table CDN
+
+The table archive's CDN path has no app id and no platform segment, unlike the Lua bundle's (1.0.364 C# `TableFileUpdate`):
+
+```text
+https://lastwar-cdn.akamaized.net/hotupdate/table/table_{version}_{md5}.data
+https://lastwar-cdn.akamaized.net/hotupdate/table/table_{new}_{old}.patch
+```
+
+- The full archive is a plain ZIP. HEAD requests on the APK's own archive returned 200 on all three CDN bases, with an ETag equal to its MD5, and the live 39516 archive downloaded as plain PKZip, not ChaCha-wrapped.
+- A patch is a plain `BSDIFF40` file; the ChaCha `PURBDP` wrapping is optional. The client downloads one only when `client_config` switch 0 is on and its local version is in the `;old|size|crc` patch chain.
+- The origin is the Aliyun OSS bucket `lastwar-client-us`; listing it returns AccessDenied.
+- The live patch chain skips the APK build. On 2026-10-05 it listed 39500, 39487, 39323, 39277, 39273, 39267, 39250, 39228, 39191, and 39182, but not 39432, so a fresh 1.0.364 install downloads the full 19.5 MB archive instead of a patch.
+
+### What changed in the live set (39432 to 39516)
+
+The live 39516 archive was fetched on 2026-10-05 and diffed against the APK's 39432:
+
+- **No schema change.** No table gained or lost a column.
+- **8 tables added**, all pre-shipped A/B or "new" variants that no client Lua reads yet, for example `lw_world_monster_B`, `lw_hero_skill_B`, `lw_guide_flow_new`, and `detect_event_new`.
+- **1 table removed**: `test_all_types`.
+- **13 tables changed rows**: weekly server-group rotations (arena, zone war, champion duel, migration), event score thresholds in `activity`, two shop buy limits, and new goods, decorations, and stages.
+
+Every table behind the production, VIP, daily-task, visitor, alliance-gift, subscription, dispatch, and idle-reward mechanics is byte-identical across the two versions.
+
+## Split tables
+
+10 tables are split, with 335 sub-tables between them: `exchange` (3), `lw_army` (12), `lw_monster` (31), `lw_monster_B` (31), `lw_monster_C` (27), `lw_monster_born` (73), `lw_monster_born_B` (73), `lw_monster_born_C` (51), `quest` (10), and `reward` (24). In 1.0.364 (static-analysis-only):
+
+- The base table holds `index`, `vExt`, and `link`; its `data` is empty.
+- Each `<base>_split<N>` holds `data` only, and its interned values index the base's `vExt`.
+- To read a row, find the `link` range that contains the id, then open `<base>_split<index>`.
+
+`LocalController` builds the sub-table name differently for names in its `OLD_STYLE` list: it asks for `<base><N>`, without `_split`. `reward` is in `OLD_STYLE`, but it ships as `reward_split1` to `reward_split24`, so the 34 `getLine`/`tryGetLine(TableName.RewardConfig, id)` call sites ask for a `reward<N>` entry that isn't in the archive. The only other source would be a `LuaDatatable` asset fallback, and the shipped `datatable` asset manifest holds only a placeholder, so as shipped those lookups return nil. The live 39516 set still ships `reward_split1..24`.
+
+### A/B variant tables
+
+`PlayerInfo:GetABTestTableName` picks a table variant from `init.user.monopoly_ab`, the server-pushed A/B slot (see [Findings & further work](/findings)). Value 18 selects the civilization-spark set (`building_B`, `lw_monster_B`, `lw_stage_feature_B`, `lw_guide_flow_B`, `monopoly_B`, and seven more `_B` tables), and value 1 selects `detect_level_B`. `building_B` has the same production numbers as `building`.
+
+### Tables that aren't what their names say
+
+- **`item` is the DataConfig table, not an item catalog**: 1,328 keys with columns `k1` to `k30`. The `init` push's `dataConfig` replaces it wholesale, so the shipped rows are only defaults.
+- **267 non-split tables are shipped but never read by client code**, for example `daily_reward`, `lw_base_visitor_config`, `vip_privilege`, and `develop_simulation` (88,019 rows). They're server-side config that happens to ship with the client.
+- `lw_monster_point` strings are GBK-encoded, not UTF-8.
+
+## Categorized index (1.0.351, 1,279 tables)
+
+This breakdown was built against the 1.0.351 archive and hasn't been redone for 1.0.364's 1,291 tables.
 
 | Group | Count | Examples |
 | --- | ---: | --- |

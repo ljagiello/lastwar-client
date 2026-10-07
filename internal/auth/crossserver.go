@@ -1,14 +1,12 @@
 package auth
 
 import (
-	"crypto/rsa"
 	"errors"
 	"fmt"
 	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 	"log/slog"
-	"net/http"
 	"os"
 	"slices"
 	"time"
@@ -30,20 +28,17 @@ type CrossServerLoginResult struct {
 	Addr string
 	Zone string
 
-	// AccessTok is the FINAL access token actually used to log in -- this differs
-	// from CrossServerLoginParams.AccessTok whenever a serverInfo redirect was
-	// followed and the mid-redirect GSL refresh (see below) obtained a new one.
-	// Callers that persist connection details (e.g. a session config file) should
-	// save this, not the original input, so the next run doesn't retry a token
-	// this connection already knows was superseded.
+	// AccessTok is the access token actually used to log in. A serverInfo redirect reuses the
+	// same token, as the real client does, so today this always equals
+	// CrossServerLoginParams.AccessTok; callers persisting a session config save this field.
 	AccessTok string
 
 	// GameUid is the FINAL gameUid actually logged in with -- this differs
 	// from CrossServerLoginParams.GameUid whenever a serverInfo redirect was
-	// followed and the mid-redirect GSL refresh (see below) returned a
-	// changed gameUid. Callers that persist connection details (e.g. a
-	// session config file) should save this, not the original input, so the
-	// next run targets the role's current gameUid instead of a stale one.
+	// followed and carried a different serverInfo.uid. Callers that persist
+	// connection details (e.g. a session config file) should save this, not the
+	// original input, so the next run targets the role's current gameUid
+	// instead of a stale one.
 	GameUid string
 }
 
@@ -78,18 +73,7 @@ type CrossServerLoginParams struct {
 	IOSMode     bool   // send an iOS-flavored identity instead of Android; see LoginParamsInput.IOSMode
 	AppVersion  string // build the token was issued under, if known; see LoginParamsInput.AppVersion
 	VersionCode string
-
-	// HTTPClient/RSAPub/GateHost are OPTIONAL GSL plumbing, needed only to
-	// refresh AccessTok via gsl.GetServerList(opt=fix) if a serverInfo redirect
-	// is hit mid-login (see the doc comment on DoCrossServerLogin). Callers
-	// that already have these in scope from their own gsl.CheckVersion() call
-	// (e.g. main.go's runCrossServerTest) should pass them through; callers
-	// that don't leave them nil/zero and DoCrossServerLogin degrades to
-	// reusing AccessTok unrefreshed across the redial, with a logged
-	// warning at the point that happens.
-	HTTPClient *http.Client
-	RSAPub     *rsa.PublicKey
-	GateHost   string
+	ResVersion  string // see LoginParamsInput.ResVersion and ResVersionFor; "" sends "0"
 
 	// DialGame, if non-nil, replaces the package-level dialGame (ultimately session.DialGame) used
 	// to open the game socket -- and is used for every redial in the serverInfo-redirect loop, not
@@ -146,6 +130,14 @@ func (p CrossServerLoginParams) LogValue() slog.Value { return slog.StringValue(
 // follows the redirect (closes the stale connection, redials the new
 // address, resends Login with the new zone) up to a small bounded number
 // of hops rather than treating the first response as final.
+//
+// The redirect is followed the way the real client follows it
+// (LoginMessage.CSHandleResponse, A-CS:82799-82858): serverInfo.uid replaces
+// the gameUid, and the redial reuses the same access token with no GSL call
+// in between. This function used to fetch a "fresh" token via GSL opt=fix
+// first, on a suspicion that tokens were single-use per connection; the real
+// client never does that, and since that GSL call claims platform=Android it
+// could only swap an iOS-issued token for an incompatible one.
 func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, error) {
 	if p.AccessTok == "" {
 		return nil, fmt.Errorf("cross-server login: no access token given (pass -cs-at, -cs-rt, or a session config with accessToken) -- an empty token reliably fails with ec=28/E011")
@@ -226,6 +218,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			IOSMode:     p.IOSMode,
 			AppVersion:  p.AppVersion,
 			VersionCode: p.VersionCode,
+			ResVersion:  p.ResVersion,
 		})
 		loginContent := sfs.NewSFSObject()
 		loginContent.PutUtfString("zn", zone)
@@ -321,65 +314,19 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// followed: ip/port can still resolve fine on their own, so this would otherwise
 			// silently redial to the new address while keeping the stale zone.
 			newZone := redirectZone(siObj, "crossserver.go cross-server Login")
-			slog.Info("serverInfo redirect: reconnecting to new address", "newAddr", newAddrs[0], "newZone", newZone, "oldAddr", addr, "oldZone", zone)
-
-			// Before closing this connection and redialing, refresh AccessTok via GSL --
-			// mirroring login.go's equivalent redirect path, on the same documented
-			// suspicion that a token is single-use-per-connection. Only possible when the
-			// caller supplied HTTPClient/RSAPub/GateHost (DoCrossServerLogin is otherwise
-			// deliberately GSL-free, see the doc comment above); callers that don't fall
-			// back to reusing p.AccessTok unrefreshed, logged loudly below so an ec=28/E011
-			// failure right after this redial is immediately diagnosable.
-			if p.HTTPClient != nil && p.RSAPub != nil && p.GateHost != "" {
-				slog.Info("fetching fresh access token before following serverInfo redirect (suspected single-use-per-connection)")
-				freshLsr, err := gsl.GetServerList(p.HTTPClient, p.GateHost, p.RSAPub, p.DeviceID, gsl.GSLOpt{Opt: "fix"}, "", p.GameUid)
-				if err != nil {
-					slog.Error("GSL refresh failed; following redirect with stale access token anyway", "error", err)
-				} else {
-					// Only overwrite on a non-empty refreshed token -- mirrors the gameUid guard
-					// just below (same reasoning, and the identical round-53 fix login.go's
-					// matching redirect path also got): freshLsr.At can be non-nil with an empty
-					// Token (gsl.go's gsl.LoginServerListRespon.UnmarshalJSON treats any
-					// JSON-object-shaped "at" field, including "{}" or one with no/empty
-					// "token", as present via gsl.LooksLikeJSONObject), and an empty token here is
-					// more likely an unpopulated/degraded refresh response than a real
-					// "clear the token" instruction. Clobbering the caller-supplied, already-
-					// working p.AccessTok with "" would break the very redial this refresh
-					// exists to support.
-					if freshLsr.At != nil {
-						if newAccessTok := capOversizedIdentityField("accessTok", freshLsr.At.Token.String(), p.AccessTok, "cross-server login serverInfo redirect GSL refresh"); newAccessTok != "" {
-							p.AccessTok = newAccessTok
-							slog.Info("fresh access token acquired", "tokenLen", len(p.AccessTok))
-						} else {
-							slog.Warn("serverInfo redirect GSL refresh returned an empty access token; keeping the existing one", "tokenLen", len(p.AccessTok))
-						}
-					}
-					// The same refresh response also carries the account's current
-					// gameUid (serverList[0].gameUid) -- propagate it the same way as
-					// AccessTok above. Without this, p.GameUid stays pinned to whatever
-					// the caller originally passed in even when the GSL refresh (issued
-					// specifically because this account just got redirected to a new
-					// shard) reports a different one, and the stale value is what ends up
-					// folded into SecurityCode and sent as `un` on the redialed
-					// connection. Only overwrite on a non-empty value -- an empty
-					// gameUid here is more likely an unpopulated field than a real
-					// "clear the uid" instruction, and clobbering a known-good value with
-					// "" is not a safe default to guess at.
-					if len(freshLsr.ServerList) > 0 {
-						if newGameUid := capOversizedIdentityField("gameUid", freshLsr.ServerList[0].GameUid.String(), "", "cross-server login serverInfo redirect GSL refresh"); newGameUid != "" && newGameUid != p.GameUid {
-							slog.Info("serverInfo redirect: gameUid changed on GSL refresh", "oldGameUid", p.GameUid, "newGameUid", newGameUid)
-							p.GameUid = newGameUid
-						}
-					}
-				}
-			} else {
-				slog.Warn("following serverInfo redirect with UNREFRESHED access token -- no HTTPClient/RSAPub/GateHost given to DoCrossServerLogin, so it cannot fetch a fresh one before redialing; if this redial fails with ec=28/E011, this reused token is the first thing to suspect")
-			}
+			// serverInfo.uid is the account's gameUid on the new shard: it becomes `un` and goes
+			// into SecurityCode on the redialed Login. Absent or empty keeps the current one.
+			newGameUid := redirectUid(siObj, "crossserver.go cross-server Login")
+			slog.Info("serverInfo redirect: reconnecting to new address with the same access token", "newAddr", newAddrs[0], "newZone", newZone,
+				"oldAddr", addr, "oldZone", zone, "newGameUid", newGameUid, "oldGameUid", p.GameUid, "accessTokLen", len(p.AccessTok))
 
 			_ = conn.Close()
 			addrs = newAddrs
 			if newZone != "" {
 				zone = newZone
+			}
+			if newGameUid != "" {
+				p.GameUid = newGameUid
 			}
 			continue
 		}

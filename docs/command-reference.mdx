@@ -1,13 +1,31 @@
 ---
 title: "Command reference"
-description: "How the client's ~3,178 dispatch commands break down by gameplay domain and transport channel, and where the full searchable catalog lives."
+description: "How the client's dispatch commands (3,115 in the 1.0.364 Lua catalog, plus 54 C#-only and 133 chat-table wire names) break down by domain, direction, and transport channel, the conventions claim requests share, and where the full catalog lives."
 ---
 
-Every command is dispatched off one flat string; there's no numeric opcode layer above SFS2X's own framing. 3,047 commands were mechanically extracted from the 1.0.351 client's own dispatch tables (`MsgDefines`/`MsgMap`); 131 more live on the dedicated chat channel's parallel table. 1.0.364 handles 3,097, see the changes section below. This page summarizes how they're organized; the full row-level catalog is described below rather than reproduced as a giant static table.
+Every command is dispatched off one flat string; there's no numeric opcode layer above SFS2X's own framing. In 1.0.364 the Lua catalog (`MsgDefines`) defines **3,115** commands, of which `MsgMap` gives a handler to 3,097; **54** more exist only in C#; and the chat subsystem's own table defines **133** wire names. The 1.0.351 figures were 3,065 / 3,047 for the Lua catalog and 131 for the chat table, 3,178 in all. This page summarizes how they're organized; the full row-level catalog is described below rather than reproduced as a giant static table.
+
+## The 1.0.364 catalog at a glance
+
+All counts are static-analysis-only, from a script that parsed every `Net/Msgs` `Message` class and every `SFSNetwork.SendMessage` call site:
+
+| Direction | Commands | Meaning |
+|---|---:|---|
+| Request | 2,243 | At least one Lua send site |
+| Push | 731 | No send site and a `push.*` name, plus `init` |
+| Never sent | 124 | No send site and not push-named: dead, or a server push with a request-style name |
+| Request, indirect | 9 | Sent through a variable, for example `BatchDoServerMail(MsgDefines.X)` |
+| Sent and push-named | 6 | Both |
+| Request from C# | 2 | No Lua send site, but a C# message class |
+| **Total** | **3,115** | 3,113 distinct wire names: two wire strings are defined under two keys each |
+
+- **54 C#-only commands** never appear in `MsgDefines`, including the login plumbing (`login.ext`, `check.device.change`, `change.user.parseid`), the world-map viewport pulls, and the march and kick pushes. C# handles 71 wire names in all; for the 18 that are also in the Lua catalog, C# wins. See [Lua architecture](/lua-architecture#dispatch-order).
+- **The chat table** has 133 wire names: 87 travel on the chat WebSocket, 45 on the game socket, and 1 has no handler. Five of them share a wire name with a `MsgDefines` command.
+- About 23% of the Lua catalog (731 of 3,115) is server pushes.
 
 ## By functional domain
 
-Two independent axes describe every command: which gameplay system it belongs to, and whether it's a client request or a server-initiated push (roughly a fifth of all commands are pushes, 22%, by the `push.*` naming convention).
+Two independent axes describe every command: which gameplay system it belongs to, and whether it's a client request or a server-initiated push (roughly a fifth of all commands are pushes, 22% in 1.0.351 by the `push.*` naming convention). The domain breakdown below was built against the 1.0.351 catalog and hasn't been redone for 1.0.364.
 
 | Domain | Count | Priority | Covers |
 |---|---:|---|---|
@@ -40,7 +58,7 @@ An exact diff of the 1.0.351 catalog (`LWLF` 793, recovered from the CDN) agains
 - The live Android (826) and iOS (821) bundles match 1.0.364 at the catalog level.
 - Every request schema `goclient` sends is unchanged. Some responses gained fields; for example, the `push.chat.get.system.mails` list push gained `delActivityIds`.
 
-The 131-command chat table wasn't re-diffed, so the domain table above and the 3,178 total still describe 1.0.351. All of this is static-analysis-only.
+The chat table grew from 131 to 133 wire names but wasn't diffed entry by entry; the domain table above still describes 1.0.351. All of this is static-analysis-only.
 
 | Module | Added | Commands |
 |---|---:|---|
@@ -59,17 +77,63 @@ The 131-command chat table wasn't re-diffed, so the domain table above and the 3
 
 Other 1.0.364 changes that touch protocol behavior: `ProductLineBuilds` gained the Crystal Factory (see [City & building](/city-building#which-buildings-are-production-lines)), `MailEnum` gained `CrystalBoss=58`, and the Lua `LoginErrorCode` table gained `55`-`58` (see [Identity, login & session](/auth#login-rejection-codes)).
 
-A few commands the real client sends never appear in `MsgDefines`, because C# sends them directly: `change.user.parseid`, `check.device.change`, and `login.ext`. See [Identity, login & session](/auth#post-login-sequence).
+A few commands the real client sends never appear in `MsgDefines`, because C# sends them directly: `change.user.parseid`, `check.device.change`, and `login.ext`. See [Identity, login & session](/auth#post-login-sequence). They're three of the 54 C#-only commands above.
+
+## Claim requests
+
+The 1.0.364 coverage pass catalogued **558 claim-like requests**, those whose names contain claim, collect, receive, reward, free, daily, sign, gift, or similar, each with its request params and the guard around its first send site; 55 carry a hand-traced eligibility rule. About 260 look like free claims; the rest are read-only fetches whose names merely contain "reward", spends, PvP actions, or purchases. Few are documented on these pages: of the 245 claim wires reachable from one partition of the UI, 231 appear nowhere in the docs. The conventions below are shared across them (static-analysis-only unless marked).
+
+### Claim-all sentinels
+
+Several claims take a sentinel instead of an id, to claim everything pending in one request:
+
+| Request | Sentinel |
+|---|---|
+| `daily.quest.reward` | `stage: -1` claims every reached daily-activity chest; the response lists them in `stageArr` |
+| `sign.receive.day.reward` | `day: 0` claims every claimable sign-in day |
+| `activity.hero.score.reward` | `index: -1` claims every reached score chest |
+| `new.arena.reward`, `gale.arena.reward` | `target: -1` claims every reached daily box |
+| `season.tower.reward` | `stageId: -1` claims the group score rewards |
+| `city.battle.activity.gain.task.reward` | `configId: -1` claims every task, `-2` every score goal |
+| `city.competition.s0.gain.task.reward` | `cityLv: -1, configId: -1` claims the score tasks |
+| `zone.mobilization.claim.challenge.reward` | `index: 0` claims every damage reward |
+| `lw.receive.towerup.first.reward`, `lw.receive.dominator.up.first.reward` | `id: -1`, which the stage item sends; whether it claims every pending milestone is unverified |
+
+### Other conventions
+
+- **Claim state.** `TaskState` `1` (CanReceive) means claimable and `2` means claimed; other claim-state enums are in the [Entity ID reference](/entity-id-reference#wire-enum-values).
+- **"Already claimed."** The generic error is `120289` (confirmed live for the VIP dailies, see [Live validation against production](/live-validation)).
+- **Daily gates use the server day.** "Already claimed today" checks compare timestamps with the server day, which starts at 02:00 UTC live, see [Identity, login & session](/auth#server-day-and-daily-reset).
+- **`activityId` types differ.** Almost every activity reward request takes `activityId` as an Int, but the generic activity detail read, `hero.event.info.get`, takes it as a UTF string.
+- **Free and paid variants can share a wire name.** A lottery with `useFree: 0` spends tickets or diamonds, `useGold`/`gold` flags spend diamonds, and `free.building.up.new` with `gold: 2` pays with diamonds. `queue.ccd.m.new` and `build.ccd.m.new` never send the UI's `isGold` flag at all, so the server alone decides whether a speed-up costs anything.
+
+### Reward payload
+
+Claim responses carry a `reward` array plus, often, a sibling `resource` object (1.0.364 `RewardManager`; static-analysis-only):
+
+```text
+reward:   [ {type: Int, value: Int | Object, total?: Long}, ... ]
+resource: {oil, metal, money, electricity, water, pvePoint, wood, people, dragonHonorScore, obsidian, flint, petroleum}
+```
+
+- `type` is a `RewardType` id; the full id-to-name table is in the [Entity ID reference](/entity-id-reference#resources-155).
+- For plain resources and currencies (`OIL`, `METAL`, `FOOD`, `GOLD` for diamonds, stamina, and so on), `value` is the amount gained and `total` the new balance.
+- For goods (type `7`), `value` is `{itemId, count, rewardAdd}`: `count` is the new owned count and `rewardAdd` the amount gained. Resource items (`27`) use `{id, num}`, heroes (`25`) `{heroId, rewardAdd, uuid}`, and soldiers (`23`) `{itemId, count}`.
+- `resource` holds absolute balances, applied before the `reward` entries. Food is `money` on the wire.
+- Some responses also carry a top-level `gold`, and a few counters arrive as their own top-level fields rather than as `reward` entries.
 
 ## Search the full catalog
 
-3,178 commands total: 3,047 from the main dispatch table (`Net.Msgs.*`, over the primary SFS socket) plus 131 from the dedicated chat subsystem's own table (`Chat.WebMessage.*` / `Chat.NetMessage.*`, split across the chat WebSocket and the primary socket, see the **WS** / **SFS** tags).
+Two row-level catalogs exist:
+
+- **The 1.0.364 coverage catalog** (`commands.tsv`): all 3,115 `MsgDefines` commands, one row each, with the wire name, direction, runtime handler, request params with their SFS2X types (`name:Int`, nested arrays expanded, `[name:Type]` for conditional puts), the response fields the handler reads, the DataCenter managers it calls, the send-site count and first send sites, the C# handler where C# shadows Lua, duplicate-wire notes, and a relevance label. Companion indexes list every one of the 4,561 send sites with its enclosing function and nearest `if` guards (`command_send_sites.tsv`), the 558 claim-like requests (`claim_commands.tsv`), the 133-name chat table (`chat_commands.tsv`), and the 159 game systems (`systems.tsv`). These live with the coverage-analysis artifacts, outside this repo, and are regenerable with the method in [Findings & further work](/findings).
+- **The 1.0.351 dossier catalog** (`cmd-data`), described below: 3,178 commands total, 3,047 from the main dispatch table (`Net.Msgs.*`, over the primary SFS socket) plus 131 from the dedicated chat subsystem's own table (`Chat.WebMessage.*` / `Chat.NetMessage.*`, split across the chat WebSocket and the primary socket, see the **WS** / **SFS** tags).
 
 <Note>
 The source dossier this page is derived from ships the full catalog as an interactive, client-side search tool (a search box filtering on key/wire-cmd/handler-class, plus a channel dropdown for **All channels** / **SFS socket** / **Chat WebSocket**, rendering up to the first 300 matches at a time). That live widget isn't reproduced here; hand-transcribing ~3,178 rows into a static Markdown table would be both unwieldy and error-prone. The underlying data is not lost, though: it's the same `cmd-data` JSON data island (one row per command, `[key, wire cmd, handler class, channel]`) backing the dossier's search tool, and it is regenerable directly from the client's own dispatch tables using the same mechanical extraction that produced it in the first place.
 </Note>
 
-Each row in the full catalog carries four fields:
+Each row in the 1.0.351 `cmd-data` catalog carries four fields:
 
 | Column | Meaning |
 |---|---|

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -330,7 +331,7 @@ func TestSaveSessionConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSessionConfig: %v", err)
 	}
-	if *got != *want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v after round trip, want %+v", got, want)
 	}
 
