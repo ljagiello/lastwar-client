@@ -357,6 +357,58 @@ func TestTreasureDigsOpensOnlyWithOwnedHammers(t *testing.T) {
 	}
 }
 
+// The ledger follows the free-hammer reply: a new total when it sends one, else the gain, and the
+// opens stop at it even though the board isn't finished.
+func TestTreasureDigsStopsAtTheGrantedHammers(t *testing.T) {
+	cases := []struct {
+		name  string
+		held  int32
+		grant *sfs.SFSObject
+	}{
+		{"total in the reply", 0, hammerGrant(digRuinHammer, 7, 7)},
+		{"gain only", 3, func() *sfs.SFSObject {
+			v := sfs.NewSFSObject()
+			v.PutUtfString("id", digRuinHammer)
+			v.PutInt("rewardAdd", 4)
+			e := sfs.NewSFSObject()
+			e.PutInt("type", rewardTypeGoods)
+			e.PutSFSObject("value", v)
+			arr := sfs.NewSFSArray()
+			arr.AddSFSObject(e)
+			r := sfs.NewSFSObject()
+			r.PutSFSArray("reward", arr)
+			return r
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			board := newDigFakeBoard(12501, map[int32]int{20009: 1, 20001: 3})
+			ruin := digRuinEvent(900, radarStateNotFinish, evTestNow.Add(4*time.Hour), digBoardSFS(9001, 12501, digNotBegin, nil, nil))
+			conn, f := startDigFake(t, radarScoringDay(), []*sfs.SFSObject{ruin}, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				switch cmd {
+				case digRadarHammerCmd:
+					return tc.grant
+				case digRadarOpenCmd:
+					return board.open(9001, int(p.GetInt("pos")))
+				}
+				return nil
+			})
+			if err := runTreasureDigs(conn, digTestInit(map[string]int32{digRuinHammer: tc.held})); err != nil {
+				t.Fatal(err)
+			}
+			if n := len(f.only(digRadarHammerCmd)); n != 1 {
+				t.Errorf("free hammer claims = %d, want 1", n)
+			}
+			if got := digPositions(f, digRadarOpenCmd); !slices.Equal(got, []int{1, 2, 5, 6, 3, 4, 7}) {
+				t.Errorf("bricks opened = %v, want the 7 hammers' worth", got)
+			}
+			if n := len(f.only(digRadarChestCmd)); n != 0 {
+				t.Error("claimed the chest of an unfinished ruin")
+			}
+		})
+	}
+}
+
 func TestTreasureDigsFailedFreeHammerOpensNothing(t *testing.T) {
 	ruin := digRuinEvent(900, radarStateNotFinish, evTestNow.Add(4*time.Hour), digBoardSFS(9001, 12501, digNotBegin, nil, nil))
 	conn, f := startDigFake(t, radarScoringDay(), []*sfs.SFSObject{ruin}, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {

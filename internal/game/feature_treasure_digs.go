@@ -963,6 +963,11 @@ func (r *digRun) vault() {
 					} else {
 						t.state = digCanNotGet
 					}
+					// The gate assumed the grant is hammer_num Dig Hammers; the ledger follows the reply.
+					if closed := int64(t.lvl.w*t.lvl.h - len(s.timed.opened)); r.hammers[digVaultHammer] < closed {
+						slog.Warn(r.name+": "+label+" grant didn't cover the board; it may fail", "held", r.hammers[digVaultHammer],
+							"closedBricks", closed)
+					}
 				case r.dry:
 					progressed = true
 					t.state = digCanNotGet
