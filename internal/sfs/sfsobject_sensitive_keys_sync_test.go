@@ -116,13 +116,13 @@ var knownNonSensitiveSFSKeys = map[string]bool{
 }
 
 // putKeyCallRe matches a literal Put*("key", ...) call for every SFSObject Put* helper this repo
-// defines (sfsobject.go: PutUtfString/PutInt/PutLong/PutBool/PutDouble/PutByte/PutShort/
-// PutSFSObject/PutSFSArray). Deliberately case-sensitive/exact on the "Put" prefix so it doesn't
+// defines (sfsobject.go: PutUtfString/PutInt/PutIntArray/PutLong/PutBool/PutDouble/PutByte/
+// PutShort/PutSFSObject/PutSFSArray). Deliberately case-sensitive/exact on the "Put" prefix so it doesn't
 // match the unexported `put`/`add` methods, which take an already-tagged SFSValue built elsewhere
 // (or are exercised directly only by same-package tests constructing edge-case SFSValue shapes,
 // e.g. sfsobject_redact_test.go) -- neither represents a new literal field name this repo's own
 // request-building code introduces.
-var putKeyCallRe = regexp.MustCompile(`\bPut(?:UtfString|Int|Long|Bool|Double|Byte|Short|SFSObject|SFSArray)\("([a-zA-Z0-9_]+)"`)
+var putKeyCallRe = regexp.MustCompile(`\bPut(?:UtfString|IntArray|Int|Long|Bool|Double|Byte|Short|SFSObject|SFSArray)\("([a-zA-Z0-9_]+)"`)
 
 // stripLineComment returns line with any trailing "//..." comment removed, tracking whether the
 // scan is inside a double-quoted string literal so a "//" that's part of a quoted value (e.g. a
