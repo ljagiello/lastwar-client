@@ -201,8 +201,7 @@ rest of the process if a reply shows the diamond balance falling. See
 | `secret-tasks-start` | Starts not-yet-started UR Secret Tasks (`hero.dispatch.start`) with idle heroes picked the way the client's Quick Join does; never refreshes a task |
 | `secret-tasks-start-plan` | Read-only: logs which task it would start with which heroes |
 | `radar-execute` | Runs the client's Quick Execute flows for march-free radar tasks (sampling, visitor, Help Teammates above a stamina reserve) and leaves them finished; the talk flow, which claims as it finishes, only on days whose entry lists type 82 |
-| `radar-overflow` | On days whose entry doesn't list type 82, claims only the finished radar tasks the next refresh would push past the stock cap |
-| `radar-inventory` | Read-only: logs every radar task with its type and state, and what the two features above would do with it |
+| `radar-inventory` | Read-only: logs every radar task with its type and state, what `radar-execute` would do with it, and the bank figures |
 
 ### Firework and dig features
 

@@ -432,8 +432,8 @@ func TestTreasureDigsRadarChestHeldOnOffDays(t *testing.T) {
 		end   time.Time
 		claim bool
 	}{
-		{"off day, event outlives today, tomorrow scores radar", radarOffDay(), evTestNow.Add(4 * time.Hour), false},
-		{"off day, event ends today", radarOffDay(), evTestNow.Add(30 * time.Minute), true},
+		{"off day, event outlives today", radarOffDay(), evTestNow.Add(4 * time.Hour), false},
+		{"off day, event ends today", radarOffDay(), evTestNow.Add(30 * time.Minute), false},
 		{"radar-scoring day", radarScoringDay(), evTestNow.Add(4 * time.Hour), true},
 	}
 	for _, tc := range cases {

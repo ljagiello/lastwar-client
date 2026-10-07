@@ -1,7 +1,7 @@
 package sfs
 
-// Request keys put on the wire by radar-execute, radar-overflow and radar-inventory
-// (internal/game/feature_radar_execute.go, feature_radar_overflow.go). All are radar task ids or
+// Request keys put on the wire by radar-execute and radar-inventory
+// (internal/game/feature_radar_execute.go). All are radar task ids or
 // flags, reviewed against their Lua senders; none carries a credential or PII.
 func init() {
 	for _, k := range []string{

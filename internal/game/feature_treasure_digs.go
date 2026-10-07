@@ -79,9 +79,8 @@ import (
 // the hammer totals the replies grant.
 //
 // A radar ruin is a radar task, which scores in the Alliance Duel (90402, Mon/Wed/Fri) when it is
-// claimed; whether the ruin's chest claim is that completion is unverified. So on a day whose duel
-// doesn't score radar tasks the chest is held when the event outlives today and tomorrow does
-// (radarTomorrowScores), like radar-overflow. No other dig action is in the score table.
+// claimed (confirmed live for radar tasks, 2026-10-07). So the chest is claimed only on a day whose
+// duel scores radar tasks, like radar-claims. No other dig action is in the score table.
 //
 // Every request goes through an allowlist of commands and their keys (digCheckParams): no buy,
 // exchange (hero.dispatch.hammer.exchange), help or share command, and no gold key, is ever sent.
@@ -755,21 +754,13 @@ func (r *digRun) radarRuins() {
 	}
 }
 
-// radarChestHeld reports whether a radar ruin's chest waits for tomorrow: today's duel doesn't
-// score radar tasks, tomorrow's does, and the event outlives today.
+// radarChestHeld reports whether a radar ruin's chest waits: radar tasks are claimed only on a day
+// whose Alliance Duel entry, read at login, scores them (score type 82), whatever the event's end.
 func (r *digRun) radarChestHeld(ev detectEvent) (bool, string) {
-	d := TodayDuel(r.conn, r.in)
-	if d.Scores(DuelScoreRadarTask, "") {
+	if TodayDuel(r.conn, r.in).Scores(DuelScoreRadarTask, "") {
 		return false, ""
 	}
-	end, ok := radarDayEnd(r.in, d)
-	if !ok || (ev.endTime > 0 && ev.endTime <= end.UnixMilli()) {
-		return false, ""
-	}
-	if !radarTomorrowScores(r.conn, r.in) {
-		return false, ""
-	}
-	return true, "today's duel doesn't score radar tasks, tomorrow's does, and the event lasts into tomorrow"
+	return true, "today's Alliance Duel doesn't score radar tasks"
 }
 
 // cityRuins digs every building carrying a buildingDigGame and claims its stage chests.

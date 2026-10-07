@@ -152,7 +152,6 @@ The duel-aware features are all off by default; see the README for the full list
 | `duel-troop-training` | hold, types 4 / 51 `4` | `building.camp.training` on idle camps |
 | `secret-tasks-start` | always, type 99 | `hero.dispatch.start` for UR tasks |
 | `radar-execute` | always, type 82 | march-free radar task flows, see [Radar tasks](#radar-tasks) |
-| `radar-overflow` | (gates internally) | `receive.detect.event.reward` for tasks the next refresh would push past the stock cap |
 
 `duel-speedups-plan`, `secret-tasks-start-plan`, and `radar-inventory` are read-only previews.
 
@@ -195,7 +194,7 @@ start.detect.event.talk {uuid} … end.detect.event.talk {uuid}       // type 14
 - **Help stamina:** a Help Teammates task costs 10 stamina unless its `cost` is `1`.
 - **Day gating:** the talk flow runs only on days whose entry lists type 82, because it claims as it finishes.
 
-`radar-overflow` computes the overflow the next refresh would cause, `eventNum + N − max(show − slots, 0) − maxNum`, from `detect_level`'s `detect_show_num`, `detect_max_num`, and `refresh` (`UIDetectEventCtrl.lua:371-394`). It claims that many finished tasks, oldest first. It sends nothing on days that list type 82. It also sends nothing when the next refresh lands after the server day ends and the next day's theme lists type 82 (Base Expansion, Train Heroes, and the Sunday rest day precede such days); that case depends on a run shortly after 02:00 UTC.
+The client's bank model for reference: each refresh adds `N` tasks into free slots and then into stock, up to `detect_max_num`, so a refresh with a full bank loses `eventNum + N − max(show − slots, 0) − maxNum` tasks (`detect_level`; `UIDetectEventCtrl.lua:371-394`). `goclient` claims radar tasks only on days whose entry lists type 82 (`radar-claims`), and `radar-inventory` logs the bank figures.
 
 ## Open questions
 

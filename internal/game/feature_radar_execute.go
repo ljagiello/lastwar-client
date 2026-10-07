@@ -143,7 +143,7 @@ func init() {
 	})
 	registerFeature(Feature{
 		Name:    "radar-inventory",
-		Summary: "read-only: log every radar task with its type and state and what radar-execute and radar-overflow would do",
+		Summary: "read-only: log every radar task with its type and state and what radar-execute would do",
 		Run:     runRadarInventory,
 	})
 }
@@ -562,7 +562,7 @@ func radarClaimFinished(conn *session.GameConn, snap *detectSnapshot, done map[i
 	return claimed, errs
 }
 
-// runRadarInventory reads the radar state and logs what radar-execute and radar-overflow would do
+// runRadarInventory reads the radar state and logs what radar-execute would do
 // with it. It sends nothing but get.detect.info and the duel's hero.event.info.get.
 func runRadarInventory(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil {
@@ -583,22 +583,10 @@ func runRadarInventory(conn *session.GameConn, in *Init) error {
 		"staminaFloor", st.have, "staminaKnown", st.known, "inAlliance", st.inAlliance,
 		"quickExecuteOn", claimSwitchOn(in, radarQuickSwitch))
 
-	overflowWhy := "radar-scoring day: radar-overflow does nothing, radar-claims claims"
-	pick := map[int64]bool{}
-	if !radarDay {
-		plan, picks, err := radarOverflowPlan(snap)
-		switch {
-		case err != nil:
-			overflowWhy = "radar-overflow would claim nothing: " + err.Error()
-		default:
-			overflowWhy = fmt.Sprintf("radar-overflow would claim %d of %d needed (eventNum %d + refresh %d - free slots %d - stock cap %d)",
-				len(picks), max(plan.k, 0), plan.eventNum, plan.refreshN, plan.freeSlots, plan.maxNum)
-			for _, ev := range picks {
-				pick[ev.uuid] = true
-			}
-		}
+	if row, ok := radarLevels[snap.level]; ok {
+		slog.Info("radar-inventory: bank", "showSlots", row.show, "stockCap", row.max, "refreshN", row.refreshN,
+			"refreshMin", row.refreshMin, "freeSlots", max(row.show-int64(len(snap.events)), 0))
 	}
-	slog.Info("radar-inventory: " + overflowWhy)
 	if !claimSwitchOn(in, radarQuickSwitch) {
 		slog.Info("radar-inventory: radar-execute would do nothing: init dataConfig doesn't turn on " + radarQuickSwitch)
 	}
@@ -612,7 +600,7 @@ func runRadarInventory(conn *session.GameConn, in *Init) error {
 			left = (time.Duration(d.ev.endTime-now.UnixMilli()) * time.Millisecond).Truncate(time.Second).String()
 		}
 		slog.Info("radar-inventory: task", "uuid", d.ev.uuid, "eventId", d.ev.eventID, "type", d.ev.typ, "sentType", d.ev.sentType,
-			"state", d.ev.state, "endsIn", left, "cost", d.ev.cost, "radarExecute", execute, "radarOverflowClaims", pick[d.ev.uuid])
+			"state", d.ev.state, "endsIn", left, "cost", d.ev.cost, "radarExecute", execute)
 	}
 	return nil
 }
