@@ -201,8 +201,19 @@ rest of the process if a reply shows the diamond balance falling. See
 | `secret-tasks-start` | Starts not-yet-started UR Secret Tasks (`hero.dispatch.start`) with idle heroes picked the way the client's Quick Join does; never refreshes a task |
 | `secret-tasks-start-plan` | Read-only: logs which task it would start with which heroes |
 | `radar-execute` | Runs the client's Quick Execute flows for march-free radar tasks (sampling, visitor, Help Teammates above a stamina reserve) and leaves them finished; the talk flow, which claims as it finishes, only on days whose entry lists type 82 |
-| `radar-overflow` | On days whose entry doesn't list type 82, claims only the finished radar tasks the next refresh would push past the stock cap |
-| `radar-inventory` | Read-only: logs every radar task with its type and state, and what the two features above would do with it |
+| `radar-inventory` | Read-only: logs every radar task with its type and state, what `radar-execute` would do with it, and the bank figures |
+
+### Firework and dig features
+
+All are off by default. Every dig write passes a per-command key allowlist that refuses any `buy`, gold or diamond key.
+
+| Feature | What it does |
+|---|---|
+| `fireworks-scan` | Read-only: lists the firework chests on alliance members' HQ tiles (`al.rank`, then `world.get.block`), with other players shown only as `member#<rank index>` |
+| `fireworks` | The same scan, then `get.fireworks.gift` for each eligible chest: under 120 minutes old, not full, from a current member; 1 s apart; stops at the daily cap |
+| `treasure-digs` / `-plan` | Radar-ruin, city-ruin and Secret Vault dig boards: claims the free hammer when the board offers it, opens bricks with owned hammers only, and claims the chests |
+| `treasure-hunt` / `-plan` | Treasure Hunt events (v1/v2): digs with owned pickaxes only and claims the tier and stored rewards |
+| `season-dig`, `offseason-dig`, `alliance-boss-dig` / `-plan` | Alliance dig vaults: opens your one free stone and claims relic and personal rewards |
 
 Every run with a feature enabled logs one `alliance duel` line (theme, score, next chest, day end),
 and every `push.act.score.obtain` the server sends is logged as `activity score obtained` with the
@@ -231,17 +242,7 @@ CRONEOF"
 ```
 
 The server day, and with it the Alliance Duel day, rolls over at 02:00 UTC. Features gated on today's
-duel entry only see the new day from the first run after that. A run a few minutes after the rollover
-needs an extra entry. Cron uses the host's local time; for a host on US Pacific time (19:00 PDT /
-18:00 PST), this one fires at 02:05 UTC in both summer and winter time, and the other of its two runs
-is an ordinary extra pass:
-
-```
-5 18,19 * * * /home/user/lastwar-client/lastwar-client -collect >> /home/user/lastwar-client/logs/collect.log 2>&1
-```
-
-`radar-overflow` relies on such a run: on the day before a day that lists radar tasks, it leaves the
-overflow unclaimed when the next refresh falls after the rollover.
+duel entry see the new day from the first scheduled run after that.
 
 Two things worth checking after setup, not just once but as ongoing habits:
 

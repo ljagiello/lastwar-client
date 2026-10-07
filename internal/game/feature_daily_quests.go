@@ -48,6 +48,11 @@ func init() {
 		Run:     runDailyQuests,
 	})
 	session.RegisterBenignErrorCode("120289", dailyQuestsTaskCmd, dailyQuestsChestCmd)
+	// Live 2026-10-06 19:05 PDT, minutes after the 02:00 UTC daily reset: daily.quest.ls still listed
+	// quests 105 and 119 as state 1, and daily.task.reward answered {errorCode=E000000,
+	// errorMsg="no rewards can be claimed"}. It is the server's "nothing to claim", scoped to this
+	// command; it has not been seen at any other hour.
+	session.RegisterBenignErrorCode("E000000", dailyQuestsTaskCmd)
 }
 
 func runDailyQuests(conn *session.GameConn, in *Init) error {

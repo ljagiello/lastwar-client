@@ -120,6 +120,11 @@ func (o *SFSObject) PutSFSObject(key string, val *SFSObject) {
 }
 func (o *SFSObject) PutSFSArray(key string, val *SFSArray) { o.put(key, SFSValue{sfsArrayType, val}) }
 
+// PutIntArray sets an IntArray (tag 12: int16 count, then big-endian int32s), the type the C#
+// client's ISFSObject.PutIntArray writes, e.g. world.get.block's `index`
+// (Assembly-CSharp.decompiled.cs:84201).
+func (o *SFSObject) PutIntArray(key string, val []int32) { o.put(key, SFSValue{sfsIntArray, val}) }
+
 // Has reports whether key is present in the decoded object. A nil receiver reports false rather
 // than panicking, matching StringRedacted/EncodeObject/writeValuePayload's existing nil-guard
 // pattern elsewhere in this file (round 32: this accessor and its siblings below were the one
@@ -957,6 +962,10 @@ func (a *SFSArray) AddValue(v SFSValue) { a.add(v) }
 func (a *SFSArray) Items() []SFSValue           { return a.items }
 func (a *SFSArray) AddInt(val int32)            { a.add(SFSValue{SFSInt, val}) }
 func (a *SFSArray) AddSFSObject(val *SFSObject) { a.add(SFSValue{SFSObjectType, val}) }
+
+// AddByteArray appends a ByteArray item (tag 10), the shape of world.get.block's `points` entries
+// (one serialized protobuf WorldPointInfo each).
+func (a *SFSArray) AddByteArray(val []byte) { a.add(SFSValue{sfsByteArray, val}) }
 
 // String makes *SFSArray satisfy fmt.Stringer safely, mirroring SFSObject.String(): it delegates
 // to StringRedacted() rather than printing raw item contents, so handing a bare *SFSArray (one not

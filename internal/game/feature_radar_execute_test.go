@@ -510,7 +510,7 @@ func TestRadarEventType(t *testing.T) {
 }
 
 func TestRadarFeaturesRegistered(t *testing.T) {
-	for _, name := range []string{"radar-execute", "radar-overflow", "radar-inventory"} {
+	for _, name := range []string{"radar-execute", "radar-inventory"} {
 		f, ok := featureRegistry[name]
 		if !ok {
 			t.Fatalf("%s not registered", name)
