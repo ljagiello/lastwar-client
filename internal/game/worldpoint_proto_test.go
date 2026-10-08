@@ -103,7 +103,7 @@ func TestDecodeWorldPointFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.ID != 347513 || p.ServerID != 783 || p.Build == nil {
+	if p.ID != 347513 || p.PointType != 1 || p.UUID != 99 || p.ServerID != 783 || p.Build == nil || p.Treasure != nil {
 		t.Fatalf("point = %+v", p)
 	}
 	b := p.Build
@@ -112,6 +112,95 @@ func TestDecodeWorldPointFixture(t *testing.T) {
 	}
 	if len(b.Gifts) != 1 || b.Gifts[0] != wantFixtureGift {
 		t.Errorf("gifts = %+v", b.Gifts)
+	}
+}
+
+// fixtureTreasure is TreasurePointInfo{uuid 300, ownerUid "o2", eventId "25001", completionTime
+// 1791212400000, allianceId "al1", rewardUserList ["u1", "u2"], complete true, expireTime
+// 1791241200000, type 1, createTime 1791205200000, multiple 2}, encoded by hand from proto:603-624,
+// with fields the reader skips: allianceAbbr (6), diggingUserList (8, a message), speed (11, a
+// fixed32 float), ownerName (12), fromPoint (17) and killerId (19).
+var fixtureTreasure = []byte{
+	0x08, 0xac, 0x02, // 1 uuid = 300
+	0x12, 0x02, 'o', '2', // 2 ownerUid = "o2"
+	0x1a, 0x05, '2', '5', '0', '0', '1', // 3 eventId = "25001" (a string)
+	0x20, 0x80, 0xdb, 0xd0, 0xe4, 0x90, 0x34, // 4 completionTime = 1791212400000
+	0x2a, 0x03, 'a', 'l', '1', // 5 allianceId = "al1"
+	0x32, 0x02, 'A', 'B', // 6 allianceAbbr = "AB"
+	0x3a, 0x02, 'u', '1', // 7 rewardUserList += "u1"
+	0x3a, 0x02, 'u', '2', // 7 rewardUserList += "u2"
+	0x42, 0x03, 0x0a, 0x01, 'd', // 8 diggingUserList += {uid "d"}
+	0x50, 0x01, // 10 complete = true
+	0x5d, 0x00, 0x00, 0xc0, 0x3f, // 11 speed = 1.5 (fixed32)
+	0x62, 0x01, 'n', // 12 ownerName = "n"
+	0x68, 0x80, 0xc3, 0xae, 0xf2, 0x90, 0x34, // 13 expireTime = 1791241200000
+	0x70, 0x01, // 14 type = 1 (RadarTreasure)
+	0x78, 0x80, 0xa1, 0x99, 0xe1, 0x90, 0x34, // 15 createTime = 1791205200000
+	0x88, 0x01, 0x05, // 17 fromPoint = 5
+	0x90, 0x01, 0x02, // 18 multiple = 2
+	0x9a, 0x01, 0x01, 'k', // 19 killerId = "k"
+}
+
+// fixtureTreasurePoint is WorldPointInfo{id 347540, pointType 21, treasurePointInfo, uuid
+// 7000000000999, serverId 783}.
+func fixtureTreasurePoint() []byte {
+	b := []byte{
+		0x08, 0x94, 0x9b, 0x15, // 1 id = 347540
+		0x10, 0x15, // 2 pointType = 21 (TREASURE)
+		0x5a, byte(len(fixtureTreasure)), // 11 treasurePointInfo
+	}
+	b = append(b, fixtureTreasure...)
+	return append(b,
+		0xa0, 0x06, 0xe7, 0xe7, 0x8d, 0x84, 0xdd, 0xcb, 0x01, // 100 uuid = 7000000000999
+		0xb0, 0x06, 0x8f, 0x06, // 102 serverId = 783
+	)
+}
+
+func TestDecodeTreasurePointFixture(t *testing.T) {
+	p, err := decodeWorldPoint(fixtureTreasurePoint())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ID != 347540 || p.PointType != 21 || p.UUID != 7000000000999 || p.ServerID != 783 || p.Build != nil || p.Treasure == nil {
+		t.Fatalf("point = %+v", p)
+	}
+	tr := p.Treasure
+	if tr.UUID != 300 || tr.OwnerUID != "o2" || tr.EventID != "25001" || tr.CompletionTime != 1791212400000 ||
+		tr.AllianceID != "al1" || !tr.Complete || tr.ExpireTime != 1791241200000 || tr.Type != 1 ||
+		tr.CreateTime != 1791205200000 || tr.Multiple != 2 {
+		t.Errorf("treasure = %+v", tr)
+	}
+	if tr.Claimers() != 2 || !tr.ClaimedBy("u1") || !tr.ClaimedBy("u2") || tr.ClaimedBy("d") || tr.ClaimedBy("") {
+		t.Errorf("claimers: %d, the digger and the empty uid are not claimers", tr.Claimers())
+	}
+	full := fixtureTreasurePoint()
+	for n := range len(full) {
+		if _, err := decodeWorldPoint(full[:n]); err == nil && n > 0 && !pbFieldBoundary(full, n) {
+			t.Errorf("truncated to %d bytes decoded without error", n)
+		}
+	}
+}
+
+func TestDecodeTreasureRejectsWrongWireTypes(t *testing.T) {
+	cases := map[string][]byte{
+		"treasure as varint":   {0x58, 0x01},
+		"pointType as bytes":   {0x12, 0x00},
+		"uuid as bytes":        {0xa2, 0x06, 0x00},
+		"eventId as varint":    pbBytesField(nil, 11, []byte{0x18, 0x01}),
+		"claimer as varint":    pbBytesField(nil, 11, []byte{0x38, 0x01}),
+		"truncated claimer":    pbBytesField(nil, 11, []byte{0x3a, 0x05, 'u'}),
+		"expireTime as fixed":  pbBytesField(nil, 11, []byte{0x69, 0, 0, 0, 0, 0, 0, 0, 0}),
+		"truncated digger msg": pbBytesField(nil, 11, []byte{0x42, 0x09, 0x0a}),
+	}
+	for name, b := range cases {
+		_, err := decodeWorldPoint(b)
+		if err == nil {
+			t.Errorf("%s: decoded without error", name)
+			continue
+		}
+		if b[0] == 0x5a && !strings.Contains(err.Error(), "treasurePointInfo") {
+			t.Errorf("%s: err %v does not name treasurePointInfo", name, err)
+		}
 	}
 }
 

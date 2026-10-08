@@ -439,6 +439,15 @@ Firework chests normally reach the client as alliance-chat posts 693 and 695 on 
 - Confirmed live: none yet. The chest list itself is `BuildInfo` field 54 (`fireWorksGiftList {uuid, configId, sendTime, num, max, index}`, tag bytes `B2 03`). No chest was live during the test, so field 54 is static-analysis-only so far.
 - Static-analysis-only: the claim is `get.fireworks.gift {uuid: Long, ownerUid: Utf, type: Int}`, where `type` is 1 for firework configs 671001-671005 and 0 otherwise. The error codes are `firework_tips_1009` (daily cap), `1014` (expired), `1015` (full), `1016` (already claimed) and `1017` (too fast).
 
+### Allies' dug radar treasures
+
+The alliance channel's "{owner}'s treasure at (x, y) has been dug up!" (post 600) also reaches the client only over the chat WebSocket, but the treasure itself is an ordinary world point. Everything here is static-analysis-only:
+
+- The point is a `WorldPointInfo` of `pointType` 21 carrying `TreasurePointInfo` (field 11): `uuid`, `ownerUid`, `eventId` (a string), `completionTime`, `allianceId`, `rewardUserList` (the claimers), `complete`, `expireTime`, `type` (1 radar, 3 activity radar, 11 off-season) and `multiple`.
+- The server places a radar task near its owner's HQ, at a distance nothing in the client states. `alliance-treasures-plan` reads every block within 3 blocks of each member HQ's block (at least 30 tiles each way) and logs each treasure's distance from its owner's HQ.
+- The claim is `detect.event.claim.treasure {uuid: Long, targetServer: Int}`, the point's own uuid and serverId. It is free and needs no march. A treasure takes `detect_event.para2`'s cap × `multiple` claimers: 20 for radar treasures 25001-25198, 10 for 1025001-1025168.
+- `801348` ("Already taken. One reward per player.") and `activity_wajueji_27000_tips13` (expired) are taken as benign. The daily cap's code is unknown, so any other error stops the run.
+
 ## Dig mini-games: what the live account showed
 
 All of these are confirmed live, read-only, on 2026-10-06:
