@@ -70,8 +70,6 @@ This section walks through going from a clean checkout to a working `-collect` r
 
     ```json
     {
-      "ip": "203.0.113.10",
-      "port": 17783,
       "zone": "your-real-zone-e.g.-APS1234",
       "gameUid": "your-real-composite-gameUid",
       "deviceId": "your-real-device-id_n3d",
@@ -83,7 +81,7 @@ This section walks through going from a clean checkout to a working `-collect` r
     }
     ```
 
-    **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in, since the SFS2X game socket is plain TCP with no TLS) and let `pcap -session-out` write this file from the captured `Login`, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token). [Capturing and decoding traffic](/capturing-and-decoding-traffic) also covers the manual pipeline. `ip` can hold a `|`-delimited list of the zone's gateways, tried in order. `gameUid`/`ip`/`port`/`zone` also show up in a GSL `getserverlist` response's `serverList[]` entries. The access token is not single-use, but it *is* bound to the platform identity (`iosMode`) and the build (`appVersion`/`versionCode`, optional, defaulting to built-in values) it was issued under, and it will eventually need refreshing from a fresh capture.
+    **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in, since the SFS2X game socket is plain TCP with no TLS) and let `pcap -session-out` write this file from the captured `Login`, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token). [Capturing and decoding traffic](/capturing-and-decoding-traffic) also covers the manual pipeline. The game server's `ip` (a `|`-delimited list of the zone's gateways, tried in order) and `port` are optional: without them, `goclient` looks the role's server up with GSL `getserverlist`, and it looks again if a saved address stops answering, see [Looking up the game server](/auth#looking-up-the-game-server). The access token is not single-use, but it *is* bound to the platform identity (`iosMode`) and the build (`appVersion`/`versionCode`, optional, defaulting to built-in values) it was issued under, and it will eventually need refreshing from a fresh capture.
 
     <Warning>
       This file contains live credentials for a real account, keep it out of version control. It's already outside the repo, in your home directory, and `chmod 600`'d above; don't move it into this repo or commit it anywhere.

@@ -76,8 +76,6 @@ whatever the config file says, for one-off tests.
 
 ```json
 {
-  "ip": "203.0.113.10",
-  "port": 17783,
   "zone": "your-real-zone-e.g.-APS1234",
   "gameUid": "your-real-composite-gameUid",
   "deviceId": "your-real-device-id_n3d",
@@ -92,11 +90,29 @@ whatever the config file says, for one-off tests.
 **Where these values come from:** capture a real login (e.g. `tcpdump` while the real app logs in,
 since the SFS2X game socket is plain TCP with no TLS) and let `go run ./cmd/pcap -in login.pcap
 -session-out ~/.lastwar_goclient_session.json` write this file from the captured `Login` (see
-"Recovering" below, and `docs/capturing-and-decoding-traffic.mdx` for the manual methodology). `gameUid`/`ip`/`port`/`zone`
-also show up in a GSL `getserverlist` response's `serverList[]` entries. The access token is not
-single-use, but it *is* bound to the platform identity (`iosMode`) and build (`appVersion`/
-`versionCode`, optional, defaulting to the built-in values) it was issued under, and it will
-eventually need refreshing from a fresh capture.
+"Recovering" below, and `docs/capturing-and-decoding-traffic.mdx` for the manual methodology). The
+access token is not single-use, but it *is* bound to the platform identity (`iosMode`) and build
+(`appVersion`/`versionCode`, optional, defaulting to the built-in values) it was issued under, and
+it will eventually need refreshing from a fresh capture.
+
+**The game server address is looked up, not typed in.** `ip` (a `|`-delimited gateway list) and
+`port` are optional. The real client asks GSL `getserverlist.php` for its role's server on every
+cold start, and this client does the same when it needs to:
+
+- With no `ip`/`port` in the config or on the command line, it looks the role's server up before
+  dialing (`opt=fix` with the config's `deviceId`, `zone` and `gameUid`, and `platform=iOS` under
+  `iosMode`).
+- With an address saved, it dials it directly and makes no GSL call. If every gateway refuses the
+  connection, or the `Login` gets no reply (the August 2026 port move looked like this), it looks
+  the server up once and retries there. An `E011` or other rejection never triggers a lookup.
+- Either way, the address it connected to is saved back into the config, so later runs dial it
+  directly.
+
+`pcap -session-out` still writes the captured `ip`/`port`, which saves the first lookup. The lookup
+takes only the address from the reply and keeps the config's `accessToken`. It is
+static-analysis-only: whether GSL honors `opt=fix` for a session the iOS app issued, and whether that
+call issues or rotates tokens, hasn't been tested live. If the lookup logs that the reply carries a
+different access token and the `Login` then fails with `E011`, recapture the session.
 
 **Recognizing an expired token, confirmed live:** every command starts failing with
 `CROSS-SERVER LOGIN FAILED: ec=28 full={ep=[E011], ec=28}`, the connection succeeds, but login
@@ -117,9 +133,10 @@ go run ./cmd/pcap -in login.pcap -session-out ~/.lastwar_goclient_session.json
 ```
 
 `-session-out` finds the Login the server *accepted* (the real app first races the zone port on
-several gateways with `a=29` probes; those are skipped), writes `ip`/`port`/`zone`/`gameUid`/
-`deviceId`/`shumeiBoxId`/`accessToken`/`iosMode` plus the `appVersion`/`versionCode` the token was
-issued under, with mode 0600, and prints only field lengths, never values. Recording the build
+several gateways with `a=29` probes; those are skipped), writes `zone`/`gameUid`/`deviceId`/
+`shumeiBoxId`/`accessToken`/`iosMode` plus the `appVersion`/`versionCode` the token was issued
+under, and the captured `ip`/`port` as a starting address, with mode 0600, and prints only field
+lengths, never values. Recording the build
 matters: a token is bound to it, so once the real app updates, a fresh token only works if the
 Login claims that same build (without these two fields, iOS mode falls back to the 1.0.344/786
 build the original capture showed).

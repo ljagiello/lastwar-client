@@ -259,20 +259,23 @@ func TestOptStateRedacts(t *testing.T) {
 }
 
 // TestGetServerListOptFields decrypts the request the way the server does and checks the opt
-// fields ChooseOpt's outcomes produce, including "no opt" for a fresh at.
+// fields ChooseOpt's outcomes produce, including "no opt" for a fresh at, and the platform
+// GetServerList and GetServerListAs send.
 func TestGetServerListOptFields(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
 	cases := []struct {
-		name    string
-		opt     GSLOpt
-		want    map[string]string
-		without []string
+		name     string
+		platform string // "" calls GetServerList, which sends Platform
+		opt      GSLOpt
+		want     map[string]string
+		without  []string
 	}{
-		{"no opt", GSLOpt{}, nil, []string{"opt", "rt", "loginKey"}},
-		{"refresh", GSLOpt{Opt: "refresh", Rt: "rt-1"}, map[string]string{"opt": "refresh", "rt": "rt-1"}, []string{"loginKey"}},
+		{"no opt", "", GSLOpt{}, map[string]string{"platform": Platform}, []string{"opt", "rt", "loginKey"}},
+		{"refresh", "", GSLOpt{Opt: "refresh", Rt: "rt-1"}, map[string]string{"opt": "refresh", "rt": "rt-1"}, []string{"loginKey"}},
+		{"fix as iOS", "iOS", GSLOpt{Opt: "fix"}, map[string]string{"opt": "fix", "platform": "iOS", "zone": "APS1", "gameuid": "g"}, []string{"rt", "loginKey"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -297,7 +300,13 @@ func TestGetServerListOptFields(t *testing.T) {
 			}))
 			defer server.Close()
 
-			if _, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "dev", c.opt, "APS1", "g"); err != nil {
+			var err error
+			if c.platform == "" {
+				_, err = GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "dev", c.opt, "APS1", "g")
+			} else {
+				_, err = GetServerListAs(DefaultHTTPClient(), server.URL, &priv.PublicKey, c.platform, "dev", c.opt, "APS1", "g")
+			}
+			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
 			if form == nil {

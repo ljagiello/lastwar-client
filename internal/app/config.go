@@ -19,6 +19,9 @@ import (
 // (IOSMode) it was issued under; it is not single-use, but it will
 // eventually need refreshing from a fresh capture.
 type SessionConfig struct {
+	// IP ("|"-delimited gateways) and Port are optional: without them runCrossServerTest looks the
+	// role's game server up with GSL getserverlist, and either way it saves the address it
+	// connected to back here.
 	IP          string `json:"ip"`
 	Port        int    `json:"port"`
 	Zone        string `json:"zone"`

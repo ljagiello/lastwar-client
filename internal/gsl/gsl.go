@@ -790,9 +790,16 @@ func (o GSLOpt) GoString() string { return o.String() }
 // for the full rationale.
 func (o GSLOpt) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
-// GetServerList performs the RSA+AES-wrapped GSL POST and returns the
-// decrypted, parsed response.
+// GetServerList performs the RSA+AES-wrapped GSL POST as an Android client (GetServerListAs with
+// Platform) and returns the decrypted, parsed response.
 func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey, deviceID string, opt GSLOpt, zone, gameUid string) (*LoginServerListRespon, error) {
+	return GetServerListAs(httpClient, gateHost, pub, Platform, deviceID, opt, zone, gameUid)
+}
+
+// GetServerListAs is GetServerList with the form's `platform` field set to platform: the issuing
+// client's GameUtility.GetPlatformName(), "Android" or "iOS" (csharp-native §2.3). A session the iOS
+// app issued sends "iOS", as that app does.
+func GetServerListAs(httpClient *http.Client, gateHost string, pub *rsa.PublicKey, platform, deviceID string, opt GSLOpt, zone, gameUid string) (*LoginServerListRespon, error) {
 	gc := crypto.NewGSLCrypto(pub)
 
 	airKey := "lwDid_" + B64OfString(deviceID)
@@ -805,7 +812,7 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 	form.Set("is3D", "1")
 	form.Set("lang", "en")
 	form.Set("simOp", "")
-	form.Set("platform", Platform)
+	form.Set("platform", platform)
 	form.Set("isSimulator", "0")
 	form.Set("zone", zone)
 	form.Set("gameuid", gameUid)
