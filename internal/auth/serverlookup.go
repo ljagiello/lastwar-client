@@ -7,7 +7,6 @@ import (
 	"lastwar-client/internal/gsl"
 	"log/slog"
 	"net/http"
-	"time"
 )
 
 // ServerLookup is what LookupGameServer needs to ask GSL getserverlist.php where a role's game
@@ -41,20 +40,23 @@ type GameServer struct {
 // SERVER_IP/PORT (A-CS:9268), so StartConnect always runs GetServerList (A-CS:7230-7246). The
 // address it returns follows zone moves and port changes that a captured address doesn't.
 //
-// The opt is gsl.ChooseOpt over what the lookup holds, a gameUid and an access token but no refresh
-// token, so it is opt=fix. A session's refresh token is never sent: the caller keeps its access
-// token, so an opt=refresh that rotated the pair would strand both.
+// The request carries no opt field: what the real app sends on a cold start while it holds a fresh
+// at and an rt (gsl.ChooseOpt's last row). The session's device is that app's device, and GSL ties
+// its tokens to it. Confirmed live on 2026-10-10 against a captured iOS session: with no opt, GSL
+// answered code 0 with the role's server (gateway hostnames, port, zone, gameUid) and no tokens.
+// opt=fix, which gsl.ChooseOpt gives a client holding no rt, was rejected with code 212. A
+// session's refresh token is never sent: the caller keeps its access token, so an opt=refresh that
+// rotated the pair would strand both.
 //
 // Only the address is taken from the reply. The caller keeps its access token, as the client does
-// on a serverInfo redirect. Whether GSL issues or rotates tokens on opt=fix for a session the iOS
-// app issued is untested (static-analysis-only), so any token in the reply is only compared with
-// AccessTok, and the result is logged.
+// on a serverInfo redirect. Any token the reply carries is only compared with AccessTok, and the
+// result is logged.
 func LookupGameServer(l ServerLookup) (GameServer, error) {
 	if l.GameUid == "" {
-		// Without a gameUid, gsl.ChooseOpt picks opt=new, which asks GSL for a brand-new account.
+		// Without a gameUid the server can't tell which role to list.
 		return GameServer{}, errors.New("GSL server lookup: no gameUid")
 	}
-	opt := gsl.ChooseOpt(gsl.OptState{GameUid: l.GameUid, AccessTok: l.AccessTok}, time.Now())
+	opt := gsl.GSLOpt{}
 	platform := loginBuild(l.IOSMode, "", "").Platform
 	slog.Info("GSL getserverlist: looking up the game server", "opt", opt.Opt, "platform", platform, "zone", l.Zone, "gameUid", l.GameUid)
 	lsr, err := gsl.GetServerListAs(l.HTTPClient, l.GateHost, l.RSAPub, platform, l.DeviceID, opt, l.Zone, l.GameUid)
