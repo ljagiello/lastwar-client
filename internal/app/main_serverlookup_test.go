@@ -248,6 +248,47 @@ func TestRunCrossServerTestNoLookupOnTokenRejection(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestNoRetryWhenLookupNamesTheSameServer: when GSL lists the very address that
+// just failed, a second dial can't help, so the run reports the original error and exits 1 after
+// one dial. Re-executes the test binary because runCrossServerTest exits the process on this path.
+func TestRunCrossServerTestNoRetryWhenLookupNamesTheSameServer(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		client := testutil.UseInMemoryGSL(t, lookupReply())
+		// The configured gateways are the looked-up ones in another order, and all refuse.
+		runCrossServerTest(crossServerTestOpts{
+			ip: "gw-c.example|gw-b.example|gw-a.example", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid, at: "at-1",
+			httpClient: client, dialGame: func(addr string, _ time.Duration) (*session.GameConn, error) {
+				fmt.Fprintf(os.Stderr, "dial %s\n", addr)
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+			},
+		})
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestNoRetryWhenLookupNamesTheSameServer$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("subprocess did not fail as expected: err=%v, stderr=%s", runErr, stderr.String())
+	}
+	if exitErr.ExitCode() != 1 {
+		t.Errorf("subprocess exit code = %d, want 1; stderr=%s", exitErr.ExitCode(), stderr.String())
+	}
+	log := stderr.String()
+	if !strings.Contains(log, "GSL lists the game server that just failed; not retrying") {
+		t.Errorf("want the not-retrying warning; stderr=%s", log)
+	}
+	// One pass over the configured gateways, none after the lookup.
+	if n := strings.Count(log, "dial gw-"); n != 3 {
+		t.Errorf("dialed %d times, want 3 (one pass over the configured gateways); stderr=%s", n, log)
+	}
+}
+
 func TestConnectFailed(t *testing.T) {
 	cases := []struct {
 		name string

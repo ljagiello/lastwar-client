@@ -117,7 +117,7 @@ The real client's recovery from `E011` needs the refresh token: clear `at`, run 
 
 ### Following a `serverInfo` redirect
 
-When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live) and now does the same as the real client: it redials with the same `at` and adopts `serverInfo.zone` and `serverInfo.uid`. Earlier versions called GSL `opt=fix` before redialing. Under the iOS identity that call could only swap a working token for an Android-bound one, because `goclient`'s GSL requests claimed `platform=Android`.
+When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live) and now does the same as the real client: it redials with the same `at` and adopts `serverInfo.zone` and `serverInfo.uid`. Earlier versions called GSL `opt=fix` before redialing. Under the iOS identity that call could only swap a working token for an Android-bound one, because that GSL request claimed `platform=Android`. The `-cs-rt` refresh and the guest login still send `platform=Android`; only the game-server lookup below sends `platform=iOS` for an iOS session.
 
 ### Looking up the game server
 
@@ -130,7 +130,7 @@ A working address costs no GSL call. Either way, `goclient` saves the address it
 
 The lookup follows the `opt` table above for what it holds, a `gameUid` and an `at` but no `rt`, so it sends `opt=fix`. It sends the session's `zone` and `gameUid`, and `platform=iOS` for a session the iOS app issued. It takes only the address from the reply, picking the entry that carries the session's `gameUid` and refusing an entry that names another role. It keeps the session's `at` and logs whether the reply carried a different one.
 
-This is static-analysis-only. Nobody has tested whether GSL accepts `opt=fix` for a session the iOS app issued, or whether that call issues or rotates tokens. If the lookup reports a different `at` and the `Login` then fails with `E011`, recapture the session.
+This is static-analysis-only. Nobody has tested whether GSL accepts `opt=fix` for a session the iOS app issued, or whether that call issues or rotates tokens. The lookup also encrypts with the RSA key and posts to the gate host from the Android check-version reply, as every other `goclient` GSL call does; if GSL keys turn out to differ by platform, the lookup fails with code 213. If the lookup reports a different `at` and the `Login` then fails with `E011`, recapture the session.
 
 ### A device of its own
 
