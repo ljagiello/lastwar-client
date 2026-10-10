@@ -122,7 +122,7 @@ What `-session-out` does:
 - It searches every plain (non-TLS) stream, or only the one you name with `-stream`.
 - It picks the `Login` request (`c=0, a=1`) whose server reply carries no `ec`. It reports streams whose `Login` was rejected or never answered, and skips the `a=29` probe streams.
 - It writes `ip`, `port`, `zone`, `gameUid`, `deviceId`, `shumeiBoxId`, `accessToken`, and `iosMode` (from `platform="0"`), plus the `appVersion` and `versionCode` the token was issued under. It overwrites the destination and sets mode `0600`, tightening an existing file's mode too.
-- It appends every other gateway that answered a probe on the same port to `ip` as a `|`-delimited fallback list, after the gateway the accepted `Login` went through.
+- It appends every other gateway that answered a probe on the same port to `ip` as a `|`-delimited fallback list, after the gateway the accepted `Login` went through. `ip` and `port` are only a starting address: `goclient` looks the server up with GSL when they stop answering, see [Looking up the game server](/auth#looking-up-the-game-server).
 - It prints `ip`, `port`, `zone`, `iosMode`, `appVersion`, and `versionCode`, but only the **lengths** of `gameUid`, `deviceId`, `shumeiBoxId`, and `accessToken`, so its output is safe to paste into an issue.
 - It refuses when more than one stream holds an accepted `Login` (for example, the app relaunched mid-capture), because the conversations carry no timestamps to tell which is freshest. Pick one with `-stream`.
 - It fails if the accepted `Login` is missing `zn`, `gameUid`, `deviceId`, or `at`. It copies `shumeiBoxId` when present but doesn't require it, since the server doesn't either: a captured session also reconnects with it empty (confirmed live, 2026-10-04).

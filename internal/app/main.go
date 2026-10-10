@@ -74,8 +74,8 @@ func Run() {
 	listBuildings := fs.Bool("list-buildings", false, "print every owned building's details (a summary line, a per-type line, and a per-instance line with uuid/level/pointId and a full raw redacted dump -- not just id/type/level) to stdout. NOTE: this print already happens by DEFAULT whenever -collect is NOT passed -- this flag only matters when -collect IS also passed, where it forces the same print to happen alongside collection instead of being skipped; the process still exits after -collect/-list-buildings finish (assuming -collect, if passed, didn't fail fatally first) unless -interactive is also set")
 	interactive := fs.String("interactive", "", "stay connected and read ad-hoc test commands from this control FIFO instead of exiting; only flat scalar param values (strings/bools/numbers) are supported -- nested JSON objects/arrays are rejected with a logged error and abort the whole send (see interactive.go)")
 
-	csIP := fs.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new)")
-	csPort := fs.Int("cs-port", 0, "port for -cs-ip -- must be a positive value; runtime validation rejects 0 or a negative port before ever attempting to dial (see runCrossServerTest's own port <= 0 check), producing a clear error instead of a cryptic OS-level dial failure")
+	csIP := fs.String("cs-ip", "", "skip normal login; reconnect directly to this ip (pipe-delimited ok) using an already-known role (from accountArr/push.account.login.new). Optional when an access token is given (-cs-at or a session config): without -cs-ip/-cs-port or a session config ip/port, GSL getserverlist looks the role's game server up, and it does so again if the given address doesn't answer")
+	csPort := fs.Int("cs-port", 0, "port for -cs-ip -- must be a positive value; runtime validation rejects 0 or a negative port before ever attempting to dial (see runCrossServerTest's own port <= 0 check), producing a clear error instead of a cryptic OS-level dial failure. Optional, like -cs-ip")
 	csZone := fs.String("cs-zone", "", "zone for -cs-ip, e.g. APS1234")
 	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip -- also sent on every -cs-rt GSL opt=refresh call, unlike -cs-zone (which only matters for -cs-ip): gameUid is passed to gsl.GetServerList unconditionally, so it matters even for a bare -cs-rt with no -cs-ip at all")
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
@@ -344,25 +344,30 @@ func Run() {
 		return
 	}
 
+	// An ip, a refresh token or an access token selects the cross-server reconnect. The access token
+	// counts on its own because the game server address is optional: with none given,
+	// runCrossServerTest looks it up with GSL getserverlist.
+	crossServer := *csIP != "" || *csRt != "" || *csAt != ""
+
 	// Symmetric to the -email/-code-pipe-ignored warnings just below (for the opposite direction):
-	// if any -cs-* flag OTHER than -cs-ip/-cs-rt was explicitly set on the command line but the
-	// cross-server dispatch branch below won't actually be taken, that flag is otherwise silently
-	// discarded and this falls through to the full guest/email login flow instead -- easy to miss
-	// (e.g. a typo'd -cs-ip that got dropped by config merging, or -cs-at set while forgetting
-	// -cs-rt) without any warning. Checked here, after config merging, so a config-supplied ip
-	// correctly counts as "cross-server WILL be taken" and doesn't produce a false warning.
-	if *csIP == "" && *csRt == "" {
+	// if any -cs-* flag was explicitly set on the command line but the cross-server dispatch branch
+	// below won't actually be taken, that flag is otherwise silently discarded and this falls through
+	// to the full guest/email login flow instead -- easy to miss (e.g. a -cs-at given an empty value
+	// by an unset shell variable) without any warning. Checked here, after config merging, so a
+	// config-supplied ip or accessToken correctly counts as "cross-server WILL be taken" and doesn't
+	// produce a false warning.
+	if !crossServer {
 		if ignored := ignoredCrossServerFlags(visitedFlags); len(ignored) > 0 {
-			slog.Warn("ignoring -cs-* flags because neither -cs-ip nor -cs-rt is set (falling through to the normal guest/email login flow instead of cross-server reconnect)", "ignoredFlags", ignored)
+			slog.Warn("ignoring -cs-* flags because none of -cs-ip, -cs-rt or -cs-at is set (falling through to the normal guest/email login flow instead of cross-server reconnect)", "ignoredFlags", ignored)
 		}
 	}
 
-	if *csIP != "" || *csRt != "" {
+	if crossServer {
 		if *email != "" {
-			slog.Warn("ignoring -email because -cs-ip/-cs-rt is set (cross-server reconnect doesn't use the email flow)")
+			slog.Warn("ignoring -email because -cs-ip/-cs-rt/-cs-at is set (cross-server reconnect doesn't use the email flow)")
 		}
 		if *codePipe != "" {
-			slog.Warn("ignoring -code-pipe because -cs-ip/-cs-rt is set (cross-server reconnect doesn't use the email flow)")
+			slog.Warn("ignoring -code-pipe because -cs-ip/-cs-rt/-cs-at is set (cross-server reconnect doesn't use the email flow)")
 		}
 		runCrossServerTest(crossServerTestOpts{
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
@@ -730,8 +735,9 @@ func detectSwallowedFlagValue(name, value string, registeredFlagNames map[string
 }
 
 // crossServerFlagNames are the -cs-* flags whose only effect is on the cross-server reconnect path
-// dispatched from -cs-ip/-cs-rt (see runCrossServerTest) -- -cs-ip and -cs-rt themselves are
-// excluded since those two are what GATE that path, not flags merely consumed once it's taken. Kept
+// dispatched from -cs-ip/-cs-rt/-cs-at (see runCrossServerTest) -- -cs-ip and -cs-rt themselves are
+// excluded since those two are what GATE that path, not flags merely consumed once it's taken.
+// -cs-at gates it too but stays listed: given an empty value, it gates nothing and is ignored. Kept
 // as a package-level map (rather than inlined in ignoredCrossServerFlags) so a test can cross-check
 // it against the FlagSet's actual -cs-* declarations and catch the two ways it can drift: a new
 // -cs-* flag added to the FlagSet but forgotten here, or a stale name left here after a flag is
@@ -747,7 +753,7 @@ var crossServerFlagNames = map[string]bool{
 }
 
 // ignoredCrossServerFlags returns which of the given visited (explicitly set on the command line)
-// flag names are -cs-* flags that get silently discarded when neither -cs-ip nor -cs-rt is set --
+// flag names are -cs-* flags that get silently discarded when none of -cs-ip, -cs-rt or -cs-at is set --
 // see the call site in main() for why that combination falls through to the plain guest/email login
 // flow instead of cross-server reconnect.
 func ignoredCrossServerFlags(visited []string) []string {
@@ -842,6 +848,32 @@ func serverListOverrideFlags(ip string, ipExplicit bool, port int, portExplicit 
 // makes this testable without spinning up fake GSL/game servers.
 func crossServerSaveBackNeeded(newHost string, newPort int, newZone, newAccessTok, newGameUid, origHost string, origPort int, origZone, origAccessTok, origGameUid string) bool {
 	return !slices.Contains(strings.Split(origHost, "|"), newHost) || newPort != origPort || newZone != origZone || newAccessTok != origAccessTok || newGameUid != origGameUid
+}
+
+// connectFailed reports whether a DoCrossServerLogin error means the game server could not be
+// reached or never answered the Login: a dial that failed on every gateway, a dropped connection,
+// a Login with no reply. That is what a stale address looks like (the port moved 17783 -> 10783 in
+// August 2026, and the Login just went unanswered). A server that answered, with an auth rejection
+// or a session-ending push, is not: another address can't fix it, and a token problem must not
+// trigger a GSL call.
+func connectFailed(err error) bool {
+	if errors.Is(err, session.ErrAuthRejected) || errors.Is(err, session.ErrSessionEnded) {
+		return false
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+// sameGameServer reports whether a GSL lookup names the game server that was just tried: the same
+// port and zone, and the same gateway hosts in any order.
+func sameGameServer(srv auth.GameServer, ip string, port int, zone string) bool {
+	if srv.Port != port || srv.Zone != zone {
+		return false
+	}
+	a, b := strings.Split(srv.IP, "|"), strings.Split(ip, "|")
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
 }
 
 // parseLogLevel maps a -log-level flag value to an slog.Level, defaulting to Info for the empty
@@ -1134,6 +1166,33 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 
+	// Without -cs-rt (whose refresh reply already lists the servers), GSL getserverlist looks the
+	// game server up, as the real client does on every cold start: before dialing when no address
+	// was given, and once more if the given one can't be reached. The lookup needs check-version's
+	// gate host and RSA key, a gameUid (without one GSL would treat this device as new) and an
+	// access token (without one the Login fails anyway).
+	var lookup func() (auth.GameServer, error)
+	if o.rt == "" && gslRSAPub != nil && gameUid != "" && accessTok != "" {
+		lookup = func() (auth.GameServer, error) {
+			return auth.LookupGameServer(auth.ServerLookup{
+				HTTPClient: httpClient, GateHost: gslGateHost, RSAPub: gslRSAPub,
+				DeviceID: deviceID, IOSMode: o.iosMode, Zone: zone, GameUid: gameUid, AccessTok: accessTok,
+			})
+		}
+	}
+	lookedUp := false
+	if lookup != nil && (gsl.FirstHost(ip) == "" || port <= 0) && !o.ipExplicit && !o.portExplicit {
+		slog.Info("no game server address given; looking it up with GSL getserverlist")
+		srv, err := lookup()
+		if err != nil {
+			slog.Error("cross-server login: no game server address given, and the GSL lookup failed", "error", err)
+			exitIfReauthNeeded(err)
+			os.Exit(1)
+		}
+		ip, port, zone = srv.IP, srv.Port, srv.Zone
+		lookedUp = true
+	}
+
 	// Symmetric to the port <= 0 check just below, but arguably more important to catch here
 	// rather than downstream: crossserver.go's addr := fmt.Sprintf("%s:%d", gsl.FirstHost(p.IP),
 	// p.Port) collapses an empty ip to just ":<port>", and Go's "host:port" dial syntax treats an
@@ -1159,7 +1218,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			// typo toward the wrong root cause (did I forget the flag? vs. did I pass it with no value?).
 			slog.Error("cross-server login: -cs-ip was given but empty (pass a non-empty ip)")
 		} else {
-			slog.Error("cross-server login: no ip given (pass -cs-ip or a session config with ip)")
+			slog.Error("cross-server login: no ip given (pass -cs-ip or a session config with ip, or omit both ip and port to have GSL look the server up; that needs a working check-version, a gameUid and an access token, and isn't done with -cs-rt)")
 		}
 		os.Exit(1)
 	}
@@ -1183,7 +1242,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			// forget the flag? vs. did I fat-finger the value?).
 			slog.Error("cross-server login: invalid -cs-port value (must be positive)", "port", port)
 		} else {
-			slog.Error("cross-server login: no port given (pass -cs-port or a session config with port)")
+			slog.Error("cross-server login: no port given (pass -cs-port or a session config with port, or omit both ip and port to have GSL look the server up; that needs a working check-version, a gameUid and an access token, and isn't done with -cs-rt)")
 		}
 		os.Exit(1)
 	}
@@ -1219,7 +1278,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 
 	resVersion := auth.ResVersionFor(httpClient, cv, o.iosMode, o.appVersion, o.versionCode, zone)
-	result, err := auth.DoCrossServerLogin(auth.CrossServerLoginParams{
+	params := auth.CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
 		DeviceID: deviceID, AirKey: airKey,
 		AccessTok: accessTok, ShumeiBoxId: o.shumeiBoxId,
@@ -1227,7 +1286,20 @@ func runCrossServerTest(o crossServerTestOpts) {
 		AppVersion: o.appVersion, VersionCode: o.versionCode,
 		ResVersion: resVersion,
 		DialGame:   o.dialGame,
-	})
+	}
+	result, err := auth.DoCrossServerLogin(params)
+	if err != nil && lookup != nil && !lookedUp && connectFailed(err) {
+		slog.Warn("cross-server login: the game server did not answer; looking it up with GSL getserverlist", "error", err)
+		if srv, lookupErr := lookup(); lookupErr != nil {
+			slog.Warn("GSL server lookup failed; reporting the original login error", "error", lookupErr)
+		} else if sameGameServer(srv, ip, port, zone) {
+			slog.Warn("GSL lists the game server that just failed; not retrying")
+		} else {
+			ip, port, zone = srv.IP, srv.Port, srv.Zone
+			params.IP, params.Port, params.Zone = ip, port, zone
+			result, err = auth.DoCrossServerLogin(params)
+		}
+	}
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
 		exitIfSessionEnded(err, nil)
@@ -1261,8 +1333,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 			if newPort, atoiErr := strconv.Atoi(newPortStr); atoiErr == nil {
 				if crossServerSaveBackNeeded(newHost, newPort, result.Zone, result.AccessTok, result.GameUid, origIP, origPort, origZone, origAccessTok, origGameUid) {
 					savedIP := newHost
-					if newPort == origPort && slices.Contains(strings.Split(origIP, "|"), newHost) {
-						savedIP = origIP // keep the configured gateway fallback list
+					if newPort == port && slices.Contains(strings.Split(ip, "|"), newHost) {
+						savedIP = ip // keep the gateway fallback list the connection came from
 					}
 					updated := &SessionConfig{
 						IP: savedIP, Port: newPort, Zone: result.Zone,
