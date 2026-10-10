@@ -100,7 +100,7 @@ it will eventually need refreshing from a fresh capture.
 cold start, and this client does the same when it needs to:
 
 - With no `ip`/`port` in the config or on the command line, it looks the role's server up before
-  dialing (`opt=fix` with the config's `deviceId`, `zone` and `gameUid`, and `platform=iOS` under
+  dialing (no `opt` field, the config's `deviceId`, `zone` and `gameUid`, and `platform=iOS` under
   `iosMode`).
 - With an address saved, it dials it directly and makes no GSL call. If every gateway refuses the
   connection, or the `Login` gets no reply (the August 2026 port move looked like this), it looks
@@ -109,10 +109,10 @@ cold start, and this client does the same when it needs to:
   directly.
 
 `pcap -session-out` still writes the captured `ip`/`port`, which saves the first lookup. The lookup
-takes only the address from the reply and keeps the config's `accessToken`. It is
-static-analysis-only: whether GSL honors `opt=fix` for a session the iOS app issued, and whether that
-call issues or rotates tokens, hasn't been tested live. If the lookup logs that the reply carries a
-different access token and the `Login` then fails with `E011`, recapture the session.
+takes only the address from the reply and keeps the config's `accessToken`. Confirmed live on
+2026-10-10 with a captured iOS session: the lookup returned the role's server and no tokens, and
+configs with no address and with the pre-August port `17783` both logged in through it. `opt=fix`
+is rejected for such a session with GSL code 212, which is why the lookup sends no `opt`.
 
 **Recognizing an expired token, confirmed live:** every command starts failing with
 `CROSS-SERVER LOGIN FAILED: ec=28 full={ep=[E011], ec=28}`, the connection succeeds, but login

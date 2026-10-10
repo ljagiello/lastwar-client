@@ -112,8 +112,8 @@ func (f failTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return nil, errors.New("unexpected request")
 }
 
-// TestLookupGameServerNeedsGameUid: without a gameUid, ChooseOpt would pick opt=new, which asks GSL
-// for a brand-new account, so the lookup refuses before any request.
+// TestLookupGameServerNeedsGameUid: without a gameUid there is no role to list, so the lookup
+// refuses before any request.
 func TestLookupGameServerNeedsGameUid(t *testing.T) {
 	_, err := LookupGameServer(ServerLookup{HTTPClient: &http.Client{Transport: failTransport{t}}, GateHost: "http://gsl.invalid", AccessTok: "at-1"})
 	if err == nil {
@@ -122,8 +122,8 @@ func TestLookupGameServerNeedsGameUid(t *testing.T) {
 }
 
 // TestLookupGameServerRequest decrypts the getserverlist.php form the way the server does: the
-// lookup sends opt=fix with the session's device, zone and gameUid, the issuing client's platform,
-// and never a refresh token or loginKey.
+// lookup sends the session's device, zone and gameUid and the issuing client's platform, with no
+// opt field (GSL rejected opt=fix with code 212 live), and never a refresh token or loginKey.
 func TestLookupGameServerRequest(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -168,13 +168,13 @@ func TestLookupGameServerRequest(t *testing.T) {
 			if form == nil {
 				t.Fatal("fake server never decoded a request")
 			}
-			want := map[string]string{"opt": "fix", "platform": c.wantPlatform, "uuid": "dev_n3d", "zone": "APS783", "gameuid": "uid-1"}
+			want := map[string]string{"platform": c.wantPlatform, "uuid": "dev_n3d", "zone": "APS783", "gameuid": "uid-1"}
 			for k, v := range want {
 				if got := form.Get(k); got != v {
 					t.Errorf("%s = %q, want %q", k, got, v)
 				}
 			}
-			for _, k := range []string{"rt", "loginKey"} {
+			for _, k := range []string{"opt", "rt", "loginKey"} {
 				if form.Has(k) {
 					t.Errorf("request carries %s, want none", k)
 				}
