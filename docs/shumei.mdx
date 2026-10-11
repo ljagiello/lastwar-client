@@ -1,0 +1,156 @@
+---
+title: "ShuMei device fingerprint (shumeiBoxId)"
+description: "How the ShuMei (数美) anti-fraud SDK produces the shumeiBoxId device fingerprint, and how a clean-room Go client can generate one without the native library."
+---
+
+`shumeiBoxId` is the value the SFS2X `Login` request sends as its ShuMei anti-fraud device fingerprint. It is **not** a locally-invented token: it is the `smid` (ShuMei Machine ID) that the ShuMei backend assigns in response to uploading a device profile to `/deviceprofile/v4`. This page documents that flow, recovered from the Obfuscator-LLVM-hardened `libsmsdk.so` and the `com.ishumei.smantifraud` Java classes, so a from-scratch Go client can register a device and mint its own `shumeiBoxId`.
+
+## Three names, three different things
+
+The protocol uses three ShuMei-related identifiers that are easy to conflate:
+
+| Name | Where | What it is |
+|---|---|---|
+| `smid` | `deviceprofile/v4` response, `detail.deviceId` | The ShuMei Machine ID that the server assigns (88 characters). |
+| `shumeiBoxId` | `Login` request field | What the SDK's `getDeviceId()` returns: `"B"` + `smid` (89 characters) once the server has assigned one. Before that, it returns a `"D"`-prefixed local value instead. Empty is a first-class, non-error client path. |
+| `shumeiId` | server push `push.shumei.id`, ~0.5 s after `Login` | A separate server-issued value; the client caches it and reports it as `ta.lw_shumei_id` in its *next* `Login`. It is **not** the `shumeiBoxId` sent in the current request. |
+
+## The flow
+
+```
+SmSdkManager.callCreate()
+  └─ SmOption:
+       organization = "9dNCYkjHeFMYZMOjxgX8"        (app-specific, from the game)
+       appId        = "default"
+       publicKey    = X.509 cert (CN=e.ishumei.com, OU=SM, C=CN)
+       area         = AREA_FJNY
+       url          = https://shumei-api.lastwargame.com:19091/deviceprofile/v4
+       confUrl      = https://shumei-api.lastwargame.com:19091/v3/cloudconf
+       usingHttps   = true
+  └─ SDK collects device data (SubCollector / AbsDetector)
+     └─ native `w1` returns two JSON objects; the first one is the request body:
+        POST <url>            Content-Type: application/octet-stream
+        body = w1's first JSON object, unchanged (Java adds nothing)
+        -> {"code":1100,"detail":{"deviceId":"<smid>","oldDeviceId","sid","c","t"},"requestId"}
+        "B" + detail.deviceId  <-- this is the boxId the Login sends
+```
+
+Only the background resend (`l11l11l1l1Il`) adds `"retry":1`. The error
+handler starts it for codes other than `1902`, so the first request never
+carries `retry`.
+
+```
+getDeviceId()
+  ├─ a server smid is cached        -> "B" + smid
+  ├─ a smid is stored on disk       -> "B" + smid
+  └─ no smid yet                    -> "D" + a locally built fallback value
+```
+
+## Configuration values (byte-exact)
+
+All recovered from `com.sdkmanager.SmSdkManager` and `com.ishumei.smantifraud`:
+
+| Constant | Value | Source |
+|---|---|---|
+| `organization` | `9dNCYkjHeFMYZMOjxgX8` | `SmSdkManager.setOrganization` |
+| `appId` | `default` | `SmSdkManager.setAppId` |
+| `publicKey` | 2048-bit RSA cert, `CN=e.ishumei.com, OU=SM, C=CN` | `SmSdkManager.setPublicKey` |
+| `os` | `android` | `l11l11lI1lll.l111l1111l1Il` |
+| `sdkver` | `3.14.3` | `l11l11lI1lll.l111l11111I1l` (sent in the profile; `getSDKVersion()`'s `3.14.3_build1` is a separate public API, not the profile field) |
+| `area` | `fjny` → numeric `011` | `SmAntiFraud.AREA_FJNY`, `l11l11lI1lll` region map |
+| device-profile path | `/deviceprofile/v4` | `l11l11lI1lll.l11l1111I1ll` |
+| cloud-config path | `/v3/cloudconf` | `l11l11lI1lll.l11l1111Il` |
+
+The SDK's own built-in datasites are region-pinned on `fengkongcloud.com`
+(`fp-it` / `fp-sa-it` / `fp-na-it-acc`, each with an `api-fp-retry-*`
+companion). Last War bypasses them entirely with the
+`shumei-api.lastwargame.com:19091` proxy above, so the region mapping matters
+only as documentation.
+
+## Cryptography
+
+The SDK's protection is **hybrid RSA-OAEP + AES-256-CBC**, decompiled from
+`l11l11l1lIl.java` and `l11l111l1lll.java`:
+
+```java
+// l11l11l1lIl: generate a per-request AES-256 key
+KeyGenerator.getInstance("AES").init(256).generateKey();
+
+// l11l11l1lIl: RSA-OAEP encrypt a value with the embedded cert
+Cipher.getInstance("RSA/ECB/OAEPWITHSHA-256ANDMGF1PADDING")
+      .init(ENCRYPT_MODE, CertificateFactory.getInstance("X.509")
+          .generateCertificate(der).getPublicKey(),
+        new OAEPParameterSpec("SHA-256","MGF1",MGF1ParameterSpec.SHA256,
+                              PSource.PSpecified.DEFAULT));
+
+// l11l11l1lIl: AES-256-CBC-PKCS5, IV "0102030405060708" (16 ASCII bytes)
+Cipher.getInstance("AES/CBC/PKCS5Padding").init(mode, aesKey,
+        new IvParameterSpec("0102030405060708".getBytes()));
+```
+
+The `data` sub-object wires it together: `pri` carries the RSA-OAEP-encrypted
+AES key (`rsaOaep(cert, aesKey)`), so the server can encrypt its reply with
+that same key and the client decrypts it AES-CBC. This shape belongs to the
+**cloudconf** request (`/v3/cloudconf`), not the deviceprofile request.
+Its `data` sub-object looks like this (from `l11l111l1lll`'s request builder):
+
+```json
+{ "os":"android", "sdkver":"3.14.3", "md5":"<config>", "enc":1,
+  "bb":"<value>", "sid":"<value>", "pri":"<rsaOaep(aesKey)>" }
+```
+
+That is RSA-OAEP with SHA-256 as both the message digest and the MGF1 hash,
+and an **empty** OAEP label (`PSpecified.DEFAULT`). In Go,
+`rsa.EncryptOAEP(sha256.New(), rand.Reader, pub, msg, nil)`.
+
+## Profile fields (byte-exact names)
+
+The device-profile JSON field names come from `l111l1111lI1l.java`:
+
+```
+organization, os, sdkver, smid, appId, encode, data, appname,
+tn, ep, sessionId, wevent, md5, enc, pri, sid, bb,
+a1 … a174 (device-data slots the SubCollector fills)
+```
+
+`encode` is the numeric protection-shape id (`2`, written by the native `w1`;
+its companion `compress` id `3` lives inside the native sub-payload). The
+`data` field is the protected fingerprint; `smid` is empty on first
+registration and echoed from the cached value afterward.
+
+## Response codes
+
+| `code` | Meaning | Source |
+|---|---|---|
+| `1100` | success, device assigned | `l1l11I1l.l111l1111l1Il` |
+| `1902` | generic "can't use this" reply; live-tested 2026-10-10, any body the server can't decode gets it | `l1l11I1l.l111l1111llIl` |
+| `1903` | hard error | `l1l11I1l.l111l1111lI1l` |
+
+The `detail` object (`l1l11I1l.l11l1111I11l`) carries `deviceId` (the smid),
+`oldDeviceId`, `sid`, `c`, `t` (`l11l111llI1l.java`).
+
+## Go implementation
+
+`internal/shumei` reimplements this. `BoxID(client, deviceID)` builds the
+profile, protects the fingerprint with the embedded iShumei public key, POSTs
+it, and returns `detail.deviceId` (the `shumeiBoxId`). `main.go`'s
+`-cs-shumei-gen` flag calls it before building `Login` params when no
+`shumeiBoxId` was supplied; a failure only logs a warning and falls back to
+the empty value the server already accepts.
+
+**Status (live-tested 2026-10-10):** the endpoint is reachable and validates
+`organization` (an empty body returns `code:9101 "invalid organization"`; the
+recovered value is accepted). However the current minimal profile returns
+`{"code":1902}` with no `smid`, so it does **not** mint a real `shumeiBoxId`.
+The real request body is produced entirely by native `w1`. The Go
+`DeviceProfile` struct was not derived from it, so it is not a partial version
+of the real body. The nested `data`/`pri` object described above belongs to
+the cloudconf request, not to deviceprofile. `BoxID` also returns the bare
+`deviceId`, while the Login expects `"B"` + `deviceId`. `-cs-shumei-gen` is
+safe to ship, because it falls back to an empty value on any failure, but it
+does not obtain a real `smid`.
+
+**What is byte-exact vs. reconstructed:** the configuration values, field
+names, endpoint, response shape, and crypto primitives (RSA-OAEP spec, AES-256
+CBC IV) are byte-exact from decompilation. The `data` sub-object assembly and
+the `aNN` device-data collector are not yet reproduced.

@@ -11,6 +11,7 @@ import (
 	"lastwar-client/internal/game"
 	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/session"
+	"lastwar-client/internal/shumei"
 	"log/slog"
 	"net"
 	"net/http"
@@ -80,6 +81,7 @@ func Run() {
 	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip -- also sent on every -cs-rt GSL opt=refresh call, unlike -cs-zone (which only matters for -cs-ip): gameUid is passed to gsl.GetServerList unconditionally, so it matters even for a bare -cs-rt with no -cs-ip at all")
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
+	csShumeiGen := fs.Bool("cs-shumei-gen", false, "generate a shumeiBoxId via the ShuMei deviceprofile/v4 endpoint when none is given (empty -cs-shumei and no session-config shumeiBoxId); makes one extra HTTPS call before login, using the same deviceId as the Login request")
 	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- IF the refresh response includes a non-empty server list, it REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and IF it includes a fresh access token, that REPLACES any explicitly-passed -cs-at; either can come back empty, in which case the corresponding -cs-* value passed here (or loaded from a session config) is used unchanged instead -- a warning is logged when that leaves a possibly-stale -cs-at in place with no refresh. If BOTH come back empty (no fresh access token AND no server list), that is NOT a graceful fallback: it is treated as a likely-rejected/expired refresh token and exits with code 2")
 	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at (e.g. one captured live from a real client) -- cheap anonymous check-version calls are still made (to derive the Login resVersion), but no GSL call happens unless -cs-rt is also set; a mid-login serverInfo redirect reuses the same token, as the real client does")
 	csIOS := fs.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
@@ -376,6 +378,7 @@ func Run() {
 			features: cfgFeatures, duelPolicy: cfgDuelPolicy, runFeature: *runFeature, runAnyway: *runAnyway,
 			interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
+			shumeiGen:  *csShumeiGen,
 			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
 			zoneExplicit: csZoneSetExplicitly, gameUidExplicit: csGameUidSetExplicitly,
 			atExplicit: csAtSetExplicitly, interactiveExplicit: interactiveSetExplicitly,
@@ -743,13 +746,14 @@ func detectSwallowedFlagValue(name, value string, registeredFlagNames map[string
 // -cs-* flag added to the FlagSet but forgotten here, or a stale name left here after a flag is
 // renamed/removed.
 var crossServerFlagNames = map[string]bool{
-	"cs-at":       true,
-	"cs-port":     true,
-	"cs-zone":     true,
-	"cs-gameuid":  true,
-	"cs-deviceid": true,
-	"cs-shumei":   true,
-	"cs-ios":      true,
+	"cs-at":         true,
+	"cs-port":       true,
+	"cs-zone":       true,
+	"cs-gameuid":    true,
+	"cs-deviceid":   true,
+	"cs-shumei":     true,
+	"cs-shumei-gen": true,
+	"cs-ios":        true,
 }
 
 // ignoredCrossServerFlags returns which of the given visited (explicitly set on the command line)
@@ -934,7 +938,7 @@ type crossServerTestOpts struct {
 	runFeature                                                    string            // -run: run just this feature, then exit
 	runAnyway                                                     bool              // -run-anyway
 	port                                                          int
-	handshake, iosMode, collect, listBuildings                    bool
+	handshake, iosMode, collect, listBuildings, shumeiGen         bool
 	configSavePath                                                string // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
 
 	// httpClient/dialGame are OPTIONAL test seams (both nil in production). httpClient overrides the
@@ -1278,10 +1282,28 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 
 	resVersion := auth.ResVersionFor(httpClient, cv, o.iosMode, o.appVersion, o.versionCode, zone)
+
+	shumeiBoxId := o.shumeiBoxId
+	if o.shumeiGen && shumeiBoxId == "" {
+		// Register this device with ShuMei's deviceprofile/v4 endpoint to obtain a real
+		// device-fingerprint token (the backend-assigned `smid`), instead of sending an empty
+		// shumeiBoxId. Optional: the server accepts an empty one (see docs/live-validation.mdx),
+		// so this only runs when -cs-shumei-gen is set and no token was already supplied.
+		var errGen error
+		shumeiBoxId, errGen = shumei.BoxID(httpClient, deviceID)
+		if errGen != nil {
+			// Not fatal: an empty shumeiBoxId is a first-class, known-accepted client path, so a
+			// failed generation degrades to that rather than aborting the login.
+			slog.Warn("shumei boxId generation failed; continuing with an empty shumeiBoxId (the server accepts it)", "error", errGen, "deviceIdLen", len(deviceID))
+			shumeiBoxId = ""
+		} else {
+			slog.Info("generated shumeiBoxId via ShuMei deviceprofile/v4", "shumeiBoxIdLen", len(shumeiBoxId))
+		}
+	}
 	params := auth.CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
 		DeviceID: deviceID, AirKey: airKey,
-		AccessTok: accessTok, ShumeiBoxId: o.shumeiBoxId,
+		AccessTok: accessTok, ShumeiBoxId: shumeiBoxId,
 		Handshake: o.handshake, IOSMode: o.iosMode,
 		AppVersion: o.appVersion, VersionCode: o.versionCode,
 		ResVersion: resVersion,
@@ -1339,7 +1361,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 					updated := &SessionConfig{
 						IP: savedIP, Port: newPort, Zone: result.Zone,
 						GameUid: result.GameUid, DeviceID: deviceID,
-						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
+						ShumeiBoxId: shumeiBoxId, AccessToken: result.AccessTok,
 						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
 						Features: o.features, DuelPolicy: o.duelPolicy,
 					}
