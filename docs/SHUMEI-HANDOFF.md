@@ -1,5 +1,11 @@
 # Handoff — make `shumeiBoxId` generation return a real `smid`
 
+> **RESOLVED 2026-10-11.** The blocker described below is done: `internal/shumei`
+> now reproduces the native `w1` protection (16-char nonce `r`, `key = MD5(r)`,
+> raw-deflate + AES-256-CBC of the `aNN` fingerprint, RSA-OAEP of `r` as `ep`),
+> and `BoxID()` returns `"B"` + a real `smid` (live-tested, `code:1100`). The
+> remaining text is kept as the research record of how the scheme was recovered.
+
 > For the next agent. Everything below is recovered/verified state; do **not** re-derive it.
 > Goal: change `internal/shumei` so `BoxID()` POSTs a profile that the ShuMei backend
 > answers with `{"code":1100,"detail":{"deviceId":"<smid>"}}` instead of `{"code":1902}`.

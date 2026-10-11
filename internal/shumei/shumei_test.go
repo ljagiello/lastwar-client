@@ -2,9 +2,13 @@ package shumei
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -30,20 +34,22 @@ func TestBoxID(t *testing.T) {
 	ft := &fakeTransport{status: http.StatusOK}
 	client := &http.Client{Transport: ft}
 
-	smid, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d")
+	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d")
 	if err != nil {
 		t.Fatalf("BoxID = %v, want nil", err)
 	}
-	if smid != "smid-test-0123456789" {
-		t.Errorf("BoxID smid = %q, want %q", smid, "smid-test-0123456789")
+	// The Login request expects getDeviceId()'s "B" + smid string.
+	if boxID != "Bsmid-test-0123456789" {
+		t.Errorf("BoxID = %q, want %q", boxID, "Bsmid-test-0123456789")
 	}
 	if ft.content != "application/octet-stream" {
 		t.Errorf("Content-Type = %q, want application/octet-stream", ft.content)
 	}
 
-	// The POSTed body must carry the exact SDK field names: organization, os,
-	// sdkver, appId, encode, data (the protected fingerprint). The real first
-	// request carries no `retry` field (only the background resend adds it).
+	// The POSTed body must carry the exact native `w1` field names:
+	// organization, os, appId, encode (2), compress (3), data, tn, ep. The
+	// real first request carries no `retry` field (only the background resend
+	// adds it).
 	var profile map[string]any
 	if err := json.Unmarshal(ft.body, &profile); err != nil {
 		t.Fatalf("POSTed body is not JSON: %v", err)
@@ -51,9 +57,9 @@ func TestBoxID(t *testing.T) {
 	for key, want := range map[string]any{
 		"organization": Organization,
 		"os":           OSName,
-		"sdkver":       SDKVersion,
 		"appId":        AppID,
 		"encode":       2.0,
+		"compress":     3.0,
 	} {
 		if got, ok := profile[key]; !ok || got != want {
 			t.Errorf("profile[%q] = %v (present=%v), want %v", key, got, ok, want)
@@ -62,8 +68,10 @@ func TestBoxID(t *testing.T) {
 	if _, hasRetry := profile["retry"]; hasRetry {
 		t.Errorf("profile carries an unexpected \"retry\" field (the first request has none)")
 	}
-	if data, ok := profile["data"].(string); !ok || data == "" {
-		t.Errorf("profile[\"data\"] = %v, want a non-empty protected fingerprint", profile["data"])
+	for _, key := range []string{"data", "tn", "ep"} {
+		if v, ok := profile[key].(string); !ok || v == "" {
+			t.Errorf("profile[%q] = %v, want a non-empty protected value", key, profile[key])
+		}
 	}
 }
 
@@ -93,17 +101,62 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-func TestDeviceFingerprintIsRSAProtectedBase64(t *testing.T) {
-	enc, err := DeviceFingerprint("0123456789abcdef0123456789abcdef_n3d")
+func TestProtectProducesHybridCiphertext(t *testing.T) {
+	pub, err := publicKey()
 	if err != nil {
-		t.Fatalf("DeviceFingerprint = %v", err)
+		t.Fatalf("publicKey = %v", err)
 	}
-	if len(enc) == 0 {
-		t.Fatal("DeviceFingerprint returned empty string")
+	data, ep, tn, err := protect(pub, `{"a1":"all"}`)
+	if err != nil {
+		t.Fatalf("protect = %v", err)
 	}
-	// RSA-OAEP on a 2048-bit key yields a 256-byte ciphertext -> 344 base64
-	// chars, so a real protected blob is far longer than any plaintext marker.
-	if len(enc) < 300 {
-		t.Errorf("DeviceFingerprint length = %d, want >= 344 (2048-bit RSA-OAEP base64)", len(enc))
+	// data is AES-256-CBC ciphertext: base64 of a multiple of the 16-byte block.
+	raw, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		t.Fatalf("data is not base64: %v", err)
+	}
+	if len(raw) == 0 || len(raw)%aes.BlockSize != 0 {
+		t.Errorf("data length = %d, want a non-zero multiple of %d", len(raw), aes.BlockSize)
+	}
+	// ep/tn are RSA-OAEP on a 2048-bit key: 256-byte ciphertext -> 344 base64 chars.
+	for name, v := range map[string]string{"ep": ep, "tn": tn} {
+		if len(v) != 344 {
+			t.Errorf("%s length = %d, want 344 (2048-bit RSA-OAEP base64)", name, len(v))
+		}
+	}
+}
+
+// TestAESKeyDerivationAndRoundTrip verifies the AES-256-CBC + PKCS#7 padding
+// the native `w1` uses: key = MD5(r) lowercase hex, IV "0102030405060708".
+func TestAESKeyDerivationAndRoundTrip(t *testing.T) {
+	const r = "ABCDEFGHIJKLMNOP"
+	key := aesKeyFromNonce(r)
+	if len(key) != 32 {
+		t.Fatalf("aesKeyFromNonce length = %d, want 32", len(key))
+	}
+	// The key must be lowercase hex (MD5(r) hex-encoded).
+	for _, c := range string(key) {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			t.Fatalf("aesKeyFromNonce = %q, want lowercase hex", key)
+		}
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher = %v", err)
+	}
+	iv := []byte("0102030405060708")
+	plaintext := []byte("hello shumei")
+	padded := pkcs7Pad(plaintext, block.BlockSize())
+	ct := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ct, padded)
+
+	// decrypt back and strip padding
+	pt := make([]byte, len(ct))
+	cipher.NewCBCDecrypter(block, iv).CryptBlocks(pt, ct)
+	padLen := int(pt[len(pt)-1])
+	pt = pt[:len(pt)-padLen]
+	if string(pt) != "hello shumei" {
+		t.Errorf("round-trip = %q, want %q", pt, "hello shumei")
 	}
 }
