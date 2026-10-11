@@ -3,7 +3,7 @@ title: "Native binaries & security posture"
 description: "Symbol/string survey of the game's native libraries and an assessment of whether anything below the protocol layer blocks a clean-room Go client."
 ---
 
-Best-effort symbol/string survey of the native libraries, no Ghidra, no decompilation. The first pass surveyed the 7 most relevant libraries, plus one targeted ARM64 disassembly of `libxlua.so`'s `CalcChatSign` helper (see the feasibility table below and [Findings & further work](/findings)). The 1.0.364 coverage pass surveyed all 39 libraries across both ABIs by symbols, strings, and P/Invoke maps, with two more targeted arm64 disassemblies. The question that matters: does anything below the protocol layer block a clean-room Go client? For the one existing account tested against production, the answer is no, see the Warning below for the full scope.
+Best-effort symbol/string survey of the native libraries. The first pass surveyed the 7 most relevant libraries, plus one targeted ARM64 disassembly of `libxlua.so`'s `CalcChatSign` helper (see the feasibility table below and [Findings & further work](/findings)). The 1.0.364 coverage pass surveyed all 39 libraries across both ABIs by symbols, strings, and P/Invoke maps, with two more targeted arm64 disassemblies. `libsmsdk.so` (ShuMei) is the one library that has since been fully decompiled — its Obfuscator-LLVM string encryption was reversed by emulating the `.datadiv_decode*` init functions, and the resulting device-profile/`deviceprofile` protocol is documented in [ShuMei device fingerprint](/shumei). The question that matters: does anything below the protocol layer block a clean-room Go client? For the one existing account tested against production, the answer is no, see the Warning below for the full scope.
 
 ## `libil2cpp.so` is a Mono bridge, not an IL2CPP build
 
@@ -40,7 +40,7 @@ The `.mdl` XOR scheme itself is unchanged, see [Extraction methodology](/methodo
         token. Once that was fixed, reconnect worked, and it still works against the shipped code after a later
         security fix replaced part of the request with placeholders. On 2026-10-04 a captured iOS session also
         reconnected with <code>shumeiBoxId</code> sent empty, see [Live validation against production](/live-validation).
-        No ShuMei-specific block was ever found
+        No ShuMei-specific block was ever found. Fully decompiled (Obfuscator-LLVM strings reversed); the device-profile protocol is documented in [ShuMei device fingerprint](/shumei)
       </td>
     </tr>
     <tr>

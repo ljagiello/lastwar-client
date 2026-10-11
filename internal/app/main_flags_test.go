@@ -289,12 +289,12 @@ func TestServerListOverrideFlags(t *testing.T) {
 	}
 }
 
-// TestCrossServerFlagNamesRecognizesExactlySevenFlags pins down that crossServerFlagNames
-// recognizes precisely the 7 -cs-* flags that are consumed once the cross-server path is taken
+// TestCrossServerFlagNamesRecognizesExactlyEightFlags pins down that crossServerFlagNames
+// recognizes precisely the 8 -cs-* flags that are consumed once the cross-server path is taken
 // (i.e. every -cs-* flag except -cs-ip/-cs-rt, which instead gate whether that path is taken at
 // all) -- neither more nor fewer.
-func TestCrossServerFlagNamesRecognizesExactlySevenFlags(t *testing.T) {
-	want := []string{"cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei", "cs-ios"}
+func TestCrossServerFlagNamesRecognizesExactlyEightFlags(t *testing.T) {
+	want := []string{"cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei", "cs-shumei-gen", "cs-ios"}
 	if len(crossServerFlagNames) != len(want) {
 		t.Fatalf("crossServerFlagNames has %d entries %v, want exactly %d: %v",
 			len(crossServerFlagNames), crossServerFlagNames, len(want), want)

@@ -50,7 +50,8 @@
           "lua-architecture",
           "data-tables",
           "android-platform",
-          "native-binaries"
+          "native-binaries",
+          "shumei"
         ]
       },
       {
