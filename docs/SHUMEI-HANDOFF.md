@@ -76,9 +76,12 @@ Tools available on the dev Mac: `ghidra` (`/opt/homebrew/Cellar/ghidra/12.1.4/li
 `organization, os, sdkver, smid, appId, encode, data, appname, tn, ep, sessionId, wevent, md5,
 enc, pri, sid, bb` plus `a1`…`a174` device-data slots.
 
-(Resolved: most of these belong to the **cloudconf** request. The deviceprofile body is only
-`organization, os, appId, encode, compress, data, tn, ep`, and the `a1`…`a174` slots live inside
-the protected `data`. See `docs/shumei.mdx`.)
+(Resolved: this class is the SDK's shared name table, not one request's body. `sdkver`, `md5`,
+`pri` and `bb` belong to the **cloudconf** request (`l11l111l1lll.java`), and `smid`, `appname`,
+`sessionId` and `wevent` to the **v3** event flow (`l1l1l111Il.java`). No decompiled Java builder
+references `enc` or `sid`. The deviceprofile body is only `organization, os, appId, encode,
+compress, data, tn, ep`, and the `a1`…`a174` slots live inside the protected `data`. See
+`docs/shumei.mdx`.)
 
 ### Values
 - `os = "android"`, `sdkver = "3.14.3"` (both from `l11l11lI1lll`). `getSDKVersion()` returns
@@ -167,7 +170,8 @@ To mint a real `smid`, the next agent needs to (in this order):
   RSA-OAEP of `r` as `ep` and of `"0"` as `tn`), embedded SPKI, constants. **Safe to
   ship**: `BoxID` returns `ErrUnassigned` on `1902`, and `main.go`'s `-cs-shumei-gen` logs a
   warning and falls back to empty `shumeiBoxId` (which the game server accepts). The flag is
-  ignored with `-cs-ios`, since the fingerprint is an Android profile.
+  ignored in iOS mode (`-cs-ios` or a session config's `iosMode`), since the fingerprint is an
+  Android profile.
 - `internal/app/main.go` — `-cs-shumei-gen` flag wired into `runCrossServerTest`.
 - Docs: `docs/shumei.mdx` (protocol + status), `docs/auth.mdx`/`native-binaries.mdx`/`go-client-
   roadmap.mdx` reference it.
@@ -185,6 +189,7 @@ To mint a real `smid`, the next agent needs to (in this order):
 - `retry`:`1` is **not** part of the first request; only the background resend adds it.
 - The Go `DeviceProfile` struct is exactly the eight fields native `w1` writes (`organization,
   os, appId, encode, compress, data, tn, ep`); don't add cloudconf fields to it.
-- The fingerprint is an Android profile, so never send it with an iOS Login (`-cs-ios`).
+- The fingerprint is an Android profile, so never send it with an iOS Login (`-cs-ios` or a
+  session config's `iosMode`).
 - The Login's `shumeiBoxId` is `"B"` + `detail.deviceId`, not the bare `deviceId`.
 - Organization `"9dNCYkjHeFMYZMOjxgX8"` is validated server-side (wrong value → `9101`).

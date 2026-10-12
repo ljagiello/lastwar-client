@@ -37,17 +37,26 @@ func (f *fakeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
+// TestBoxID drives boxID with a test-generated key pair, so besides the wire
+// shape it can decrypt the POSTed body and check each protected field holds
+// what the server expects: ep wraps r, tn wraps "0", and data is the device
+// data for this deviceID.
 func TestBoxID(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey = %v", err)
+	}
 	ft := &fakeTransport{status: http.StatusOK}
 	client := &http.Client{Transport: ft}
 
-	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d")
+	const deviceID = "0123456789abcdef0123456789abcdef_n3d"
+	got, err := boxID(client, &priv.PublicKey, deviceID)
 	if err != nil {
-		t.Fatalf("BoxID = %v, want nil", err)
+		t.Fatalf("boxID = %v, want nil", err)
 	}
 	// The Login request expects getDeviceId()'s "B" + smid string.
-	if boxID != "Bsmid-test-0123456789" {
-		t.Errorf("BoxID = %q, want %q", boxID, "Bsmid-test-0123456789")
+	if got != "Bsmid-test-0123456789" {
+		t.Errorf("boxID = %q, want %q", got, "Bsmid-test-0123456789")
 	}
 	if ft.content != "application/octet-stream" {
 		t.Errorf("Content-Type = %q, want application/octet-stream", ft.content)
@@ -75,10 +84,16 @@ func TestBoxID(t *testing.T) {
 	if _, hasRetry := profile["retry"]; hasRetry {
 		t.Errorf("profile carries an unexpected \"retry\" field (the first request has none)")
 	}
+	fields := map[string]string{}
 	for _, key := range []string{"data", "tn", "ep"} {
-		if v, ok := profile[key].(string); !ok || v == "" {
-			t.Errorf("profile[%q] = %v, want a non-empty protected value", key, profile[key])
+		v, ok := profile[key].(string)
+		if !ok || v == "" {
+			t.Fatalf("profile[%q] = %v, want a non-empty protected value", key, profile[key])
 		}
+		fields[key] = v
+	}
+	if plaintext := unprotect(t, priv, fields["data"], fields["ep"], fields["tn"]); plaintext != deviceData(deviceID) {
+		t.Errorf("decrypted data = %q, want deviceData(%q)", plaintext, deviceID)
 	}
 }
 
@@ -124,8 +139,7 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // TestProtectRoundTrip inverts the whole native `w1` pipeline. protect takes
 // the RSA key as a parameter, so a test-generated key pair can decrypt ep back
-// to r. The AES key is derived here from the spec (hex MD5 of r), not via
-// aesKeyFromNonce, so a broken helper can't cancel itself out.
+// to r.
 func TestProtectRoundTrip(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -136,6 +150,17 @@ func TestProtectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("protect = %v", err)
 	}
+	if got := unprotect(t, priv, data, ep, tn); got != in {
+		t.Errorf("inflate(decrypt(data)) = %q, want the device-data JSON", got)
+	}
+}
+
+// unprotect inverts protect with the test's private key and returns the
+// inflated device data, failing the test at the first malformed stage. The AES
+// key is derived here from the spec (hex MD5 of r), not via aesKeyFromNonce, so
+// a broken helper can't cancel itself out.
+func unprotect(t *testing.T, priv *rsa.PrivateKey, data, ep, tn string) string {
+	t.Helper()
 	oaepDecrypt := func(name, s string) []byte {
 		ct, err := base64.StdEncoding.DecodeString(s)
 		if err != nil {
@@ -182,13 +207,11 @@ func TestProtectRoundTrip(t *testing.T) {
 	if pad < 1 || pad > aes.BlockSize || !bytes.Equal(pt[len(pt)-pad:], bytes.Repeat([]byte{byte(pad)}, pad)) {
 		t.Fatalf("decrypted data ends in % x, want PKCS#7 padding", pt[len(pt)-aes.BlockSize:])
 	}
-	got, err := io.ReadAll(flate.NewReader(bytes.NewReader(pt[:len(pt)-pad])))
+	inflated, err := io.ReadAll(flate.NewReader(bytes.NewReader(pt[:len(pt)-pad])))
 	if err != nil {
 		t.Fatalf("raw inflate = %v", err)
 	}
-	if string(got) != in {
-		t.Errorf("inflate(decrypt(data)) = %q, want the device-data JSON", got)
-	}
+	return string(inflated)
 }
 
 // TestProtectWithEmbeddedKey checks the embedded iShumei key parses as 2048-bit

@@ -341,6 +341,12 @@ func BoxID(client Client, deviceID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return boxID(client, pub, deviceID)
+}
+
+// boxID is BoxID with the RSA key as a parameter, the same way protect takes
+// it, so a test can use its own key pair and decrypt the POSTed body.
+func boxID(client Client, pub *rsa.PublicKey, deviceID string) (string, error) {
 	data, ep, tn, err := protect(pub, deviceData(deviceID))
 	if err != nil {
 		return "", err

@@ -134,9 +134,11 @@ organization, os, appId, encode (2), compress (3), data, tn, ep
 ```
 
 The `a1 … a174` device-data slots live *inside* the protected `data` payload
-(the `aNN` fingerprint), not at the top level. The `sdkver`/`smid`/`appname`/
-`sessionId`/`wevent`/`md5`/`enc`/`pri`/`sid`/`bb` names belong to the
-**cloudconf** request (`l11l111l1lll.java`), not to deviceprofile.
+(the `aNN` fingerprint), not at the top level. The other names in the SDK's
+name table (`l111l1111lI1l.java`) belong to other requests: `sdkver`/`md5`/
+`pri`/`bb` to **cloudconf** (`l11l111l1lll.java`), and `smid`/`appname`/
+`sessionId`/`wevent` to the **v3** event flow (`l1l1l111Il.java`). No
+decompiled Java builder references `enc` or `sid`.
 
 ## Response codes
 
@@ -156,9 +158,9 @@ The `detail` object (`l1l11I1l.l11l1111I11l`) carries `deviceId` (the smid),
 it, and returns `"B"` + `detail.deviceId` (the full `shumeiBoxId`). `main.go`'s
 `-cs-shumei-gen` flag calls it before building `Login` params when no
 `shumeiBoxId` was supplied; a failure only logs a warning and falls back to
-the empty value the server already accepts. With `-cs-ios` the flag is
-ignored, because the fingerprint is an Android device profile, which an iOS
-`Login` never carries.
+the empty value the server already accepts. In iOS mode (`-cs-ios` or a
+session config's `iosMode`) the flag is ignored, because the fingerprint is an
+Android device profile, which an iOS `Login` never carries.
 
 **Status (live-tested 2026-10-11):** the full fingerprint, protected with the
 hybrid scheme, returns `code:1100` and a real `smid`, so `BoxID` now mints a
