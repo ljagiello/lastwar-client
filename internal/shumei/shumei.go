@@ -76,17 +76,11 @@ const (
 	AppID        = "default"
 )
 
-// SDK version and OS, reported in the device-profile's `sdkver`/`os` fields.
-// The `sdkver` field is "3.14.3" (l11l11lI1lll.l111l11111I1l); the "build1"
-// part (l11l11lI1lll.l111l11111Il) is combined into "3.14.3_build1" only in
-// SmAntiFraud.getSDKVersion(), a public API not sent in the profile. The os
-// constant l11l11lI1lll.l111l1111l1Il is "android".
-const (
-	SDKVersion      = "3.14.3"
-	SDKVersionBuild = "build1"
-	SDKVersionFull  = "3.14.3_build1" // SmAntiFraud.getSDKVersion(), not the profile field
-	OSName          = "android"
-)
+// OSName is the device-profile's `os` field (l11l11lI1lll.l111l1111l1Il). The
+// SDK version "3.14.3" (l11l11lI1lll.l111l11111I1l) is not a deviceprofile
+// field: it is the cloudconf request's `sdkver`, and here only the `a7` slot
+// inside the protected device data (with "build1" in `a136`).
+const OSName = "android"
 
 // Region the game selects (AREA_FJNY) and the numeric area code the SDK
 // derives from it (l11l11lI1lll.l1111l111111Il: "bj"->"001", "xjp"->"010",
@@ -327,6 +321,12 @@ const innerTemplate = `{
   "a131": "pl", "a132": "pl", "a141": 1, "a156": [], "a157": 0, "a159": ""
 }`
 
+// deviceData fills innerTemplate's `__DEVICE_ID__` slots (a2, a80, a97) with
+// deviceID, giving the device-data JSON that protect encrypts.
+func deviceData(deviceID string) string {
+	return strings.ReplaceAll(innerTemplate, "__DEVICE_ID__", deviceID)
+}
+
 // BoxID registers a device with the ShuMei backend and returns its assigned
 // device fingerprint, already prefixed with `"B"` to match the Login request's
 // `shumeiBoxId` field. deviceID should match the request's own deviceId so the
@@ -341,8 +341,7 @@ func BoxID(client Client, deviceID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	inner := strings.ReplaceAll(innerTemplate, "__DEVICE_ID__", deviceID)
-	data, ep, tn, err := protect(pub, inner)
+	data, ep, tn, err := protect(pub, deviceData(deviceID))
 	if err != nil {
 		return "", err
 	}

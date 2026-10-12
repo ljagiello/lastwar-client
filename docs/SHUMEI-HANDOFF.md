@@ -76,6 +76,10 @@ Tools available on the dev Mac: `ghidra` (`/opt/homebrew/Cellar/ghidra/12.1.4/li
 `organization, os, sdkver, smid, appId, encode, data, appname, tn, ep, sessionId, wevent, md5,
 enc, pri, sid, bb` plus `a1`…`a174` device-data slots.
 
+(Resolved: most of these belong to the **cloudconf** request. The deviceprofile body is only
+`organization, os, appId, encode, compress, data, tn, ep`, and the `a1`…`a174` slots live inside
+the protected `data`. See `docs/shumei.mdx`.)
+
 ### Values
 - `os = "android"`, `sdkver = "3.14.3"` (both from `l11l11lI1lll`). `getSDKVersion()` returns
   `"3.14.3_build1"` but that is a separate public API, **not** the `sdkver` field.
@@ -159,9 +163,11 @@ To mint a real `smid`, the next agent needs to (in this order):
 ## Current Go code (for the next agent)
 
 - `internal/shumei/shumei.go` — `BoxID(client, deviceID)`, `DeviceProfile`, `ProfileResponse`,
-  `protect()` (currently zlib-deflate → RSA-OAEP → base64), embedded SPKI, constants. **Safe to
+  `protect()` (raw deflate → AES-256-CBC under `hex(MD5(r))` → base64 as `data`, plus
+  RSA-OAEP of `r` as `ep` and of `"0"` as `tn`), embedded SPKI, constants. **Safe to
   ship**: `BoxID` returns `ErrUnassigned` on `1902`, and `main.go`'s `-cs-shumei-gen` logs a
-  warning and falls back to empty `shumeiBoxId` (which the game server accepts).
+  warning and falls back to empty `shumeiBoxId` (which the game server accepts). The flag is
+  ignored with `-cs-ios`, since the fingerprint is an Android profile.
 - `internal/app/main.go` — `-cs-shumei-gen` flag wired into `runCrossServerTest`.
 - Docs: `docs/shumei.mdx` (protocol + status), `docs/auth.mdx`/`native-binaries.mdx`/`go-client-
   roadmap.mdx` reference it.
@@ -170,11 +176,15 @@ To mint a real `smid`, the next agent needs to (in this order):
 
 ## Gotchas the next agent must not regress
 
-- `sdkver` is `"3.14.3"`, **not** `"3.14.3_build1"`.
+- The SDK version is `"3.14.3"`, **not** `"3.14.3_build1"`. It is `a7` inside the device data
+  (and cloudconf's `sdkver`), never a top-level deviceprofile field.
 - RSA-OAEP label is empty; MGF1 = SHA-256; don't add a label or use PKCS#1 v1.5.
-- The `data` field is (in the hybrid flow) a nested object, not a bare base64 string.
+- The deviceprofile `data` field is a bare base64 string: AES-256-CBC (key `hex(MD5(r))`, IV
+  `"0102030405060708"`) of the **raw**-deflated (`compress/flate`, not zlib) `aNN` JSON. The
+  nested `data` object belongs to cloudconf.
 - `retry`:`1` is **not** part of the first request; only the background resend adds it.
-- The Go `DeviceProfile` struct was never derived from the SDK. The real body is whatever native
-  `w1` emits, so don't treat the struct as a partial version of it.
+- The Go `DeviceProfile` struct is exactly the eight fields native `w1` writes (`organization,
+  os, appId, encode, compress, data, tn, ep`); don't add cloudconf fields to it.
+- The fingerprint is an Android profile, so never send it with an iOS Login (`-cs-ios`).
 - The Login's `shumeiBoxId` is `"B"` + `detail.deviceId`, not the bare `deviceId`.
 - Organization `"9dNCYkjHeFMYZMOjxgX8"` is validated server-side (wrong value → `9101`).

@@ -2,10 +2,17 @@ package shumei
 
 import (
 	"bytes"
+	"compress/flate"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/md5"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -75,22 +82,36 @@ func TestBoxID(t *testing.T) {
 	}
 }
 
-func TestBoxIDRejectsUnassigned(t *testing.T) {
-	ft := &fakeTransport{status: http.StatusOK}
-	client := &http.Client{Transport: ft}
-	// override the canned body with a no-deviceId response
-	client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(bytes.NewReader([]byte(`{"code":1902,"detail":{},"requestId":"r-1"}`))),
-			Header:     http.Header{},
-		}, nil
-	})
-
-	if _, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d"); err == nil {
-		t.Fatal("BoxID accepted a response with no deviceId, want ErrUnassigned")
-	} else if got := err.Error(); got == "" {
-		t.Fatal("BoxID returned an empty error string")
+// TestBoxIDErrors covers the replies BoxID must refuse: a non-200 status, the
+// server's 1902 with no deviceId (ErrUnassigned), and a body that isn't JSON.
+func TestBoxIDErrors(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		status     int
+		body       string
+		unassigned bool
+	}{
+		// A success-shaped body, so only the status check can reject it.
+		{"non-200", http.StatusInternalServerError, `{"code":1100,"detail":{"deviceId":"smid-1"}}`, false},
+		{"1902 without deviceId", http.StatusOK, `{"code":1902,"detail":{},"requestId":"r-1"}`, true},
+		{"malformed JSON", http.StatusOK, "not json", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: c.status,
+					Body:       io.NopCloser(strings.NewReader(c.body)),
+					Header:     http.Header{},
+				}, nil
+			})}
+			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d")
+			if err == nil {
+				t.Fatalf("BoxID = %q, nil; want an error", boxID)
+			}
+			if got := errors.Is(err, ErrUnassigned); got != c.unassigned {
+				t.Errorf("errors.Is(%v, ErrUnassigned) = %v, want %v", err, got, c.unassigned)
+			}
+		})
 	}
 }
 
@@ -101,24 +122,86 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-func TestProtectProducesHybridCiphertext(t *testing.T) {
+// TestProtectRoundTrip inverts the whole native `w1` pipeline. protect takes
+// the RSA key as a parameter, so a test-generated key pair can decrypt ep back
+// to r. The AES key is derived here from the spec (hex MD5 of r), not via
+// aesKeyFromNonce, so a broken helper can't cancel itself out.
+func TestProtectRoundTrip(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey = %v", err)
+	}
+	in := deviceData("0123456789abcdef0123456789abcdef_n3d")
+	data, ep, tn, err := protect(&priv.PublicKey, in)
+	if err != nil {
+		t.Fatalf("protect = %v", err)
+	}
+	oaepDecrypt := func(name, s string) []byte {
+		ct, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			t.Fatalf("%s is not base64: %v", name, err)
+		}
+		pt, err := rsa.DecryptOAEP(sha256.New(), nil, priv, ct, nil)
+		if err != nil {
+			t.Fatalf("%s: RSA-OAEP(SHA-256) decrypt = %v", name, err)
+		}
+		return pt
+	}
+
+	// ep wraps the 16-char alphanumeric nonce r; tn wraps "0".
+	r := oaepDecrypt("ep", ep)
+	if len(r) != 16 {
+		t.Fatalf("ep plaintext = %q, want the 16-char nonce", r)
+	}
+	const alnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	for _, c := range string(r) {
+		if !strings.ContainsRune(alnum, c) {
+			t.Fatalf("ep plaintext = %q, want alphanumeric", r)
+		}
+	}
+	if got := string(oaepDecrypt("tn", tn)); got != "0" {
+		t.Errorf("tn plaintext = %q, want \"0\"", got)
+	}
+
+	// data = base64(AES-256-CBC(rawDeflate(in), hex(MD5(r)), IV "0102030405060708")).
+	sum := md5.Sum(r)
+	block, err := aes.NewCipher([]byte(hex.EncodeToString(sum[:])))
+	if err != nil {
+		t.Fatalf("aes.NewCipher = %v", err)
+	}
+	ct, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		t.Fatalf("data is not base64: %v", err)
+	}
+	if len(ct) == 0 || len(ct)%aes.BlockSize != 0 {
+		t.Fatalf("data length = %d, want a non-zero multiple of %d", len(ct), aes.BlockSize)
+	}
+	pt := make([]byte, len(ct))
+	cipher.NewCBCDecrypter(block, []byte("0102030405060708")).CryptBlocks(pt, ct)
+	pad := int(pt[len(pt)-1])
+	if pad < 1 || pad > aes.BlockSize || !bytes.Equal(pt[len(pt)-pad:], bytes.Repeat([]byte{byte(pad)}, pad)) {
+		t.Fatalf("decrypted data ends in % x, want PKCS#7 padding", pt[len(pt)-aes.BlockSize:])
+	}
+	got, err := io.ReadAll(flate.NewReader(bytes.NewReader(pt[:len(pt)-pad])))
+	if err != nil {
+		t.Fatalf("raw inflate = %v", err)
+	}
+	if string(got) != in {
+		t.Errorf("inflate(decrypt(data)) = %q, want the device-data JSON", got)
+	}
+}
+
+// TestProtectWithEmbeddedKey checks the embedded iShumei key parses as 2048-bit
+// RSA: its OAEP ciphertexts are 256 bytes, i.e. 344 base64 chars.
+func TestProtectWithEmbeddedKey(t *testing.T) {
 	pub, err := publicKey()
 	if err != nil {
 		t.Fatalf("publicKey = %v", err)
 	}
-	data, ep, tn, err := protect(pub, `{"a1":"all"}`)
+	_, ep, tn, err := protect(pub, `{"a1":"all"}`)
 	if err != nil {
 		t.Fatalf("protect = %v", err)
 	}
-	// data is AES-256-CBC ciphertext: base64 of a multiple of the 16-byte block.
-	raw, err := base64.StdEncoding.DecodeString(data)
-	if err != nil {
-		t.Fatalf("data is not base64: %v", err)
-	}
-	if len(raw) == 0 || len(raw)%aes.BlockSize != 0 {
-		t.Errorf("data length = %d, want a non-zero multiple of %d", len(raw), aes.BlockSize)
-	}
-	// ep/tn are RSA-OAEP on a 2048-bit key: 256-byte ciphertext -> 344 base64 chars.
 	for name, v := range map[string]string{"ep": ep, "tn": tn} {
 		if len(v) != 344 {
 			t.Errorf("%s length = %d, want 344 (2048-bit RSA-OAEP base64)", name, len(v))
@@ -126,37 +209,30 @@ func TestProtectProducesHybridCiphertext(t *testing.T) {
 	}
 }
 
-// TestAESKeyDerivationAndRoundTrip verifies the AES-256-CBC + PKCS#7 padding
-// the native `w1` uses: key = MD5(r) lowercase hex, IV "0102030405060708".
-func TestAESKeyDerivationAndRoundTrip(t *testing.T) {
-	const r = "ABCDEFGHIJKLMNOP"
-	key := aesKeyFromNonce(r)
-	if len(key) != 32 {
-		t.Fatalf("aesKeyFromNonce length = %d, want 32", len(key))
+// TestAESKeyFromNonce pins the key derivation to a known answer: the
+// lowercase-hex MD5 of r.
+func TestAESKeyFromNonce(t *testing.T) {
+	const want = "19fc8eff82037f1fc0d8ea1d32b5e339" // md5("ABCDEFGHIJKLMNOP")
+	if got := string(aesKeyFromNonce("ABCDEFGHIJKLMNOP")); got != want {
+		t.Errorf("aesKeyFromNonce = %q, want %q", got, want)
 	}
-	// The key must be lowercase hex (MD5(r) hex-encoded).
-	for _, c := range string(key) {
-		if !strings.ContainsRune("0123456789abcdef", c) {
-			t.Fatalf("aesKeyFromNonce = %q, want lowercase hex", key)
+}
+
+// TestDeviceData checks the template is valid JSON once filled in and that the
+// device ID lands in all three of its slots (a2, a80, a97). A broken template
+// only shows up live as a 1902, so this is the guard against hand edits.
+func TestDeviceData(t *testing.T) {
+	if n := strings.Count(innerTemplate, "__DEVICE_ID__"); n != 3 {
+		t.Errorf("innerTemplate has %d __DEVICE_ID__ placeholders, want 3", n)
+	}
+	const id = "0123456789abcdef0123456789abcdef_n3d"
+	var m map[string]any
+	if err := json.Unmarshal([]byte(deviceData(id)), &m); err != nil {
+		t.Fatalf("deviceData is not valid JSON: %v", err)
+	}
+	for _, k := range []string{"a2", "a80", "a97"} {
+		if m[k] != id {
+			t.Errorf("%s = %v, want the device ID %q", k, m[k], id)
 		}
-	}
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatalf("aes.NewCipher = %v", err)
-	}
-	iv := []byte("0102030405060708")
-	plaintext := []byte("hello shumei")
-	padded := pkcs7Pad(plaintext, block.BlockSize())
-	ct := make([]byte, len(padded))
-	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ct, padded)
-
-	// decrypt back and strip padding
-	pt := make([]byte, len(ct))
-	cipher.NewCBCDecrypter(block, iv).CryptBlocks(pt, ct)
-	padLen := int(pt[len(pt)-1])
-	pt = pt[:len(pt)-padLen]
-	if string(pt) != "hello shumei" {
-		t.Errorf("round-trip = %q, want %q", pt, "hello shumei")
 	}
 }

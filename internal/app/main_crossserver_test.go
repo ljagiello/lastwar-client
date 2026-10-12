@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1509,4 +1510,65 @@ func TestCrossServerTestOptsStringGoStringRedact(t *testing.T) {
 	if s := fmt.Sprintf("%+v", struct{ O crossServerTestOpts }{O: o}); strings.Contains(s, liveRefreshToken) {
 		t.Errorf("fmt.Sprintf(%%+v, wrapper) = %q, must not contain the live refresh token nested in .O", s)
 	}
+}
+
+// TestRunCrossServerTestShumeiGenSkippedInIOSMode pins -cs-shumei-gen's iOS guard: shumei.BoxID
+// registers an Android device profile, so an iOS-mode Login must never carry one. With -cs-ios the
+// deviceprofile/v4 POST must not go out at all (and a WARN says why); without it, the same run does
+// make that POST, which proves the request counter below actually sees it.
+func TestRunCrossServerTestShumeiGenSkippedInIOSMode(t *testing.T) {
+	run := func(t *testing.T, iosMode bool) (log string, profilePosts int32) {
+		t.Setenv("HOME", t.TempDir())
+
+		client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{
+			Code: "0",
+			ServerList: []gsl.LoginServerInfo{
+				{IP: gsl.FlexString("10.9.8.7"), Port: testutil.FlexPort(20443), Zone: "APS-REAL", GameUid: "uid-real"},
+			},
+			At: &gsl.LoginToken{Token: "fresh-token"},
+		})
+		var posts atomic.Int32
+		base := client.Transport
+		client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "/deviceprofile/v4") {
+				posts.Add(1)
+			}
+			return base.RoundTrip(r)
+		})
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		defer slog.SetDefault(orig)
+
+		synctest.Test(t, func(t *testing.T) {
+			runCrossServerTest(crossServerTestOpts{
+				rt: "some-refresh-token", shumeiGen: true, iosMode: iosMode,
+				httpClient: client,
+				dialGame:   session.NewInMemoryGameDial(session.FakeInitPushServer(nil)),
+			})
+			synctest.Wait()
+		})
+		return buf.String(), posts.Load()
+	}
+
+	t.Run("iOS mode -> no deviceprofile POST, WARN", func(t *testing.T) {
+		log, posts := run(t, true)
+		if posts != 0 {
+			t.Errorf("deviceprofile/v4 POSTs = %d, want 0 in iOS mode", posts)
+		}
+		if !strings.Contains(log, "ignoring -cs-shumei-gen in iOS mode") {
+			t.Errorf("log = %s\nwant the iOS-mode skip WARN", log)
+		}
+	})
+
+	t.Run("Android mode -> deviceprofile POST goes out", func(t *testing.T) {
+		log, posts := run(t, false)
+		if posts != 1 {
+			t.Errorf("deviceprofile/v4 POSTs = %d, want 1 outside iOS mode", posts)
+		}
+		if strings.Contains(log, "ignoring -cs-shumei-gen in iOS mode") {
+			t.Errorf("log = %s\nwant no iOS-mode skip WARN outside iOS mode", log)
+		}
+	})
 }

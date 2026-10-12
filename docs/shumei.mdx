@@ -56,7 +56,7 @@ All recovered from `com.sdkmanager.SmSdkManager` and `com.ishumei.smantifraud`:
 | `appId` | `default` | `SmSdkManager.setAppId` |
 | `publicKey` | 2048-bit RSA cert, `CN=e.ishumei.com, OU=SM, C=CN` | `SmSdkManager.setPublicKey` |
 | `os` | `android` | `l11l11lI1lll.l111l1111l1Il` |
-| `sdkver` | `3.14.3` | `l11l11lI1lll.l111l11111I1l` (sent in the profile; `getSDKVersion()`'s `3.14.3_build1` is a separate public API, not the profile field) |
+| `sdkver` | `3.14.3` | `l11l11lI1lll.l111l11111I1l` (a cloudconf field, not a top-level deviceprofile one; deviceprofile carries it only as `a7` inside the protected `data`. `getSDKVersion()`'s `3.14.3_build1` is a separate public API) |
 | `area` | `fjny` → numeric `011` | `SmAntiFraud.AREA_FJNY`, `l11l11lI1lll` region map |
 | device-profile path | `/deviceprofile/v4` | `l11l11lI1lll.l11l1111I1ll` |
 | cloud-config path | `/v3/cloudconf` | `l11l11lI1lll.l11l1111Il` |
@@ -156,7 +156,9 @@ The `detail` object (`l1l11I1l.l11l1111I11l`) carries `deviceId` (the smid),
 it, and returns `"B"` + `detail.deviceId` (the full `shumeiBoxId`). `main.go`'s
 `-cs-shumei-gen` flag calls it before building `Login` params when no
 `shumeiBoxId` was supplied; a failure only logs a warning and falls back to
-the empty value the server already accepts.
+the empty value the server already accepts. With `-cs-ios` the flag is
+ignored, because the fingerprint is an Android device profile, which an iOS
+`Login` never carries.
 
 **Status (live-tested 2026-10-11):** the full fingerprint, protected with the
 hybrid scheme, returns `code:1100` and a real `smid`, so `BoxID` now mints a
