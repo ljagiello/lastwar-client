@@ -182,9 +182,14 @@ func TestMintShumeiBoxIDConfigWithoutDeviceID(t *testing.T) {
 // still saves the install values it filled, so the retry reports the same phone.
 func TestMintShumeiBoxIDFailure(t *testing.T) {
 	path := writeTestSessionConfig(t, &SessionConfig{DeviceID: "dev-1"})
-	boxID, install := mintShumeiBoxID(&shumeiReply{body: `{"code":1902,"detail":{}}`}, "dev-1", mintDevice, shumei.Install{}, path)
+	client := &shumeiReply{body: `{"code":1902,"detail":{}}`}
+	boxID, install := mintShumeiBoxID(client, "dev-1", mintDevice, shumei.Install{}, path)
 	if boxID != "" || install.BoxID != "" {
 		t.Errorf("boxID = %q, install.BoxID = %q; want both empty after a 1902", boxID, install.BoxID)
+	}
+	// The 1902 reply must be what failed, not a check before the request.
+	if client.calls != 1 {
+		t.Errorf("deviceprofile requests = %d, want 1", client.calls)
 	}
 	saved, err := LoadSessionConfig(path)
 	if err != nil {
@@ -405,8 +410,8 @@ func TestRunCrossServerTestShumeiAppVersion(t *testing.T) {
 			t.Errorf("appVersion %q: registered %d devices, want 1", appVersion, len(registered))
 			continue
 		}
-		if got := registered[0]; got.AppVersion != want {
-			t.Errorf("appVersion %q: registered a38 %q, want the Login's %q", appVersion, got.AppVersion, want)
+		if got := registered[0]; len(sent) > 0 && got.AppVersion != sent[0] {
+			t.Errorf("appVersion %q: registered a38 %q, but the Login sent %q", appVersion, got.AppVersion, sent[0])
 		}
 		if got := registered[0]; !got.BootTime.Equal(flagDevice.BootTime) || got.WiFi == nil || got.WiFi.SSID != "Home" {
 			t.Errorf("appVersion %q: registered boot time %v, Wi-Fi %+v, want the flags' %v and SSID Home", appVersion, got.BootTime, got.WiFi, flagDevice.BootTime)

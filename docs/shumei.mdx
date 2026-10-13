@@ -263,9 +263,22 @@ send a fixed `1.0.352`, which contradicted the `Login`. `a125`'s
 `appVersion` reports a new version without a new update time.
 
 `SmSdkManager.callCreate()` sets the SDK's `notCollect` to
-`{"input", "protect"}`. The collector reports that set itself as `a85` (unless
-it holds `"a85"`), and hands it to the native collector too, so `BoxID` sends
-`a85` as `["input","protect"]`, in Java's `HashSet` order.
+`{"input", "protect"}`. The collector merges in the cloud config's exclusions,
+reports the merged set as `a85` (unless it holds `"a85"`), and hands it to the
+native collector too.
+
+Until a `/v3/cloudconf` reply has been cached, the cloud config is the SDK's
+built-in default. The config getter (`l11l111l1lll`) tries the one in memory,
+then the cached one, then a default compiled into the SDK. A fresh install
+starts the cloudconf and deviceprofile requests together on two network
+threads, so its first registration most likely reads the default. The
+default is `{"ver":1,"enc":1,"data":…}`: base64, AES-256-CBC under the key
+`5sn2vI1UbnoQZgr/32T6yh1xr62EQtNR9DJ3zNXl/9s=` (base64) with the IV
+`"0102030405060708"`, then zlib. It decrypts to 15,108 bytes of JSON whose
+`sensitive.gps` and `sensitive.tel` are `false` and whose other `sensitive.*`
+keys are `true`, so it excludes `gps` and `tel`. `BoxID` therefore sends `a85`
+as `["input","tel","gps","protect"]`, in Java's `HashSet` order. No Java gate
+checks `gps` or `tel`; they matter only to the native collector.
 
 `a63`, the input-method list (`InputMethodManager.getInputMethodList()`), is in
 the SDK's schema, but Last War never collects it: the collector skips `a63`
@@ -275,12 +288,13 @@ collector's Java gates, `"input"` gates only `a63`, and none checks
 `a63`. C485 reached the same reading in
 [discussion #21](https://github.com/ljagiello/lastwar-client/discussions/21).
 
-The SDK adds the cloud config's exclusions to that set, so a real install's
-`a85` can hold more names. The `/v3/cloudconf` reply parser (`l11l111l1lll`)
-turns every `sensitive.<name>` key whose value isn't `true` into an exclusion,
-so the server can switch off a whole category or a single `aNN` field.
-`goclient` doesn't fetch the cloud config, and no live reply has been
-decrypted, so which keys Last War's server sends is unknown.
+A server reply replaces the default once it's cached, so later registrations
+may report a different set. The parser reads two formats. A `ver: 1` config,
+like the default, has flat `sensitive.<name>` keys, and a value that isn't
+`true` excludes the name. Any other version has a nested `sensitive` object,
+where `true` excludes it. Either way the server can switch off a whole category
+or a single `aNN` field. `goclient` doesn't fetch the cloud config, and no live
+reply has been decrypted, so which keys Last War's server sends is unknown.
 
 ### Values one install keeps
 

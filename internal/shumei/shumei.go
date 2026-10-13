@@ -292,9 +292,12 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // input-method list, is left out entirely: SmSdkManager puts "input" in the
 // SDK's notCollect set, and the collector skips a63 when that set holds
 // "input" (l111l1111llIl), so Last War never sends it. a85 is that set itself,
-// {"input", "protect"} in Java's HashSet order, which the collector reports
-// unless the set holds "a85". A real install would add the cloud config's
-// exclusions; this client doesn't fetch the cloud config.
+// which the collector reports unless the set holds "a85". The SDK merges the
+// cloud config's exclusions into it, and until a cloudconf reply has been
+// cached, that config is the SDK's built-in default (l11l111l1lll), which
+// excludes "gps" and "tel". So a fresh install most likely sends {"input",
+// "tel", "gps", "protect"}, in Java's HashSet order. A later server reply could
+// change the cloud half; this client doesn't fetch the cloud config.
 const innerTemplate = `{
   "a1": "all", "a4": "1", "a5": "default",
   "a6": "android", "a10": "12", "a7": "3.14.3",
@@ -325,7 +328,7 @@ const innerTemplate = `{
   "a72": { "status": 2, "level": 85, "scale": 100, "temp": 320, "vol": 4200 },
   "a73": 0, "a74": 0, "a75": 0, "a76": "", "a77": {}, "a78": [], "a79": "",
   "a83": "1011100",
-  "a85": [ "input", "protect" ], "a86": "0111001",
+  "a85": [ "input", "tel", "gps", "protect" ], "a86": "0111001",
   "a88": "locateServiceName:android.location.ILocationManager$Stub$Proxy|phoneServiceName:com.android.internal.telephony.ITelephony$Stub$Proxy",
   "a90": 32, "a92": "1080,1920", "a93": 1,
   "a102": [], "a103": "", "a107": {}, "a108": "", "a110": "", "a114": [], "a115": [],
@@ -522,8 +525,9 @@ func javaRandomDigits(seed int64, n int) string {
 // `shumeiBoxId` field. deviceID should match the request's own deviceId so the
 // server can bind the fingerprint to the same device identity. dev carries
 // the install values, which must be filled (see Device.Install), the app
-// version the Login claims (Device.AppVersion), and the clock and Wi-Fi fields; zero clocks and no Wi-Fi report the host's clocks and no
-// Wi-Fi, like a real Last War install.
+// version the Login claims (Device.AppVersion), and the clock and Wi-Fi
+// fields; zero clocks and no Wi-Fi report the host's clocks and no Wi-Fi, like
+// a real Last War install.
 //
 // Note on scope: the device-data fingerprint this mints is a spoofed Android
 // profile for a device that does not exist. The game server does not require a

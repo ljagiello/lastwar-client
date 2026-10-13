@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -150,7 +151,9 @@ func TestBoxIDErrors(t *testing.T) {
 		{"malformed JSON", http.StatusOK, "not json", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			calls := 0
 			client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				calls++
 				return &http.Response{
 					StatusCode: c.status,
 					Body:       io.NopCloser(strings.NewReader(c.body)),
@@ -160,6 +163,10 @@ func TestBoxIDErrors(t *testing.T) {
 			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall, AppVersion: testAppVersion})
 			if err == nil {
 				t.Fatalf("BoxID = %q, nil; want an error", boxID)
+			}
+			// The reply must be what failed, not a check before the request.
+			if calls != 1 {
+				t.Errorf("BoxID made %d requests, want 1 (error: %v)", calls, err)
 			}
 			if got := errors.Is(err, ErrUnassigned); got != c.unassigned {
 				t.Errorf("errors.Is(%v, ErrUnassigned) = %v, want %v", err, got, c.unassigned)
@@ -355,12 +362,15 @@ func TestDeviceData(t *testing.T) {
 		// versionName: the build the Login claims, not a fixed one.
 		"a38": testAppVersion,
 		"a39": "com.fun.lastwar.gp",
-		// The notCollect set SmSdkManager configures, in Java's HashSet order.
-		"a85": "[input protect]",
 	} {
 		if got := fmt.Sprint(m[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
 		}
+	}
+	// The exclusion set: SmSdkManager's notCollect plus the SDK's built-in cloud
+	// config's, as a JSON array in Java's HashSet order.
+	if want := []any{"input", "tel", "gps", "protect"}; !reflect.DeepEqual(m["a85"], want) {
+		t.Errorf("a85 = %#v, want %#v", m["a85"], want)
 	}
 	// SmSdkManager puts "input" in notCollect, so the collector never fills a63.
 	if v, ok := m["a63"]; ok {
