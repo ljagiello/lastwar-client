@@ -280,8 +280,9 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // SM-G988N running Android 12), because this client runs on a desktop and has
 // no real device telemetry. deviceData adds the fields that change between
 // collections: the device ID (a2, a97), the clocks (a9, a40, a170, a171), the
-// SDK session ID (a80), and the Wi-Fi details (a19, a30, a31) when a Device
-// carries them.
+// SDK session ID (a80), the collection time (a133), and the Wi-Fi details
+// (a19, a30, a31) when a Device carries them. It also adds the per-install
+// values from Device.Install: a24, a84, a125, a126, a163, a167 and a168.
 //
 // The empty entries stay here to document which slots this device leaves
 // empty. deviceData drops them, the way the SDK's serializer does.
@@ -301,21 +302,21 @@ const innerTemplate = `{
   "a47": [ "1,InvenSense", "4,AKM", "9,Bosch", "13,Bosch" ],
   "a18": { "ro.debuggable": "0", "ro.boot.hardware": "exynos990", "gsm.sim.state": "READY",
            "gsm.operator.alpha": "Netia", "sys.usb.state": "android,adb" },
-  "a24": "8f7a9a1b751fa784", "a39": "com.fun.lastwar.gp", "a38": "1.0.352",
+  "a39": "com.fun.lastwar.gp", "a38": "1.0.352",
   "a136": "build1", "a96": "9dNCYkjHeFMYZMOjxgX8",
   "a63": [ "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME" ],
   "a68": [], "a69": 120000000000, "a70": 130000000000, "a71": 128000000000, "a127": 12,
   "a99": "", "a100": "", "a101": "", "a113": 0, "a130": 3, "a116": {}, "a117": false,
   "a120": { "mr": 0, "mt": 0, "tr": 123456789, "tt": 987654321 }, "a121": 0, "a124": "",
-  "a125": { "fit": 1783000000000, "lut": 1784560000000 }, "a126": "", "a135": 0, "a139": 0, "a142": 1,
+  "a135": 0, "a139": 0, "a142": 1,
   "a153": {}, "a154": { "pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.5.01.7" },
-  "a133": 250, "a144": "", "a155": 0, "a160": 0, "a161": 0, "a162": [],
-  "a163": "ffeeddccbbaa99887766554433221100", "a164": 0, "a165": 0,
-  "a167": 1784500000000, "a168": 1784500000000, "a169": "",
+  "a144": "", "a155": 0, "a160": 0, "a161": 0, "a162": [],
+  "a164": 0, "a165": 0,
+  "a169": "",
   "a172": {}, "a173": 0, "a174": 1, "a15": "false",
   "a72": { "status": 2, "level": 85, "scale": 100, "temp": 320, "vol": 4200 },
   "a73": 0, "a74": 0, "a75": 0, "a76": "", "a77": {}, "a78": [], "a79": "",
-  "a83": "1011100", "a84": "e2b31bdf2f77091e",
+  "a83": "1011100",
   "a85": [], "a86": "0111001",
   "a88": "locateServiceName:android.location.ILocationManager$Stub$Proxy|phoneServiceName:com.android.internal.telephony.ITelephony$Stub$Proxy",
   "a90": 32, "a92": "1080,1920", "a93": 1,
@@ -324,9 +325,10 @@ const innerTemplate = `{
 }`
 
 // Device holds the fingerprint values that change during a device's life: the
-// clocks the SDK samples on every collection, and the Wi-Fi details it reads
-// when the app may see them. BoxID fills each zero field with the host's real
-// value.
+// clocks the SDK samples on every collection, the Wi-Fi details it reads when
+// the app may see them, and the values one install keeps. BoxID fills each
+// zero clock, Wi-Fi IP and collection time with the host's real value or a
+// random one. It never makes up install values: the caller passes them.
 type Device struct {
 	// Now is the collection time, a9 (System.currentTimeMillis()). Zero means
 	// the current time.
@@ -343,6 +345,17 @@ type Device struct {
 	// ACCESS_FINE_LOCATION (l1l11l1Illl), Last War doesn't request it, so a19,
 	// a30 and a31 come back empty and the serializer leaves them out.
 	WiFi *WiFi
+
+	// Install is what this install keeps between registrations. It must be
+	// filled (NewInstall or Install.Fill): BoxID refuses one with values unset
+	// rather than invent a phone the caller never sees, so the install sent is
+	// always the one the caller keeps.
+	Install Install
+
+	// CollectTime is how long the SDK took to collect the device data, a133
+	// (the milliseconds from the start of l111l1111llIl's collection to the
+	// end). Zero means a random time from 150 to 600 ms.
+	CollectTime time.Duration
 }
 
 // WiFi is the connected network, as Android's WifiInfo reports it to an app
@@ -353,7 +366,8 @@ type WiFi struct {
 	IP    string // a31, the device's IPv4 on that network; "" means the host's LAN address
 }
 
-// withHostDefaults fills each zero field of d with the host's real value.
+// withHostDefaults fills d's zero clocks and Wi-Fi IP with the host's real
+// values and a zero CollectTime with a random one. It leaves Install as given.
 func (d Device) withHostDefaults() Device {
 	if d.Now.IsZero() {
 		d.Now = time.Now()
@@ -366,6 +380,9 @@ func (d Device) withHostDefaults() Device {
 		w.IP = hostIP()
 		d.WiFi = &w
 	}
+	if d.CollectTime == 0 {
+		d.CollectTime = randDuration(150*time.Millisecond, 600*time.Millisecond).Truncate(time.Millisecond)
+	}
 	return d
 }
 
@@ -374,14 +391,24 @@ func (d Device) withHostDefaults() Device {
 const sdkStartLead = time.Second
 
 // deviceData builds the device-data JSON that protect encrypts: innerTemplate
-// plus deviceID and d's clock and Wi-Fi values. It serializes the way the
-// SDK's reflection serializer (l1l1l11Ill) does: compact, and without
+// plus deviceID and d's clock, Wi-Fi and install values. It serializes the way
+// the SDK's reflection serializer (l1l1l11Ill) does: compact, and without
 // top-level entries that are empty strings, lists or maps. d must already
 // carry its host defaults.
 func deviceData(deviceID string, d Device) (string, error) {
 	if d.BootTime.After(d.Now) {
 		return "", fmt.Errorf("shumei: boot time %s is after the collection time %s",
 			d.BootTime.Format(time.RFC3339), d.Now.Format(time.RFC3339))
+	}
+	in := d.Install
+	if in.AndroidID == "" || in.MediaDrmID == "" || in.PUUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() {
+		return "", errors.New("shumei: install values are unset (Install.Fill sets them)")
+	}
+	if err := in.Validate(); err != nil {
+		return "", fmt.Errorf("shumei: install: %w", err)
+	}
+	if _, ok := in.For(deviceID); !ok {
+		return "", errors.New("shumei: the install belongs to a different deviceId")
 	}
 	dec := json.NewDecoder(strings.NewReader(innerTemplate))
 	dec.UseNumber()
@@ -400,6 +427,19 @@ func deviceData(deviceID string, d Device) (string, error) {
 	m["a170"] = now - boot
 	start := d.Now.Add(-sdkStartLead).UnixMilli()
 	m["a80"] = fmt.Sprintf("%d-%s", start, javaRandomDigits(start, 5))
+	m["a133"] = d.CollectTime.Milliseconds()
+
+	m["a24"] = in.AndroidID
+	m["a84"] = in.MediaDrmID
+	m["a163"] = in.PUUID
+	m["a125"] = map[string]any{"fit": in.FirstInstallTime.UnixMilli(), "lut": in.LastUpdateTime.UnixMilli()}
+	m["a126"] = in.BoxID
+	var saved int64
+	if !in.BoxIDSavedAt.IsZero() {
+		saved = in.BoxIDSavedAt.UnixMilli()
+	}
+	m["a167"], m["a168"] = saved, saved
+
 	if w := d.WiFi; w != nil {
 		m["a19"] = w.BSSID
 		if w.SSID != "" {
@@ -463,8 +503,9 @@ func javaRandomDigits(seed int64, n int) string {
 // BoxID registers a device with the ShuMei backend and returns its assigned
 // device fingerprint, already prefixed with `"B"` to match the Login request's
 // `shumeiBoxId` field. deviceID should match the request's own deviceId so the
-// server can bind the fingerprint to the same device identity. dev sets the
-// clock and Wi-Fi fields; its zero value reports the host's clocks and no
+// server can bind the fingerprint to the same device identity. dev carries
+// the install values, which must be filled (see Device.Install), and the clock
+// and Wi-Fi fields; zero clocks and no Wi-Fi report the host's clocks and no
 // Wi-Fi, like a real Last War install.
 //
 // Note on scope: the device-data fingerprint this mints is a spoofed Android

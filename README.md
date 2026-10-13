@@ -93,7 +93,14 @@ since the SFS2X game socket is plain TCP with no TLS) and let `go run ./cmd/pcap
 "Recovering" below, and `docs/capturing-and-decoding-traffic.mdx` for the manual methodology). The
 access token is not single-use, but it *is* bound to the platform identity (`iosMode`) and build
 (`appVersion`/`versionCode`, optional, defaulting to the built-in values) it was issued under, and
-it will eventually need refreshing from a fresh capture.
+it will eventually need refreshing from a fresh capture. With `-cs-shumei-gen`, the client also
+adds a `shumeiInstall` object: the per-install values its ShuMei fingerprint reports, rewritten
+after each registration (see `docs/shumei.mdx`). Keep that object. Copying a config without
+`shumeiInstall` over it makes the next registration report a different phone, and copying an
+older one sends a stale `boxId`. A recapture with `pcap -session-out` (see "Recovering" below)
+writes a fresh file without it: if the `deviceId` didn't change, copy the old `shumeiInstall`
+into the new file. This matters only for configs without a `shumeiBoxId`: `-cs-shumei-gen` never
+registers when one is set, and a captured config usually has one.
 
 **The game server address is looked up, not typed in.** `ip` (a `|`-delimited gateway list) and
 `port` are optional. The real client asks GSL `getserverlist.php` for its role's server on every

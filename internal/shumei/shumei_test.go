@@ -53,7 +53,7 @@ func TestBoxID(t *testing.T) {
 	client := &http.Client{Transport: ft}
 
 	const deviceID = "0123456789abcdef0123456789abcdef_n3d"
-	dev := Device{Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000)}
+	dev := testDevice()
 	got, err := boxID(client, &priv.PublicKey, deviceID, dev)
 	if err != nil {
 		t.Fatalf("boxID = %v, want nil", err)
@@ -101,6 +101,25 @@ func TestBoxID(t *testing.T) {
 	}
 }
 
+// testInstall is a filled install with pinned values, so deviceData's output is
+// fixed.
+var testInstall = Install{
+	AndroidID:        "3f9c1e0a7b2d4c58",
+	MediaDrmID:       "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=___",
+	PUUID:            "6f1c2b3a4d5e4f60a7b8c9d0e1f20314",
+	FirstInstallTime: time.UnixMilli(1775000000000),
+	LastUpdateTime:   time.UnixMilli(1789000000000),
+}
+
+// testDevice is a Device with every field pinned that withHostDefaults would
+// otherwise fill.
+func testDevice() Device {
+	return Device{
+		Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000),
+		Install: testInstall, CollectTime: 287 * time.Millisecond,
+	}
+}
+
 // mustDeviceData is deviceData, failing the test on an error.
 func mustDeviceData(t *testing.T, deviceID string, d Device) string {
 	t.Helper()
@@ -133,7 +152,7 @@ func TestBoxIDErrors(t *testing.T) {
 					Header:     http.Header{},
 				}, nil
 			})}
-			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{})
+			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall})
 			if err == nil {
 				t.Fatalf("BoxID = %q, nil; want an error", boxID)
 			}
@@ -141,6 +160,21 @@ func TestBoxIDErrors(t *testing.T) {
 				t.Errorf("errors.Is(%v, ErrUnassigned) = %v, want %v", err, got, c.unassigned)
 			}
 		})
+	}
+}
+
+// TestBoxIDNeedsInstall checks BoxID refuses an install with values unset
+// before it contacts the server, rather than register a phone the caller
+// never sees and so can't keep.
+func TestBoxIDNeedsInstall(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("unexpected request")
+	})}
+	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{})
+	if err == nil || !strings.Contains(err.Error(), "unset") || calls != 0 {
+		t.Errorf("BoxID with no install = %q, %v after %d requests; want the unset-install error and no request", boxID, err, calls)
 	}
 }
 
@@ -159,7 +193,7 @@ func TestProtectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rsa.GenerateKey = %v", err)
 	}
-	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{}.withHostDefaults())
+	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall}.withHostDefaults())
 	data, ep, tn, err := protect(&priv.PublicKey, in)
 	if err != nil {
 		t.Fatalf("protect = %v", err)
@@ -275,8 +309,8 @@ func TestDeviceData(t *testing.T) {
 	const id = "0123456789abcdef0123456789abcdef_n3d"
 	// The SDK started one second before collecting, at 1790882443713, whose
 	// java.util.Random digits TestJavaRandomDigits pins.
-	now, boot := time.UnixMilli(1790882444713), time.UnixMilli(1790000000000)
-	s := mustDeviceData(t, id, Device{Now: now, BootTime: boot})
+	d := testDevice()
+	s := mustDeviceData(t, id, d)
 
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, []byte(s)); err != nil || compact.String() != s {
@@ -291,6 +325,14 @@ func TestDeviceData(t *testing.T) {
 		"a171": "882444713",
 		"a170": "882444713",
 		"a80":  "1790882443713-36769",
+		"a133": "287",
+		"a24":  testInstall.AndroidID,
+		"a84":  testInstall.MediaDrmID,
+		"a163": testInstall.PUUID,
+		"a125": "map[fit:1775000000000 lut:1789000000000]",
+		// No smid cached yet: the cache file doesn't exist, so both are 0.
+		"a167": "0",
+		"a168": "0",
 	} {
 		if got := fmt.Sprint(m[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
@@ -300,6 +342,9 @@ func TestDeviceData(t *testing.T) {
 		if v, ok := m[key]; ok {
 			t.Errorf("%s = %v, want it absent: a real Last War install reads no Wi-Fi details", key, v)
 		}
+	}
+	if v, ok := m["a126"]; ok {
+		t.Errorf("a126 = %v, want it absent before the install's first registration", v)
 	}
 	for key, v := range m {
 		if isEmpty(v) {
@@ -311,18 +356,63 @@ func TestDeviceData(t *testing.T) {
 		t.Errorf("a117 = %v, a113 = %v, want false and 0 kept", m["a117"], m["a113"])
 	}
 
-	if _, err := deviceData(id, Device{Now: boot, BootTime: now}); err == nil {
+	backwards := d
+	backwards.Now, backwards.BootTime = d.BootTime, d.Now
+	if _, err := deviceData(id, backwards); err == nil {
 		t.Error("deviceData with the boot time after the collection time = nil error, want an error")
+	}
+	unset := d
+	unset.Install = Install{}
+	if _, err := deviceData(id, unset); err == nil {
+		t.Error("deviceData with no install values = nil error, want an error")
+	}
+	for name, unsetOne := range map[string]func(*Install){
+		"androidId":        func(in *Install) { in.AndroidID = "" },
+		"mediaDrmId":       func(in *Install) { in.MediaDrmID = "" },
+		"puuid":            func(in *Install) { in.PUUID = "" },
+		"firstInstallTime": func(in *Install) { in.FirstInstallTime = time.Time{} },
+		"lastUpdateTime":   func(in *Install) { in.LastUpdateTime = time.Time{} },
+	} {
+		partial := d
+		unsetOne(&partial.Install)
+		if _, err := deviceData(id, partial); err == nil {
+			t.Errorf("deviceData with the install's %s unset = nil error, want an error", name)
+		}
+	}
+	invalid := d
+	invalid.Install.AndroidID = "not-an-android-id"
+	if _, err := deviceData(id, invalid); err == nil {
+		t.Error("deviceData with an invalid androidId = nil error, want an error")
+	}
+	other := d
+	other.Install.DeviceID = "another-device"
+	if _, err := deviceData(id, other); err == nil {
+		t.Error("deviceData with another deviceId's install = nil error, want an error")
+	}
+}
+
+// TestDeviceDataRegistered checks a registered install sends its cached box ID
+// back as a126, with its save time in a167 and a168.
+func TestDeviceDataRegistered(t *testing.T) {
+	d := testDevice()
+	d.Install, _ = d.Install.Registered("Bsmid-earlier", time.UnixMilli(1789500000123))
+	m := decodeDeviceData(t, mustDeviceData(t, "id", d))
+	for key, want := range map[string]string{
+		"a126": "Bsmid-earlier",
+		"a167": "1789500000123",
+		"a168": "1789500000123",
+	} {
+		if got := fmt.Sprint(m[key]); got != want {
+			t.Errorf("%s = %s, want %s", key, got, want)
+		}
 	}
 }
 
 // TestDeviceDataWiFi checks a Device's Wi-Fi details land the way WifiInfo
 // reports them: the SSID in quotes, without HTML escaping.
 func TestDeviceDataWiFi(t *testing.T) {
-	d := Device{
-		Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000),
-		WiFi: &WiFi{SSID: "Home <5G> & co", BSSID: "aa:bb:cc:dd:ee:ff", IP: "192.168.1.50"},
-	}
+	d := testDevice()
+	d.WiFi = &WiFi{SSID: "Home <5G> & co", BSSID: "aa:bb:cc:dd:ee:ff", IP: "192.168.1.50"}
 	s := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", d)
 	if strings.Contains(s, `\u00`) {
 		t.Errorf("deviceData escapes characters the SDK sends raw:\n%s", s)
@@ -363,6 +453,15 @@ func TestWithHostDefaults(t *testing.T) {
 	}
 	if d.WiFi != nil {
 		t.Errorf("WiFi = %+v, want nil: no Wi-Fi details unless asked for", d.WiFi)
+	}
+	if d.CollectTime < 150*time.Millisecond || d.CollectTime >= 600*time.Millisecond {
+		t.Errorf("CollectTime = %v, want 150 to 600 ms", d.CollectTime)
+	}
+	if d.Install != (Install{}) {
+		t.Errorf("Install = %+v, want it left empty: withHostDefaults never makes up install values", d.Install)
+	}
+	if kept := testDevice().withHostDefaults(); kept.Install != testInstall || kept.CollectTime != 287*time.Millisecond {
+		t.Errorf("withHostDefaults changed a set Install or CollectTime: %+v, %v", kept.Install, kept.CollectTime)
 	}
 
 	set := Device{Now: time.UnixMilli(2), BootTime: time.UnixMilli(1), WiFi: &WiFi{SSID: "Home"}}

@@ -213,7 +213,8 @@ path, not a hard gate.
 names, endpoint, response shape, and crypto primitives (RSA-OAEP spec, AES-256
 CBC IV, the MD5-derived key) are byte-exact from decompilation and confirmed
 live. The `aNN` device-data values themselves are a spoofed profile, not
-collected from a real device, apart from the clock fields below.
+collected from a real device. The clock fields below come from the host, and
+the per-install values below are generated in the formats a real phone uses.
 
 ### Fields that change between collections
 
@@ -242,3 +243,74 @@ Java's field order. The server accepted the alphabetical order live. `-cs-shumei
 device that holds the location permission. The SSID gets the quotes
 `WifiInfo.getSSID()` adds, and `a31` becomes the host's LAN IPv4. Both
 shapes returned `1100` and an 88-char `smid` on 2026-10-12 (confirmed live).
+
+`a133` changes too: it's how long the collection took, in milliseconds
+(`l111l1111llIl`). `BoxID` picks a random 150 to 600 ms on each call.
+
+### Values one install keeps
+
+Some fields stay the same for the life of an app install. `goclient` keeps them
+per session, in the session config's `shumeiInstall` object. The first
+`-cs-shumei-gen` run for a session generates whatever the object leaves out and
+writes it back, so every later registration reports the same phone. A value
+already in the object stays, such as a real phone's Android ID.
+
+One install belongs to one Login `deviceId`, so the object records the one it
+was made for, in its own `deviceId` key. A run under a different `deviceId`
+registers a fresh install instead. That includes a run where `-cs-deviceid`
+overrides the config's. The registration doesn't save the fresh install over the
+config's when the config belongs to the other `deviceId`. The owner is the
+config's top-level `deviceId`, or, if there's none, the `deviceId` of the
+install already saved.
+
+There's one exception. If that same run also follows a server redirect,
+refreshes its token, or looks its server up after a failed connect, it saves
+the whole config back under the `deviceId` it used, together with that run's
+install. That is how the config has always treated `deviceId`. A run that
+never had an install (no `-cs-shumei-gen`, or iOS) writes none.
+
+Without a session config (`-no-config`, or bare `-cs-*` flags and no file),
+there's nowhere to keep the values, so every run reports a new phone.
+`goclient` logs a warning saying so. Without `-cs-deviceid`, all those phones
+share the one persisted `deviceId`.
+
+`goclient` checks the object only on runs that register: `-cs-shumei-gen`, no
+`shumeiBoxId`, and not iOS. It exits on a value a real install couldn't hold.
+
+| Field | SDK source | `shumeiInstall` key | Fresh value |
+|---|---|---|---|
+| `a24` | `Settings.Secure.ANDROID_ID` (`l1l11I111ll`), unhashed because Last War doesn't set `needUsingMD5` | `androidId` | 16 random lowercase hex digits |
+| `a84` | the base64 `deviceUniqueId` of the Widevine, ClearKey (W3C and DASH-IF UUIDs) and PlayReady `MediaDrm` schemes, in that order, joined with `_` (`l1111l111111Il`), cached in the `auc` prefs | `mediaDrmId` | 32 random bytes for Widevine, then `___`. Android's ClearKey plugin keeps its test ID under `deviceId`, not `deviceUniqueId`, and the Samsung has no PlayReady |
+| `a163` | `UUID.randomUUID()` without dashes, cached as `puuid` in the `seq` prefs (`l1l11I11l`) | `puuid` | a random version 4 UUID |
+| `a125` | `{fit, lut}`: `PackageInfo.firstInstallTime` and `lastUpdateTime` | `firstInstallTime`, `lastUpdateTime` | installed 30 to 400 days ago, updated in the last 20 days |
+| `a126` | `getDeviceId()` unless it's a `D` fallback: the `"B"` + `smid` cached from the last registration | `boxId` | absent until the first registration |
+| `a167`, `a168` | the smid cache file's timestamp (`SMSDK.u2`), and the copy the SDK records as `bfic` right after writing that file | `boxIdSavedAt` | 0 until the first registration |
+
+The three times are RFC 3339 strings, such as `2026-03-04T10:22:31.123Z`. The
+wire and `dumpsys package` show them as milliseconds or in other formats. A
+number there fails to parse, and every run then exits while loading the config.
+
+The template used to send fixed values for all of these, including an `a84` in
+the wrong format and `a167`/`a168` timestamps next to an empty `a126`, a pairing
+a real install doesn't produce.
+
+After a registration succeeds, `goclient` stores the box ID in `boxId` and the
+time in `boxIdSavedAt`. The next run sends them back as `a126`, `a167` and
+`a168`, as the SDK does on every launch. Android rewrites a prefs file only when
+a value changes, so getting the same `smid` again keeps the earlier time. In
+practice that doesn't happen: on 2026-10-12, three registrations with one
+throwaway install all returned `1100`, each with a different 88-char `smid`. The
+first was a fresh install, the second sent the first `smid` back as `a126`, and
+the third was the same install with no `a126` (confirmed live). The `smid` looks
+like an opaque token re-issued on every reply, so `boxIdSavedAt` moves on every
+run. A failed registration still saves the generated values. The minted box ID stays
+out of the config's top-level `shumeiBoxId`: that field means "send this one
+and don't register", so storing a minted ID there would stop later runs from
+registering.
+
+Three assumptions remain. `SMSDK.u2` is native and hasn't been traced, so "0
+for a missing file" comes from its Java wrapper, which returns 0 when the call
+fails. The Widevine ID length (32 bytes) is the common one, not one read from an
+SM-G988N. And the `a133` range of 150 to 600 ms is a guess: the real collection
+waits up to 3 s on one of its threads (`thread.join(3000L)`), and no real
+timing has been measured.

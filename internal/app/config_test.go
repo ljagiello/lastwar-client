@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"fmt"
+	"lastwar-client/internal/shumei"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSessionConfigStringGoStringRedact is the round-48 regression test for the MAJOR finding that
@@ -322,6 +324,15 @@ func TestSaveSessionConfigRoundTrip(t *testing.T) {
 		ShumeiBoxId: "some-shumei-box-id",
 		AccessToken: "some-access-token",
 		IOSMode:     true,
+		ShumeiInstall: shumei.Install{
+			AndroidID:        "3f9c1e0a7b2d4c58",
+			MediaDrmID:       "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=___",
+			PUUID:            "6f1c2b3a4d5e4f60a7b8c9d0e1f20314",
+			FirstInstallTime: time.UnixMilli(1775000000000).UTC(),
+			LastUpdateTime:   time.UnixMilli(1789000000000).UTC(),
+			BoxID:            "Bsome-smid",
+			BoxIDSavedAt:     time.UnixMilli(1789500000123).UTC(),
+		},
 	}
 	if err := SaveSessionConfig(want, path); err != nil {
 		t.Fatalf("SaveSessionConfig: %v", err)

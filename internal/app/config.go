@@ -2,8 +2,10 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"lastwar-client/internal/auth"
+	"lastwar-client/internal/shumei"
 	"log/slog"
 	"os"
 )
@@ -47,6 +49,14 @@ type SessionConfig struct {
 	// DuelPolicy overrides a feature's Alliance Duel policy by name: "hold" runs it only on duel
 	// days that score it, "always" runs it every time. See -list-features.
 	DuelPolicy map[string]string `json:"duelPolicy,omitempty"`
+	// ShumeiInstall is what this session's phone keeps between -cs-shumei-gen registrations
+	// (Android ID, MediaDrm ID, the SDK's install UUID, the app's install times, and the smid
+	// the last registration cached), so each one reports the same phone. -cs-shumei-gen fills
+	// any value left out and writes it back here. It records the deviceId it belongs to: a run
+	// under another deviceId (-cs-deviceid) registers a fresh install, and the mint doesn't save
+	// it over this one. A redirect or refresh save-back in that same run still rewrites the whole
+	// config under the run's deviceId, with the run's install, as it always has for deviceId.
+	ShumeiInstall shumei.Install `json:"shumeiInstall,omitzero"`
 }
 
 // String/GoString are the round-48 regression fix for the MAJOR finding that SessionConfig --
@@ -135,6 +145,31 @@ func SaveSessionConfig(cfg *SessionConfig, path string) error {
 		return err
 	}
 	return auth.AtomicWriteStateFile(path, string(data))
+}
+
+// errOtherDeviceID is saveShumeiInstall refusing to store one deviceId's install in a session
+// config made for another, as after a run whose -cs-deviceid overrides the config's.
+var errOtherDeviceID = errors.New("the session config holds a different deviceId")
+
+// saveShumeiInstall stores install in the session config at path, re-reading the file first so
+// every other field stays as it is on disk. The config's deviceId owns the install slot; without
+// one, the deviceId of the install already there does, so a run under another deviceId can't
+// replace it (and with it any values pasted from a real phone). It returns errOtherDeviceID, and
+// writes nothing, when that owner isn't the deviceId install belongs to.
+func saveShumeiInstall(path string, install shumei.Install) error {
+	cfg, err := LoadSessionConfig(path)
+	if err != nil {
+		return err
+	}
+	owner := cfg.DeviceID
+	if owner == "" {
+		owner = cfg.ShumeiInstall.DeviceID
+	}
+	if owner != "" && owner != install.DeviceID {
+		return errOtherDeviceID
+	}
+	cfg.ShumeiInstall = install
+	return SaveSessionConfig(cfg, path)
 }
 
 // applyOverride returns override if it's non-zero, else base.

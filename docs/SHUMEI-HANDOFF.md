@@ -165,15 +165,19 @@ To mint a real `smid`, the next agent needs to (in this order):
 
 ## Current Go code (for the next agent)
 
-- `internal/shumei/shumei.go` — `BoxID(client, deviceID, device)`, `Device` (clock and Wi-Fi
-  fields, see `docs/shumei.mdx`), `DeviceProfile`, `ProfileResponse`,
+- `internal/shumei/shumei.go` — `BoxID(client, deviceID, device)`, `Device` (clock, Wi-Fi and
+  per-install fields, see `docs/shumei.mdx`), `DeviceProfile`, `ProfileResponse`,
   `protect()` (raw deflate → AES-256-CBC under `hex(MD5(r))` → base64 as `data`, plus
   RSA-OAEP of `r` as `ep` and of `"0"` as `tn`), embedded SPKI, constants. **Safe to
   ship**: `BoxID` returns `ErrUnassigned` on `1902`, and `main.go`'s `-cs-shumei-gen` logs a
   warning and falls back to empty `shumeiBoxId` (which the game server accepts). The flag is
   ignored in iOS mode (`-cs-ios` or a session config's `iosMode`), since the fingerprint is an
   Android profile.
-- `internal/app/main.go` — `-cs-shumei-gen` flag wired into `runCrossServerTest`.
+- `internal/shumei/install.go` — `Install`, the values one install keeps (`a24`, `a84`, `a125`,
+  `a126`, `a163`, `a167`/`a168`) and the deviceId they belong to, with `NewInstall`, `Fill`,
+  `For` (binds an install to one deviceId), `Registered` and `Validate`.
+- `internal/app/main.go` — `-cs-shumei-gen` flag wired into `runCrossServerTest`;
+  `mintShumeiBoxID` fills the session config's `shumeiInstall` and writes it back.
 - Docs: `docs/shumei.mdx` (protocol + status), `docs/auth.mdx`/`native-binaries.mdx`/`go-client-
   roadmap.mdx` reference it.
 - `go build ./...`, `golangci-lint run ./internal/shumei/` (0 issues), `go test ./internal/shumei/`
