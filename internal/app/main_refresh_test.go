@@ -381,6 +381,9 @@ func TestMainUsesSessionConfigRefreshToken(t *testing.T) {
 		addr := session.StartFakeGameServer(t, tokenCheckingServer(os.Getenv("LASTWAR_TEST_GOOD"), &seen))
 		host, port := testutil.SplitHostPortInt(t, addr)
 		reply := refreshReply()
+		if os.Getenv("LASTWAR_TEST_NO_RT") != "" {
+			reply = noRtReply()
+		}
 		reply.ServerList = []gsl.LoginServerInfo{{ID: "783", IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: lookupZone, GameUid: lookupGameUid}}
 		testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, reply))
 		cfgPath := os.Getenv("LASTWAR_TEST_CFG")
@@ -412,6 +415,11 @@ func TestMainUsesSessionConfigRefreshToken(t *testing.T) {
 		{"30-day-old accessTokenTime",
 			SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", AccessToken: "at-old", AccessTokenTime: stale, RefreshToken: "rt-old"},
 			[]string{"LASTWAR_TEST_GOOD=" + refreshedAt, "LASTWAR_TEST_SET_ADDR=1"}, 0, "[" + refreshedAt + "]", true},
+		// The live reply shape (no rt): the config's refresh token and its time come through the
+		// run and are saved back unchanged.
+		{"30-day-old accessTokenTime, reply without rt",
+			SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", AccessToken: "at-old", AccessTokenTime: stale, RefreshToken: "rt-old", RefreshTokenTime: 42},
+			[]string{"LASTWAR_TEST_GOOD=" + refreshedAt, "LASTWAR_TEST_SET_ADDR=1", "LASTWAR_TEST_NO_RT=1"}, 0, "[" + refreshedAt + "]", true},
 		{"explicit -cs-at ignores the config's accessTokenTime",
 			SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", AccessToken: "at-old", AccessTokenTime: stale, RefreshToken: "rt-old"},
 			[]string{"LASTWAR_TEST_GOOD=at-explicit", "LASTWAR_TEST_SET_ADDR=1", "LASTWAR_TEST_ARGS=-cs-at at-explicit"}, 0, "[at-explicit]", false},
@@ -431,7 +439,13 @@ func TestMainUsesSessionConfigRefreshToken(t *testing.T) {
 			if got := strings.Contains(stderr, `"opt":"refresh"`); got != c.refresh {
 				t.Errorf("refreshed = %v, want %v; stderr=%s", got, c.refresh, stderr)
 			}
-			if c.refresh {
+			switch {
+			case c.refresh && c.cfg.RefreshTokenTime != 0:
+				cfg := readSessionConfig(t, cfgPath)
+				if cfg.AccessToken != refreshedAt || cfg.RefreshToken != "rt-old" || cfg.RefreshTokenTime != 42 {
+					t.Errorf("at=%q rt=%q rt.time=%d, want %s and the kept rt-old/42", cfg.AccessToken, cfg.RefreshToken, cfg.RefreshTokenTime, refreshedAt)
+				}
+			case c.refresh:
 				wantRefreshedTokens(t, cfgPath)
 			}
 		})
@@ -760,5 +774,33 @@ func TestRunCrossServerTestRefreshRequest(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunCrossServerTestCsRtRefreshesOnce: a -cs-rt refresh whose reply still carries a 30-day-old
+// at.time (GSL returned the original time, live) is not followed by a second refresh before the
+// Login.
+func TestRunCrossServerTestCsRtRefreshesOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var seen loginAts
+	dial, _ := recordingDial(map[string]func(*session.GameConn){"gw-a.example:10783": tokenCheckingServer(refreshedAt, &seen)})
+	var calls func() int
+
+	synctest.Test(t, func(t *testing.T) {
+		reply := refreshReply()
+		reply.At.Time = gsl.FlexString(strconv.FormatInt(time.Now().Add(-31*24*time.Hour).Unix(), 10))
+		client := testutil.UseInMemoryGSL(t, reply)
+		calls = countGetServerList(client)
+		runCrossServerTest(crossServerTestOpts{
+			zone: lookupZone, gameUid: lookupGameUid, at: "at-old", rt: "rt-flag", httpClient: client, dialGame: dial,
+		})
+		synctest.Wait()
+	})
+
+	if n := calls(); n != 1 {
+		t.Errorf("getserverlist requests = %d, want 1 (the -cs-rt refresh only)", n)
+	}
+	if got := seen.get(); fmt.Sprint(got) != fmt.Sprint([]string{refreshedAt}) {
+		t.Errorf("Login access tokens = %v, want [%s]", got, refreshedAt)
 	}
 }
