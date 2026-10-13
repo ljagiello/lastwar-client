@@ -1354,7 +1354,13 @@ func runCrossServerTest(o crossServerTestOpts) {
 				exitIfReauthNeeded(err)
 				os.Exit(1)
 			}
-			slog.Warn("GSL refresh failed; trying the old access token", "error", err)
+			if errors.Is(err, gsl.ErrReauthNeeded) {
+				// GSL won't refresh this device any more. The old token may still work, so use it
+				// while it does; the real client would clear both and re-auth.
+				slog.Error("the refresh token is no longer accepted (GSL 211/212); trying the old access token, but bind the device again before it stops working", "error", err)
+			} else {
+				slog.Warn("GSL refresh failed; trying the old access token", "error", err)
+			}
 		}
 	}
 

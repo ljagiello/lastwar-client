@@ -692,6 +692,12 @@ func TestRunCrossServerTestRefreshBeforeLoginFails(t *testing.T) {
 			t.Errorf("exit code = %d, want 2 with the re-auth message; stderr=%s", code, stderr)
 		}
 	})
+	t.Run("211, old access token", func(t *testing.T) {
+		code, stderr := runRefreshHelper(t, "TestRunCrossServerTestRefreshBeforeLoginFails", "LASTWAR_TEST_GSL_CODE=211", "LASTWAR_TEST_AT=at-old")
+		if code != 0 || !strings.Contains(stderr, "logins=[at-old]") || !strings.Contains(stderr, "refresh token is no longer accepted") {
+			t.Errorf("exit code = %d, want 0, a Login with the old token, and the bind-again error; stderr=%s", code, stderr)
+		}
+	})
 	t.Run("transient failure, old access token", func(t *testing.T) {
 		code, stderr := runRefreshHelper(t, "TestRunCrossServerTestRefreshBeforeLoginFails", "LASTWAR_TEST_GSL_CODE=500", "LASTWAR_TEST_AT=at-old")
 		if code != 0 || !strings.Contains(stderr, "logins=[at-old]") || !strings.Contains(stderr, "trying the old access token") {

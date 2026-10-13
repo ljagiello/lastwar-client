@@ -166,7 +166,7 @@ A session config with a `refreshToken`, such as one `-own-device-session` writes
 
 - **Before the `Login`**, when the config has no `accessToken`, or its `accessTokenTime` is 30 days old (`gsl.ChooseOpt`), `goclient` sends GSL `opt=refresh` with the refresh token.
 - **After an `E011`**, it refreshes once and logs in again. A token rejected again right after a refresh exits 2 with a message to bind the device again. A refresh that fails for another reason, such as the network or another GSL code, exits 1, and the next run tries again.
-- **Every refresh is saved at once.** The new `at`, `rt`, and their times go into the session config before the `Login` uses them, so a rotated `rt` survives a `Login` that fails. A GSL code 211 or 212 means the device's credentials are gone and exits 2.
+- **Every refresh is saved at once.** The new `at`, `rt`, and their times go into the session config before the `Login` uses them, so a rotated `rt` survives a `Login` that fails. A GSL code 211 or 212 means the device's credentials are gone and exits 2, except before the `Login` while an old access token is still on hand: then the run logs an error saying to bind the device again and carries on with the old token for as long as it works.
 
 The refresh sends the session's device, `zone`, and `gameUid`, and `platform=iOS` under `iosMode`. A config captured from the real app has no refresh token, so its `E011` still needs a fresh capture (see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token)).
 
