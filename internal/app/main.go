@@ -81,7 +81,7 @@ func Run() {
 	csGameUid := fs.String("cs-gameuid", "", "composite gameUid for -cs-ip -- also sent on every -cs-rt GSL opt=refresh call, unlike -cs-zone (which only matters for -cs-ip): gameUid is passed to gsl.GetServerList unconditionally, so it matters even for a bare -cs-rt with no -cs-ip at all")
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
-	csShumeiGen := fs.Bool("cs-shumei-gen", false, "generate a shumeiBoxId via the ShuMei deviceprofile/v4 endpoint when none is given (empty -cs-shumei and no session-config shumeiBoxId); makes one extra HTTPS call before login, using the same deviceId as the Login request; ignored in iOS mode (-cs-ios or a session config's iosMode), since the fingerprint it registers is an Android device profile")
+	csShumeiGen := fs.Bool("cs-shumei-gen", false, "generate a shumeiBoxId via the ShuMei deviceprofile/v4 endpoint when none is given (empty -cs-shumei and no session-config shumeiBoxId); makes one extra HTTPS call before login, using the same deviceId as the Login request, and keeps the fingerprint's per-install values (Android ID, MediaDrm ID, install times, last minted box ID) in the session config's shumeiInstall so later runs report the same phone; ignored in iOS mode (-cs-ios or a session config's iosMode), since the fingerprint it registers is an Android device profile")
 	csShumeiSSID := fs.String("cs-shumei-ssid", "", "with -cs-shumei-gen, report this Wi-Fi SSID (a30) in the ShuMei fingerprint. By default the fingerprint carries no Wi-Fi details, like a real Last War install: the SDK reads them only with the location permission, which Last War doesn't request. Setting this or -cs-shumei-bssid also reports the host's LAN IPv4 as the Wi-Fi IP (a31)")
 	csShumeiBSSID := fs.String("cs-shumei-bssid", "", "with -cs-shumei-gen, report this Wi-Fi access point MAC (BSSID, a19) in the ShuMei fingerprint; see -cs-shumei-ssid")
 	csShumeiBoot := fs.String("cs-shumei-boot", "", "with -cs-shumei-gen, the device boot time the ShuMei fingerprint reports (a40), RFC 3339, e.g. 2026-10-01T12:20:43Z; its uptime fields count from it. Default: the host's real boot time")
@@ -294,9 +294,10 @@ func Run() {
 	var cfgAppVersion, cfgVersionCode string
 	var cfgFeatures map[string]bool
 	var cfgDuelPolicy map[string]string
+	var cfgShumeiInstall shumei.Install
 	if cfg != nil {
 		cfgAppVersion, cfgVersionCode, cfgFeatures = cfg.AppVersion, cfg.VersionCode, cfg.Features
-		cfgDuelPolicy = cfg.DuelPolicy
+		cfgDuelPolicy, cfgShumeiInstall = cfg.DuelPolicy, cfg.ShumeiInstall
 		slog.Info("loaded session config", "path", cfgSource)
 		// Round 33 fix (originally scoped to -cs-ip/-cs-port/-cs-gameuid only; round 34 extends it
 		// to -cs-zone/-cs-deviceid/-cs-shumei/-cs-at, the four siblings round 33 missed):
@@ -379,6 +380,10 @@ func Run() {
 			slog.Error("invalid -cs-shumei-* flag", "error", err)
 			os.Exit(1)
 		}
+		if err := cfgShumeiInstall.Validate(); *csShumeiGen && err != nil {
+			slog.Error("invalid shumeiInstall in the session config", "path", cfgSource, "error", err)
+			os.Exit(1)
+		}
 		runCrossServerTest(crossServerTestOpts{
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
@@ -386,7 +391,7 @@ func Run() {
 			features: cfgFeatures, duelPolicy: cfgDuelPolicy, runFeature: *runFeature, runAnyway: *runAnyway,
 			interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
-			shumeiGen: *csShumeiGen, shumeiDevice: shumeiDevice,
+			shumeiGen: *csShumeiGen, shumeiDevice: shumeiDevice, shumeiInstall: cfgShumeiInstall,
 			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
 			zoneExplicit: csZoneSetExplicitly, gameUidExplicit: csGameUidSetExplicitly,
 			atExplicit: csAtSetExplicitly, interactiveExplicit: interactiveSetExplicitly,
@@ -800,6 +805,37 @@ func shumeiDeviceFromFlags(ssid, bssid, boot string) (shumei.Device, error) {
 	return d, nil
 }
 
+// mintShumeiBoxID registers this session's phone with ShuMei and returns its box ID and the install
+// values as the registration leaves them. It fills any install value the session config left out
+// and, given a config path, writes the install back there whenever this call changed it, so the
+// next run reports the same phone. A failed registration returns "" -- not fatal, since the server
+// accepts an empty shumeiBoxId -- and still keeps the values it filled.
+func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, install shumei.Install, configPath string) (string, shumei.Install) {
+	install, changed := install.Fill(time.Now())
+	dev.Install = install
+	boxID, err := shumei.BoxID(client, deviceID, dev)
+	if err != nil {
+		slog.Warn("shumei boxId generation failed; continuing with an empty shumeiBoxId (the server accepts it)", "error", err, "deviceIdLen", len(deviceID))
+		boxID = ""
+	} else {
+		slog.Info("generated shumeiBoxId via ShuMei deviceprofile/v4", "shumeiBoxIdLen", len(boxID))
+		changed = changed || boxID != install.BoxID
+		install = install.Registered(boxID, time.Now())
+	}
+	switch {
+	case !changed:
+	case configPath == "":
+		slog.Info("no session config to keep this phone's ShuMei install values in; the next run reports a different phone")
+	default:
+		if err := saveShumeiInstall(configPath, install); err != nil {
+			slog.Warn("failed to save the ShuMei install values to the session config", "path", configPath, "error", err)
+		} else {
+			slog.Info("saved the ShuMei install values to the session config", "path", configPath)
+		}
+	}
+	return boxID, install
+}
+
 // ignoredCrossServerFlags returns which of the given visited (explicitly set on the command line)
 // flag names are -cs-* flags that get silently discarded when none of -cs-ip, -cs-rt or -cs-at is set --
 // see the call site in main() for why that combination falls through to the plain guest/email login
@@ -983,8 +1019,9 @@ type crossServerTestOpts struct {
 	runAnyway                                                     bool              // -run-anyway
 	port                                                          int
 	handshake, iosMode, collect, listBuildings, shumeiGen         bool
-	shumeiDevice                                                  shumei.Device // -cs-shumei-ssid/-bssid/-boot, for -cs-shumei-gen
-	configSavePath                                                string        // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
+	shumeiDevice                                                  shumei.Device  // -cs-shumei-ssid/-bssid/-boot, for -cs-shumei-gen
+	shumeiInstall                                                 shumei.Install // the session config's shumeiInstall, for -cs-shumei-gen
+	configSavePath                                                string         // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
 
 	// httpClient/dialGame are OPTIONAL test seams (both nil in production). httpClient overrides the
 	// GSL HTTP client (default gsl.DefaultHTTPClient()); dialGame overrides the game-socket dial,
@@ -1328,7 +1365,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 
 	resVersion := auth.ResVersionFor(httpClient, cv, o.iosMode, o.appVersion, o.versionCode, zone)
 
-	shumeiBoxId := o.shumeiBoxId
+	shumeiBoxId, shumeiInstall := o.shumeiBoxId, o.shumeiInstall
 	if !o.shumeiGen && (o.shumeiDevice.WiFi != nil || !o.shumeiDevice.BootTime.IsZero()) {
 		slog.Warn("ignoring -cs-shumei-ssid/-cs-shumei-bssid/-cs-shumei-boot without -cs-shumei-gen: they only shape a generated shumeiBoxId")
 	}
@@ -1342,16 +1379,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		// device-fingerprint token (the backend-assigned `smid`), instead of sending an empty
 		// shumeiBoxId. Optional: the server accepts an empty one (see docs/live-validation.mdx),
 		// so this only runs when -cs-shumei-gen is set and no token was already supplied.
-		var errGen error
-		shumeiBoxId, errGen = shumei.BoxID(httpClient, deviceID, o.shumeiDevice)
-		if errGen != nil {
-			// Not fatal: an empty shumeiBoxId is a first-class, known-accepted client path, so a
-			// failed generation degrades to that rather than aborting the login.
-			slog.Warn("shumei boxId generation failed; continuing with an empty shumeiBoxId (the server accepts it)", "error", errGen, "deviceIdLen", len(deviceID))
-			shumeiBoxId = ""
-		} else {
-			slog.Info("generated shumeiBoxId via ShuMei deviceprofile/v4", "shumeiBoxIdLen", len(shumeiBoxId))
-		}
+		shumeiBoxId, shumeiInstall = mintShumeiBoxID(httpClient, deviceID, o.shumeiDevice, o.shumeiInstall, o.configSavePath)
 	}
 	params := auth.CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
@@ -1414,9 +1442,11 @@ func runCrossServerTest(o crossServerTestOpts) {
 					updated := &SessionConfig{
 						IP: savedIP, Port: newPort, Zone: result.Zone,
 						GameUid: result.GameUid, DeviceID: deviceID,
-						ShumeiBoxId: shumeiBoxId, AccessToken: result.AccessTok,
+						// The configured shumeiBoxId, not a minted one: that lives in
+						// ShumeiInstall, and storing it here would stop later runs registering.
+						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
 						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
-						Features: o.features, DuelPolicy: o.duelPolicy,
+						Features: o.features, DuelPolicy: o.duelPolicy, ShumeiInstall: shumeiInstall,
 					}
 					if err := SaveSessionConfig(updated, o.configSavePath); err != nil {
 						slog.Warn("failed to persist redirected server address to session config", "path", o.configSavePath, "error", err)

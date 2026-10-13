@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"lastwar-client/internal/auth"
+	"lastwar-client/internal/shumei"
 	"log/slog"
 	"os"
 )
@@ -47,6 +48,12 @@ type SessionConfig struct {
 	// DuelPolicy overrides a feature's Alliance Duel policy by name: "hold" runs it only on duel
 	// days that score it, "always" runs it every time. See -list-features.
 	DuelPolicy map[string]string `json:"duelPolicy,omitempty"`
+	// ShumeiInstall is what this session's phone keeps between -cs-shumei-gen registrations
+	// (Android ID, MediaDrm ID, the SDK's install UUID, the app's install times, and the smid
+	// the last registration cached), so each one reports the same phone. -cs-shumei-gen fills
+	// any value left out and writes it back here. It belongs with DeviceID: changing one
+	// without the other describes a different install.
+	ShumeiInstall shumei.Install `json:"shumeiInstall,omitzero"`
 }
 
 // String/GoString are the round-48 regression fix for the MAJOR finding that SessionConfig --
@@ -135,6 +142,17 @@ func SaveSessionConfig(cfg *SessionConfig, path string) error {
 		return err
 	}
 	return auth.AtomicWriteStateFile(path, string(data))
+}
+
+// saveShumeiInstall stores install in the session config at path, re-reading the file first so
+// every other field stays as it is on disk.
+func saveShumeiInstall(path string, install shumei.Install) error {
+	cfg, err := LoadSessionConfig(path)
+	if err != nil {
+		return err
+	}
+	cfg.ShumeiInstall = install
+	return SaveSessionConfig(cfg, path)
 }
 
 // applyOverride returns override if it's non-zero, else base.
