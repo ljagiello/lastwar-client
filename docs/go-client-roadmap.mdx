@@ -140,7 +140,7 @@ Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, 
 LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -own-device-session ~/own_device_session.json
 ```
 
-Since 2026-10-13 a `Login` with the resulting token works, once Android `ta` carries its platform markers (it was rejected with `ec=28`, `ep=[E005]` before). Run it like any session config, `LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_session.json -collect`. See [Identity, login & session](/auth#a-device-of-its-own).
+Since 2026-10-13 a `Login` with the resulting token works, once Android `ta` is filled (it was rejected with `ec=28`, `ep=[E005]` before). Run it like any session config, `LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_session.json`. Whether the own device's session leaves the real app's tokens valid is still open, see [Identity, login & session](/auth#a-device-of-its-own).
 
 ### Flags reference
 

@@ -494,6 +494,8 @@ type LoginParamsInput struct {
 	// for -- reusing a token obtained under one Platform's identity while
 	// claiming a different Platform/package gets ec=28/E005, even though
 	// the token itself, un, and every other field are valid and accepted.
+	// (Those Android Logins also sent ta as "{}", which on its own gets
+	// E005 for an established account; see BuildLoginParams and #22.)
 	IOSMode bool
 
 	// AppVersion/VersionCode, when non-empty, replace the build identity BuildLoginParams would
@@ -505,7 +507,7 @@ type LoginParamsInput struct {
 	VersionCode string
 
 	// ResVersion is the hot-update state to report (see ResVersionFor); "" sends "0", the value
-	// this client sent for months. It also fills ta's lw_res_version under IOSMode.
+	// this client sent for months. It also fills ta's lw_res_version.
 	ResVersion string
 }
 
@@ -625,12 +627,13 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	if in.ResVersion != "" {
 		resVersion, lwResVersion = in.ResVersion, in.ResVersion
 	}
-	// The ta analytics blob is part of the login gate: its platform markers (#os, #bundle_id,
-	// lw_platform) must match the identity the token was issued to. An Android Login with an
-	// Android-issued token and ta="{}" gets ec=28/E005; the same Login with the markers filled in
-	// is accepted (found by C485, discussion #22, from real Android captures). Every Android E005
-	// this project recorded before also sent "{}", which the platform-binding reading in
-	// crossserver.go never separated out.
+	// The ta analytics blob is part of the login gate for an established account. Confirmed live
+	// on 2026-10-13 (found by C485, discussion #22): an Android Login into the real account with an
+	// Android-issued token and ta="{}" gets ec=28/E005, and the same Login with this blob is
+	// accepted. A guest Login was accepted with "{}" and is with this blob too. Which keys the
+	// server reads isn't isolated; the platform markers (#os, #bundle_id, lw_platform) are the
+	// likely ones. Every Android E005 this project recorded before also sent "{}", which the
+	// platform-binding reading in crossserver.go never separated out.
 	//
 	// LwDeviceID/LwShumeiID/LwAirKey were originally set from the same in.DeviceID/
 	// in.ShumeiBoxId/in.AirKey values used for the top-level request fields elsewhere in
@@ -643,11 +646,17 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// These three fields are placeholders (empty string, matching this struct's existing
 	// pattern for telemetry we have no way to observe, e.g. Carrier/LwLine below); the server
 	// accepts them blank, and their keys stay in case some check depends on them existing.
+	// The per-platform values. A real Android ta reports the app version as lw_version too; the
+	// iOS blob keeps the "0.0.0" the cron's iOS session has logged in with since August 2026.
+	osName, manufacturer, deviceModel, lwVersion := "Android", "unknown", "Android", effectiveAppVersion
+	if in.IOSMode {
+		osName, manufacturer, deviceModel, lwVersion = "iOS", "Apple", "unknown", "0.0.0"
+	}
 	blob := analyticsBlob{
-		OS: "iOS", Disk: "50.0/100.0", DeviceID: "00000000-0000-0000-0000-000000000000",
+		OS: osName, Disk: "50.0/100.0", DeviceID: "00000000-0000-0000-0000-000000000000",
 		OSVersion: "0.0", SystemLanguage: "en", BundleID: build.PackageName, Carrier: "",
 		AppVersion: effectiveAppVersion, FPS: 0, RAM: "0.0/0.0", Simulator: false, ZoneOffset: 0,
-		Manufacturer: "Apple", ScreenHeight: 0, NetworkType: "WIFI", DeviceModel: "unknown",
+		Manufacturer: manufacturer, ScreenHeight: 0, NetworkType: "WIFI", DeviceModel: deviceModel,
 		ScreenWidth: 0, InstallTime: "2000-01-01 00:00:00.000",
 		LwNet: "wifi", LwResVersion: lwResVersion, LwBuildcode: effectiveVersionCode, LwLine: "",
 		PdDl: 0, LwAb: "0", LwPlatform: storefrontPF(in.IOSMode),
@@ -655,17 +664,18 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		LwAllianceID: "00000000000000000000000000000000",
 		LwDeviceID:   "", LwDeviceLevel: 0, LwMainLevel: 0,
 		LwShumeiID: "", LwAirKey: "",
-		LwVersion: "0.0.0", LwPower: 0, LwZone: "APS" + in.ServerID,
-	}
-	if !in.IOSMode {
-		// A real Android ta reports the app version as lw_version too. The iOS blob keeps the
-		// "0.0.0" the cron's iOS session has logged in with since August 2026.
-		blob.OS, blob.Manufacturer, blob.DeviceModel, blob.LwVersion = "Android", "unknown", "Android", effectiveAppVersion
+		LwVersion: lwVersion, LwPower: 0, LwZone: "APS" + in.ServerID,
 	}
 	// lw_zone repeats the zone, which DoCrossServerLogin accepts up to the full string cap; a blob
 	// that would no longer encode falls back to "{}" rather than making the whole Login unsendable.
+	// An established account rejects that Login with E005, so it is logged.
 	ta := "{}"
-	if b, err := json.Marshal(blob); err == nil && len(b) <= sfs.MaxUtfStringBytes {
+	if b, err := json.Marshal(blob); err != nil {
+		slog.Warn("ta: could not marshal the analytics blob; sending {}", "error", err)
+	} else if len(b) > sfs.MaxUtfStringBytes {
+		slog.Warn("ta: the analytics blob is too long to encode; sending {}, which an established account rejects with E005",
+			"len", len(b), "max", sfs.MaxUtfStringBytes, "zoneLen", len(in.ServerID))
+	} else {
 		ta = string(b)
 	}
 	p.PutUtfString("ta", ta)

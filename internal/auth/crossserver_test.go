@@ -238,7 +238,9 @@ func TestDoCrossServerLoginDebugDumpBodyFileIsChmodded0600(t *testing.T) {
 // builds a "ta" analytics blob (JSON-marshaled into a single opaque string field), iOS-only at the
 // time, that used to embed the live DeviceID/AirKey/ShumeiBoxId values directly -- a leak
 // StringRedacted() couldn't see, since it only masks known-sensitive *keys*, not secrets embedded
-// inside another field's string value, and "ta" itself wasn't even in that key list. Mirrors
+// inside another field's string value, and "ta" itself wasn't even in that key list. "ta" is now
+// in that list, so this test only shows the dump hides ta as a whole; a secret inside the blob is
+// caught by TestBuildLoginParamsDoesNotLeakSecretsInAnalyticsBlob's raw-ta check. Mirrors
 // TestDoCrossServerLoginDebugDumpRedactsCredentials (Android, which builds the blob too since
 // discussion #22) but with IOSMode:true and its own distinguishable secret values.
 func TestDoCrossServerLoginDebugDumpRedactsCredentialsIOSMode(t *testing.T) {
@@ -775,7 +777,8 @@ func TestDoCrossServerLoginRejectsOversizedZoneGameUidAccessTok(t *testing.T) {
 // maxIdentityFieldLen bytes is accepted and DoCrossServerLogin proceeds past validation to dial.
 // Without this, a future edit tightening any of the three `>` comparisons to `>=` would wrongly
 // reject a legitimate maximal-length zone/gameUid/accessTok while the existing test suite --
-// including the dedicated reject-side regression test -- kept passing throughout.
+// including the dedicated reject-side regression test -- kept passing throughout. An at-cap zone also
+// pushes ta's lw_zone past the cap, so this relies on BuildLoginParams' "{}" fallback for ta too.
 func TestDoCrossServerLoginAcceptsZoneGameUidAccessTokExactlyAtCap(t *testing.T) {
 	atCap := strings.Repeat("x", maxIdentityFieldLen)
 
