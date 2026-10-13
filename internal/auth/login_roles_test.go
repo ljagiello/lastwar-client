@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -137,13 +139,55 @@ func TestLoginEmailBindsAnEntrysOwnLoginKey(t *testing.T) {
 	alt.PutUtfString("loginKey", "lk-role-72")
 	pipe := emailFlowServer(t, pushWithRoles(liveShapeRole(783, "APS783", "uid-783", "Main"), alt))
 
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	result, err := Login(LoginOptions{Email: "player@example.com", CodePipe: pipe, Server: "72"})
+	slog.SetDefault(orig)
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 	defer func() { _ = result.Conn.Close() }()
 	if got := readState(t, loginKeyStatePath()); got != "lk-role-72" {
 		t.Errorf("persisted loginKey = %q, want the entry's lk-role-72", got)
+	}
+	if out := buf.String(); strings.Contains(out, "lk-role-72") || !strings.Contains(out, "ownLoginKey=true") {
+		t.Errorf("want the role's own loginKey noted, never logged:\n%s", out)
+	}
+}
+
+// TestLoginFastPathIgnoresServer: a device that already holds a loginKey logs in through GSL
+// opt=login without the email flow, so -server can't pick anything and is named as ignored.
+func TestLoginFastPathIgnoresServer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for name, v := range map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_loginkey": "lk-account", ".lastwar_goclient_gameuid": "uid-783"} {
+		if err := os.WriteFile(home+"/"+name, []byte(v), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addr := session.StartFakeGameServer(t, session.FakeInitPushServer(nil))
+	host, port := testutil.SplitHostPortInt(t, addr)
+	testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
+		Code:       "0",
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: "APS783", GameUid: "uid-783"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
+	}))
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	result, err := Login(LoginOptions{Server: "72"})
+	slog.SetDefault(orig)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	defer func() { _ = result.Conn.Close() }()
+	if !strings.Contains(buf.String(), "ignoring -server because a loginKey is already persisted") {
+		t.Errorf("want the -server warning:\n%s", buf.String())
+	}
+	if got := readState(t, gameUidStatePath()); got != "uid-783" {
+		t.Errorf("persisted gameUid = %q, want it unchanged", got)
 	}
 }
 

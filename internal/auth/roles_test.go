@@ -137,6 +137,39 @@ func TestAccountRolesReadsAnEntrysOwnLoginKey(t *testing.T) {
 	}
 }
 
+// TestPickRoleMatchesEitherField: an entry is matched by its id alone (Int, Short or String) or by
+// its zone alone, and the no-match error lists a zone-only entry by its zone's number.
+func TestPickRoleMatchesEitherField(t *testing.T) {
+	idOnly := sfs.NewSFSObject()
+	idOnly.PutUtfString("id", "72")
+	idOnly.PutUtfString("gameUid", "uid-72")
+	short := sfs.NewSFSObject()
+	short.PutShort("id", 15)
+	short.PutUtfString("gameUid", "uid-15")
+	zoneOnly := sfs.NewSFSObject()
+	zoneOnly.PutUtfString("zone", "APS8092")
+	zoneOnly.PutUtfString("gameUid", "uid-8092")
+	roles := accountRoles(pushWithRoles(idOnly, short, zoneOnly))
+	for server, want := range map[string]string{"72": "uid-72", "15": "uid-15", "APS8092": "uid-8092"} {
+		if r, err := pickRole(roles, server); err != nil || r.GameUid != want {
+			t.Errorf("pickRole(%q) = %q, %v; want %s", server, r.GameUid, err, want)
+		}
+	}
+	if _, err := pickRole(roles, "1"); err == nil || !strings.Contains(err.Error(), "[72 15 8092]") {
+		t.Errorf("err = %v, want the servers listed, the zone-only one by number", err)
+	}
+}
+
+// TestOldUidIsRedacted: an accountArr entry's oldUid is the deviceId the role was created on, so a
+// redacted dump of the push hides it.
+func TestOldUidIsRedacted(t *testing.T) {
+	e := liveShapeRole(783, "APS783", "uid-783", "Main")
+	e.PutUtfString("oldUid", "secret-old-device_n3d1")
+	if out := pushWithRoles(e).StringRedacted(); strings.Contains(out, "secret-old-device_n3d1") {
+		t.Errorf("StringRedacted shows oldUid: %s", out)
+	}
+}
+
 // TestLogAccountRolesOmitsDeviceAndHosts: the role list shows the server and role, never the
 // device uuid, internal hosts, or the role's name.
 func TestLogAccountRolesOmitsDeviceAndHosts(t *testing.T) {
@@ -145,14 +178,16 @@ func TestLogAccountRolesOmitsDeviceAndHosts(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(orig)
 
-	logAccountRoles(accountRoles(pushWithRoles(liveShapeRole(783, "APS783", "uid-783", "SecretName"))))
+	e := liveShapeRole(783, "APS783", "uid-783", "SecretName")
+	e.PutUtfString("loginKey", "lk-secret-role")
+	logAccountRoles(accountRoles(pushWithRoles(e)))
 	out := buf.String()
-	for _, want := range []string{"server=783", "zone=APS783", "gameUid=uid-783", "level=35", "power=247419474", "serverName=State#783"} {
+	for _, want := range []string{"server=783", "zone=APS783", "gameUid=uid-783", "level=35", "power=247419474", "serverName=State#783", "hasOwnLoginKey=true"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %s:\n%s", want, out)
 		}
 	}
-	for _, leak := range []string{"secret-device-uuid", "game-db-internal", "SecretName"} {
+	for _, leak := range []string{"secret-device-uuid", "game-db-internal", "SecretName", "lk-secret-role"} {
 		if strings.Contains(out, leak) {
 			t.Errorf("log contains %q:\n%s", leak, out)
 		}

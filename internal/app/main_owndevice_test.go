@@ -13,64 +13,83 @@ import (
 	"testing"
 )
 
-// ownDeviceGSLReply is GSL's opt=login reply for the bound device: its own token pair and its
-// role's server.
+// ownDeviceGSLReply is GSL's opt=login reply for the bound device: its own token pair and the
+// servers of the account's two roles.
 func ownDeviceGSLReply() gsl.LoginServerListRespon {
 	return gsl.LoginServerListRespon{
-		Code: "0", LastLoggedServer: "783",
-		ServerList: []gsl.LoginServerInfo{{ID: "783", IP: lookupGateways, Port: testutil.FlexPort(lookupPort), Zone: lookupZone, GameUid: "uid-783"}},
-		At:         &gsl.LoginToken{Token: "at-own", Time: "1791900000"},
-		Rt:         &gsl.LoginToken{Token: "rt-own", Time: "1791900000"},
+		Code: "0", LastLoggedServer: "1",
+		ServerList: []gsl.LoginServerInfo{
+			{ID: "1", IP: "gw-1.example", Port: testutil.FlexPort(10001), Zone: "APS1", GameUid: "uid-1"},
+			{ID: "783", IP: lookupGateways, Port: testutil.FlexPort(lookupPort), Zone: lookupZone, GameUid: "uid-783"},
+		},
+		At: &gsl.LoginToken{Token: "at-own", Time: "1791900000"},
+		Rt: &gsl.LoginToken{Token: "rt-own", Time: "1791900000"},
 	}
 }
 
-// emailBindingGameServer walks Login's email path and pushes an account with one role, on 783.
-func emailBindingGameServer(server *session.GameConn) {
-	if _, err := server.ReadEnvelope(); err != nil {
-		return
-	}
-	ok := sfs.NewSFSObject()
-	ok.PutBool("success", true)
-	if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, ok); err != nil {
-		return
-	}
-	if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
-		return
-	}
-	for _, cmd := range []string{"account.login.send.verify.code", "account.login.new"} {
-		if _, err := session.ReadNextExtension(server); err != nil {
+// emailBindingGameServer walks Login's email path and pushes an account with two roles: uid-1 on
+// server 1 (the top-level pick) and uid-783 on 783, whose entry carries its own loginKey. With
+// pushError the push reports an errorCode instead, as for a refused code.
+func emailBindingGameServer(pushError bool) func(*session.GameConn) {
+	return func(server *session.GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
 			return
 		}
-		if err := server.SendExtension(cmd, ok); err != nil {
+		ok := sfs.NewSFSObject()
+		ok.PutBool("success", true)
+		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, ok); err != nil {
 			return
 		}
+		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
+			return
+		}
+		for _, cmd := range []string{"account.login.send.verify.code", "account.login.new"} {
+			if _, err := session.ReadNextExtension(server); err != nil {
+				return
+			}
+			if err := server.SendExtension(cmd, ok); err != nil {
+				return
+			}
+		}
+		push := sfs.NewSFSObject()
+		if pushError {
+			push.PutInt("errorCode", 208193)
+			_ = server.SendExtension("push.account.login.new", push)
+			return
+		}
+		arr := sfs.NewSFSArray()
+		for _, r := range []struct {
+			id                  int32
+			zone, uid, loginKey string
+		}{{1, "APS1", "uid-1", ""}, {783, "APS783", "uid-783", "lk-role-783"}} {
+			role := sfs.NewSFSObject()
+			role.PutInt("id", r.id)
+			role.PutUtfString("zone", r.zone)
+			role.PutUtfString("gameUid", r.uid)
+			if r.loginKey != "" {
+				role.PutUtfString("loginKey", r.loginKey)
+			}
+			arr.AddSFSObject(role)
+		}
+		push.PutUtfString("loginKey", "lk-account")
+		push.PutUtfString("gameUid", "uid-1")
+		push.PutSFSArray("accountArr", arr)
+		_ = server.SendExtension("push.account.login.new", push)
 	}
-	role := sfs.NewSFSObject()
-	role.PutInt("id", 783)
-	role.PutUtfString("zone", "APS783")
-	role.PutUtfString("gameUid", "uid-783")
-	arr := sfs.NewSFSArray()
-	arr.AddSFSObject(role)
-	push := sfs.NewSFSObject()
-	push.PutUtfString("loginKey", "lk-account")
-	push.PutUtfString("gameUid", "uid-783")
-	push.PutSFSArray("accountArr", arr)
-	_ = server.SendExtension("push.account.login.new", push)
 }
 
-// TestMainOwnDeviceSessionWithEmail runs Run() end to end: -email binds a fresh device (the role on
-// -server 783), then the same run trades the loginKey for the device's own token pair and writes
-// the session config. With a loginKey already on file, -email is ignored and no game server is
-// dialed. -server without -email is ignored with a warning.
+// TestMainOwnDeviceSessionWithEmail runs Run() end to end in a subprocess, against a fake GSL and a
+// fake game server: -email binding a device (with or without -server), -own-device-session trading
+// its loginKey and writing the session config, and the cases around them.
 func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		home := os.Getenv("LASTWAR_TEST_HOME")
 		t.Setenv("HOME", home)
 		var replies []gsl.LoginServerListRespon
 		if os.Getenv("LASTWAR_TEST_BOUND") == "" {
-			addr := session.StartFakeGameServer(t, emailBindingGameServer)
+			addr := session.StartFakeGameServer(t, emailBindingGameServer(os.Getenv("LASTWAR_TEST_PUSH_ERROR") != ""))
 			host, port := testutil.SplitHostPortInt(t, addr)
-			// Login's opt=new: a guest token and the fake game server.
+			// Login's opt=new/opt=fix: a guest token and the fake game server.
 			replies = append(replies, gsl.LoginServerListRespon{Code: "0",
 				ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: "APS1"}},
 				At:         &gsl.LoginToken{Token: "at-guest"}})
@@ -88,52 +107,88 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 			defer func() { _ = f.Close() }()
 			_, _ = f.WriteString("123456\n")
 		}()
-		os.Args = append([]string{"lastwar-client", "-code-pipe", pipe, "-own-device-session", filepath.Join(home, "own.json")},
-			strings.Fields(os.Getenv("LASTWAR_TEST_ARGS"))...)
+		args := []string{"lastwar-client", "-no-config", "-code-pipe", pipe}
+		if os.Getenv("LASTWAR_TEST_PLAIN") == "" {
+			args = append(args, "-own-device-session", filepath.Join(home, "own.json"))
+		}
+		os.Args = append(args, strings.Fields(os.Getenv("LASTWAR_TEST_ARGS"))...)
 		Run()
 		fmt.Fprintln(os.Stderr, "run returned")
 		return
 	}
 
+	bound := map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_loginkey": "lk-account", ".lastwar_goclient_gameuid": "uid-783"}
 	type tc struct {
-		name, args string
-		bound      bool
-		wantLog    []string
-		noLog      []string
+		name, args   string
+		seed         map[string]string
+		plain        bool // no -own-device-session: the plain -email login
+		pushError    bool
+		wantCode     int // -1: any (the plain path goes on into the game loop)
+		wantLog      []string
+		noLog        []string
+		wantGameUid  string // the persisted gameUid, and the config's when one is written
+		wantLoginKey string // the persisted loginKey ("" = none)
+		wantZone     string // the config's zone; "" = no config written
+		wantDeviceID string // the config's deviceId when seeded
 	}
 	for _, c := range []tc{
-		{"fresh device", "-email player@example.com -server 783", false,
-			[]string{"binding the role on the requested server", "device bound by email verification", "wrote own-device session config"},
-			[]string{"ignoring -email"}},
-		{"already bound", "-email player@example.com", true,
-			[]string{"ignoring -email and -server: this device is already bound", "wrote own-device session config"},
-			[]string{"step 6: request email verify code"}},
-		{"-server without -email", "-server 783", true,
-			[]string{"ignoring -server because -email is not set", "wrote own-device session config"}, nil},
-		{"reused guest", "-email player@example.com", false,
-			[]string{"this device already logged in as a guest", "device bound by email verification", "wrote own-device session config"}, nil},
+		{name: "fresh device, -server 783", args: "-email player@example.com -server 783",
+			wantLog: []string{"account role", "binding the role on the requested server", "device bound by email verification", "wrote own-device session config"},
+			noLog:   []string{"ignoring -email", "this device already logged in as a guest"},
+			// The 783 entry carries its own loginKey, which wins over the account's.
+			wantGameUid: "uid-783", wantLoginKey: "lk-role-783", wantZone: lookupZone},
+		{name: "fresh device, no -server", args: "-email player@example.com",
+			wantLog:     []string{"account role", "device bound by email verification", "wrote own-device session config"},
+			noLog:       []string{"binding the role on the requested server"},
+			wantGameUid: "uid-1", wantLoginKey: "lk-account", wantZone: "APS1"},
+		{name: "already bound", args: "-email player@example.com -server 783", seed: bound,
+			wantLog:     []string{"ignoring -email and -server: this device is already bound", `"serverGiven":true`, "wrote own-device session config"},
+			noLog:       []string{"step 6: request email verify code", "check-version: fetch RSA pubkey and pick gate host"},
+			wantGameUid: "uid-783", wantLoginKey: "lk-account", wantZone: lookupZone, wantDeviceID: "dev_n3d"},
+		{name: "-server without -email", args: "-server 783", seed: bound,
+			wantLog:     []string{"ignoring -server because -email is not set", "wrote own-device session config"},
+			wantGameUid: "uid-783", wantLoginKey: "lk-account", wantZone: lookupZone, wantDeviceID: "dev_n3d"},
+		{name: "reused guest (username)", args: "-email player@example.com -server 783",
+			seed:        map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_username": "guest-1"},
+			wantLog:     []string{"this device already logged in as a guest", "device bound by email verification"},
+			wantGameUid: "uid-783", wantLoginKey: "lk-role-783", wantZone: lookupZone, wantDeviceID: "dev_n3d"},
+		{name: "reused guest (gameUid)", args: "-email player@example.com -server 783",
+			seed:        map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_gameuid": "uid-guest"},
+			wantLog:     []string{"this device already logged in as a guest", "device bound by email verification"},
+			wantGameUid: "uid-783", wantLoginKey: "lk-role-783", wantZone: lookupZone, wantDeviceID: "dev_n3d"},
+		{name: "no role on -server", args: "-email player@example.com -server 999", wantCode: 1,
+			wantLog: []string{"no role on server 999", "fresh LASTWAR_STATE_DIR"},
+			noLog:   []string{"own-device bootstrap failed", "wrote own-device session config"}},
+		{name: "code refused", args: "-email player@example.com -server 783", pushError: true, wantCode: 2,
+			wantLog: []string{"LOGIN-WITH-CODE FAILED"},
+			noLog:   []string{"own-device bootstrap failed", "wrote own-device session config"}},
+		{name: "plain -email -server", args: "-email player@example.com -server 783", plain: true, wantCode: -1,
+			wantLog:     []string{"binding the role on the requested server"},
+			wantGameUid: "uid-783", wantLoginKey: "lk-role-783"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			home := t.TempDir()
 			env := []string{"LASTWAR_TEST_HOME=" + home, "LASTWAR_TEST_ARGS=" + c.args}
-			if c.name == "reused guest" {
-				for name, v := range map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_username": "guest-1"} {
-					if err := os.WriteFile(filepath.Join(home, name), []byte(v), 0o600); err != nil {
-						t.Fatal(err)
-					}
+			for name, v := range c.seed {
+				if err := os.WriteFile(filepath.Join(home, name), []byte(v), 0o600); err != nil {
+					t.Fatal(err)
 				}
 			}
-			if c.bound {
-				for name, v := range map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_loginkey": "lk-account", ".lastwar_goclient_gameuid": "uid-783"} {
-					if err := os.WriteFile(filepath.Join(home, name), []byte(v), 0o600); err != nil {
-						t.Fatal(err)
-					}
-				}
+			if c.seed[".lastwar_goclient_loginkey"] != "" {
 				env = append(env, "LASTWAR_TEST_BOUND=1")
 			}
+			if c.plain {
+				env = append(env, "LASTWAR_TEST_PLAIN=1")
+			}
+			if c.pushError {
+				env = append(env, "LASTWAR_TEST_PUSH_ERROR=1")
+			}
 			code, stderr := runRefreshHelper(t, "TestMainOwnDeviceSessionWithEmail", env...)
-			if code != 0 || !strings.Contains(stderr, "run returned") {
-				t.Fatalf("exit code = %d, want a clean return; stderr=%s", code, stderr)
+			if c.wantCode >= 0 && code != c.wantCode {
+				t.Fatalf("exit code = %d, want %d; stderr=%s", code, c.wantCode, stderr)
+			}
+			if c.wantCode == 0 && !strings.Contains(stderr, "run returned") {
+				t.Fatalf("Run() didn't return cleanly; stderr=%s", stderr)
 			}
 			for _, want := range c.wantLog {
 				if !strings.Contains(stderr, want) {
@@ -145,18 +200,57 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 					t.Errorf("log has %q; stderr=%s", not, stderr)
 				}
 			}
-			cfg := readSessionConfig(t, filepath.Join(home, "own.json"))
-			if cfg.AccessToken != "at-own" || cfg.RefreshToken != "rt-own" || cfg.GameUid != "uid-783" || cfg.Zone != lookupZone || cfg.IP != lookupGateways {
-				t.Errorf("session config: at=%q rt=%q gameUid=%q zone=%q ip=%q", cfg.AccessToken, cfg.RefreshToken, cfg.GameUid, cfg.Zone, cfg.IP)
+			state := func(name string) string {
+				b, err := os.ReadFile(filepath.Join(home, name))
+				if err != nil {
+					return ""
+				}
+				return strings.TrimSpace(string(b))
 			}
-			if cfg.DeviceID == "" || cfg.IOSMode {
-				t.Errorf("session config: deviceId=%q iosMode=%v, want this device, Android", cfg.DeviceID, cfg.IOSMode)
+			if got := state(".lastwar_goclient_loginkey"); got != c.wantLoginKey {
+				t.Errorf("persisted loginKey = %q, want %q", got, c.wantLoginKey)
 			}
-			for _, secret := range []string{"lk-account", "at-own", "rt-own", "123456"} {
-				if strings.Contains(stderr, `"`+secret+`"`) || strings.Contains(stderr, "="+secret) {
+			if c.wantGameUid != "" {
+				if got := state(".lastwar_goclient_gameuid"); got != c.wantGameUid {
+					t.Errorf("persisted gameUid = %q, want %q", got, c.wantGameUid)
+				}
+			}
+			cfgPath := filepath.Join(home, "own.json")
+			if c.wantZone == "" {
+				if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+					t.Errorf("a session config was written (stat err %v)", err)
+				}
+			} else {
+				cfg := readSessionConfig(t, cfgPath)
+				if cfg.AccessToken != "at-own" || cfg.RefreshToken != "rt-own" || cfg.GameUid != c.wantGameUid || cfg.Zone != c.wantZone {
+					t.Errorf("session config: at=%q rt=%q gameUid=%q zone=%q, want at-own rt-own %s %s", cfg.AccessToken, cfg.RefreshToken, cfg.GameUid, cfg.Zone, c.wantGameUid, c.wantZone)
+				}
+				if cfg.DeviceID == "" || (c.wantDeviceID != "" && cfg.DeviceID != c.wantDeviceID) || cfg.IOSMode {
+					t.Errorf("session config: deviceId=%q iosMode=%v, want this device (%q), Android", cfg.DeviceID, cfg.IOSMode, c.wantDeviceID)
+				}
+			}
+			for _, secret := range []string{"lk-account", "lk-role-783", "at-own", "rt-own", "123456"} {
+				if strings.Contains(stderr, secret) {
 					t.Errorf("log contains %q; stderr=%s", secret, stderr)
 				}
 			}
 		})
+	}
+}
+
+// TestMainCrossServerIgnoresEmailAndServer: an access token selects the cross-server reconnect,
+// which doesn't run the email flow, so -email and -server are both named as ignored.
+func TestMainCrossServerIgnoresEmailAndServer(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		os.Args = []string{"lastwar-client", "-no-config", "-cs-at", "at-x", "-email", "player@example.com", "-server", "783"}
+		Run()
+		return
+	}
+	_, stderr := runRefreshHelper(t, "TestMainCrossServerIgnoresEmailAndServer")
+	for _, want := range []string{"ignoring -email because -cs-ip/-cs-rt/-cs-at is set", "ignoring -server because -cs-ip/-cs-rt/-cs-at is set"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("log lacks %q; stderr=%s", want, stderr)
+		}
 	}
 }
