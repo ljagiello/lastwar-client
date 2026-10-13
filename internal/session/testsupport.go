@@ -61,20 +61,32 @@ func NewFakeGameListener(t *testing.T) (net.Listener, string) {
 }
 
 // ServeFakeGameServer runs handler, each in its own goroutine, once per connection accepted on
-// ln, until ln.Close() (via NewFakeGameListener's t.Cleanup) breaks the Accept loop at test end.
-// Takes no *testing.T deliberately: like conn_wait_test.go's ReadAndReply, handler may still be
-// running in the background after the test function itself has returned, and calling T methods
-// from such a goroutine is unsafe.
+// ln, until ln.Close() (via NewFakeGameListener's t.Cleanup) breaks the Accept loop at test end,
+// which then closes every accepted connection. Takes no *testing.T deliberately: like
+// conn_wait_test.go's ReadAndReply, handler may still be running in the background after the test
+// function itself has returned, and calling T methods from such a goroutine is unsafe.
 //
 // The handler's GameConn never sees the client's PingPong requests (see newFakeServerConn).
 func ServeFakeGameServer(ln net.Listener, handler func(*GameConn)) {
 	go func() {
+		// conns keeps each accepted connection reachable until ln closes. A handler that returns
+		// while the client still holds the socket (FakeInitPushServer returns right after sending
+		// init) would otherwise leave its conn unreferenced, and net's finalizer closes the socket
+		// at the next GC: the client then reads EOF mid-test, e.g. inside FetchInit's trailing 3s
+		// window, and runCrossServerTest's os.Exit(1) kills the whole test binary.
+		var conns []*GameConn
+		defer func() {
+			for _, gc := range conns {
+				_ = gc.Close()
+			}
+		}()
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
 			gc := newFakeServerConn(c)
+			conns = append(conns, gc)
 			go handler(gc)
 		}
 	}()

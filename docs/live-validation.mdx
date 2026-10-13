@@ -182,7 +182,7 @@ Other facts from the same capture, all observed live:
 - `init.mixedInfo.todayLoginTimes` counts logins per server day, including every `goclient` run.
 - Over 328 s, the server answered all 83 heartbeats. There was no kick, no redirect, and no token-expiry hint anywhere in `init`.
 
-`psh`, `shumeiBoxId`, `dataConfigMd5`, `init.add`, `login.ext`, and the probe template are app-integrity and anti-fraud surfaces. They're recorded here as protocol facts only; reproducing them is out of scope for this project.
+`psh`, `dataConfigMd5`, `init.add`, `login.ext`, and the probe template are app-integrity and anti-fraud surfaces. They're recorded here as protocol facts only; reproducing them is out of scope for this project. `shumeiBoxId` is in scope: `goclient` reproduces the ShuMei device-profile registration that mints it, see [ShuMei device fingerprint](/shumei).
 
 ## `ec`/`ep` vs `errorMessage`: two distinct error channels
 

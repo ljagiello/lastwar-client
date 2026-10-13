@@ -1,5 +1,11 @@
 # Handoff — make `shumeiBoxId` generation return a real `smid`
 
+> **RESOLVED 2026-10-11.** The blocker described below is done: `internal/shumei`
+> now reproduces the native `w1` protection (16-char nonce `r`, `key = MD5(r)`,
+> raw-deflate + AES-256-CBC of the `aNN` fingerprint, RSA-OAEP of `r` as `ep`),
+> and `BoxID()` returns `"B"` + a real `smid` (live-tested, `code:1100`). The
+> remaining text is kept as the research record of how the scheme was recovered.
+
 > For the next agent. Everything below is recovered/verified state; do **not** re-derive it.
 > Goal: change `internal/shumei` so `BoxID()` POSTs a profile that the ShuMei backend
 > answers with `{"code":1100,"detail":{"deviceId":"<smid>"}}` instead of `{"code":1902}`.
@@ -69,6 +75,13 @@ Tools available on the dev Mac: `ghidra` (`/opt/homebrew/Cellar/ghidra/12.1.4/li
 ### Profile field names (byte-exact, class `l111l1111lI1l`)
 `organization, os, sdkver, smid, appId, encode, data, appname, tn, ep, sessionId, wevent, md5,
 enc, pri, sid, bb` plus `a1`…`a174` device-data slots.
+
+(Resolved: this class is the SDK's shared name table, not one request's body. `sdkver`, `md5`,
+`pri` and `bb` belong to the **cloudconf** request (`l11l111l1lll.java`), and `smid`, `appname`,
+`sessionId` and `wevent` to the **v3** event flow (`l1l1l111Il.java`). No decompiled Java builder
+references `enc` or `sid`. The deviceprofile body is only `organization, os, appId, encode,
+compress, data, tn, ep`, and the `a1`…`a174` slots live inside the protected `data`. See
+`docs/shumei.mdx`.)
 
 ### Values
 - `os = "android"`, `sdkver = "3.14.3"` (both from `l11l11lI1lll`). `getSDKVersion()` returns
@@ -153,9 +166,12 @@ To mint a real `smid`, the next agent needs to (in this order):
 ## Current Go code (for the next agent)
 
 - `internal/shumei/shumei.go` — `BoxID(client, deviceID)`, `DeviceProfile`, `ProfileResponse`,
-  `protect()` (currently zlib-deflate → RSA-OAEP → base64), embedded SPKI, constants. **Safe to
+  `protect()` (raw deflate → AES-256-CBC under `hex(MD5(r))` → base64 as `data`, plus
+  RSA-OAEP of `r` as `ep` and of `"0"` as `tn`), embedded SPKI, constants. **Safe to
   ship**: `BoxID` returns `ErrUnassigned` on `1902`, and `main.go`'s `-cs-shumei-gen` logs a
-  warning and falls back to empty `shumeiBoxId` (which the game server accepts).
+  warning and falls back to empty `shumeiBoxId` (which the game server accepts). The flag is
+  ignored in iOS mode (`-cs-ios` or a session config's `iosMode`), since the fingerprint is an
+  Android profile.
 - `internal/app/main.go` — `-cs-shumei-gen` flag wired into `runCrossServerTest`.
 - Docs: `docs/shumei.mdx` (protocol + status), `docs/auth.mdx`/`native-binaries.mdx`/`go-client-
   roadmap.mdx` reference it.
@@ -164,11 +180,16 @@ To mint a real `smid`, the next agent needs to (in this order):
 
 ## Gotchas the next agent must not regress
 
-- `sdkver` is `"3.14.3"`, **not** `"3.14.3_build1"`.
+- The SDK version is `"3.14.3"`, **not** `"3.14.3_build1"`. It is `a7` inside the device data
+  (and cloudconf's `sdkver`), never a top-level deviceprofile field.
 - RSA-OAEP label is empty; MGF1 = SHA-256; don't add a label or use PKCS#1 v1.5.
-- The `data` field is (in the hybrid flow) a nested object, not a bare base64 string.
+- The deviceprofile `data` field is a bare base64 string: AES-256-CBC (key `hex(MD5(r))`, IV
+  `"0102030405060708"`) of the **raw**-deflated (`compress/flate`, not zlib) `aNN` JSON. The
+  nested `data` object belongs to cloudconf.
 - `retry`:`1` is **not** part of the first request; only the background resend adds it.
-- The Go `DeviceProfile` struct was never derived from the SDK. The real body is whatever native
-  `w1` emits, so don't treat the struct as a partial version of it.
+- The Go `DeviceProfile` struct is exactly the eight fields native `w1` writes (`organization,
+  os, appId, encode, compress, data, tn, ep`); don't add cloudconf fields to it.
+- The fingerprint is an Android profile, so never send it with an iOS Login (`-cs-ios` or a
+  session config's `iosMode`).
 - The Login's `shumeiBoxId` is `"B"` + `detail.deviceId`, not the bare `deviceId`.
 - Organization `"9dNCYkjHeFMYZMOjxgX8"` is validated server-side (wrong value → `9101`).
