@@ -45,8 +45,8 @@ type GameServer struct {
 // its tokens to it. Confirmed live on 2026-10-10 against a captured iOS session: with no opt, GSL
 // answered code 0 with the role's server (gateway hostnames, port, zone, gameUid) and no tokens.
 // opt=fix, which gsl.ChooseOpt gives a client holding no rt, was rejected with code 212. A
-// session's refresh token is never sent: the caller keeps its access token, so an opt=refresh that
-// rotated the pair would strand both.
+// session's refresh token is never sent here: refreshing is RefreshTokens' job, which the caller
+// runs, and saves, when the access token is missing, 30 days old, or rejected.
 //
 // Only the address is taken from the reply. The caller keeps its access token, as the client does
 // on a serverInfo redirect. Any token the reply carries is only compared with AccessTok, and the
@@ -96,7 +96,7 @@ func gameServerFrom(lsr *gsl.LoginServerListRespon, gameUid, zone, accessTok str
 		"replyHasRefreshToken", replyHasRt)
 	if replyTok != "" && replyTok != accessTok {
 		slog.Warn("GSL server lookup: the reply carries a different access token; keeping the session's. " +
-			"If the Login now fails with E011, GSL rotated it and the session needs a fresh capture")
+			"If the Login now fails with E011, GSL rotated it: a session with a refresh token refreshes, a captured one needs a fresh capture")
 	}
 	return s, nil
 }

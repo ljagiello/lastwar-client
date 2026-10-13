@@ -147,12 +147,14 @@ func SaveSessionConfig(cfg *SessionConfig, path string) error {
 	return auth.AtomicWriteStateFile(path, string(data))
 }
 
-// saveRefreshedTokens stores a refreshed token pair in the session config at path right away,
-// re-reading the file first so every other field stays as it is on disk. The real client stores a
-// refresh reply's at/rt before it logs in with them; saving here, not only after a successful Login,
-// keeps a rotated refresh token even when that Login fails. A run without a session config (path
-// "") has nowhere to keep them. A failure is only logged: the run can still use the tokens.
-func saveRefreshedTokens(path string, t auth.Tokens) {
+// saveRefreshedTokens stores deviceID's refreshed token pair in the session config at path right
+// away, re-reading the file first so every other field stays as it is on disk. The real client
+// stores a refresh reply's at/rt before it logs in with them; saving here, not only after a
+// successful Login, keeps a rotated refresh token even when that Login fails. Tokens belong to the
+// device they were issued to, so they aren't saved into a config made for another one (the owner
+// rule saveShumeiInstall uses), as after a -cs-rt run under -cs-deviceid. A run without a session
+// config (path "") has nowhere to keep them. A failure is only logged: the run can still use them.
+func saveRefreshedTokens(path, deviceID string, t auth.Tokens) {
 	if path == "" {
 		slog.Warn("GSL refresh: no session config to keep the refreshed tokens in; the next run starts from the old ones")
 		return
@@ -160,6 +162,15 @@ func saveRefreshedTokens(path string, t auth.Tokens) {
 	cfg, err := LoadSessionConfig(path)
 	if err != nil {
 		slog.Warn("GSL refresh: could not re-read the session config to save the refreshed tokens", "path", path, "error", err)
+		return
+	}
+	owner := cfg.DeviceID
+	if owner == "" {
+		owner = cfg.ShumeiInstall.DeviceID
+	}
+	if owner != "" && owner != deviceID {
+		slog.Warn("GSL refresh: not saving the refreshed tokens; the session config holds another device's", "path", path,
+			"configDeviceIdLen", len(owner), "runDeviceIdLen", len(deviceID))
 		return
 	}
 	cfg.AccessToken, cfg.AccessTokenTime = t.AccessTok, t.AccessTokTime

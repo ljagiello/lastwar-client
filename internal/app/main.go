@@ -508,6 +508,13 @@ func Run() {
 // exitIfReauthNeeded exits with code 2 when err carries GSL code 211 or 212
 // (gsl.ErrReauthNeeded): the server no longer accepts this device's at/rt/loginKey, so retrying
 // cannot help. Code 2 is the README's "session is stale" exit code for cron wrappers.
+// accessTokenStale reports whether the real client would refresh before logging in
+// (gsl.ChooseOpt's opt=refresh row): a refresh token and a gameUid are held, and the access token
+// is missing or its at.time is 30 days old.
+func accessTokenStale(gameUid, accessTok string, accessTokTime int64, refreshTok string) bool {
+	return gsl.ChooseOpt(gsl.OptState{GameUid: gameUid, AccessTok: accessTok, AccessTokTime: accessTokTime, RefreshTok: refreshTok}, time.Now()).Opt == "refresh"
+}
+
 func exitIfReauthNeeded(err error) {
 	if !errors.Is(err, gsl.ErrReauthNeeded) {
 		return
@@ -1304,11 +1311,13 @@ func runCrossServerTest(o crossServerTestOpts) {
 			refreshTok, refreshTokTime = o.rt, 0
 		}
 		refreshed = true
-		saveRefreshedTokens(o.configSavePath, auth.Tokens{AccessTok: accessTok, RefreshTok: refreshTok, AccessTokTime: accessTokTime, RefreshTokTime: refreshTokTime})
+		saveRefreshedTokens(o.configSavePath, deviceID, auth.Tokens{AccessTok: accessTok, RefreshTok: refreshTok, AccessTokTime: accessTokTime, RefreshTokTime: refreshTokTime})
 	}
 
 	// refreshWithConfigToken trades the session config's refresh token for a fresh access token
-	// (GSL opt=refresh) and saves the pair to the session config before any Login uses it.
+	// (GSL opt=refresh) and saves the pair to the session config before any Login uses it. Unlike
+	// the older -cs-rt request above, it sends the session's zone and, under iosMode, platform=iOS,
+	// as the real client does (auth.RefreshTokens).
 	refreshWithConfigToken := func() error {
 		if gslRSAPub == nil {
 			return errors.New("GSL refresh: check-version failed, so there is no gate host or RSA key")
@@ -1325,14 +1334,19 @@ func runCrossServerTest(o crossServerTestOpts) {
 			refreshTok, refreshTokTime = t.RefreshTok, t.RefreshTokTime
 		}
 		refreshed = true
-		saveRefreshedTokens(o.configSavePath, auth.Tokens{AccessTok: accessTok, RefreshTok: refreshTok, AccessTokTime: accessTokTime, RefreshTokTime: refreshTokTime})
+		saveRefreshedTokens(o.configSavePath, deviceID, auth.Tokens{AccessTok: accessTok, RefreshTok: refreshTok, AccessTokTime: accessTokTime, RefreshTokTime: refreshTokTime})
+		if accessTokenStale(gameUid, accessTok, accessTokTime, refreshTok) {
+			// Live, a refresh eight days in returned the same at with its original at.time. If GSL
+			// does that at 30 days too, every run refreshes before its Login; harmless, but worth
+			// seeing in the log.
+			slog.Warn("GSL refresh: the access token it returned is still 30 days old, so every run will refresh until GSL issues a new one", "accessTokenTime", accessTokTime)
+		}
 		return nil
 	}
 
 	// Before the Login, refresh when the real client would (gsl.ChooseOpt): no access token, or
 	// at.time 30 days old.
-	if !refreshed && refreshTok != "" && gameUid != "" &&
-		gsl.ChooseOpt(gsl.OptState{GameUid: gameUid, AccessTok: accessTok, AccessTokTime: accessTokTime, RefreshTok: refreshTok}, time.Now()).Opt == "refresh" {
+	if !refreshed && accessTokenStale(gameUid, accessTok, accessTokTime, refreshTok) {
 		slog.Info("access token missing or 30 days old; refreshing it with the session config's refresh token", "accessTokenLen", len(accessTok), "accessTokenTime", accessTokTime)
 		if err := refreshWithConfigToken(); err != nil {
 			if accessTok == "" {
@@ -1500,18 +1514,21 @@ func runCrossServerTest(o crossServerTestOpts) {
 	if err != nil && errors.Is(err, session.ErrTokenRejected) && refreshTok != "" && !refreshed {
 		slog.Warn("cross-server login: access token rejected (E011); refreshing it with the session config's refresh token and logging in again", "error", err)
 		if refreshErr := refreshWithConfigToken(); refreshErr != nil {
-			slog.Error("GSL refresh after E011 failed", "error", refreshErr)
+			// 211/212 means the device's credentials are gone (exit 2). Anything else (network,
+			// another GSL code, no check-version) says nothing about the session, and the next
+			// run tries again, so it isn't the exit-2 "session is stale" contract.
+			slog.Error("GSL refresh after E011 failed; the next run will try again", "error", refreshErr)
 			exitIfReauthNeeded(refreshErr)
-		} else {
-			params.AccessTok = accessTok
-			result, err = auth.DoCrossServerLogin(params)
+			os.Exit(1)
 		}
+		params.AccessTok = accessTok
+		result, err = auth.DoCrossServerLogin(params)
 	}
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
 		exitIfSessionEnded(err, nil)
 		if errors.Is(err, session.ErrTokenRejected) {
-			if refreshTok == "" {
+			if !refreshed {
 				slog.Error("the session config's access token has been rotated server-side; every run will fail until it is replaced. " +
 					"Recapture: run `tcpdump -i en0 -w login.pcap 'tcp and not port 443'`, cold-start the real app until its main screen loads, " +
 					"then `pcap -in login.pcap -session-out ~/.lastwar_goclient_session.json` (see README, \"Recognizing an expired token\")")

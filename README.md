@@ -40,9 +40,10 @@ for the current confirmed-vs-unconfirmed picture. Preview the docs locally with 
   exposed a third class of the same kind of bug: `serverInfo` zone-migration redirects were either
   unhandled or unreachable on both login paths. See `docs/live-validation.mdx` for the full
   root-cause writeups.
-- **Not yet general-purpose:** the reconnect path currently needs a session config captured from a
-  real client login (see below) rather than deriving one from scratch. A from-scratch login using
-  `-cs-ios`-equivalent identity from the very first GSL call hasn't been tried yet.
+- **Not yet general-purpose:** the reconnect path needs a session config: one captured from a real
+  client login (see below), or one `-own-device-session` writes for a device of its own, which
+  refreshes its own tokens. A from-scratch login using `-cs-ios`-equivalent identity from the very
+  first GSL call hasn't been tried yet.
 
 ## Scope
 
