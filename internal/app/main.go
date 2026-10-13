@@ -82,6 +82,9 @@ func Run() {
 	csDeviceID := fs.String("cs-deviceid", "", "override deviceId (e.g. a real device's, extracted from its local PlayerPrefs) instead of this Go client's own persisted one")
 	csShumei := fs.String("cs-shumei", "", "real shumeiBoxId anti-fraud fingerprint token, if known")
 	csShumeiGen := fs.Bool("cs-shumei-gen", false, "generate a shumeiBoxId via the ShuMei deviceprofile/v4 endpoint when none is given (empty -cs-shumei and no session-config shumeiBoxId); makes one extra HTTPS call before login, using the same deviceId as the Login request; ignored in iOS mode (-cs-ios or a session config's iosMode), since the fingerprint it registers is an Android device profile")
+	csShumeiSSID := fs.String("cs-shumei-ssid", "", "with -cs-shumei-gen, report this Wi-Fi SSID (a30) in the ShuMei fingerprint. By default the fingerprint carries no Wi-Fi details, like a real Last War install: the SDK reads them only with the location permission, which Last War doesn't request. Setting this or -cs-shumei-bssid also reports the host's LAN IPv4 as the Wi-Fi IP (a31)")
+	csShumeiBSSID := fs.String("cs-shumei-bssid", "", "with -cs-shumei-gen, report this Wi-Fi access point MAC (BSSID, a19) in the ShuMei fingerprint; see -cs-shumei-ssid")
+	csShumeiBoot := fs.String("cs-shumei-boot", "", "with -cs-shumei-gen, the device boot time the ShuMei fingerprint reports (a40), RFC 3339, e.g. 2026-10-01T12:20:43Z; its uptime fields count from it. Default: the host's real boot time")
 	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- IF the refresh response includes a non-empty server list, it REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and IF it includes a fresh access token, that REPLACES any explicitly-passed -cs-at; either can come back empty, in which case the corresponding -cs-* value passed here (or loaded from a session config) is used unchanged instead -- a warning is logged when that leaves a possibly-stale -cs-at in place with no refresh. If BOTH come back empty (no fresh access token AND no server list), that is NOT a graceful fallback: it is treated as a likely-rejected/expired refresh token and exits with code 2")
 	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at (e.g. one captured live from a real client) -- cheap anonymous check-version calls are still made (to derive the Login resVersion), but no GSL call happens unless -cs-rt is also set; a mid-login serverInfo redirect reuses the same token, as the real client does")
 	csIOS := fs.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
@@ -371,6 +374,11 @@ func Run() {
 		if *codePipe != "" {
 			slog.Warn("ignoring -code-pipe because -cs-ip/-cs-rt/-cs-at is set (cross-server reconnect doesn't use the email flow)")
 		}
+		shumeiDevice, err := shumeiDeviceFromFlags(*csShumeiSSID, *csShumeiBSSID, *csShumeiBoot)
+		if err != nil {
+			slog.Error("invalid -cs-shumei-* flag", "error", err)
+			os.Exit(1)
+		}
 		runCrossServerTest(crossServerTestOpts{
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
@@ -378,7 +386,7 @@ func Run() {
 			features: cfgFeatures, duelPolicy: cfgDuelPolicy, runFeature: *runFeature, runAnyway: *runAnyway,
 			interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
-			shumeiGen:  *csShumeiGen,
+			shumeiGen: *csShumeiGen, shumeiDevice: shumeiDevice,
 			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
 			zoneExplicit: csZoneSetExplicitly, gameUidExplicit: csGameUidSetExplicitly,
 			atExplicit: csAtSetExplicitly, interactiveExplicit: interactiveSetExplicitly,
@@ -686,7 +694,8 @@ func warnIfInteractiveExplicitlyEmpty(explicit bool, interactive string) {
 var stringFlagSwallowGuardNames = map[string]bool{
 	"email": true, "code-pipe": true, "interactive": true,
 	"cs-ip": true, "cs-zone": true, "cs-gameuid": true, "cs-deviceid": true,
-	"cs-shumei": true, "cs-rt": true, "cs-at": true,
+	"cs-shumei": true, "cs-shumei-ssid": true, "cs-shumei-bssid": true, "cs-shumei-boot": true,
+	"cs-rt": true, "cs-at": true,
 	"config": true, "decode-stream": true, "decode-label": true, "log-level": true,
 	"own-device-session": true, "run": true,
 }
@@ -746,14 +755,49 @@ func detectSwallowedFlagValue(name, value string, registeredFlagNames map[string
 // -cs-* flag added to the FlagSet but forgotten here, or a stale name left here after a flag is
 // renamed/removed.
 var crossServerFlagNames = map[string]bool{
-	"cs-at":         true,
-	"cs-port":       true,
-	"cs-zone":       true,
-	"cs-gameuid":    true,
-	"cs-deviceid":   true,
-	"cs-shumei":     true,
-	"cs-shumei-gen": true,
-	"cs-ios":        true,
+	"cs-at":           true,
+	"cs-port":         true,
+	"cs-zone":         true,
+	"cs-gameuid":      true,
+	"cs-deviceid":     true,
+	"cs-shumei":       true,
+	"cs-shumei-gen":   true,
+	"cs-shumei-ssid":  true,
+	"cs-shumei-bssid": true,
+	"cs-shumei-boot":  true,
+	"cs-ios":          true,
+}
+
+// shumeiDeviceFromFlags builds the shumei.Device that -cs-shumei-ssid, -cs-shumei-bssid and
+// -cs-shumei-boot describe. Empty flags leave their fields zero, so shumei.BoxID uses the host's
+// boot time and reports no Wi-Fi. The BSSID is normalized to the lowercase colon form Android's
+// getBSSID() returns.
+func shumeiDeviceFromFlags(ssid, bssid, boot string) (shumei.Device, error) {
+	var d shumei.Device
+	if boot != "" {
+		t, err := time.Parse(time.RFC3339, boot)
+		if err != nil {
+			return d, fmt.Errorf("-cs-shumei-boot %q is not an RFC 3339 time: %w", boot, err)
+		}
+		if !t.Before(time.Now()) {
+			return d, fmt.Errorf("-cs-shumei-boot %q is not in the past", boot)
+		}
+		d.BootTime = t
+	}
+	if len(ssid) > 32 {
+		return d, fmt.Errorf("-cs-shumei-ssid is %d bytes, longer than a Wi-Fi SSID's 32", len(ssid))
+	}
+	if bssid != "" {
+		mac, err := net.ParseMAC(bssid)
+		if err != nil || len(mac) != 6 {
+			return d, fmt.Errorf("-cs-shumei-bssid %q is not a 6-byte MAC address", bssid)
+		}
+		bssid = mac.String()
+	}
+	if ssid != "" || bssid != "" {
+		d.WiFi = &shumei.WiFi{SSID: ssid, BSSID: bssid}
+	}
+	return d, nil
 }
 
 // ignoredCrossServerFlags returns which of the given visited (explicitly set on the command line)
@@ -939,7 +983,8 @@ type crossServerTestOpts struct {
 	runAnyway                                                     bool              // -run-anyway
 	port                                                          int
 	handshake, iosMode, collect, listBuildings, shumeiGen         bool
-	configSavePath                                                string // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
+	shumeiDevice                                                  shumei.Device // -cs-shumei-ssid/-bssid/-boot, for -cs-shumei-gen
+	configSavePath                                                string        // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
 
 	// httpClient/dialGame are OPTIONAL test seams (both nil in production). httpClient overrides the
 	// GSL HTTP client (default gsl.DefaultHTTPClient()); dialGame overrides the game-socket dial,
@@ -1284,6 +1329,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 	resVersion := auth.ResVersionFor(httpClient, cv, o.iosMode, o.appVersion, o.versionCode, zone)
 
 	shumeiBoxId := o.shumeiBoxId
+	if !o.shumeiGen && (o.shumeiDevice.WiFi != nil || !o.shumeiDevice.BootTime.IsZero()) {
+		slog.Warn("ignoring -cs-shumei-ssid/-cs-shumei-bssid/-cs-shumei-boot without -cs-shumei-gen: they only shape a generated shumeiBoxId")
+	}
 	if o.shumeiGen && shumeiBoxId == "" && o.iosMode {
 		// shumei.BoxID registers an Android device profile (os "android", package
 		// com.fun.lastwar.gp), while an iOS-mode Login claims com.lastwar.ios -- a pairing the real
@@ -1295,7 +1343,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		// shumeiBoxId. Optional: the server accepts an empty one (see docs/live-validation.mdx),
 		// so this only runs when -cs-shumei-gen is set and no token was already supplied.
 		var errGen error
-		shumeiBoxId, errGen = shumei.BoxID(httpClient, deviceID)
+		shumeiBoxId, errGen = shumei.BoxID(httpClient, deviceID, o.shumeiDevice)
 		if errGen != nil {
 			// Not fatal: an empty shumeiBoxId is a first-class, known-accepted client path, so a
 			// failed generation degrades to that rather than aborting the login.

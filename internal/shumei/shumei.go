@@ -66,6 +66,7 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Organization and AppID are the values the shipped game (Last War)
@@ -274,24 +275,25 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 	return data, base64.StdEncoding.EncodeToString(epBytes), base64.StdEncoding.EncodeToString(tnBytes), nil
 }
 
-// innerTemplate is the `aNN` device-data fingerprint the SDK's SubCollector
-// fills. It is a spoofed Android device profile (a Samsung SM-G988N running
-// Android 12), because this client runs on a desktop and has no real device
-// telemetry. The `__DEVICE_ID__` placeholder is replaced with the caller's
-// device ID so the fingerprint binds to the same identity as the Login request.
+// innerTemplate is the static part of the `aNN` device-data fingerprint the
+// SDK's SubCollector fills. It is a spoofed Android device profile (a Samsung
+// SM-G988N running Android 12), because this client runs on a desktop and has
+// no real device telemetry. deviceData adds the fields that change between
+// collections: the device ID (a2, a97), the clocks (a9, a40, a170, a171), the
+// SDK session ID (a80), and the Wi-Fi details (a19, a30, a31) when a Device
+// carries them.
 //
-// The server validates the protection (an empty/minimal fingerprint returns
-// 1902) but accepts this full template as-is, empty fields included.
+// The empty entries stay here to document which slots this device leaves
+// empty. deviceData drops them, the way the SDK's serializer does.
 const innerTemplate = `{
   "a1": "all", "a4": "1", "a5": "default",
-  "a2": "__DEVICE_ID__",
-  "a6": "android", "a9": 1784568338000, "a10": "12", "a7": "3.14.3",
+  "a6": "android", "a10": "12", "a7": "3.14.3",
   "a62": "/data/user/0/com.fun.lastwar.gp/files",
   "a64": { "enable": "0", "service": [], "suc": "1" },
   "a36": "1080,1920,320", "a45": "26006",
   "a143": "exynos990", "a33": "exynos990", "a34": 2457000, "a37": 128, "a32": 8, "a48": 8000000000,
   "a56": "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US",
-  "a57": -1802451281, "a31": "192.168.1.100", "a11": "default", "a30": "\"Netia Mobile_5G\"", "a29": "",
+  "a57": -1802451281, "a11": "default", "a29": "",
   "a44": "WIFI",
   "a46": { "board": "z3q", "model": "SM-G988N", "brand": "samsung", "manufacturer": "samsung",
            "fingerprint": "samsung/z3qksx/z3q:12/NRD90M/1201240816:user/release-keys",
@@ -299,8 +301,8 @@ const innerTemplate = `{
   "a47": [ "1,InvenSense", "4,AKM", "9,Bosch", "13,Bosch" ],
   "a18": { "ro.debuggable": "0", "ro.boot.hardware": "exynos990", "gsm.sim.state": "READY",
            "gsm.operator.alpha": "Netia", "sys.usb.state": "android,adb" },
-  "a19": "b4:11:22:33:44:55", "a24": "8f7a9a1b751fa784", "a39": "com.fun.lastwar.gp", "a38": "1.0.352",
-  "a40": 1784500000000, "a136": "build1", "a96": "9dNCYkjHeFMYZMOjxgX8",
+  "a24": "8f7a9a1b751fa784", "a39": "com.fun.lastwar.gp", "a38": "1.0.352",
+  "a136": "build1", "a96": "9dNCYkjHeFMYZMOjxgX8",
   "a63": [ "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME" ],
   "a68": [], "a69": 120000000000, "a70": 130000000000, "a71": 128000000000, "a127": 12,
   "a99": "", "a100": "", "a101": "", "a113": 0, "a130": 3, "a116": {}, "a117": false,
@@ -309,45 +311,183 @@ const innerTemplate = `{
   "a153": {}, "a154": { "pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.5.01.7" },
   "a133": 250, "a144": "", "a155": 0, "a160": 0, "a161": 0, "a162": [],
   "a163": "ffeeddccbbaa99887766554433221100", "a164": 0, "a165": 0,
-  "a167": 1784500000000, "a168": 1784500000000, "a169": "", "a170": 12345678, "a171": 12345678,
+  "a167": 1784500000000, "a168": 1784500000000, "a169": "",
   "a172": {}, "a173": 0, "a174": 1, "a15": "false",
   "a72": { "status": 2, "level": 85, "scale": 100, "temp": 320, "vol": 4200 },
   "a73": 0, "a74": 0, "a75": 0, "a76": "", "a77": {}, "a78": [], "a79": "",
-  "a80": "__DEVICE_ID__", "a83": "1011100", "a84": "e2b31bdf2f77091e",
+  "a83": "1011100", "a84": "e2b31bdf2f77091e",
   "a85": [], "a86": "0111001",
   "a88": "locateServiceName:android.location.ILocationManager$Stub$Proxy|phoneServiceName:com.android.internal.telephony.ITelephony$Stub$Proxy",
-  "a90": 32, "a92": "1080,1920", "a93": 1, "a97": "__DEVICE_ID__",
+  "a90": 32, "a92": "1080,1920", "a93": 1,
   "a102": [], "a103": "", "a107": {}, "a108": "", "a110": "", "a114": [], "a115": [],
   "a131": "pl", "a132": "pl", "a141": 1, "a156": [], "a157": 0, "a159": ""
 }`
 
-// deviceData fills innerTemplate's `__DEVICE_ID__` slots (a2, a80, a97) with
-// deviceID, giving the device-data JSON that protect encrypts.
-func deviceData(deviceID string) string {
-	return strings.ReplaceAll(innerTemplate, "__DEVICE_ID__", deviceID)
+// Device holds the fingerprint values that change during a device's life: the
+// clocks the SDK samples on every collection, and the Wi-Fi details it reads
+// when the app may see them. BoxID fills each zero field with the host's real
+// value.
+type Device struct {
+	// Now is the collection time, a9 (System.currentTimeMillis()). Zero means
+	// the current time.
+	Now time.Time
+
+	// BootTime is when the device booted, a40 (the SDK's median of 11
+	// currentTimeMillis()-elapsedRealtime() samples). a171 (elapsedRealtime())
+	// and a170 (uptimeMillis()) count from it. Zero means Now minus the host's
+	// uptime.
+	BootTime time.Time
+
+	// WiFi adds the connected network's details. Nil is what a real Last War
+	// install sends: the SDK reads them only when the app holds
+	// ACCESS_FINE_LOCATION (l1l11l1Illl), Last War doesn't request it, so a19,
+	// a30 and a31 come back empty and the serializer leaves them out.
+	WiFi *WiFi
+}
+
+// WiFi is the connected network, as Android's WifiInfo reports it to an app
+// holding the location permission.
+type WiFi struct {
+	SSID  string // a30, unquoted: getSSID() adds the quotes
+	BSSID string // a19, the access point's MAC
+	IP    string // a31, the device's IPv4 on that network; "" means the host's LAN address
+}
+
+// withHostDefaults fills each zero field of d with the host's real value.
+func (d Device) withHostDefaults() Device {
+	if d.Now.IsZero() {
+		d.Now = time.Now()
+	}
+	if d.BootTime.IsZero() {
+		d.BootTime = d.Now.Add(-hostUptime())
+	}
+	if d.WiFi != nil && d.WiFi.IP == "" {
+		w := *d.WiFi
+		w.IP = hostIP()
+		d.WiFi = &w
+	}
+	return d
+}
+
+// sdkStartLead is how long before collecting the device data the app started
+// the SDK (SmAntiFraud.create), whose clock a80 records.
+const sdkStartLead = time.Second
+
+// deviceData builds the device-data JSON that protect encrypts: innerTemplate
+// plus deviceID and d's clock and Wi-Fi values. It serializes the way the
+// SDK's reflection serializer (l1l1l11Ill) does: compact, and without
+// top-level entries that are empty strings, lists or maps. d must already
+// carry its host defaults.
+func deviceData(deviceID string, d Device) (string, error) {
+	if d.BootTime.After(d.Now) {
+		return "", fmt.Errorf("shumei: boot time %s is after the collection time %s",
+			d.BootTime.Format(time.RFC3339), d.Now.Format(time.RFC3339))
+	}
+	dec := json.NewDecoder(strings.NewReader(innerTemplate))
+	dec.UseNumber()
+	var m map[string]any
+	if err := dec.Decode(&m); err != nil {
+		return "", fmt.Errorf("shumei: parse device-data template: %w", err)
+	}
+
+	m["a2"], m["a97"] = deviceID, deviceID
+	now, boot := d.Now.UnixMilli(), d.BootTime.UnixMilli()
+	m["a9"] = now
+	m["a40"] = boot
+	m["a171"] = now - boot
+	// uptimeMillis() leaves out deep sleep. The host's sleep time isn't
+	// measured, so this equals elapsedRealtime().
+	m["a170"] = now - boot
+	start := d.Now.Add(-sdkStartLead).UnixMilli()
+	m["a80"] = fmt.Sprintf("%d-%s", start, javaRandomDigits(start, 5))
+	if w := d.WiFi; w != nil {
+		m["a19"] = w.BSSID
+		if w.SSID != "" {
+			m["a30"] = `"` + w.SSID + `"`
+		}
+		m["a31"] = w.IP
+	}
+
+	for k, v := range m {
+		if isEmpty(v) {
+			delete(m, k)
+		}
+	}
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(m); err != nil {
+		return "", fmt.Errorf("shumei: marshal device data: %w", err)
+	}
+	return strings.TrimSuffix(b.String(), "\n"), nil
+}
+
+// isEmpty reports whether the SDK's serializer would skip v: null, an empty
+// string, an empty collection or an empty map (l1l1l11Ill.l111l11111lIl).
+func isEmpty(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return true
+	case string:
+		return v == ""
+	case []any:
+		return len(v) == 0
+	case map[string]any:
+		return len(v) == 0
+	}
+	return false
+}
+
+// javaRandomDigits returns n digits drawn with java.util.Random(seed).nextInt(10).
+// a80 is the SDK start time in milliseconds, "-", then five such digits seeded
+// with that same time (l11l11Il11l).
+func javaRandomDigits(seed int64, n int) string {
+	const multiplier, mask = 0x5DEECE66D, 1<<48 - 1
+	s := (uint64(seed) ^ multiplier) & mask
+	digits := make([]byte, n)
+	for i := range digits {
+		for {
+			s = (s*multiplier + 0xB) & mask
+			bits := int32(s >> 17) // next(31)
+			v := bits % 10
+			// nextInt(bound)'s rejection test, relying on int32 overflow as Java does.
+			if bits-v+9 >= 0 {
+				digits[i] = byte('0' + v)
+				break
+			}
+		}
+	}
+	return string(digits)
 }
 
 // BoxID registers a device with the ShuMei backend and returns its assigned
 // device fingerprint, already prefixed with `"B"` to match the Login request's
 // `shumeiBoxId` field. deviceID should match the request's own deviceId so the
-// server can bind the fingerprint to the same device identity.
+// server can bind the fingerprint to the same device identity. dev sets the
+// clock and Wi-Fi fields; its zero value reports the host's clocks and no
+// Wi-Fi, like a real Last War install.
 //
 // Note on scope: the device-data fingerprint this mints is a spoofed Android
 // profile for a device that does not exist. The game server does not require a
 // real shumeiBoxId (an empty one is accepted), so this is an optional
 // best-effort path, not a hard gate.
-func BoxID(client Client, deviceID string) (string, error) {
+func BoxID(client Client, deviceID string, dev Device) (string, error) {
 	pub, err := publicKey()
 	if err != nil {
 		return "", err
 	}
-	return boxID(client, pub, deviceID)
+	return boxID(client, pub, deviceID, dev.withHostDefaults())
 }
 
 // boxID is BoxID with the RSA key as a parameter, the same way protect takes
-// it, so a test can use its own key pair and decrypt the POSTed body.
-func boxID(client Client, pub *rsa.PublicKey, deviceID string) (string, error) {
-	data, ep, tn, err := protect(pub, deviceData(deviceID))
+// it, so a test can use its own key pair and decrypt the POSTed body. dev must
+// already carry its host defaults.
+func boxID(client Client, pub *rsa.PublicKey, deviceID string, dev Device) (string, error) {
+	inner, err := deviceData(deviceID, dev)
+	if err != nil {
+		return "", err
+	}
+	data, ep, tn, err := protect(pub, inner)
 	if err != nil {
 		return "", err
 	}
