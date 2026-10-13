@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"lastwar-client/internal/auth"
@@ -254,7 +255,9 @@ func TestRunCrossServerTestSaveBackKeepsRefreshToken(t *testing.T) {
 // runCrossServerTest exits the process, and returns the exit code and stderr.
 func runRefreshHelper(t *testing.T, name string, env ...string) (int, string) {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^"+name+"$")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+name+"$")
 	cmd.Env = append(append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1"), env...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -306,8 +309,9 @@ func TestRunCrossServerTestRefreshSavedBeforeLogin(t *testing.T) {
 	if strings.Count(stderr, "refreshing the access token") != 1 {
 		t.Errorf("want exactly one refresh (no loop); stderr=%s", stderr)
 	}
+	// The subprocess logs through slog's text handler, which doesn't quote values.
 	for _, secret := range []string{"at-old", "rt-old", refreshedAt, refreshedRt} {
-		if strings.Contains(stderr, `"`+secret+`"`) {
+		if strings.Contains(stderr, secret) {
 			t.Errorf("log contains token %q; stderr=%s", secret, stderr)
 		}
 	}
@@ -332,7 +336,7 @@ func TestRunCrossServerTestRefreshRejectedExits2(t *testing.T) {
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2; stderr=%s", code, stderr)
 	}
-	if !strings.Contains(stderr, "re-auth needed") {
+	if !strings.Contains(stderr, "GSL rejected this device's credentials") {
 		t.Errorf("want the re-auth message; stderr=%s", stderr)
 	}
 	if cfg := readSessionConfig(t, cfgPath); cfg.AccessToken != "at-old" || cfg.RefreshToken != "rt-old" {
@@ -363,23 +367,29 @@ func TestRunCrossServerTestNoRefreshTokenKeepsRecaptureHint(t *testing.T) {
 	}
 }
 
-// TestMainUsesSessionConfigRefreshToken runs Run() end to end against a session config holding a
-// refresh token and no access token: the config alone selects the reconnect, the run refreshes,
-// logs in with the fresh token, and saves the pair. With -cs-deviceid given, the config's refresh
-// token (bound to the config's device) is left alone.
+// TestMainUsesSessionConfigRefreshToken runs Run() end to end. The fake GSL lists the fake game
+// server, so a config needs no address of its own.
+//   - A config holding only a refresh token (no address, no access token) selects the reconnect by
+//     itself, refreshes (opt=refresh), logs in with the fresh token, and saves the pair.
+//   - A config whose accessTokenTime is 31 days old refreshes before the Login.
+//   - An explicit -cs-at isn't judged by the config's accessTokenTime: it is used as given.
+//   - With -cs-deviceid, the config's refresh token (bound to the config's device) is left alone.
 func TestMainUsesSessionConfigRefreshToken(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
-		home := t.TempDir()
-		t.Setenv("HOME", home)
-		testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, refreshReply()))
+		t.Setenv("HOME", t.TempDir())
 		var seen loginAts
-		addr := session.StartFakeGameServer(t, tokenCheckingServer(refreshedAt, &seen))
+		addr := session.StartFakeGameServer(t, tokenCheckingServer(os.Getenv("LASTWAR_TEST_GOOD"), &seen))
 		host, port := testutil.SplitHostPortInt(t, addr)
+		reply := refreshReply()
+		reply.ServerList = []gsl.LoginServerInfo{{ID: "783", IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: lookupZone, GameUid: lookupGameUid}}
+		testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, reply))
 		cfgPath := os.Getenv("LASTWAR_TEST_CFG")
-		cfg := readSessionConfig(t, cfgPath)
-		cfg.IP, cfg.Port = host, port
-		if err := SaveSessionConfig(&cfg, cfgPath); err != nil {
-			t.Fatal(err)
+		if os.Getenv("LASTWAR_TEST_SET_ADDR") == "1" {
+			cfg := readSessionConfig(t, cfgPath)
+			cfg.IP, cfg.Port = host, port
+			if err := SaveSessionConfig(&cfg, cfgPath); err != nil {
+				t.Fatal(err)
+			}
 		}
 		os.Args = append([]string{"lastwar-client", "-config", cfgPath}, strings.Fields(os.Getenv("LASTWAR_TEST_ARGS"))...)
 		Run()
@@ -387,27 +397,45 @@ func TestMainUsesSessionConfigRefreshToken(t *testing.T) {
 		return
 	}
 
-	t.Run("config refresh token", func(t *testing.T) {
-		cfgPath := writeSessionConfig(t, SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", RefreshToken: "rt-old"})
-		code, stderr := runRefreshHelper(t, "TestMainUsesSessionConfigRefreshToken", "LASTWAR_TEST_CFG="+cfgPath)
-		if code != 0 {
-			t.Fatalf("exit code = %d, want 0; stderr=%s", code, stderr)
-		}
-		if !strings.Contains(stderr, "logins=["+refreshedAt+"]") {
-			t.Errorf("want one Login with the refreshed token; stderr=%s", stderr)
-		}
-		wantRefreshedTokens(t, cfgPath)
-	})
-	t.Run("-cs-deviceid ignores it", func(t *testing.T) {
-		cfgPath := writeSessionConfig(t, SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", RefreshToken: "rt-old", AccessToken: "at-old"})
-		code, stderr := runRefreshHelper(t, "TestMainUsesSessionConfigRefreshToken", "LASTWAR_TEST_CFG="+cfgPath, "LASTWAR_TEST_ARGS=-cs-deviceid other_n3d")
-		if code != 2 {
-			t.Errorf("exit code = %d, want 2 (E011, no refresh); stderr=%s", code, stderr)
-		}
-		if strings.Contains(stderr, "refreshing the access token") {
-			t.Errorf("refreshed with another device's refresh token; stderr=%s", stderr)
-		}
-	})
+	stale := time.Now().Add(-31 * 24 * time.Hour).Unix()
+	for _, c := range []struct {
+		name       string
+		cfg        SessionConfig
+		env        []string
+		wantCode   int
+		wantLogins string
+		refresh    bool
+	}{
+		{"refresh token only, no address",
+			SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", RefreshToken: "rt-old"},
+			[]string{"LASTWAR_TEST_GOOD=" + refreshedAt}, 0, "[" + refreshedAt + "]", true},
+		{"30-day-old accessTokenTime",
+			SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", AccessToken: "at-old", AccessTokenTime: stale, RefreshToken: "rt-old"},
+			[]string{"LASTWAR_TEST_GOOD=" + refreshedAt, "LASTWAR_TEST_SET_ADDR=1"}, 0, "[" + refreshedAt + "]", true},
+		{"explicit -cs-at ignores the config's accessTokenTime",
+			SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", AccessToken: "at-old", AccessTokenTime: stale, RefreshToken: "rt-old"},
+			[]string{"LASTWAR_TEST_GOOD=at-explicit", "LASTWAR_TEST_SET_ADDR=1", "LASTWAR_TEST_ARGS=-cs-at at-explicit"}, 0, "[at-explicit]", false},
+		{"-cs-deviceid ignores the config's refresh token",
+			SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", RefreshToken: "rt-old", AccessToken: "at-old"},
+			[]string{"LASTWAR_TEST_GOOD=" + refreshedAt, "LASTWAR_TEST_SET_ADDR=1", "LASTWAR_TEST_ARGS=-cs-deviceid other_n3d"}, 2, "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfgPath := writeSessionConfig(t, c.cfg)
+			code, stderr := runRefreshHelper(t, "TestMainUsesSessionConfigRefreshToken", append([]string{"LASTWAR_TEST_CFG=" + cfgPath}, c.env...)...)
+			if code != c.wantCode {
+				t.Fatalf("exit code = %d, want %d; stderr=%s", code, c.wantCode, stderr)
+			}
+			if c.wantLogins != "" && !strings.Contains(stderr, "logins="+c.wantLogins) {
+				t.Errorf("want logins=%s; stderr=%s", c.wantLogins, stderr)
+			}
+			if got := strings.Contains(stderr, `"opt":"refresh"`); got != c.refresh {
+				t.Errorf("refreshed = %v, want %v; stderr=%s", got, c.refresh, stderr)
+			}
+			if c.refresh {
+				wantRefreshedTokens(t, cfgPath)
+			}
+		})
+	}
 }
 
 // TestSaveRefreshedTokensKeepsOtherFields: only the four token fields change on disk.
@@ -555,5 +583,176 @@ func TestRunCrossServerTestWarnsWhenRefreshedTokenStillStale(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "still 30 days old") {
 		t.Errorf("want the still-stale warning:\n%s", buf.String())
+	}
+}
+
+// noRtReply is the refresh reply shape seen live: a fresh at and no rt.
+func noRtReply() gsl.LoginServerListRespon {
+	r := refreshReply()
+	r.Rt = nil
+	return r
+}
+
+// TestRunCrossServerTestRefreshWithoutRtKeepsTheRefreshToken: live, opt=refresh returned an at and
+// no rt. The config's refresh token and its time must survive that, after an E011 and before a
+// Login alike, or the feature works exactly once.
+func TestRunCrossServerTestRefreshWithoutRtKeepsTheRefreshToken(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		at         string
+		staleAt    bool
+		wantLogins []string
+	}{
+		{"after E011", "at-old", false, []string{"at-old", refreshedAt}},
+		{"before the Login", "at-old", true, []string{refreshedAt}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			client := testutil.UseInMemoryGSL(t, noRtReply())
+			var seen loginAts
+			dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer(refreshedAt, &seen)})
+			cfgPath := writeSessionConfig(t, SessionConfig{IP: "10.0.0.1", Port: lookupPort, Zone: lookupZone, GameUid: lookupGameUid, AccessToken: c.at, RefreshToken: "rt-old", RefreshTokenTime: 42})
+
+			synctest.Test(t, func(t *testing.T) {
+				var atTime int64
+				if c.staleAt {
+					atTime = time.Now().Add(-31 * 24 * time.Hour).Unix()
+				}
+				runCrossServerTest(crossServerTestOpts{
+					ip: "10.0.0.1", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid,
+					at: c.at, refreshTok: "rt-old", accessTokTime: atTime, refreshTokTime: 42,
+					configSavePath: cfgPath, httpClient: client, dialGame: dial,
+				})
+				synctest.Wait()
+			})
+
+			if got := seen.get(); fmt.Sprint(got) != fmt.Sprint(c.wantLogins) {
+				t.Errorf("Login access tokens = %v, want %v", got, c.wantLogins)
+			}
+			cfg := readSessionConfig(t, cfgPath)
+			if cfg.AccessToken != refreshedAt || cfg.AccessTokenTime != refreshedAtTime {
+				t.Errorf("at/at.time = %q/%d, want %q/%d", cfg.AccessToken, cfg.AccessTokenTime, refreshedAt, refreshedAtTime)
+			}
+			if cfg.RefreshToken != "rt-old" || cfg.RefreshTokenTime != 42 {
+				t.Errorf("rt/rt.time = %q/%d, want the kept rt-old/42", cfg.RefreshToken, cfg.RefreshTokenTime)
+			}
+		})
+	}
+}
+
+// TestRunCrossServerTestRefreshesOncePerRun: a 30-day-old token refreshed before the Login and then
+// rejected anyway is not refreshed a second time; the run exits 2 after one refresh.
+func TestRunCrossServerTestRefreshesOncePerRun(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		client := testutil.UseInMemoryGSL(t, refreshReply())
+		var seen loginAts
+		dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer("never", &seen)})
+		runCrossServerTest(crossServerTestOpts{
+			ip: "10.0.0.1", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid,
+			at: "at-old", refreshTok: "rt-old", accessTokTime: time.Now().Add(-31 * 24 * time.Hour).Unix(),
+			configSavePath: os.Getenv("LASTWAR_TEST_CFG"), httpClient: client, dialGame: dial,
+		})
+		return
+	}
+	cfgPath := writeSessionConfig(t, SessionConfig{IP: "10.0.0.1", Port: lookupPort, Zone: lookupZone, GameUid: lookupGameUid, AccessToken: "at-old", RefreshToken: "rt-old"})
+	code, stderr := runRefreshHelper(t, "TestRunCrossServerTestRefreshesOncePerRun", "LASTWAR_TEST_CFG="+cfgPath)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2; stderr=%s", code, stderr)
+	}
+	if n := strings.Count(stderr, "GSL getserverlist: refreshing the access token"); n != 1 {
+		t.Errorf("refreshes = %d, want 1; stderr=%s", n, stderr)
+	}
+	if !strings.Contains(stderr, "rejected even after a GSL refresh") {
+		t.Errorf("want the after-refresh message; stderr=%s", stderr)
+	}
+}
+
+// TestRunCrossServerTestRefreshBeforeLoginFails: a refresh before the Login that GSL rejects with
+// 211 and no access token to fall back on exits 2 with the re-auth message; one that fails for
+// another reason while an old access token exists logs in with the old token.
+func TestRunCrossServerTestRefreshBeforeLoginFails(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		code := os.Getenv("LASTWAR_TEST_GSL_CODE")
+		client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{Code: gsl.FlexString(code)})
+		var seen loginAts
+		dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer("at-old", &seen)})
+		at, atTime := os.Getenv("LASTWAR_TEST_AT"), time.Now().Add(-31*24*time.Hour).Unix()
+		runCrossServerTest(crossServerTestOpts{
+			ip: "10.0.0.1", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid,
+			at: at, refreshTok: "rt-old", accessTokTime: atTime, httpClient: client, dialGame: dial,
+		})
+		fmt.Fprintf(os.Stderr, "logins=%v\n", seen.get())
+		return
+	}
+	t.Run("211, no access token", func(t *testing.T) {
+		code, stderr := runRefreshHelper(t, "TestRunCrossServerTestRefreshBeforeLoginFails", "LASTWAR_TEST_GSL_CODE=211", "LASTWAR_TEST_AT=")
+		if code != 2 || !strings.Contains(stderr, "GSL rejected this device's credentials") {
+			t.Errorf("exit code = %d, want 2 with the re-auth message; stderr=%s", code, stderr)
+		}
+	})
+	t.Run("transient failure, old access token", func(t *testing.T) {
+		code, stderr := runRefreshHelper(t, "TestRunCrossServerTestRefreshBeforeLoginFails", "LASTWAR_TEST_GSL_CODE=500", "LASTWAR_TEST_AT=at-old")
+		if code != 0 || !strings.Contains(stderr, "logins=[at-old]") || !strings.Contains(stderr, "trying the old access token") {
+			t.Errorf("exit code = %d, want 0 and a Login with the old token; stderr=%s", code, stderr)
+		}
+	})
+}
+
+// TestRunCrossServerTestCsRtSavesBeforeAFailedLogin: a -cs-rt refresh saves the rotated rt before
+// the Login, so a Login that fails afterwards doesn't lose it.
+func TestRunCrossServerTestCsRtSavesBeforeAFailedLogin(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		client := testutil.UseInMemoryGSL(t, refreshReply())
+		var seen loginAts
+		dial, _ := recordingDial(map[string]func(*session.GameConn){"gw-a.example:10783": tokenCheckingServer("never", &seen)})
+		runCrossServerTest(crossServerTestOpts{
+			zone: lookupZone, gameUid: lookupGameUid, at: "at-old", rt: "rt-flag",
+			configSavePath: os.Getenv("LASTWAR_TEST_CFG"), httpClient: client, dialGame: dial,
+		})
+		return
+	}
+	cfgPath := writeSessionConfig(t, SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, AccessToken: "at-old"})
+	code, stderr := runRefreshHelper(t, "TestRunCrossServerTestCsRtSavesBeforeAFailedLogin", "LASTWAR_TEST_CFG="+cfgPath)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2; stderr=%s", code, stderr)
+	}
+	wantRefreshedTokens(t, cfgPath)
+}
+
+// TestRunCrossServerTestRefreshRequest decrypts the refresh this run sends: opt=refresh with the
+// config's refresh token, the run's device, zone and gameUid, and the session's platform.
+func TestRunCrossServerTestRefreshRequest(t *testing.T) {
+	for _, c := range []struct {
+		iosMode      bool
+		wantPlatform string
+	}{{false, gsl.Platform}, {true, "iOS"}} {
+		t.Run(c.wantPlatform, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			client, forms := testutil.UseDecryptingGSL(t, refreshReply())
+			var seen loginAts
+			dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer(refreshedAt, &seen)})
+
+			synctest.Test(t, func(t *testing.T) {
+				runCrossServerTest(crossServerTestOpts{
+					ip: "10.0.0.1", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid, deviceID: "dev-cfg",
+					refreshTok: "rt-old", iosMode: c.iosMode, httpClient: client, dialGame: dial,
+				})
+				synctest.Wait()
+			})
+
+			got := forms()
+			if len(got) != 1 {
+				t.Fatalf("getserverlist requests = %d, want 1", len(got))
+			}
+			want := map[string]string{"opt": "refresh", "rt": "rt-old", "uuid": "dev-cfg", "zone": lookupZone, "gameuid": lookupGameUid, "platform": c.wantPlatform}
+			for k, v := range want {
+				if g := got[0].Get(k); g != v {
+					t.Errorf("%s = %q, want %q", k, g, v)
+				}
+			}
+		})
 	}
 }
