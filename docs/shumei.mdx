@@ -272,9 +272,10 @@ built-in default. The config getter (`l11l111l1lll`) tries the one in memory,
 then the cached one, then a default compiled into the SDK. A fresh install
 starts the cloudconf and deviceprofile requests together on two network
 threads, so its first registration most likely reads the default. The
-default is `{"ver":1,"enc":1,"data":…}`: base64, AES-256-CBC under the key
-`5sn2vI1UbnoQZgr/32T6yh1xr62EQtNR9DJ3zNXl/9s=` (base64) with the IV
-`"0102030405060708"`, then zlib. It decrypts to 15,108 bytes of JSON whose
+default is `{"ver":1,"code":0,"data":"…","length":11349,"enc":1}`, whose
+`data` is base64, AES-256-CBC under the key
+`5sn2vI1UbnoQZgr/32T6yh1xr62EQtNR9DJ3zNXl/9s=` (base64) with the 16 ASCII bytes
+`0102030405060708` as the IV, then zlib. It decrypts to 15,108 bytes of JSON whose
 `sensitive.gps` and `sensitive.tel` are `false` and whose other `sensitive.*`
 keys are `true`, so it excludes `gps` and `tel`. `BoxID` therefore sends `a85`
 as `["input","tel","gps","protect"]`, in Java's `HashSet` order. No Java gate

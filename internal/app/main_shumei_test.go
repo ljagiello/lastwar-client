@@ -383,7 +383,9 @@ func TestRunCrossServerTestShumeiAppVersion(t *testing.T) {
 	t.Cleanup(func() { registerShumeiDevice = register })
 	// Booted the day before synctest's clock starts (2000-01-01), so the registration succeeds.
 	flagDevice := shumei.Device{BootTime: time.Date(1999, 12, 31, 0, 0, 0, 0, time.UTC), WiFi: &shumei.WiFi{SSID: "Home"}}
-	for _, appVersion := range []string{"1.0.399", ""} {
+	// 9.9.9 can't become the default build, so the first case always tells the config's version
+	// from the default's.
+	for _, appVersion := range []string{"9.9.9", ""} {
 		var registered []shumei.Device
 		registerShumeiDevice = func(client shumei.Client, deviceID string, dev shumei.Device) (string, error) {
 			registered = append(registered, dev)
