@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeModeIgnoredFlags(t *testing.T) {
@@ -289,12 +290,15 @@ func TestServerListOverrideFlags(t *testing.T) {
 	}
 }
 
-// TestCrossServerFlagNamesRecognizesExactlyEightFlags pins down that crossServerFlagNames
-// recognizes precisely the 8 -cs-* flags that are consumed once the cross-server path is taken
+// TestCrossServerFlagNamesRecognizesExactlyElevenFlags pins down that crossServerFlagNames
+// recognizes precisely the 11 -cs-* flags that are consumed once the cross-server path is taken
 // (i.e. every -cs-* flag except -cs-ip/-cs-rt, which instead gate whether that path is taken at
 // all) -- neither more nor fewer.
-func TestCrossServerFlagNamesRecognizesExactlyEightFlags(t *testing.T) {
-	want := []string{"cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei", "cs-shumei-gen", "cs-ios"}
+func TestCrossServerFlagNamesRecognizesExactlyElevenFlags(t *testing.T) {
+	want := []string{
+		"cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei", "cs-shumei-gen",
+		"cs-shumei-ssid", "cs-shumei-bssid", "cs-shumei-boot", "cs-ios",
+	}
 	if len(crossServerFlagNames) != len(want) {
 		t.Fatalf("crossServerFlagNames has %d entries %v, want exactly %d: %v",
 			len(crossServerFlagNames), crossServerFlagNames, len(want), want)
@@ -457,5 +461,42 @@ func TestShouldAbortBeforeInteractive(t *testing.T) {
 				t.Errorf("shouldAbortBeforeInteractive(err=%v, interactiveRequested=%v) = %v, want %v", c.err, c.interactiveRequested, got, c.want)
 			}
 		})
+	}
+}
+
+// TestShumeiDeviceFromFlags covers -cs-shumei-ssid/-bssid/-boot: empty flags leave the Device
+// zero (host boot time, no Wi-Fi), a BSSID is normalized to getBSSID()'s lowercase colon form, and
+// values a real device can't report are rejected.
+func TestShumeiDeviceFromFlags(t *testing.T) {
+	d, err := shumeiDeviceFromFlags("", "", "")
+	if err != nil || d.WiFi != nil || !d.BootTime.IsZero() {
+		t.Errorf("no flags = %+v, %v; want a zero Device", d, err)
+	}
+
+	d, err = shumeiDeviceFromFlags("Home", "AA-BB-CC-DD-EE-FF", "2026-10-01T12:20:43Z")
+	if err != nil {
+		t.Fatalf("shumeiDeviceFromFlags = %v", err)
+	}
+	if d.WiFi == nil || d.WiFi.SSID != "Home" || d.WiFi.BSSID != "aa:bb:cc:dd:ee:ff" || d.WiFi.IP != "" {
+		t.Errorf("WiFi = %+v, want SSID Home, BSSID aa:bb:cc:dd:ee:ff, IP left for the host", d.WiFi)
+	}
+	if want := time.Date(2026, 10, 1, 12, 20, 43, 0, time.UTC); !d.BootTime.Equal(want) {
+		t.Errorf("BootTime = %v, want %v", d.BootTime, want)
+	}
+
+	if d, err := shumeiDeviceFromFlags("", "aa:bb:cc:dd:ee:ff", ""); err != nil || d.WiFi == nil {
+		t.Errorf("BSSID alone = %+v, %v; want Wi-Fi details", d, err)
+	}
+
+	for _, c := range []struct{ name, ssid, bssid, boot string }{
+		{"boot not RFC 3339", "", "", "2026-10-01"},
+		{"boot in the future", "", "", time.Now().Add(time.Hour).Format(time.RFC3339)},
+		{"BSSID not a MAC", "", "router", ""},
+		{"BSSID not 6 bytes", "", "00:00:00:00:fe:80:00:00:00:00:00:00:02:00:5e:10:00:00:00:01", ""},
+		{"SSID over 32 bytes", strings.Repeat("x", 33), "", ""},
+	} {
+		if _, err := shumeiDeviceFromFlags(c.ssid, c.bssid, c.boot); err == nil {
+			t.Errorf("%s: shumeiDeviceFromFlags = nil error, want an error", c.name)
+		}
 	}
 }

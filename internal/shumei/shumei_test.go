@@ -13,10 +13,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeTransport returns a canned device-profile response, recording the
@@ -50,7 +53,8 @@ func TestBoxID(t *testing.T) {
 	client := &http.Client{Transport: ft}
 
 	const deviceID = "0123456789abcdef0123456789abcdef_n3d"
-	got, err := boxID(client, &priv.PublicKey, deviceID)
+	dev := Device{Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000)}
+	got, err := boxID(client, &priv.PublicKey, deviceID, dev)
 	if err != nil {
 		t.Fatalf("boxID = %v, want nil", err)
 	}
@@ -92,9 +96,19 @@ func TestBoxID(t *testing.T) {
 		}
 		fields[key] = v
 	}
-	if plaintext := unprotect(t, priv, fields["data"], fields["ep"], fields["tn"]); plaintext != deviceData(deviceID) {
-		t.Errorf("decrypted data = %q, want deviceData(%q)", plaintext, deviceID)
+	if plaintext, want := unprotect(t, priv, fields["data"], fields["ep"], fields["tn"]), mustDeviceData(t, deviceID, dev); plaintext != want {
+		t.Errorf("decrypted data = %q, want deviceData(%q) = %q", plaintext, deviceID, want)
 	}
+}
+
+// mustDeviceData is deviceData, failing the test on an error.
+func mustDeviceData(t *testing.T, deviceID string, d Device) string {
+	t.Helper()
+	s, err := deviceData(deviceID, d)
+	if err != nil {
+		t.Fatalf("deviceData = %v", err)
+	}
+	return s
 }
 
 // TestBoxIDErrors covers the replies BoxID must refuse: a non-200 status, the
@@ -119,7 +133,7 @@ func TestBoxIDErrors(t *testing.T) {
 					Header:     http.Header{},
 				}, nil
 			})}
-			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d")
+			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{})
 			if err == nil {
 				t.Fatalf("BoxID = %q, nil; want an error", boxID)
 			}
@@ -145,7 +159,7 @@ func TestProtectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rsa.GenerateKey = %v", err)
 	}
-	in := deviceData("0123456789abcdef0123456789abcdef_n3d")
+	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{}.withHostDefaults())
 	data, ep, tn, err := protect(&priv.PublicKey, in)
 	if err != nil {
 		t.Fatalf("protect = %v", err)
@@ -241,21 +255,155 @@ func TestAESKeyFromNonce(t *testing.T) {
 	}
 }
 
-// TestDeviceData checks the template is valid JSON once filled in and that the
-// device ID lands in all three of its slots (a2, a80, a97). A broken template
-// only shows up live as a 1902, so this is the guard against hand edits.
-func TestDeviceData(t *testing.T) {
-	if n := strings.Count(innerTemplate, "__DEVICE_ID__"); n != 3 {
-		t.Errorf("innerTemplate has %d __DEVICE_ID__ placeholders, want 3", n)
-	}
-	const id = "0123456789abcdef0123456789abcdef_n3d"
+// decodeDeviceData parses deviceData's JSON, keeping numbers exact.
+func decodeDeviceData(t *testing.T, s string) map[string]any {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
 	var m map[string]any
-	if err := json.Unmarshal([]byte(deviceData(id)), &m); err != nil {
-		t.Fatalf("deviceData is not valid JSON: %v", err)
+	if err := dec.Decode(&m); err != nil {
+		t.Fatalf("deviceData is not valid JSON: %v\n%s", err, s)
 	}
-	for _, k := range []string{"a2", "a80", "a97"} {
-		if m[k] != id {
-			t.Errorf("%s = %v, want the device ID %q", k, m[k], id)
+	return m
+}
+
+// TestDeviceData checks the fields deviceData adds to the template, and that it
+// serializes the way the SDK does: compact, without empty top-level entries,
+// and without Wi-Fi details by default. A broken template only shows up live as
+// a 1902, so this is also the guard against hand edits.
+func TestDeviceData(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef_n3d"
+	// The SDK started one second before collecting, at 1790882443713, whose
+	// java.util.Random digits TestJavaRandomDigits pins.
+	now, boot := time.UnixMilli(1790882444713), time.UnixMilli(1790000000000)
+	s := mustDeviceData(t, id, Device{Now: now, BootTime: boot})
+
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, []byte(s)); err != nil || compact.String() != s {
+		t.Errorf("deviceData is not compact JSON (Compact error %v):\n%s", err, s)
+	}
+	m := decodeDeviceData(t, s)
+	for key, want := range map[string]string{
+		"a2":   id,
+		"a97":  id,
+		"a9":   "1790882444713",
+		"a40":  "1790000000000",
+		"a171": "882444713",
+		"a170": "882444713",
+		"a80":  "1790882443713-36769",
+	} {
+		if got := fmt.Sprint(m[key]); got != want {
+			t.Errorf("%s = %s, want %s", key, got, want)
+		}
+	}
+	for _, key := range []string{"a19", "a30", "a31"} {
+		if v, ok := m[key]; ok {
+			t.Errorf("%s = %v, want it absent: a real Last War install reads no Wi-Fi details", key, v)
+		}
+	}
+	for key, v := range m {
+		if isEmpty(v) {
+			t.Errorf("%s = %v, want empty entries dropped, as the SDK's serializer does", key, v)
+		}
+	}
+	// false and 0 aren't empty to the SDK, so they stay.
+	if m["a117"] != false || fmt.Sprint(m["a113"]) != "0" {
+		t.Errorf("a117 = %v, a113 = %v, want false and 0 kept", m["a117"], m["a113"])
+	}
+
+	if _, err := deviceData(id, Device{Now: boot, BootTime: now}); err == nil {
+		t.Error("deviceData with the boot time after the collection time = nil error, want an error")
+	}
+}
+
+// TestDeviceDataWiFi checks a Device's Wi-Fi details land the way WifiInfo
+// reports them: the SSID in quotes, without HTML escaping.
+func TestDeviceDataWiFi(t *testing.T) {
+	d := Device{
+		Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000),
+		WiFi: &WiFi{SSID: "Home <5G> & co", BSSID: "aa:bb:cc:dd:ee:ff", IP: "192.168.1.50"},
+	}
+	s := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", d)
+	if strings.Contains(s, `\u00`) {
+		t.Errorf("deviceData escapes characters the SDK sends raw:\n%s", s)
+	}
+	m := decodeDeviceData(t, s)
+	for key, want := range map[string]string{
+		"a19": "aa:bb:cc:dd:ee:ff",
+		"a30": `"Home <5G> & co"`,
+		"a31": "192.168.1.50",
+	} {
+		if m[key] != want {
+			t.Errorf("%s = %v, want %q", key, m[key], want)
+		}
+	}
+
+	// An unreadable host IP leaves a31 empty, so it's dropped.
+	d.WiFi = &WiFi{SSID: "Home"}
+	if m := decodeDeviceData(t, mustDeviceData(t, "id", d)); m["a31"] != nil || m["a19"] != nil {
+		t.Errorf("a31 = %v, a19 = %v, want both dropped when empty", m["a31"], m["a19"])
+	}
+}
+
+// TestWithHostDefaults checks zero fields take the host's values and set ones
+// stay, without changing the caller's WiFi.
+func TestWithHostDefaults(t *testing.T) {
+	before := time.Now()
+	d := Device{}.withHostDefaults()
+	if d.Now.Before(before) || d.Now.After(time.Now()) {
+		t.Errorf("Now = %v, want the current time", d.Now)
+	}
+	if d.BootTime.After(d.Now) {
+		t.Errorf("BootTime = %v, want it no later than Now %v", d.BootTime, d.Now)
+	}
+	// A set Now keeps the host's uptime: the boot time moves with it.
+	moved := Device{Now: time.UnixMilli(1790882444713)}.withHostDefaults()
+	if diff := moved.Now.Sub(moved.BootTime) - hostUptime(); diff < -time.Second || diff > time.Second {
+		t.Errorf("BootTime = %v for Now %v, want Now minus the host's uptime %v", moved.BootTime, moved.Now, hostUptime())
+	}
+	if d.WiFi != nil {
+		t.Errorf("WiFi = %+v, want nil: no Wi-Fi details unless asked for", d.WiFi)
+	}
+
+	set := Device{Now: time.UnixMilli(2), BootTime: time.UnixMilli(1), WiFi: &WiFi{SSID: "Home"}}
+	got := set.withHostDefaults()
+	if !got.Now.Equal(set.Now) || !got.BootTime.Equal(set.BootTime) {
+		t.Errorf("withHostDefaults changed set clocks: %v, %v", got.Now, got.BootTime)
+	}
+	if got.WiFi.IP != hostIP() || got.WiFi.SSID != "Home" {
+		t.Errorf("WiFi = %+v, want SSID kept and IP %q from the host", got.WiFi, hostIP())
+	}
+	if set.WiFi.IP != "" {
+		t.Errorf("withHostDefaults wrote the IP into the caller's WiFi")
+	}
+}
+
+// TestUptime checks the host's uptime reads on the systems that support it.
+func TestUptime(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("uptime reads only Linux and macOS")
+	}
+	got, err := uptime()
+	if err != nil {
+		t.Fatalf("uptime = %v", err)
+	}
+	if got <= 0 || got > 10*365*24*time.Hour {
+		t.Errorf("uptime = %v, want a positive duration under ten years", got)
+	}
+}
+
+// TestJavaRandomDigits pins the java.util.Random port to known answers from
+// OpenJDK 27: five `new Random(seed).nextInt(10)` draws per seed.
+func TestJavaRandomDigits(t *testing.T) {
+	for seed, want := range map[int64]string{
+		0:             "08975",
+		1:             "58734",
+		1784568338000: "17865",
+		1790882443713: "36769",
+		1791999999999: "48223",
+	} {
+		if got := javaRandomDigits(seed, 5); got != want {
+			t.Errorf("javaRandomDigits(%d, 5) = %q, want %q", seed, got, want)
 		}
 	}
 }
