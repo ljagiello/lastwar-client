@@ -106,14 +106,23 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 			[]string{"binding the role on the requested server", "device bound by email verification", "wrote own-device session config"},
 			[]string{"ignoring -email"}},
 		{"already bound", "-email player@example.com", true,
-			[]string{"ignoring -email: this device is already bound", "wrote own-device session config"},
+			[]string{"ignoring -email and -server: this device is already bound", "wrote own-device session config"},
 			[]string{"step 6: request email verify code"}},
 		{"-server without -email", "-server 783", true,
 			[]string{"ignoring -server because -email is not set", "wrote own-device session config"}, nil},
+		{"reused guest", "-email player@example.com", false,
+			[]string{"this device already logged in as a guest", "device bound by email verification", "wrote own-device session config"}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			home := t.TempDir()
 			env := []string{"LASTWAR_TEST_HOME=" + home, "LASTWAR_TEST_ARGS=" + c.args}
+			if c.name == "reused guest" {
+				for name, v := range map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_username": "guest-1"} {
+					if err := os.WriteFile(filepath.Join(home, name), []byte(v), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			if c.bound {
 				for name, v := range map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_loginkey": "lk-account", ".lastwar_goclient_gameuid": "uid-783"} {
 					if err := os.WriteFile(filepath.Join(home, name), []byte(v), 0o600); err != nil {

@@ -55,3 +55,24 @@ func TestOwnDeviceSessionFromRejects(t *testing.T) {
 		})
 	}
 }
+
+// TestOwnDeviceSessionFromRefusesAnotherRole: when GSL lists no entry for the requested gameUid
+// (say -server picked a role GSL's opt=login reply doesn't list), PickServer's fallback entry
+// belongs to another role, and its gameUid must not replace the requested one in the config. An
+// entry without a gameUid can't be told apart, so it is used, keeping the requested gameUid.
+func TestOwnDeviceSessionFromRefusesAnotherRole(t *testing.T) {
+	other := gslReply(t, `{"code":0,"lastLoggedServer":"783","at":{"token":"at-1","time":1},
+		"serverList":[{"id":"783","ip":"c.example","port":"10783","zone":"APS783","gameUid":"uid-783"}]}`)
+	if _, err := ownDeviceSessionFrom(other, "dev", "uid-72"); err == nil || !strings.Contains(err.Error(), "uid-72") {
+		t.Errorf("err = %v, want a refusal naming the requested gameUid", err)
+	}
+	unnamed := gslReply(t, `{"code":0,"at":{"token":"at-1","time":1},
+		"serverList":[{"id":"72","ip":"h.example","port":"10072","zone":"APS72"}]}`)
+	s, err := ownDeviceSessionFrom(unnamed, "dev", "uid-72")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.GameUid != "uid-72" || s.Zone != "APS72" {
+		t.Errorf("gameUid/zone = %q/%q, want uid-72/APS72", s.GameUid, s.Zone)
+	}
+}

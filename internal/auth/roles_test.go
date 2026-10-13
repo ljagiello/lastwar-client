@@ -113,6 +113,30 @@ func TestPickRole(t *testing.T) {
 	}
 }
 
+func TestValidServer(t *testing.T) {
+	for _, ok := range []string{"783", "APS783", "aps8092", " 72 "} {
+		if err := ValidServer(ok); err != nil {
+			t.Errorf("ValidServer(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"APS", "", "  ", "State#783", "78x", "APS-1"} {
+		if err := ValidServer(bad); err == nil {
+			t.Errorf("ValidServer(%q) = nil, want an error", bad)
+		}
+	}
+}
+
+// TestAccountRolesReadsAnEntrysOwnLoginKey: the live one-role reply had no per-entry loginKey, but
+// the 1.0.364 role picker reads param.loginKey, so an entry that carries one keeps it.
+func TestAccountRolesReadsAnEntrysOwnLoginKey(t *testing.T) {
+	e := liveShapeRole(72, "APS72", "uid-72", "Alt")
+	e.PutUtfString("loginKey", "lk-role-72")
+	roles := accountRoles(pushWithRoles(liveShapeRole(783, "APS783", "uid-783", "Main"), e))
+	if roles[0].LoginKey != "" || roles[1].LoginKey != "lk-role-72" {
+		t.Errorf("entry loginKeys = %q/%q, want \"\"/lk-role-72", roles[0].LoginKey, roles[1].LoginKey)
+	}
+}
+
 // TestLogAccountRolesOmitsDeviceAndHosts: the role list shows the server and role, never the
 // device uuid, internal hosts, or the role's name.
 func TestLogAccountRolesOmitsDeviceAndHosts(t *testing.T) {

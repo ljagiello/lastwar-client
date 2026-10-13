@@ -135,12 +135,15 @@ echo 123456 > /tmp/lw_code_pipe
 Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, username, gameUid, loginKey) independent of the session config, so repeated guest/email-flow runs present a consistent device to the server. Delete those files to start fully fresh. Set `LASTWAR_STATE_DIR` to keep them in another directory instead, so several device identities can coexist on one machine.
 
 ```bash
-# EXPERIMENTAL: after the -email flow has bound this client's own device (same LASTWAR_STATE_DIR),
-# trade its loginKey for the device's own token pair (GSL opt=login) and write a session config:
-LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -own-device-session ~/own_device_session.json
+# A device of its own, set up in one run: bind it by email verification (-server picks the role),
+# trade its loginKey for its own token pair (GSL opt=login), and write a session config:
+mkfifo /tmp/lw_code_pipe
+LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -email you@example.com -server 783 \
+  -code-pipe /tmp/lw_code_pipe -own-device-session ~/own_device_session.json &
+echo 123456 > /tmp/lw_code_pipe
 ```
 
-Since 2026-10-13 a `Login` with the resulting token works, once Android `ta` is filled (it was rejected with `ec=28`, `ep=[E005]` before). Run it like any session config, `LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_session.json`. Whether the own device's session leaves the real app's tokens valid is still open, see [Identity, login & session](/auth#a-device-of-its-own).
+Since 2026-10-13 a `Login` with the resulting config works, and it refreshes its own tokens. Run it like any session config, `LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_session.json`. Whether the own device's session leaves the real app's tokens valid is still open, see [Identity, login & session](/auth#setting-up-a-device-of-its-own-in-one-run).
 
 ### Flags reference
 

@@ -109,17 +109,57 @@ func TestLoginEmailWithoutServerKeepsTopLevel(t *testing.T) {
 	}
 }
 
-// TestLoginEmailUnknownServerPersistsNothing: a Server the account has no role on fails after
-// verification and persists nothing, so the device isn't left bound to a role nobody asked for.
-func TestLoginEmailUnknownServerPersistsNothing(t *testing.T) {
+// TestLoginEmailUnknownServerSavesNoLoginKey: a Server the account has no role on fails after
+// verification without saving the loginKey, so the device isn't bound to a role nobody asked for.
+// The code is spent by then, and the error says so and what to do. (The guest's own state from the
+// base Login may be on disk; only the binding is withheld.)
+func TestLoginEmailUnknownServerSavesNoLoginKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	pipe := emailFlowServer(t, pushWithRoles(liveShapeRole(783, "APS783", "uid-783", "Main")))
 
 	_, err := Login(LoginOptions{Email: "player@example.com", CodePipe: pipe, Server: "72"})
-	if err == nil || !strings.Contains(err.Error(), "no role on server 72") {
-		t.Fatalf("err = %v, want the no-role error", err)
+	if err == nil || !strings.Contains(err.Error(), "no role on server 72") || !strings.Contains(err.Error(), "fresh LASTWAR_STATE_DIR") {
+		t.Fatalf("err = %v, want the no-role error with the next step", err)
 	}
-	if lk, uid := readState(t, loginKeyStatePath()), readState(t, gameUidStatePath()); lk != "" || uid != "" {
-		t.Errorf("persisted loginKey/gameUid %q/%q, want nothing", lk, uid)
+	if lk := readState(t, loginKeyStatePath()); lk != "" {
+		t.Errorf("persisted loginKey %q, want none", lk)
+	}
+	if uid := readState(t, gameUidStatePath()); uid == "uid-783" {
+		t.Errorf("persisted the account role's gameUid %q", uid)
+	}
+}
+
+// TestLoginEmailBindsAnEntrysOwnLoginKey: a role entry that carries its own loginKey (the role
+// picker reads param.loginKey) is bound with it rather than the account's.
+func TestLoginEmailBindsAnEntrysOwnLoginKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	alt := liveShapeRole(72, "APS72", "uid-72", "Alt")
+	alt.PutUtfString("loginKey", "lk-role-72")
+	pipe := emailFlowServer(t, pushWithRoles(liveShapeRole(783, "APS783", "uid-783", "Main"), alt))
+
+	result, err := Login(LoginOptions{Email: "player@example.com", CodePipe: pipe, Server: "72"})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	defer func() { _ = result.Conn.Close() }()
+	if got := readState(t, loginKeyStatePath()); got != "lk-role-72" {
+		t.Errorf("persisted loginKey = %q, want the entry's lk-role-72", got)
+	}
+}
+
+// TestLoginRejectsABadServerBeforeAnyRequest: a -server that names no server number fails before
+// check-version, the guest Login, or the email code it would waste.
+func TestLoginRejectsABadServerBeforeAnyRequest(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	orig := gsl.CheckVersionHosts
+	gsl.CheckVersionHosts = []string{"http://gsl.invalid"}
+	defer func() { gsl.CheckVersionHosts = orig }()
+	for _, bad := range []string{"APS", "State#783"} {
+		if _, err := Login(LoginOptions{Email: "player@example.com", Server: bad}); err == nil || !strings.Contains(err.Error(), "-server") {
+			t.Errorf("Server %q: err = %v, want the -server error", bad, err)
+		}
+	}
+	if _, err := os.Stat(deviceIDStatePath()); !os.IsNotExist(err) {
+		t.Errorf("a device identity was created before the -server check (stat err %v)", err)
 	}
 }

@@ -99,7 +99,7 @@ func Run() {
 	runAnyway := fs.Bool("run-anyway", false, "with -run, run the feature even when today's Alliance Duel holds it (it scores duel points only on other days)")
 	listFeatures := fs.Bool("list-features", false, "list the optional features (name, default, whether the session config enables it) and exit")
 	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: trade this client's own device's loginKey (state under $LASTWAR_STATE_DIR, else the home directory) for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit; run that config like any other with -config. With -email, first binds the device by email verification in the same run")
-	server := fs.String("server", "", "with -email, bind the account's role on this server (its number, e.g. 783, or its zone, APS783) instead of the one the account login names; the account's roles are logged after verification")
+	server := fs.String("server", "", "with -email, bind the account's role on this server (its number, e.g. 783, or its zone, APS783) instead of the one the account login names; the account's roles are logged after verification. Picking a role other than that one is EXPERIMENTAL (never tried live)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag.ContinueOnError still runs the same failf/usage path flag.ExitOnError does
 		// internally -- it only differs in returning the error here instead of calling os.Exit
@@ -389,6 +389,9 @@ func Run() {
 	if crossServer {
 		if *email != "" {
 			slog.Warn("ignoring -email because -cs-ip/-cs-rt/-cs-at is set (cross-server reconnect doesn't use the email flow)")
+			if *server != "" {
+				slog.Warn("ignoring -server because -cs-ip/-cs-rt/-cs-at is set (it picks the role an email verification binds)")
+			}
 		}
 		if *codePipe != "" {
 			slog.Warn("ignoring -code-pipe because -cs-ip/-cs-rt/-cs-at is set (cross-server reconnect doesn't use the email flow)")
@@ -506,9 +509,6 @@ func accessTokenStale(gameUid, accessTok string, accessTokTime int64, refreshTok
 	return gsl.ChooseOpt(gsl.OptState{GameUid: gameUid, AccessTok: accessTok, AccessTokTime: accessTokTime, RefreshTok: refreshTok}, time.Now()).Opt == "refresh"
 }
 
-// exitIfReauthNeeded exits with code 2 when err carries GSL code 211 or 212
-// (gsl.ErrReauthNeeded): the server no longer accepts this device's at/rt/loginKey, so retrying
-// cannot help. Code 2 is the README's "session is stale" exit code for cron wrappers.
 // exitLoginFailed logs a failed auth.Login and exits: 2 for a confirmed server-side auth rejection
 // (ErrAuthRejected, or GSL 211/212), 1 for anything else.
 func exitLoginFailed(err error) {
@@ -539,8 +539,13 @@ func bindOwnDevice(email, codePipe, server string, handshake bool) {
 		os.Exit(1)
 	}
 	if ident.LoginKey != "" {
-		slog.Warn("ignoring -email: this device is already bound (a loginKey is on file); trading that loginKey instead. Use a fresh LASTWAR_STATE_DIR to bind a new device")
+		slog.Warn("ignoring -email and -server: this device is already bound (a loginKey is on file); trading that loginKey for its bound role instead. Use a fresh LASTWAR_STATE_DIR to bind a new device", "serverGiven", server != "")
 		return
+	}
+	if ident.Username != "" || ident.GameUid != "" {
+		// Live on 2026-10-13, a device's second guest Login (after a bind that failed at the code)
+		// got E011: GSL opt=new returned the guest's gameUid, and the Login carrying it was refused.
+		slog.Warn("this device already logged in as a guest; a second guest Login has been rejected with E011. If this run fails at the Login, bind from a fresh LASTWAR_STATE_DIR")
 	}
 	result, err := auth.Login(auth.LoginOptions{Email: email, CodePipe: codePipe, Handshake: handshake, Server: server})
 	if err != nil {
@@ -550,6 +555,9 @@ func bindOwnDevice(email, codePipe, server string, handshake bool) {
 	slog.Info("device bound by email verification; trading its loginKey for its own token pair")
 }
 
+// exitIfReauthNeeded exits with code 2 when err carries GSL code 211 or 212
+// (gsl.ErrReauthNeeded): the server no longer accepts this device's at/rt/loginKey, so retrying
+// cannot help. Code 2 is the README's "session is stale" exit code for cron wrappers.
 func exitIfReauthNeeded(err error) {
 	if !errors.Is(err, gsl.ErrReauthNeeded) {
 		return

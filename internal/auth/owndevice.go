@@ -76,6 +76,12 @@ func ownDeviceSessionFrom(lsr *gsl.LoginServerListRespon, deviceID, gameUid stri
 		return nil, errors.New("GSL reply carried no access token")
 	}
 	srv := *lsr.PickServer(gameUid)
+	// PickServer falls back to lastLoggedServer, then the first entry. An entry naming another
+	// gameUid is another role of the account, so it is refused rather than written into this role's
+	// config (the rule LookupGameServer applies); an entry without a gameUid can't be told apart.
+	if g := srv.GameUid.String(); gameUid != "" && g != "" && g != gameUid {
+		return nil, fmt.Errorf("GSL listed no server for gameUid %s (its pick, id %s, is gameUid %s); the role may not be reachable through opt=login with this account's loginKey", gameUid, srv.ID, g)
+	}
 	slog.Info("own device: GSL server selected", "id", srv.ID, "zone", srv.Zone, "ip", srv.IP, "port", srv.Port,
 		"serverListLen", len(lsr.ServerList), "lastLoggedServer", lsr.LastLoggedServer)
 	s := &OwnDeviceSession{

@@ -322,6 +322,11 @@ var SensitiveSFSKeys = map[string]bool{
 	// for the base zone Login (see login.go's/identity.go's BuildLoginParams doc comments) -- it
 	// always appears alongside airKey in loginParams, so it must Redact the same way.
 	"deviceId": true,
+	// oldUid, in each push.account.login.new accountArr entry (seen live 2026-10-13), is the
+	// deviceId the role was created on -- the same credential as deviceId above. The entry's
+	// `uuid` carries the same value, but `uuid` also keys building entries whose dumps need it, so
+	// it isn't listed; code reading accountArr keeps only named fields (auth.accountRoles).
+	"oldUid": true,
 	// chatToken is documented (docs/auth.mdx, docs/alliance-chat-mail.mdx) as a live bearer
 	// credential for the separate chat WebSocket, carried in the `init` push's params. Not yet
 	// consumed by any Go code (chat isn't implemented) -- added pre-emptively/defense-in-depth.
