@@ -258,13 +258,23 @@ already in the object stays, such as a real phone's Android ID.
 One install belongs to one Login `deviceId`, so the object records the one it
 was made for, in its own `deviceId` key. A run under a different `deviceId`
 registers a fresh install instead. That includes a run where `-cs-deviceid`
-overrides the config's. The fresh install isn't saved into a config that holds
-the other `deviceId`. Without a session config (`-no-config`, or bare `-cs-*`
-flags and no file), there's nowhere to keep the values. Every run then reports a
-new phone under the same persisted `deviceId`, and `goclient` logs a warning
-saying so. `goclient` checks the object only on runs that register:
-`-cs-shumei-gen`, no `shumeiBoxId`, and not iOS. It exits on a value a real
-install couldn't hold.
+overrides the config's. The registration doesn't save the fresh install over the
+config's when the config belongs to the other `deviceId`. The owner is the
+config's top-level `deviceId`, or, if there's none, the `deviceId` of the
+install already saved.
+
+There's one exception. If that same run also follows a server redirect or
+refreshes its token, it saves the whole config back under the `deviceId` it
+used, together with that run's install. That is how the config has always
+treated `deviceId`.
+
+Without a session config (`-no-config`, or bare `-cs-*` flags and no file),
+there's nowhere to keep the values, so every run reports a new phone.
+`goclient` logs a warning saying so. Without `-cs-deviceid`, all those phones
+share the one persisted `deviceId`.
+
+`goclient` checks the object only on runs that register: `-cs-shumei-gen`, no
+`shumeiBoxId`, and not iOS. It exits on a value a real install couldn't hold.
 
 | Field | SDK source | `shumeiInstall` key | Fresh value |
 |---|---|---|---|

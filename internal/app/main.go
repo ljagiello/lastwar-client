@@ -817,7 +817,7 @@ func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, i
 	changed := install.DeviceID != deviceID
 	install, ok := install.For(deviceID)
 	if !ok {
-		slog.Warn("the session config's shumeiInstall belongs to a different deviceId (is -cs-deviceid overriding the config's?); registering a fresh install for this one")
+		slog.Warn("the session config's shumeiInstall belongs to a different deviceId than this run's (a -cs-deviceid override, or a deviceId that changed); registering a fresh install for this one")
 		install = shumei.Install{DeviceID: deviceID}
 	}
 	install, filled := install.Fill(time.Now())
@@ -840,7 +840,7 @@ func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, i
 	default:
 		switch err := saveShumeiInstall(configPath, install); {
 		case errors.Is(err, errOtherDeviceID):
-			slog.Warn("not saving the ShuMei install values: the session config holds a different deviceId than this run's", "path", configPath)
+			slog.Warn("not saving the ShuMei install values: the session config's deviceId, or its shumeiInstall's, is a different one than this run's (set deviceId in the config to choose)", "path", configPath)
 		case err != nil:
 			slog.Warn("failed to save the ShuMei install values to the session config", "path", configPath, "error", err)
 		default:

@@ -142,6 +142,30 @@ func TestMintShumeiBoxIDOtherDeviceID(t *testing.T) {
 	}
 }
 
+// TestMintShumeiBoxIDConfigWithoutDeviceID checks a session config without a top-level deviceId
+// still keeps its install, and that the install already there then owns the slot: a run under
+// another deviceId can't replace it.
+func TestMintShumeiBoxIDConfigWithoutDeviceID(t *testing.T) {
+	path := writeTestSessionConfig(t, &SessionConfig{AccessToken: "tok-1"})
+	_, install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", shumei.Device{}, shumei.Install{}, path)
+	saved, err := LoadSessionConfig(path)
+	if err != nil || saved.ShumeiInstall.DeviceID != "dev-1" || !sameInstall(saved.ShumeiInstall, install) {
+		t.Fatalf("config without a deviceId holds %+v (load error %v), want the dev-1 install %+v", saved.ShumeiInstall, err, install)
+	}
+
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, other := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-2", shumei.Device{}, saved.ShumeiInstall, path)
+	if other.DeviceID != "dev-2" || other.AndroidID == install.AndroidID {
+		t.Errorf("install for dev-2 = %+v, want a fresh one, not dev-1's", other)
+	}
+	if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
+		t.Errorf("the dev-2 run replaced dev-1's install in a config without a deviceId (read error %v); want it untouched", err)
+	}
+}
+
 // TestMintShumeiBoxIDFailure checks a failed registration falls back to an empty box ID but
 // still saves the install values it filled, so the retry reports the same phone.
 func TestMintShumeiBoxIDFailure(t *testing.T) {
@@ -200,13 +224,17 @@ func TestMintsShumeiBoxID(t *testing.T) {
 	}
 }
 
-// TestRunExitsOnInvalidShumeiInstall checks Run refuses a session config whose shumeiInstall a
-// real install couldn't hold before it registers anything. Run calls os.Exit, so this re-executes
-// the test binary as a subprocess (see TestMainFlagParseExitCodes). The exit comes before any
-// network call. The cases where Run must not exit are TestMintsShumeiBoxID's.
-func TestRunExitsOnInvalidShumeiInstall(t *testing.T) {
+// TestRunShumeiInstallGate checks Run refuses a session config whose shumeiInstall a real install
+// couldn't hold on exactly the runs that register (-cs-shumei-gen, no shumeiBoxId, not iOS), and
+// lets every other run through. Run calls os.Exit, so each case re-executes the test binary as a
+// subprocess (see TestMainFlagParseExitCodes). The child points check-version at a closed local
+// port, so no case reaches a real server even if the gate regresses. Where Run stopped is read
+// off the device-id file: runCrossServerTest creates it first thing, so it exists only for a run
+// that got past the gate.
+func TestRunShumeiInstallGate(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
-		os.Args = []string{"lastwar-client", "-config", os.Getenv("LASTWAR_TEST_CONFIG"), "-cs-shumei-gen"}
+		gsl.CheckVersionHosts = []string{"http://127.0.0.1:1"}
+		os.Args = append([]string{"lastwar-client", "-config", os.Getenv("LASTWAR_TEST_CONFIG")}, strings.Fields(os.Getenv("LASTWAR_TEST_ARGS"))...)
 		Run()
 		return
 	}
@@ -215,21 +243,38 @@ func TestRunExitsOnInvalidShumeiInstall(t *testing.T) {
 		DeviceID: "dev-1", AccessToken: "tok-1",
 		ShumeiInstall: shumei.Install{AndroidID: "NOT-AN-ANDROID-ID"},
 	})
-	cmd := exec.Command(os.Args[0], "-test.run=^TestRunExitsOnInvalidShumeiInstall$")
-	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1", "LASTWAR_TEST_CONFIG="+path, "HOME="+t.TempDir())
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
+	for _, c := range []struct {
+		name, args string
+		gated      bool
+	}{
+		{"mints", "-cs-shumei-gen", true},
+		{"shumeiBoxId given", "-cs-shumei-gen -cs-shumei Bsmid", false},
+		{"iOS mode", "-cs-shumei-gen -cs-ios", false},
+		{"no -cs-shumei-gen", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			home := t.TempDir()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestRunShumeiInstallGate$")
+			cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1", "LASTWAR_TEST_CONFIG="+path,
+				"LASTWAR_TEST_ARGS="+c.args, "HOME="+home, "LASTWAR_STATE_DIR=")
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			runErr := cmd.Run()
 
-	exitErr, ok := runErr.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 1 {
-		t.Fatalf("subprocess = %v, want exit 1; stderr=%s", runErr, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "invalid shumeiInstall") {
-		t.Errorf("stderr = %s, want it to name the invalid shumeiInstall", stderr.String())
-	}
-	if strings.Contains(stderr.String(), "NOT-AN-ANDROID-ID") {
-		t.Errorf("stderr = %s, which logs the androidId value itself", stderr.String())
+			// Every case exits 1: the gated one at the gate, the rest later, for want of an ip.
+			if exitErr, ok := runErr.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+				t.Fatalf("subprocess = %v, want exit 1; stderr=%s", runErr, stderr.String())
+			}
+			gated := strings.Contains(stderr.String(), "invalid shumeiInstall")
+			_, statErr := os.Stat(filepath.Join(home, ".lastwar_goclient_device_id"))
+			pastGate := statErr == nil
+			if gated != c.gated || pastGate == c.gated {
+				t.Errorf("gate logged %v, run continued past it %v; want gated %v; stderr=%s", gated, pastGate, c.gated, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "NOT-AN-ANDROID-ID") {
+				t.Errorf("stderr = %s, which logs the androidId value itself", stderr.String())
+			}
+		})
 	}
 }
 

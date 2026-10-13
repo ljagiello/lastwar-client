@@ -327,7 +327,8 @@ const innerTemplate = `{
 // Device holds the fingerprint values that change during a device's life: the
 // clocks the SDK samples on every collection, the Wi-Fi details it reads when
 // the app may see them, and the values one install keeps. BoxID fills each
-// zero field with the host's real value or a fresh install's.
+// zero clock, Wi-Fi IP and collection time with the host's real value or a
+// random one. It never makes up install values: the caller passes them.
 type Device struct {
 	// Now is the collection time, a9 (System.currentTimeMillis()). Zero means
 	// the current time.
@@ -345,10 +346,10 @@ type Device struct {
 	// a30 and a31 come back empty and the serializer leaves them out.
 	WiFi *WiFi
 
-	// Install is what this install keeps between registrations. Empty fields
-	// take a fresh install's values for this call only, so a caller that
-	// wants the same phone next time fills it first (Install.Fill) and keeps
-	// the result.
+	// Install is what this install keeps between registrations. It must be
+	// filled (NewInstall or Install.Fill): BoxID refuses one with values unset
+	// rather than invent a phone the caller never sees, so the install sent is
+	// always the one the caller keeps.
 	Install Install
 
 	// CollectTime is how long the SDK took to collect the device data, a133
@@ -378,7 +379,6 @@ func (d Device) withHostDefaults() Device {
 		w.IP = hostIP()
 		d.WiFi = &w
 	}
-	d.Install, _ = d.Install.Fill(d.Now)
 	if d.CollectTime == 0 {
 		d.CollectTime = randDuration(150*time.Millisecond, 600*time.Millisecond).Truncate(time.Millisecond)
 	}
@@ -502,8 +502,9 @@ func javaRandomDigits(seed int64, n int) string {
 // BoxID registers a device with the ShuMei backend and returns its assigned
 // device fingerprint, already prefixed with `"B"` to match the Login request's
 // `shumeiBoxId` field. deviceID should match the request's own deviceId so the
-// server can bind the fingerprint to the same device identity. dev sets the
-// clock and Wi-Fi fields; its zero value reports the host's clocks and no
+// server can bind the fingerprint to the same device identity. dev carries
+// the install values, which must be filled (see Device.Install), and the clock
+// and Wi-Fi fields; zero clocks and no Wi-Fi report the host's clocks and no
 // Wi-Fi, like a real Last War install.
 //
 // Note on scope: the device-data fingerprint this mints is a spoofed Android

@@ -152,7 +152,7 @@ func TestBoxIDErrors(t *testing.T) {
 					Header:     http.Header{},
 				}, nil
 			})}
-			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{})
+			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall})
 			if err == nil {
 				t.Fatalf("BoxID = %q, nil; want an error", boxID)
 			}
@@ -160,6 +160,20 @@ func TestBoxIDErrors(t *testing.T) {
 				t.Errorf("errors.Is(%v, ErrUnassigned) = %v, want %v", err, got, c.unassigned)
 			}
 		})
+	}
+}
+
+// TestBoxIDNeedsInstall checks BoxID refuses an install with values unset
+// before it contacts the server, rather than register a phone the caller
+// never sees and so can't keep.
+func TestBoxIDNeedsInstall(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("unexpected request")
+	})}
+	if boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{}); err == nil || calls != 0 {
+		t.Errorf("BoxID with no install = %q, %v after %d requests; want an error and no request", boxID, err, calls)
 	}
 }
 
@@ -178,7 +192,7 @@ func TestProtectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rsa.GenerateKey = %v", err)
 	}
-	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{}.withHostDefaults())
+	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall}.withHostDefaults())
 	data, ep, tn, err := protect(&priv.PublicKey, in)
 	if err != nil {
 		t.Fatalf("protect = %v", err)
@@ -351,10 +365,18 @@ func TestDeviceData(t *testing.T) {
 	if _, err := deviceData(id, unset); err == nil {
 		t.Error("deviceData with no install values = nil error, want an error")
 	}
-	partial := d
-	partial.Install.PUUID = ""
-	if _, err := deviceData(id, partial); err == nil {
-		t.Error("deviceData with the install's puuid unset = nil error, want an error")
+	for name, unsetOne := range map[string]func(*Install){
+		"androidId":        func(in *Install) { in.AndroidID = "" },
+		"mediaDrmId":       func(in *Install) { in.MediaDrmID = "" },
+		"puuid":            func(in *Install) { in.PUUID = "" },
+		"firstInstallTime": func(in *Install) { in.FirstInstallTime = time.Time{} },
+		"lastUpdateTime":   func(in *Install) { in.LastUpdateTime = time.Time{} },
+	} {
+		partial := d
+		unsetOne(&partial.Install)
+		if _, err := deviceData(id, partial); err == nil {
+			t.Errorf("deviceData with the install's %s unset = nil error, want an error", name)
+		}
 	}
 	invalid := d
 	invalid.Install.AndroidID = "not-an-android-id"
@@ -434,8 +456,8 @@ func TestWithHostDefaults(t *testing.T) {
 	if d.CollectTime < 150*time.Millisecond || d.CollectTime >= 600*time.Millisecond {
 		t.Errorf("CollectTime = %v, want 150 to 600 ms", d.CollectTime)
 	}
-	if err := d.Install.Validate(); err != nil || d.Install.AndroidID == "" || d.Install.FirstInstallTime.IsZero() {
-		t.Errorf("Install = %+v (Validate %v), want a fresh install's values", d.Install, err)
+	if d.Install != (Install{}) {
+		t.Errorf("Install = %+v, want it left empty: withHostDefaults never makes up install values", d.Install)
 	}
 	if kept := testDevice().withHostDefaults(); kept.Install != testInstall || kept.CollectTime != 287*time.Millisecond {
 		t.Errorf("withHostDefaults changed a set Install or CollectTime: %+v, %v", kept.Install, kept.CollectTime)

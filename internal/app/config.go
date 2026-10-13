@@ -53,7 +53,9 @@ type SessionConfig struct {
 	// (Android ID, MediaDrm ID, the SDK's install UUID, the app's install times, and the smid
 	// the last registration cached), so each one reports the same phone. -cs-shumei-gen fills
 	// any value left out and writes it back here. It records the deviceId it belongs to: a run
-	// under another deviceId (-cs-deviceid) registers a fresh install and leaves this one alone.
+	// under another deviceId (-cs-deviceid) registers a fresh install, and the mint doesn't save
+	// it over this one. A redirect or refresh save-back in that same run still rewrites the whole
+	// config under the run's deviceId, with the run's install, as it always has for deviceId.
 	ShumeiInstall shumei.Install `json:"shumeiInstall,omitzero"`
 }
 
@@ -150,14 +152,20 @@ func SaveSessionConfig(cfg *SessionConfig, path string) error {
 var errOtherDeviceID = errors.New("the session config holds a different deviceId")
 
 // saveShumeiInstall stores install in the session config at path, re-reading the file first so
-// every other field stays as it is on disk. It returns errOtherDeviceID, and writes nothing, when
-// the config's deviceId isn't the one install belongs to.
+// every other field stays as it is on disk. The config's deviceId owns the install slot; without
+// one, the deviceId of the install already there does, so a run under another deviceId can't
+// replace it (and with it any values pasted from a real phone). It returns errOtherDeviceID, and
+// writes nothing, when that owner isn't the deviceId install belongs to.
 func saveShumeiInstall(path string, install shumei.Install) error {
 	cfg, err := LoadSessionConfig(path)
 	if err != nil {
 		return err
 	}
-	if cfg.DeviceID != "" && cfg.DeviceID != install.DeviceID {
+	owner := cfg.DeviceID
+	if owner == "" {
+		owner = cfg.ShumeiInstall.DeviceID
+	}
+	if owner != "" && owner != install.DeviceID {
 		return errOtherDeviceID
 	}
 	cfg.ShumeiInstall = install
