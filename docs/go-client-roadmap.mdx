@@ -143,7 +143,7 @@ LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -email you@example.com 
 echo 123456 > /tmp/lw_code_pipe
 ```
 
-Since 2026-10-13 a `Login` with the resulting config works, and it refreshes its own tokens. Run it like any session config, `LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_session.json`. On 2026-10-13 a token captured from the real app kept working alongside own devices (confirmed live). Each `Login` takes the role's one live connection, so they don't play at the same time, see [Identity, login & session](/auth#setting-up-a-device-of-its-own-in-one-run).
+Since 2026-10-13 a `Login` with the resulting config works, and it refreshes its own tokens. Run it like any session config, `LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_session.json`. On 2026-10-13 a token captured from the real app kept working alongside own devices (confirmed live). Each `Login` takes the role's one live connection, so two devices don't play at the same time. See [Identity, login & session](/auth#setting-up-a-device-of-its-own-in-one-run).
 
 ### Flags reference
 

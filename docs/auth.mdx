@@ -207,7 +207,7 @@ Confirmed live on 2026-10-13 with the own device's eight-day-old pair:
 These need live observation; [Findings & further work](/findings) tracks them.
 
 - Does `opt=refresh` rotate `at` or `rt` once `at` is 30 days old? Eight days after issue it returned the current `at` and no `rt` (2026-10-13). The client stores whatever arrives non-empty.
-- Does the real app's own 30-day refresh invalidate a device of its own's tokens? Own devices and a captured token coexisted on 2026-10-13, but no real-app refresh happened in that window.
+- Does the real app's own 30-day refresh invalidate the tokens of a device of its own? Own devices and a captured token coexisted on 2026-10-13, but no real-app refresh happened in that window.
 - Does the server check `platform`, `uuid`, or `airKey` on `opt=refresh`? The client always sends the values the token was issued under.
 
 ## Post-login sequence
