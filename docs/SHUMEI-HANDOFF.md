@@ -112,8 +112,8 @@ compress, data, tn, ep`, and the `a1`…`a174` slots live inside the protected `
   `RSA/ECB/OAEPWITHSHA-256ANDMGF1PADDING`, `getPublicKey`, `X.509`, `CertificateFactory`,
   `OAEPParameterSpec`, `MGF1`, `PSource$PSpecified`, `doFinal`, `encodeToString`, `Base64`,
   `SHA-256`, `deflate`).
-- Native `w1` (`FUN_0010f8d0`) returns `{metadata}{encrypted_data}` — two JSON objects joined at
-  `"}{"`; the Java `l111l1111llIl` splits on `indexOf("}{")+1` and stores each half.
+- Native `w1` (the JNI stub at `0xa07c` calls `FUN_0010f8d0`, which calls `FUN_0010c160`)
+  returns `{metadata}{encrypted_data}` — two JSON objects joined at `"}{"`; the Java `l111l1111llIl` splits on `indexOf("}{")+1` and stores each half.
 - Native `x4` (`FUN_00117098`) parses a JSON map, `map.set(m,"4050607080102030",value)` (via
   `FUN_0019c5d0`), reserializes. So `"4050607080102030"` is a **map key** in the native payload,
   not an AES key (the `"01020304050607084050607080102030"` string reserved from `strings` is two
