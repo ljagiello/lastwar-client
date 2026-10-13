@@ -17,8 +17,8 @@ import (
 // EXPERIMENTAL. Confirmed live 2026-10-04: GSL opt=login returned an at/rt pair (at.time is the
 // issue time, in unix seconds) and the role's server (APS783, its three gateway hostnames). The
 // base-zone Login with that token and this client's Android identity got ec=28/E005 while Android
-// ta was "{}"; confirmed live 2026-10-13, the same token logs in once ta carries the Android
-// platform markers (BuildLoginParams, discussion #22).
+// ta was "{}"; confirmed live 2026-10-13, the same token logs in once Android ta is filled
+// (BuildLoginParams, discussion #22).
 type OwnDeviceSession struct {
 	DeviceID              string
 	GameUid               string

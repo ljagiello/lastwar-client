@@ -627,6 +627,13 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	if in.ResVersion != "" {
 		resVersion, lwResVersion = in.ResVersion, in.ResVersion
 	}
+	// The ta blob's per-platform values. A real Android ta reports the app version as lw_version
+	// too; the iOS blob keeps the "0.0.0" the cron's iOS session has logged in with since August 2026.
+	osName, manufacturer, deviceModel, lwVersion := "Android", "unknown", "Android", effectiveAppVersion
+	if in.IOSMode {
+		osName, manufacturer, deviceModel, lwVersion = "iOS", "Apple", "unknown", "0.0.0"
+	}
+
 	// The ta analytics blob is part of the login gate for an established account. Confirmed live
 	// on 2026-10-13 (found by C485, discussion #22): an Android Login into the real account with an
 	// Android-issued token and ta="{}" gets ec=28/E005, and the same Login with this blob is
@@ -646,12 +653,6 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// These three fields are placeholders (empty string, matching this struct's existing
 	// pattern for telemetry we have no way to observe, e.g. Carrier/LwLine below); the server
 	// accepts them blank, and their keys stay in case some check depends on them existing.
-	// The per-platform values. A real Android ta reports the app version as lw_version too; the
-	// iOS blob keeps the "0.0.0" the cron's iOS session has logged in with since August 2026.
-	osName, manufacturer, deviceModel, lwVersion := "Android", "unknown", "Android", effectiveAppVersion
-	if in.IOSMode {
-		osName, manufacturer, deviceModel, lwVersion = "iOS", "Apple", "unknown", "0.0.0"
-	}
 	blob := analyticsBlob{
 		OS: osName, Disk: "50.0/100.0", DeviceID: "00000000-0000-0000-0000-000000000000",
 		OSVersion: "0.0", SystemLanguage: "en", BundleID: build.PackageName, Carrier: "",
@@ -668,15 +669,14 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	}
 	// lw_zone repeats the zone, which DoCrossServerLogin accepts up to the full string cap; a blob
 	// that would no longer encode falls back to "{}" rather than making the whole Login unsendable.
-	// An established account rejects that Login with E005, so it is logged.
+	// An established account rejected an Android Login with "{}" (E005), so it is logged. The blob
+	// holds only strings, ints and bools, so Marshal can't fail.
 	ta := "{}"
-	if b, err := json.Marshal(blob); err != nil {
-		slog.Warn("ta: could not marshal the analytics blob; sending {}", "error", err)
-	} else if len(b) > sfs.MaxUtfStringBytes {
-		slog.Warn("ta: the analytics blob is too long to encode; sending {}, which an established account rejects with E005",
-			"len", len(b), "max", sfs.MaxUtfStringBytes, "zoneLen", len(in.ServerID))
-	} else {
+	if b, _ := json.Marshal(blob); len(b) <= sfs.MaxUtfStringBytes {
 		ta = string(b)
+	} else {
+		slog.Warn("ta: the analytics blob is too long to encode; sending {}, which an established account rejected with E005 (seen on Android)",
+			"len", len(b), "max", sfs.MaxUtfStringBytes, "zoneLen", len(in.ServerID))
 	}
 	p.PutUtfString("ta", ta)
 	p.PutUtfString("distinct_id", "")

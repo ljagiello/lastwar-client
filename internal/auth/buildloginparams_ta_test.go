@@ -57,10 +57,12 @@ func TestBuildLoginParamsTaFallsBackWhenOverCap(t *testing.T) {
 		}
 
 		var buf bytes.Buffer
-		orig := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-		over := BuildLoginParams(LoginParamsInput{IOSMode: iosMode, ServerID: atCap + "9"})
-		slog.SetDefault(orig)
+		over := func() *sfs.SFSObject {
+			orig := slog.Default()
+			defer slog.SetDefault(orig)
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			return BuildLoginParams(LoginParamsInput{IOSMode: iosMode, ServerID: atCap + "9"})
+		}()
 		if got := over.GetString("ta"); got != "{}" {
 			t.Errorf("IOSMode=%v over cap: ta = %.40q..., want \"{}\"", iosMode, got)
 		}
