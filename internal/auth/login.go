@@ -36,6 +36,9 @@ type LoginOptions struct {
 	Email     string // required unless a LoginKey is already persisted
 	CodePipe  string // FIFO path to read the email verification code from; "" reads stdin
 	Handshake bool   // experimental: send the vanilla SFS2X pre-Login Handshake (see conn.go:DoHandshake)
+	// Server, with Email, binds the account's role on this server ("783" or "APS783", see
+	// pickRole) instead of the one push.account.login.new names at its top level.
+	Server string
 }
 
 // String/GoString are the round-49 regression fix for the MINOR finding that LoginOptions --
@@ -250,6 +253,13 @@ const maxServerListLogEntries = 500
 // lets GSL resolve the account directly -- the email verification-code
 // flow. Returns a live, authenticated connection with heartbeat running.
 func Login(opts LoginOptions) (*LoginResult, error) {
+	// A bad -server is caught here, before the email code it would waste. Without an email it is
+	// ignored (Run and the loginKey fast path say so), so it isn't checked.
+	if opts.Server != "" && opts.Email != "" {
+		if err := validServer(opts.Server); err != nil {
+			return nil, fmt.Errorf("login: %w", err)
+		}
+	}
 	httpClient := gsl.DefaultHTTPClient()
 
 	slog.Info("check-version: fetch RSA pubkey and pick gate host")
@@ -541,6 +551,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		if opts.Email != "" {
 			slog.Warn("ignoring -email because a loginKey is already persisted (fast-path login skips email verification)")
 		}
+		if opts.Server != "" {
+			slog.Warn("ignoring -server because a loginKey is already persisted (the device is bound to its role already)")
+		}
 		if opts.CodePipe != "" {
 			slog.Warn("ignoring -code-pipe because a loginKey is already persisted (fast-path login skips email verification)")
 		}
@@ -635,13 +648,32 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	slog.Info("login success", "gameUid", msg2.Params.GetString("gameUid"), "loginKey", sfs.Redact(msg2.Params.GetString("loginKey")))
 	result.Account = msg2.Params
 
+	// The account's roles. -server binds the picked role's gameUid instead of the top-level one,
+	// with the entry's own loginKey when it carries one, else the account's (see accountRole:
+	// binding a role other than the top-level one is static analysis only).
+	roles := accountRoles(msg2.Params)
+	logAccountRoles(roles)
+	loginKey, gameUid, username := msg2.Params.GetString("loginKey"), msg2.Params.GetString("gameUid"), msg2.Params.GetString("gameUserName")
+	if opts.Server != "" {
+		role, err := pickRole(roles, opts.Server)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("login: -server: %w (the email code is spent and nothing was saved: bind again from a fresh LASTWAR_STATE_DIR with one of the servers listed above)", err)
+		}
+		slog.Info("binding the role on the requested server", "server", role.ServerID, "zone", role.Zone, "gameUid", role.GameUid, "ownLoginKey", role.LoginKey != "")
+		gameUid, username = role.GameUid, role.Name
+		if role.LoginKey != "" {
+			loginKey = role.LoginKey
+		}
+	}
+
 	// session.WarnIfWrongTypedField below adds a diagnostic for the "field present but wrong-typed"
 	// case specifically -- distinct from genuinely absent, which the GetString-then-compare-to-""
 	// checks that follow already, deliberately, treat as "nothing to persist" and stay silent
 	// about. Without this, a wrong-typed field here degrades the next run to the full
 	// email-verification flow (or leaves gameUid/username stale) with no log line indicating why.
 	session.WarnIfWrongTypedField(msg2.Params, "loginKey", "push.account.login.new", session.SFSFieldKindString)
-	if lk := msg2.Params.GetString("loginKey"); lk != "" {
+	if lk := loginKey; lk != "" {
 		if err := ident.SaveLoginKey(lk); err != nil {
 			slog.Warn("failed to persist loginKey", "error", err)
 		} else {
@@ -649,13 +681,13 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		}
 	}
 	session.WarnIfWrongTypedField(msg2.Params, "gameUid", "push.account.login.new", session.SFSFieldKindString)
-	if gu := msg2.Params.GetString("gameUid"); gu != "" {
+	if gu := gameUid; gu != "" {
 		if err := ident.SaveGameUid(gu); err != nil {
 			slog.Warn("failed to persist gameUid", "error", err)
 		}
 	}
 	session.WarnIfWrongTypedField(msg2.Params, "gameUserName", "push.account.login.new", session.SFSFieldKindString)
-	if un := msg2.Params.GetString("gameUserName"); un != "" {
+	if un := username; un != "" {
 		if err := ident.SaveUsername(un); err != nil {
 			slog.Warn("failed to persist username", "error", err)
 		}

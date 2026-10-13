@@ -211,6 +211,15 @@ echo 'building.production.collect {"uuid":123}' > /tmp/lw_cmd_pipe
 mkfifo /tmp/lw_code_pipe
 ./lastwar-client -email you@example.com -code-pipe /tmp/lw_code_pipe &
 echo 123456 > /tmp/lw_code_pipe
+
+# Or give this client a device of its own in one run, no capture needed: bind a fresh device
+# by email, trade its loginKey for its own token pair, and write a session config that
+# refreshes itself (see docs/auth.mdx, "A device of its own"). The run logs the account's
+# roles; add -server <number> to bind one other than the account's own pick:
+LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -email you@example.com \
+  -code-pipe /tmp/lw_code_pipe -own-device-session ~/own_device_session.json &
+echo 123456 > /tmp/lw_code_pipe
+LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_session.json -collect
 ```
 
 Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, username, gameUid,

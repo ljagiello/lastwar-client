@@ -98,7 +98,8 @@ func Run() {
 	runFeature := fs.String("run", "", "after login, run only this optional feature (see -list-features) once, even if the session config doesn't enable it, log its responses, and exit -- the live validation step before enabling a feature in the session config")
 	runAnyway := fs.Bool("run-anyway", false, "with -run, run the feature even when today's Alliance Duel holds it (it scores duel points only on other days)")
 	listFeatures := fs.Bool("list-features", false, "list the optional features (name, default, whether the session config enables it) and exit")
-	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: after -email verification has bound this client's own device (state under $LASTWAR_STATE_DIR, else the home directory), trade its persisted loginKey for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit; run that config like any other with -config")
+	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: trade this client's own device's loginKey (state under $LASTWAR_STATE_DIR, else the home directory) for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit; run that config like any other with -config. With -email, first binds the device by email verification in the same run")
+	server := fs.String("server", "", "with -email, bind the account's role on this server (its number, e.g. 783, or its zone, APS783) instead of the one the account login names; the account's roles are logged after verification. Picking a role other than that one is EXPERIMENTAL (never tried live)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag.ContinueOnError still runs the same failf/usage path flag.ExitOnError does
 		// internally -- it only differs in returning the error here instead of calling os.Exit
@@ -174,7 +175,13 @@ func Run() {
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(*logLevel)})))
 
+	if *server != "" && *email == "" {
+		slog.Warn("ignoring -server because -email is not set (it picks the role an email verification binds)")
+	}
 	if *ownDeviceSession != "" {
+		if *email != "" {
+			bindOwnDevice(*email, *codePipe, *server, *handshake)
+		}
 		if err := writeOwnDeviceSession(gsl.DefaultHTTPClient(), *ownDeviceSession); err != nil {
 			slog.Error("own-device bootstrap failed", "error", err)
 			exitIfReauthNeeded(err)
@@ -382,6 +389,9 @@ func Run() {
 	if crossServer {
 		if *email != "" {
 			slog.Warn("ignoring -email because -cs-ip/-cs-rt/-cs-at is set (cross-server reconnect doesn't use the email flow)")
+			if *server != "" {
+				slog.Warn("ignoring -server because -cs-ip/-cs-rt/-cs-at is set (it picks the role an email verification binds)")
+			}
 		}
 		if *codePipe != "" {
 			slog.Warn("ignoring -code-pipe because -cs-ip/-cs-rt/-cs-at is set (cross-server reconnect doesn't use the email flow)")
@@ -412,22 +422,9 @@ func Run() {
 		return
 	}
 
-	result, err := auth.Login(auth.LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake})
+	result, err := auth.Login(auth.LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake, Server: *server})
 	if err != nil {
-		slog.Error("login failed", "error", err)
-		exitIfSessionEnded(err, nil)
-		exitIfReauthNeeded(err)
-		// Exit code 2 (rather than the generic 1) specifically marks a
-		// confirmed server-side auth rejection (ErrAuthRejected) -- the
-		// class of failure the README documents as needing a fresh
-		// capture, not a transient retry -- so a cron wrapper can
-		// distinguish it without parsing the JSON log body. A network/
-		// dial/local-I/O failure that never reached that point is just a
-		// generic failure (1): it may well clear up on its own.
-		if errors.Is(err, session.ErrAuthRejected) {
-			os.Exit(2)
-		}
-		os.Exit(1)
+		exitLoginFailed(err)
 	}
 	conn := result.Conn
 	defer func() { _ = conn.Close() }()
@@ -510,6 +507,52 @@ func Run() {
 // is missing or its at.time is 30 days old.
 func accessTokenStale(gameUid, accessTok string, accessTokTime int64, refreshTok string) bool {
 	return gsl.ChooseOpt(gsl.OptState{GameUid: gameUid, AccessTok: accessTok, AccessTokTime: accessTokTime, RefreshTok: refreshTok}, time.Now()).Opt == "refresh"
+}
+
+// exitLoginFailed logs a failed auth.Login and exits: 2 for a confirmed server-side auth rejection
+// (ErrAuthRejected, or GSL 211/212), 1 for anything else.
+func exitLoginFailed(err error) {
+	slog.Error("login failed", "error", err)
+	exitIfSessionEnded(err, nil)
+	exitIfReauthNeeded(err)
+	// Exit code 2 (rather than the generic 1) specifically marks a
+	// confirmed server-side auth rejection (ErrAuthRejected) -- the
+	// class of failure the README documents as needing a fresh
+	// capture, not a transient retry -- so a cron wrapper can
+	// distinguish it without parsing the JSON log body. A network/
+	// dial/local-I/O failure that never reached that point is just a
+	// generic failure (1): it may well clear up on its own.
+	if errors.Is(err, session.ErrAuthRejected) {
+		os.Exit(2)
+	}
+	os.Exit(1)
+}
+
+// bindOwnDevice runs the -email verification for -own-device-session, so one run binds this
+// device to the account (and, with server, to that role) and writes its session config. A device
+// that already holds a loginKey is bound already: Login would take the opt=login fast path and
+// skip the email, so it is left alone and the caller trades that loginKey instead. Exits on failure.
+func bindOwnDevice(email, codePipe, server string, handshake bool) {
+	ident, err := auth.LoadOrCreateDeviceIdentity()
+	if err != nil {
+		slog.Error("load device identity failed", "error", err)
+		os.Exit(1)
+	}
+	if ident.LoginKey != "" {
+		slog.Warn("ignoring -email and -server: this device is already bound (a loginKey is on file); trading that loginKey for its bound role instead. Use a fresh LASTWAR_STATE_DIR to bind a new device", "serverGiven", server != "")
+		return
+	}
+	if ident.Username != "" || ident.GameUid != "" {
+		// Live on 2026-10-13, a device's second guest Login (after a bind that failed at the code)
+		// got E011: the Login with the access token GSL opt=new returned for it was refused.
+		slog.Warn("this device already logged in as a guest; a second guest Login has been rejected with E011. If this run fails at the Login, bind from a fresh LASTWAR_STATE_DIR")
+	}
+	result, err := auth.Login(auth.LoginOptions{Email: email, CodePipe: codePipe, Handshake: handshake, Server: server})
+	if err != nil {
+		exitLoginFailed(err)
+	}
+	_ = result.Conn.Close()
+	slog.Info("device bound by email verification; trading its loginKey for its own token pair")
 }
 
 // exitIfReauthNeeded exits with code 2 when err carries GSL code 211 or 212
@@ -722,7 +765,7 @@ var stringFlagSwallowGuardNames = map[string]bool{
 	"cs-shumei": true, "cs-shumei-ssid": true, "cs-shumei-bssid": true, "cs-shumei-boot": true,
 	"cs-rt": true, "cs-at": true,
 	"config": true, "decode-stream": true, "decode-label": true, "log-level": true,
-	"own-device-session": true, "run": true,
+	"own-device-session": true, "run": true, "server": true,
 }
 
 // detectSwallowedFlagValue is the pure decision at the heart of round 25's Fix 1 (the MAJOR

@@ -757,8 +757,10 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p.PutUtfString("packageSign", packageSignHex(effectivePackageName))
 	p.PutUtfString("platform", platformCode)
 	p.PutInt("lat", 1) // real client sent 1 (location-authorized); we hardcoded 0 before
-	// device_string: not present in any real capture (guest or reconnect)
-	// -- dropped rather than guessed at.
+	// device_string: real Android Logins send it (C485's captures, discussion #22; the a=29
+	// gateway probe's masked Android template carries an OPPO one), but every Login this repo
+	// captured is iOS, and the own-device Android Login is accepted without it (2026-10-13), so
+	// it is left out rather than guessed at.
 	p.PutUtfString("pf", pf)
 	p.PutUtfString("firebaseId", "")
 	p.PutUtfString("afuid", "")
