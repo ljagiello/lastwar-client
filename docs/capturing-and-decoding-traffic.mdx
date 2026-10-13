@@ -94,7 +94,7 @@ Each decoded line is one SFS2X extension-call envelope: `c` is the SFSObject's t
 
 ## Recovering from a rotated token
 
-When every run fails with `ec=28`, `ep=[E011]`, the server no longer accepts the session config's access token. The fix is a fresh capture of the real app logging in, and `pcap -session-out` turns that capture straight into a session config. Confirmed live on 2026-10-04: this procedure restored the scheduled runs after the 2026-10-02 rotation (see [Live validation against production](/live-validation)).
+When every run fails with `ec=28`, `ep=[E011]`, the server no longer accepts the session config's access token. A config with a `refreshToken`, such as an own-device one, recovers on its own (see [Refreshing the access token](/auth#refreshing-the-access-token)). For a captured config, the fix is a fresh capture of the real app logging in, and `pcap -session-out` turns that capture straight into a session config. Confirmed live on 2026-10-04: this procedure restored the scheduled runs after the 2026-10-02 rotation (see [Live validation against production](/live-validation)).
 
 <Steps>
   <Step title="Start the capture">

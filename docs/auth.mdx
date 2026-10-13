@@ -142,7 +142,7 @@ Confirmed live on 2026-10-10 against a session captured from the iOS app, with t
 A Go client that copies the real app's tokens shares them with the app, so either side's refresh may invalidate the other's. The real client's role-switch flow shows how a device gets a pair of its own: email verification, then `loginKey`, then GSL `opt=login`. `goclient` ran that flow on 2026-10-04 with a fresh, Go-generated device (confirmed live):
 
 1. The existing `-email` and `-code-pipe` flow bound the new device to the real account. `push.account.login.new` returned the account's `gameUid` and a `loginKey`. The `LASTWAR_STATE_DIR` environment variable kept that device's state files apart from the existing ones.
-2. The experimental `-own-device-session <path>` flag traded the `loginKey` for the device's own `at`/`rt` pair through GSL `opt=login`. The response named `lastLoggedServer` 783 and a one-entry `serverList` for `APS783`, whose `ip` held three gateway hostnames on port 10783 (see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe)). `at.time` and `rt.time` both equaled the moment of issue. The flag writes these into a session config, including `refreshToken`, `accessTokenTime`, and `refreshTokenTime`, though nothing reads the refresh token yet.
+2. The experimental `-own-device-session <path>` flag traded the `loginKey` for the device's own `at`/`rt` pair through GSL `opt=login`. The response named `lastLoggedServer` 783 and a one-entry `serverList` for `APS783`, whose `ip` held three gateway hostnames on port 10783 (see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe)). `at.time` and `rt.time` both equaled the moment of issue. The flag writes these into a session config, including `refreshToken`, `accessTokenTime`, and `refreshTokenTime`, which later runs refresh with (see [Refreshing the access token](#refreshing-the-access-token)).
 3. A base-zone `Login` with that token and `goclient`'s Android identity (1.0.364/1892, `un` = `gameUid`, `shumeiBoxId` empty) was rejected with `ec=28`, `ep=[E005]`.
 4. On 2026-10-13 the same token, nine days old, logged in once the `Login` carried a filled Android `ta` analytics blob (confirmed live). The `init` push loaded 160 buildings. Minutes later the account's email got a "New Device Alert for Last War ID" naming an Android device in the United States, with a **Sign Out of This Device** button. So the account keeps a device list, and the server counts the Go client's device as one of them.
 
@@ -160,11 +160,28 @@ What the test settles and what it doesn't:
 - **Established accounts only.** A guest `Login` was accepted with `{}` for months, and on 2026-10-13 a fresh guest was accepted with the filled blob too (confirmed live). The `-email` binding and the `loginKey` fast path (`opt=login`, `un` empty) haven't been run with the filled blob yet.
 - **Which keys matter is open.** Both A/B tests, C485's and this one, compared `{}` with the whole blob. The platform markers (`#os`, `#bundle_id`, `lw_platform`) are the likely gate, but the build and zone keys changed with them.
 
+### Refreshing the access token
+
+A session config with a `refreshToken`, such as one `-own-device-session` writes, renews its own access token the way the real client does (`csharp-native` §2.3):
+
+- **Before the `Login`**, when the config has no `accessToken`, or its `accessTokenTime` is 30 days old (`gsl.ChooseOpt`), `goclient` sends GSL `opt=refresh` with the refresh token.
+- **After an `E011`**, it refreshes once and logs in again. A token rejected again right after a refresh exits 2 with a message to bind the device again.
+- **Every refresh is saved at once.** The new `at`, `rt`, and their times go into the session config before the `Login` uses them, so a rotated `rt` survives a `Login` that fails. A GSL code 211 or 212 means the device's credentials are gone and exits 2.
+
+The refresh sends the session's device, `zone`, and `gameUid`, and `platform=iOS` under `iosMode`. A config captured from the real app has no refresh token, so its `E011` still needs a fresh capture (see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token)).
+
+Confirmed live on 2026-10-13 with the own device's eight-day-old pair:
+
+- **`E011`, then refresh:** a config whose `accessToken` the server never issued got `E011`. The refresh succeeded, and the second `Login` loaded 160 buildings.
+- **Stale `at.time`:** with `accessTokenTime` set 31 days back, the refresh ran before the `Login`, which was accepted.
+- **No access token:** a config holding only `refreshToken` refreshed and logged in.
+- **What `opt=refresh` returned:** each time, the device's current `at` with its original `at.time`, and no `rt`. Eight days after issue, a refresh doesn't rotate either token.
+
 ### Open questions
 
 These need live observation; [Findings & further work](/findings) tracks them.
 
-- Does `opt=refresh` return a rotated `rt`? The client stores whatever arrives non-empty.
+- Does `opt=refresh` rotate `at` or `rt` once `at` is 30 days old? Eight days after issue it returned the current `at` and no `rt` (2026-10-13). The client stores whatever arrives non-empty.
 - Can two devices hold working sessions for one account at once? GSL issued a newly bound device its own pair, and that device's `Login` is accepted (2026-10-13). Whether that leaves other devices' tokens valid is still unknown.
 - Does the server check `platform`, `uuid`, or `airKey` on `opt=refresh`? The client always sends the values the token was issued under.
 

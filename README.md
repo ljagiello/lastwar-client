@@ -125,10 +125,17 @@ is rejected for such a session with GSL code 212, which is why the lookup sends 
 `CROSS-SERVER LOGIN FAILED: ec=28 full={ep=[E011], ec=28}`, the connection succeeds, but login
 itself is rejected, so nothing downstream even gets attempted. Don't confuse this with a single
 flaky run: it was 100% reproducible across 16 consecutive scheduled runs (every 3 hours for ~42
-hours) until the credentials were refreshed. Fixing it needs a fresh capture, same as initial setup.
+hours) until the credentials were refreshed. For a captured config, fixing it needs a fresh capture,
+same as initial setup.
 In both real recurrences so far (2026-08-16 and 2026-10-02), `shumeiBoxId` had also changed, not just
 `accessToken`, and the 2026-10-02 one happened server-side with no other login on that device.
 The client now logs a dedicated "access token has been rotated" error for this case (exit code 2).
+
+**A device of its own refreshes itself, confirmed live:** a config written by `-own-device-session`
+holds the device's `refreshToken`. On `E011`, or once `accessTokenTime` is 30 days old, the client
+trades it for a fresh access token through GSL `opt=refresh`, saves the pair to the config right
+away, and logs in, so no capture is needed. See `docs/auth.mdx`, "A device of its own" and
+"Refreshing the access token".
 
 **Recovering, one command after the capture:** start a capture (no `sudo` needed if Wireshark's
 ChmodBPF is installed; use the real interface, `-i any` needs root on macOS), cold-start the real
