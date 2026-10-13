@@ -28,8 +28,9 @@ func ownDeviceGSLReply() gsl.LoginServerListRespon {
 }
 
 // emailBindingGameServer walks Login's email path and pushes an account with two roles: uid-1 on
-// server 1 (the top-level pick) and uid-783 on 783, whose entry carries its own loginKey, then
-// push.init.build for a run that goes on into the game. mode "error" pushes an errorCode instead,
+// server 1 (the top-level pick) and uid-783 on 783, whose entry carries its own loginKey. Its
+// init carries no buildings, so a plain -email run going on into the game sits out
+// FetchBuildings' 12 s wait before exiting 0. mode "error" pushes an errorCode instead,
 // as for a refused code; "kick" pushes push.user.off, as when the account logs in elsewhere.
 func emailBindingGameServer(mode string) func(*session.GameConn) {
 	return func(server *session.GameConn) {
@@ -79,10 +80,7 @@ func emailBindingGameServer(mode string) func(*session.GameConn) {
 		push.PutUtfString("loginKey", "lk-account")
 		push.PutUtfString("gameUid", "uid-1")
 		push.PutSFSArray("accountArr", arr)
-		if err := server.SendExtension("push.account.login.new", push); err != nil {
-			return
-		}
-		_ = server.SendExtension("push.init.build", sfs.NewSFSObject())
+		_ = server.SendExtension("push.account.login.new", push)
 	}
 }
 
