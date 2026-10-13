@@ -152,7 +152,8 @@ type Client interface {
 }
 
 // DeviceProfile is the JSON body POSTed to /deviceprofile/v4. Field names are
-// byte-exact from the native `w1` (FUN_0010c160 in the decompiled libsmsdk.so):
+// byte-exact from the native `w1` (FUN_0010f8d0 and the FUN_0010c160 it calls,
+// in the decompiled libsmsdk.so):
 // organization, os, appId, encode (2), compress (3), data, tn, ep. The first
 // request carries no `retry` field (only the background resend adds it).
 type DeviceProfile struct {
@@ -278,11 +279,13 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // innerTemplate is the static part of the `aNN` device-data fingerprint the
 // SDK's SubCollector fills. It is a spoofed Android device profile (a Samsung
 // SM-G988N running Android 12), because this client runs on a desktop and has
-// no real device telemetry. deviceData adds the fields that change between
-// collections: the device ID (a2, a97), the clocks (a9, a40, a170, a171), the
-// SDK session ID (a80), the collection time (a133), and the Wi-Fi details
-// (a19, a30, a31) when a Device carries them. It also adds the per-install
-// values from Device.Install: a24, a84, a125, a126, a163, a167 and a168.
+// no real device telemetry. It started as C485's C# ShumeiInnerTemplate,
+// shared in https://github.com/ljagiello/lastwar-client/discussions/21.
+// deviceData adds the fields that change between collections: the device ID
+// (a2, a97), the clocks (a9, a40, a170, a171), the SDK session ID (a80), the
+// collection time (a133), and the Wi-Fi details (a19, a30, a31) when a Device
+// carries them. It also adds the per-install values from Device.Install: a24,
+// a84, a125, a126, a163, a167 and a168.
 //
 // The empty entries stay here to document which slots this device leaves
 // empty. deviceData drops them, the way the SDK's serializer does.
