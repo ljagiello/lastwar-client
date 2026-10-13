@@ -172,8 +172,9 @@ func TestBoxIDNeedsInstall(t *testing.T) {
 		calls++
 		return nil, errors.New("unexpected request")
 	})}
-	if boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{}); err == nil || calls != 0 {
-		t.Errorf("BoxID with no install = %q, %v after %d requests; want an error and no request", boxID, err, calls)
+	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{})
+	if err == nil || !strings.Contains(err.Error(), "unset") || calls != 0 {
+		t.Errorf("BoxID with no install = %q, %v after %d requests; want the unset-install error and no request", boxID, err, calls)
 	}
 }
 

@@ -164,6 +164,12 @@ func TestMintShumeiBoxIDConfigWithoutDeviceID(t *testing.T) {
 	if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
 		t.Errorf("the dev-2 run replaced dev-1's install in a config without a deviceId (read error %v); want it untouched", err)
 	}
+
+	// The install's own deviceId keeps saving: a later dev-1 run's new smid is stored.
+	_, next := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-1", shumei.Device{}, saved.ShumeiInstall, path)
+	if again, err := LoadSessionConfig(path); err != nil || again.ShumeiInstall.BoxID != "Bsmid-2" || !sameInstall(again.ShumeiInstall, next) {
+		t.Errorf("after dev-1's next run the config holds %+v (load error %v), want %+v with Bsmid-2", again.ShumeiInstall, err, next)
+	}
 }
 
 // TestMintShumeiBoxIDFailure checks a failed registration falls back to an empty box ID but
@@ -335,5 +341,30 @@ func TestRunCrossServerTestSaveBackDropsOtherDeviceInstall(t *testing.T) {
 	saved := runSaveBack(t, crossServerTestOpts{deviceID: "dev-2", shumeiInstall: d1Install, configSavePath: path})
 	if saved.DeviceID != "dev-2" || saved.ShumeiInstall != (shumei.Install{}) {
 		t.Errorf("saved deviceId %q with shumeiInstall %+v, want dev-2 with no install", saved.DeviceID, saved.ShumeiInstall)
+	}
+}
+
+// TestRunCrossServerTestSaveBackWritesNoStubInstall checks a run that never had an install (no
+// -cs-shumei-gen here; iOS and a given shumeiBoxId are the same) saves the config back without a
+// shumeiInstall, rather than an empty one bound to its deviceId.
+func TestRunCrossServerTestSaveBackWritesNoStubInstall(t *testing.T) {
+	path := writeTestSessionConfig(t, &SessionConfig{DeviceID: "dev-1"})
+	saved := runSaveBack(t, crossServerTestOpts{deviceID: "dev-1", configSavePath: path})
+	if saved.ShumeiInstall != (shumei.Install{}) {
+		t.Errorf("saved shumeiInstall = %+v, want none", saved.ShumeiInstall)
+	}
+	if raw, err := os.ReadFile(path); err != nil || bytes.Contains(raw, []byte("shumeiInstall")) {
+		t.Errorf("saved config (read error %v) = %s, want no shumeiInstall key", err, raw)
+	}
+}
+
+// TestRunCrossServerTestSaveBackKeepsUnboundInstall checks a run that doesn't mint still saves back
+// an install pasted without a deviceId, bound to the run's, instead of dropping it.
+func TestRunCrossServerTestSaveBackKeepsUnboundInstall(t *testing.T) {
+	pasted := shumei.Install{AndroidID: "3f9c1e0a7b2d4c58"}
+	path := writeTestSessionConfig(t, &SessionConfig{DeviceID: "dev-1", ShumeiInstall: pasted})
+	saved := runSaveBack(t, crossServerTestOpts{deviceID: "dev-1", shumeiInstall: pasted, configSavePath: path})
+	if saved.ShumeiInstall.AndroidID != pasted.AndroidID || saved.ShumeiInstall.DeviceID != "dev-1" {
+		t.Errorf("saved shumeiInstall = %+v, want the pasted androidId bound to dev-1", saved.ShumeiInstall)
 	}
 }

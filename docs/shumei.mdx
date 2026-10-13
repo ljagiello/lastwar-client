@@ -263,10 +263,11 @@ config's when the config belongs to the other `deviceId`. The owner is the
 config's top-level `deviceId`, or, if there's none, the `deviceId` of the
 install already saved.
 
-There's one exception. If that same run also follows a server redirect or
-refreshes its token, it saves the whole config back under the `deviceId` it
-used, together with that run's install. That is how the config has always
-treated `deviceId`.
+There's one exception. If that same run also follows a server redirect,
+refreshes its token, or looks its server up after a failed connect, it saves
+the whole config back under the `deviceId` it used, together with that run's
+install. That is how the config has always treated `deviceId`. A run that
+never had an install (no `-cs-shumei-gen`, or iOS) writes none.
 
 Without a session config (`-no-config`, or bare `-cs-*` flags and no file),
 there's nowhere to keep the values, so every run reports a new phone.

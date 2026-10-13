@@ -840,7 +840,7 @@ func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, i
 	default:
 		switch err := saveShumeiInstall(configPath, install); {
 		case errors.Is(err, errOtherDeviceID):
-			slog.Warn("not saving the ShuMei install values: the session config's deviceId, or its shumeiInstall's, is a different one than this run's (set deviceId in the config to choose)", "path", configPath)
+			slog.Warn("not saving the ShuMei install values: the session config belongs to a different deviceId than this run's (its deviceId, or without one, its saved install's)", "path", configPath)
 		case err != nil:
 			slog.Warn("failed to save the ShuMei install values to the session config", "path", configPath, "error", err)
 		default:
@@ -1461,8 +1461,12 @@ func runCrossServerTest(o crossServerTestOpts) {
 					if newPort == port && slices.Contains(strings.Split(ip, "|"), newHost) {
 						savedIP = ip // keep the gateway fallback list the connection came from
 					}
-					// Another deviceId's install doesn't belong next to this one (see mintShumeiBoxID).
-					savedInstall, _ := shumeiInstall.For(deviceID)
+					// Another deviceId's install doesn't belong next to this one (see mintShumeiBoxID),
+					// and a run that never had one doesn't write an empty stub bound to its deviceId.
+					var savedInstall shumei.Install
+					if shumeiInstall != (shumei.Install{}) {
+						savedInstall, _ = shumeiInstall.For(deviceID)
+					}
 					updated := &SessionConfig{
 						IP: savedIP, Port: newPort, Zone: result.Zone,
 						GameUid: result.GameUid, DeviceID: deviceID,

@@ -366,7 +366,8 @@ type WiFi struct {
 	IP    string // a31, the device's IPv4 on that network; "" means the host's LAN address
 }
 
-// withHostDefaults fills each zero field of d with the host's real value.
+// withHostDefaults fills d's zero clocks and Wi-Fi IP with the host's real
+// values and a zero CollectTime with a random one. It leaves Install as given.
 func (d Device) withHostDefaults() Device {
 	if d.Now.IsZero() {
 		d.Now = time.Now()
