@@ -151,6 +151,42 @@ decompiled Java builder references `enc` or `sid`.
 The `detail` object (`l1l11I1l.l11l1111I11l`) carries `deviceId` (the smid),
 `oldDeviceId`, `sid`, `c`, `t` (`l11l111llI1l.java`).
 
+## iOS
+
+The iOS app (1.0.344, build 786) links the ShuMei SDK statically into
+`Frameworks/UnityFramework.framework/UnityFramework`. Its `SmSdkManager`
+configures the same organization and the same `deviceprofile/v4` and
+`v3/cloudconf` URLs, but a different public key: a 1024-bit RSA
+SubjectPublicKeyInfo, stored as base64 at file offset `0x863ffdf`, right after
+the organization string:
+
+```
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDXoi5fkXgG1nCQZdII4lLQT2VzbygcRlwve53AypO1AHW+3G6nqMUTu3SrLH6jdAHHi7y8FIGnx3q52is6LBqW1EpkWQCqjGGfcHl7wjk9IG7seV6E5mWiGz0k4gfR//GXRDUcVhjr5Uo6Hd4o8GyPFkbIi/k5T3Ggp6OfTZ8cYQIDAQAB
+```
+
+On 2026-10-12, each of these requests sent the Android `aNN` template,
+protected with the `w1` scheme above (confirmed live):
+
+| Key | `os` | RSA padding | Result |
+|---|---|---|---|
+| iOS 1024-bit | `ios`, `iOS`, `iphone`, `iPhone` | OAEP-SHA256 | `1902` |
+| iOS 1024-bit | `android` | OAEP-SHA256 | `1902` |
+| iOS 1024-bit | `ios` | OAEP-SHA1 | `1902` |
+| iOS 1024-bit | `ios` | PKCS#1 v1.5 | `1902` |
+| Android 2048-bit | `ios` | OAEP-SHA256 | `1100`, 88-char `smid` |
+| Android 2048-bit | `android` | OAEP-SHA256 | `1100`, 88-char `smid` |
+
+The server can't use the iOS key with the `w1` scheme under any of those
+paddings, so the iOS SDK protects its profile some other way. That scheme, and
+the iOS SDK's device-data fields, haven't been reversed.
+
+The server does accept `os: "ios"` with the Android key and fingerprint, but
+`goclient` doesn't use that. Only the outer `os` field would change: the
+protected fingerprint would still describe an Android phone (`a6: "android"`,
+the `com.fun.lastwar.gp` package and paths, a Samsung model), which is the
+pairing the iOS-mode skip below avoids. A real iOS `shumeiBoxId` needs the iOS
+protection scheme and an iOS fingerprint template.
+
 ## Go implementation
 
 `internal/shumei` reimplements this. `BoxID(client, deviceID)` builds the
