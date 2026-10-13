@@ -380,11 +380,7 @@ func Run() {
 			slog.Error("invalid -cs-shumei-* flag", "error", err)
 			os.Exit(1)
 		}
-		if err := cfgShumeiInstall.Validate(); *csShumeiGen && err != nil {
-			slog.Error("invalid shumeiInstall in the session config", "path", cfgSource, "error", err)
-			os.Exit(1)
-		}
-		runCrossServerTest(crossServerTestOpts{
+		o := crossServerTestOpts{
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
 			iosMode: *csIOS, appVersion: cfgAppVersion, versionCode: cfgVersionCode,
@@ -395,7 +391,12 @@ func Run() {
 			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
 			zoneExplicit: csZoneSetExplicitly, gameUidExplicit: csGameUidSetExplicitly,
 			atExplicit: csAtSetExplicitly, interactiveExplicit: interactiveSetExplicitly,
-		})
+		}
+		if err := o.shumeiInstall.Validate(); err != nil && o.mintsShumeiBoxID() {
+			slog.Error("invalid shumeiInstall in the session config", "path", cfgSource, "error", err)
+			os.Exit(1)
+		}
+		runCrossServerTest(o)
 		return
 	}
 
@@ -808,10 +809,19 @@ func shumeiDeviceFromFlags(ssid, bssid, boot string) (shumei.Device, error) {
 // mintShumeiBoxID registers this session's phone with ShuMei and returns its box ID and the install
 // values as the registration leaves them. It fills any install value the session config left out
 // and, given a config path, writes the install back there whenever this call changed it, so the
-// next run reports the same phone. A failed registration returns "" -- not fatal, since the server
-// accepts an empty shumeiBoxId -- and still keeps the values it filled.
+// next run reports the same phone. An install made for another deviceId is a different phone: this
+// run registers a fresh one instead, and saving it is refused while the config holds the other
+// deviceId. A failed registration returns "" -- not fatal, since the server accepts an empty
+// shumeiBoxId -- and still keeps the values it filled.
 func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, install shumei.Install, configPath string) (string, shumei.Install) {
-	install, changed := install.Fill(time.Now())
+	changed := install.DeviceID != deviceID
+	install, ok := install.For(deviceID)
+	if !ok {
+		slog.Warn("the session config's shumeiInstall belongs to a different deviceId (is -cs-deviceid overriding the config's?); registering a fresh install for this one")
+		install = shumei.Install{DeviceID: deviceID}
+	}
+	install, filled := install.Fill(time.Now())
+	changed = changed || filled
 	dev.Install = install
 	boxID, err := shumei.BoxID(client, deviceID, dev)
 	if err != nil {
@@ -819,17 +829,21 @@ func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, i
 		boxID = ""
 	} else {
 		slog.Info("generated shumeiBoxId via ShuMei deviceprofile/v4", "shumeiBoxIdLen", len(boxID))
-		changed = changed || boxID != install.BoxID
-		install = install.Registered(boxID, time.Now())
+		var registered bool
+		install, registered = install.Registered(boxID, time.Now())
+		changed = changed || registered
 	}
 	switch {
 	case !changed:
 	case configPath == "":
-		slog.Info("no session config to keep this phone's ShuMei install values in; the next run reports a different phone")
+		slog.Warn("no session config to keep this phone's ShuMei install values in, so every run reports a new phone under the same deviceId (pass -config, or drop -no-config)")
 	default:
-		if err := saveShumeiInstall(configPath, install); err != nil {
+		switch err := saveShumeiInstall(configPath, install); {
+		case errors.Is(err, errOtherDeviceID):
+			slog.Warn("not saving the ShuMei install values: the session config holds a different deviceId than this run's", "path", configPath)
+		case err != nil:
 			slog.Warn("failed to save the ShuMei install values to the session config", "path", configPath, "error", err)
-		} else {
+		default:
 			slog.Info("saved the ShuMei install values to the session config", "path", configPath)
 		}
 	}
@@ -1076,6 +1090,14 @@ func (o crossServerTestOpts) GoString() string { return o.String() }
 // which slog resolves before handler dispatch. See gsl.go's gsl.LoginToken.LogValue for the fuller
 // rationale, shared across every credential-bearing type in this codebase.
 func (o crossServerTestOpts) LogValue() slog.Value { return slog.StringValue(o.String()) }
+
+// mintsShumeiBoxID reports whether runCrossServerTest registers with ShuMei: -cs-shumei-gen is set,
+// no shumeiBoxId was given, and the Login isn't iOS (the fingerprint is an Android profile). Run
+// checks the session config's shumeiInstall only then, so a bad one can't stop a run that never
+// uses it.
+func (o crossServerTestOpts) mintsShumeiBoxID() bool {
+	return o.shumeiGen && o.shumeiBoxId == "" && !o.iosMode
+}
 
 // runCrossServerTest exercises DoCrossServerLogin directly, using an
 // already-known role's connection details (captured from a prior
@@ -1374,7 +1396,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		// com.fun.lastwar.gp), while an iOS-mode Login claims com.lastwar.ios -- a pairing the real
 		// client can never produce. Stay on the empty shumeiBoxId the server already accepts.
 		slog.Warn("ignoring -cs-shumei-gen in iOS mode: it mints an Android device fingerprint, which an iOS Login never carries; continuing with an empty shumeiBoxId (the server accepts it)")
-	} else if o.shumeiGen && shumeiBoxId == "" {
+	} else if o.mintsShumeiBoxID() {
 		// Register this device with ShuMei's deviceprofile/v4 endpoint to obtain a real
 		// device-fingerprint token (the backend-assigned `smid`), instead of sending an empty
 		// shumeiBoxId. Optional: the server accepts an empty one (see docs/live-validation.mdx),
@@ -1439,6 +1461,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 					if newPort == port && slices.Contains(strings.Split(ip, "|"), newHost) {
 						savedIP = ip // keep the gateway fallback list the connection came from
 					}
+					// Another deviceId's install doesn't belong next to this one (see mintShumeiBoxID).
+					savedInstall, _ := shumeiInstall.For(deviceID)
 					updated := &SessionConfig{
 						IP: savedIP, Port: newPort, Zone: result.Zone,
 						GameUid: result.GameUid, DeviceID: deviceID,
@@ -1446,7 +1470,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 						// ShumeiInstall, and storing it here would stop later runs registering.
 						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
 						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
-						Features: o.features, DuelPolicy: o.duelPolicy, ShumeiInstall: shumeiInstall,
+						Features: o.features, DuelPolicy: o.duelPolicy, ShumeiInstall: savedInstall,
 					}
 					if err := SaveSessionConfig(updated, o.configSavePath); err != nil {
 						slog.Warn("failed to persist redirected server address to session config", "path", o.configSavePath, "error", err)

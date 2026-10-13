@@ -253,10 +253,18 @@ Some fields stay the same for the life of an app install. `goclient` keeps them
 per session, in the session config's `shumeiInstall` object. The first
 `-cs-shumei-gen` run for a session generates whatever the object leaves out and
 writes it back, so every later registration reports the same phone. A value
-already in the object stays, such as a real phone's Android ID. The object
-belongs with the config's `deviceId`: changing one without the other describes
-a different install. Without a session config (`-no-config`, or bare `-cs-*`
-flags and no file), every run is a fresh install.
+already in the object stays, such as a real phone's Android ID.
+
+One install belongs to one Login `deviceId`, so the object records the one it
+was made for, in its own `deviceId` key. A run under a different `deviceId`
+registers a fresh install instead. That includes a run where `-cs-deviceid`
+overrides the config's. The fresh install isn't saved into a config that holds
+the other `deviceId`. Without a session config (`-no-config`, or bare `-cs-*`
+flags and no file), there's nowhere to keep the values. Every run then reports a
+new phone under the same persisted `deviceId`, and `goclient` logs a warning
+saying so. `goclient` checks the object only on runs that register:
+`-cs-shumei-gen`, no `shumeiBoxId`, and not iOS. It exits on a value a real
+install couldn't hold.
 
 | Field | SDK source | `shumeiInstall` key | Fresh value |
 |---|---|---|---|
@@ -266,6 +274,10 @@ flags and no file), every run is a fresh install.
 | `a125` | `{fit, lut}`: `PackageInfo.firstInstallTime` and `lastUpdateTime` | `firstInstallTime`, `lastUpdateTime` | installed 30 to 400 days ago, updated in the last 20 days |
 | `a126` | `getDeviceId()` unless it's a `D` fallback: the `"B"` + `smid` cached from the last registration | `boxId` | absent until the first registration |
 | `a167`, `a168` | the smid cache file's timestamp (`SMSDK.u2`), and the copy the SDK records as `bfic` right after writing that file | `boxIdSavedAt` | 0 until the first registration |
+
+The three times are RFC 3339 strings, such as `2026-03-04T10:22:31.123Z`. The
+wire and `dumpsys package` show them as milliseconds or in other formats. A
+number there fails to parse, and every run then exits while loading the config.
 
 The template used to send fixed values for all of these, including an `a84` in
 the wrong format and `a167`/`a168` timestamps next to an empty `a126`, a pairing
@@ -285,7 +297,9 @@ out of the config's top-level `shumeiBoxId`: that field means "send this one
 and don't register", so storing a minted ID there would stop later runs from
 registering.
 
-Two assumptions remain. `SMSDK.u2` is native and hasn't been traced, so "0 for
-a missing file" comes from its Java wrapper, which returns 0 when the call
+Three assumptions remain. `SMSDK.u2` is native and hasn't been traced, so "0
+for a missing file" comes from its Java wrapper, which returns 0 when the call
 fails. The Widevine ID length (32 bytes) is the common one, not one read from an
-SM-G988N.
+SM-G988N. And the `a133` range of 150 to 600 ms is a guess: the real collection
+waits up to 3 s on one of its threads (`thread.join(3000L)`), and no real
+timing has been measured.

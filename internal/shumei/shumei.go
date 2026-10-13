@@ -406,6 +406,9 @@ func deviceData(deviceID string, d Device) (string, error) {
 	if err := in.Validate(); err != nil {
 		return "", fmt.Errorf("shumei: install: %w", err)
 	}
+	if _, ok := in.For(deviceID); !ok {
+		return "", errors.New("shumei: the install belongs to a different deviceId")
+	}
 	dec := json.NewDecoder(strings.NewReader(innerTemplate))
 	dec.UseNumber()
 	var m map[string]any

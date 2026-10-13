@@ -16,8 +16,13 @@ import (
 // IDs the SDK reads or generates once, the app's install times, and the smid
 // the SDK cached from its last registration. A session config keeps one, so
 // every registration for that session reports the same phone. It belongs with
-// the session's deviceId: a different deviceId is a different install.
+// one Login deviceId: a different deviceId is a different install (see For).
 type Install struct {
+	// DeviceID is the Login deviceId (a2, a97) this install registers under.
+	// Empty means it isn't bound to one yet, as in a hand-written config; For
+	// binds it.
+	DeviceID string `json:"deviceId,omitempty"`
+
 	// AndroidID is a24, Settings.Secure.ANDROID_ID (l1l11I111ll): 16
 	// lowercase hex digits, which Android 8 and later derive per app signing
 	// key. Last War doesn't set needUsingMD5, so the SDK sends it unhashed.
@@ -62,9 +67,6 @@ const widevineIDLen = 32
 func NewInstall(now time.Time) Install {
 	installed := now.Add(-randDuration(30*24*time.Hour, 400*24*time.Hour)).Truncate(time.Millisecond)
 	updated := now.Add(-randDuration(time.Hour, 20*24*time.Hour)).Truncate(time.Millisecond)
-	if updated.Before(installed) {
-		updated = installed
-	}
 	return Install{
 		AndroidID:        hex.EncodeToString(randBytes(8)),
 		MediaDrmID:       base64.StdEncoding.EncodeToString(randBytes(widevineIDLen)) + "___",
@@ -103,14 +105,30 @@ func (in Install) Fill(now time.Time) (Install, bool) {
 	return in, filled
 }
 
-// Registered returns in after the SDK cached boxID at t. Android writes a
-// prefs file only when a value changes, so caching the same smid again keeps
-// the earlier time.
-func (in Install) Registered(boxID string, t time.Time) Install {
-	if boxID != in.BoxID {
-		in.BoxID, in.BoxIDSavedAt = boxID, t.Truncate(time.Millisecond)
+// For returns in as the install of deviceID: unchanged if it already is,
+// bound to deviceID if it isn't bound yet. An install made for a different
+// deviceId is a different phone, so For returns the zero Install and false
+// rather than let two deviceIds share one fingerprint.
+func (in Install) For(deviceID string) (Install, bool) {
+	switch in.DeviceID {
+	case deviceID:
+		return in, true
+	case "":
+		in.DeviceID = deviceID
+		return in, true
 	}
-	return in
+	return Install{}, false
+}
+
+// Registered returns in after the SDK cached boxID at t, and whether that
+// changed it. Android writes a prefs file only when a value changes, so
+// caching the same smid again keeps the earlier time.
+func (in Install) Registered(boxID string, t time.Time) (Install, bool) {
+	if boxID == in.BoxID {
+		return in, false
+	}
+	in.BoxID, in.BoxIDSavedAt = boxID, t.Truncate(time.Millisecond)
+	return in, true
 }
 
 var (
@@ -119,10 +137,11 @@ var (
 )
 
 // Validate reports the first set value a real install couldn't hold. Empty
-// values pass: Fill supplies them.
+// values pass: Fill supplies them. The errors give lengths, never the values,
+// since they end up in logs.
 func (in Install) Validate() error {
 	if in.AndroidID != "" && !androidIDRe.MatchString(in.AndroidID) {
-		return fmt.Errorf("androidId %q is not 16 lowercase hex digits", in.AndroidID)
+		return fmt.Errorf("androidId (%d characters) is not 16 lowercase hex digits", len(in.AndroidID))
 	}
 	if in.MediaDrmID != "" {
 		parts := strings.Split(in.MediaDrmID, "_")
@@ -136,13 +155,13 @@ func (in Install) Validate() error {
 		}
 	}
 	if in.PUUID != "" && !puuidRe.MatchString(in.PUUID) {
-		return fmt.Errorf("puuid %q is not a random (version 4) UUID as 32 lowercase hex digits", in.PUUID)
+		return fmt.Errorf("puuid (%d characters) is not a random (version 4) UUID as 32 lowercase hex digits", len(in.PUUID))
 	}
 	if !in.FirstInstallTime.IsZero() && !in.LastUpdateTime.IsZero() && in.LastUpdateTime.Before(in.FirstInstallTime) {
 		return errors.New("lastUpdateTime is before firstInstallTime")
 	}
 	if in.BoxID != "" && !strings.HasPrefix(in.BoxID, "B") {
-		return fmt.Errorf("boxId must start with \"B\", as getDeviceId() returns it")
+		return errors.New(`boxId must start with "B", as getDeviceId() returns it`)
 	}
 	if (in.BoxID == "") != in.BoxIDSavedAt.IsZero() {
 		return errors.New("boxId and boxIdSavedAt must be set together")

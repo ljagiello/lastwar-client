@@ -74,20 +74,46 @@ func TestInstallFill(t *testing.T) {
 	if got.FirstInstallTime != late || got.LastUpdateTime.Before(late) {
 		t.Errorf("Fill = fit %v, lut %v; want fit kept and lut no earlier", got.FirstInstallTime, got.LastUpdateTime)
 	}
+
+	// Filling only the times still counts, so the caller saves them.
+	ids := Install{AndroidID: testInstall.AndroidID, MediaDrmID: testInstall.MediaDrmID, PUUID: testInstall.PUUID}
+	if got, filled := ids.Fill(now); !filled || got.FirstInstallTime.IsZero() || got.LastUpdateTime.IsZero() {
+		t.Errorf("Fill with only the IDs set = %+v, %v; want both times set, true", got, filled)
+	}
+
+	// Fill leaves the owner to For.
+	if got, _ := (Install{}).Fill(now); got.DeviceID != "" {
+		t.Errorf("Fill set DeviceID %q, want it left empty", got.DeviceID)
+	}
+}
+
+// TestInstallFor checks an install binds to the first deviceId it's used
+// with, and refuses any other.
+func TestInstallFor(t *testing.T) {
+	got, ok := testInstall.For("dev-1")
+	if !ok || got.DeviceID != "dev-1" || got.AndroidID != testInstall.AndroidID {
+		t.Fatalf("For on an unbound install = %+v, %v; want it bound to dev-1, true", got, ok)
+	}
+	if again, ok := got.For("dev-1"); !ok || again != got {
+		t.Errorf("For with its own deviceId = %+v, %v; want it unchanged, true", again, ok)
+	}
+	if other, ok := got.For("dev-2"); ok || other != (Install{}) {
+		t.Errorf("For with another deviceId = %+v, %v; want the zero Install, false", other, ok)
+	}
 }
 
 // TestInstallRegistered checks the save time moves only when the box ID does.
 func TestInstallRegistered(t *testing.T) {
 	first, second := time.UnixMilli(1790000000123), time.UnixMilli(1790000999999)
-	in := testInstall.Registered("Bsmid-1", first)
-	if in.BoxID != "Bsmid-1" || !in.BoxIDSavedAt.Equal(first) {
-		t.Fatalf("Registered = %q at %v, want Bsmid-1 at %v", in.BoxID, in.BoxIDSavedAt, first)
+	in, changed := testInstall.Registered("Bsmid-1", first)
+	if !changed || in.BoxID != "Bsmid-1" || !in.BoxIDSavedAt.Equal(first) {
+		t.Fatalf("Registered = %q at %v (changed %v), want Bsmid-1 at %v, true", in.BoxID, in.BoxIDSavedAt, changed, first)
 	}
-	if again := in.Registered("Bsmid-1", second); !again.BoxIDSavedAt.Equal(first) {
-		t.Errorf("same box ID moved the save time to %v, want %v kept", again.BoxIDSavedAt, first)
+	if again, changed := in.Registered("Bsmid-1", second); changed || !again.BoxIDSavedAt.Equal(first) {
+		t.Errorf("same box ID = save time %v, changed %v; want %v kept, false", again.BoxIDSavedAt, changed, first)
 	}
-	if changed := in.Registered("Bsmid-2", second); changed.BoxID != "Bsmid-2" || !changed.BoxIDSavedAt.Equal(second) {
-		t.Errorf("Registered = %q at %v, want Bsmid-2 at %v", changed.BoxID, changed.BoxIDSavedAt, second)
+	if next, changed := in.Registered("Bsmid-2", second); !changed || next.BoxID != "Bsmid-2" || !next.BoxIDSavedAt.Equal(second) {
+		t.Errorf("Registered = %q at %v (changed %v), want Bsmid-2 at %v, true", next.BoxID, next.BoxIDSavedAt, changed, second)
 	}
 }
 
@@ -97,7 +123,7 @@ func TestInstallValidate(t *testing.T) {
 	if err := (Install{}).Validate(); err != nil {
 		t.Errorf("empty Install.Validate() = %v, want nil", err)
 	}
-	registered := testInstall.Registered("Bsmid", time.UnixMilli(1789500000000))
+	registered, _ := testInstall.Registered("Bsmid", time.UnixMilli(1789500000000))
 	if err := registered.Validate(); err != nil {
 		t.Errorf("registered Install.Validate() = %v, want nil", err)
 	}
@@ -108,6 +134,7 @@ func TestInstallValidate(t *testing.T) {
 		"mediaDrmId not base64":  func(in *Install) { in.MediaDrmID = "not base64!___" },
 		"puuid with dashes":      func(in *Install) { in.PUUID = "6f1c2b3a-4d5e-4f60-a7b8-c9d0e1f20314" },
 		"puuid not version 4":    func(in *Install) { in.PUUID = "ffeeddccbbaa99887766554433221100" },
+		"puuid wrong variant":    func(in *Install) { in.PUUID = "6f1c2b3a4d5e4f6077b8c9d0e1f20314" },
 		"update before install":  func(in *Install) { in.LastUpdateTime = in.FirstInstallTime.Add(-time.Second) },
 		"boxId without B":        func(in *Install) { in.BoxID, in.BoxIDSavedAt = "smid", time.UnixMilli(1) },
 		"boxId without saved at": func(in *Install) { in.BoxID = "Bsmid" },
@@ -115,8 +142,16 @@ func TestInstallValidate(t *testing.T) {
 	} {
 		in := testInstall
 		mutate(&in)
-		if err := in.Validate(); err == nil {
+		err := in.Validate()
+		if err == nil {
 			t.Errorf("%s: Validate() = nil, want an error", name)
+			continue
+		}
+		// The error reaches the logs, so it must not carry the identifiers.
+		for _, id := range []string{in.AndroidID, in.PUUID} {
+			if strings.Contains(err.Error(), id) {
+				t.Errorf("%s: Validate() = %q, which contains the value %q", name, err, id)
+			}
 		}
 	}
 }

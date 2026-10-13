@@ -351,13 +351,28 @@ func TestDeviceData(t *testing.T) {
 	if _, err := deviceData(id, unset); err == nil {
 		t.Error("deviceData with no install values = nil error, want an error")
 	}
+	partial := d
+	partial.Install.PUUID = ""
+	if _, err := deviceData(id, partial); err == nil {
+		t.Error("deviceData with the install's puuid unset = nil error, want an error")
+	}
+	invalid := d
+	invalid.Install.AndroidID = "not-an-android-id"
+	if _, err := deviceData(id, invalid); err == nil {
+		t.Error("deviceData with an invalid androidId = nil error, want an error")
+	}
+	other := d
+	other.Install.DeviceID = "another-device"
+	if _, err := deviceData(id, other); err == nil {
+		t.Error("deviceData with another deviceId's install = nil error, want an error")
+	}
 }
 
 // TestDeviceDataRegistered checks a registered install sends its cached box ID
 // back as a126, with its save time in a167 and a168.
 func TestDeviceDataRegistered(t *testing.T) {
 	d := testDevice()
-	d.Install = d.Install.Registered("Bsmid-earlier", time.UnixMilli(1789500000123))
+	d.Install, _ = d.Install.Registered("Bsmid-earlier", time.UnixMilli(1789500000123))
 	m := decodeDeviceData(t, mustDeviceData(t, "id", d))
 	for key, want := range map[string]string{
 		"a126": "Bsmid-earlier",

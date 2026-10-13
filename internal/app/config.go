@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"lastwar-client/internal/auth"
 	"lastwar-client/internal/shumei"
@@ -51,8 +52,8 @@ type SessionConfig struct {
 	// ShumeiInstall is what this session's phone keeps between -cs-shumei-gen registrations
 	// (Android ID, MediaDrm ID, the SDK's install UUID, the app's install times, and the smid
 	// the last registration cached), so each one reports the same phone. -cs-shumei-gen fills
-	// any value left out and writes it back here. It belongs with DeviceID: changing one
-	// without the other describes a different install.
+	// any value left out and writes it back here. It records the deviceId it belongs to: a run
+	// under another deviceId (-cs-deviceid) registers a fresh install and leaves this one alone.
 	ShumeiInstall shumei.Install `json:"shumeiInstall,omitzero"`
 }
 
@@ -144,12 +145,20 @@ func SaveSessionConfig(cfg *SessionConfig, path string) error {
 	return auth.AtomicWriteStateFile(path, string(data))
 }
 
+// errOtherDeviceID is saveShumeiInstall refusing to store one deviceId's install in a session
+// config made for another, as after a run whose -cs-deviceid overrides the config's.
+var errOtherDeviceID = errors.New("the session config holds a different deviceId")
+
 // saveShumeiInstall stores install in the session config at path, re-reading the file first so
-// every other field stays as it is on disk.
+// every other field stays as it is on disk. It returns errOtherDeviceID, and writes nothing, when
+// the config's deviceId isn't the one install belongs to.
 func saveShumeiInstall(path string, install shumei.Install) error {
 	cfg, err := LoadSessionConfig(path)
 	if err != nil {
 		return err
+	}
+	if cfg.DeviceID != "" && cfg.DeviceID != install.DeviceID {
+		return errOtherDeviceID
 	}
 	cfg.ShumeiInstall = install
 	return SaveSessionConfig(cfg, path)
