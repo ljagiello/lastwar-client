@@ -494,6 +494,8 @@ type LoginParamsInput struct {
 	// for -- reusing a token obtained under one Platform's identity while
 	// claiming a different Platform/package gets ec=28/E005, even though
 	// the token itself, un, and every other field are valid and accepted.
+	// (Those Android Logins also sent ta as "{}", which on its own gets
+	// E005 for an established account; see BuildLoginParams and #22.)
 	IOSMode bool
 
 	// AppVersion/VersionCode, when non-empty, replace the build identity BuildLoginParams would
@@ -505,7 +507,7 @@ type LoginParamsInput struct {
 	VersionCode string
 
 	// ResVersion is the hot-update state to report (see ResVersionFor); "" sends "0", the value
-	// this client sent for months. It also fills ta's lw_res_version under IOSMode.
+	// this client sent for months. It also fills ta's lw_res_version.
 	ResVersion string
 }
 
@@ -564,11 +566,10 @@ func (in LoginParamsInput) LogValue() slog.Value { return slog.StringValue(in.St
 
 const iosPackageName = "com.lastwar.ios"
 
-// iosAnalyticsBlob mirrors the JSON shape of the `ta` analytics blob a real
-// captured iOS login sends, so the diagnostic copy built in BuildLoginParams
-// can be constructed field-by-field instead of as a giant hand-maintained
-// JSON string literal.
-type iosAnalyticsBlob struct {
+// analyticsBlob mirrors the JSON shape of the `ta` analytics blob a real login sends (captured
+// from iOS here, and from Android by C485, discussion #22), so BuildLoginParams can build it
+// field-by-field instead of as a giant hand-maintained JSON string literal.
+type analyticsBlob struct {
 	OS              string `json:"#os"`
 	Disk            string `json:"#disk"`
 	DeviceID        string `json:"#device_id"`
@@ -626,43 +627,56 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	if in.ResVersion != "" {
 		resVersion, lwResVersion = in.ResVersion, in.ResVersion
 	}
-	ta := "{}"
+	// The ta blob's per-platform values. A real Android ta reports the app version as lw_version
+	// too; the iOS blob keeps the "0.0.0" the cron's iOS session has logged in with since August 2026.
+	osName, manufacturer, deviceModel, lwVersion := "Android", "unknown", "Android", effectiveAppVersion
 	if in.IOSMode {
-		// DIAGNOSTIC ONLY: reproduces the field structure/format of the ta analytics blob a
-		// real captured iOS login sends, to isolate whether the server validates fields inside
-		// it (lw_zone/lw_device_id/lw_shumei_id echoing the top-level request) as part of the
-		// same token-binding check already confirmed for PackageName/AppVersion/VersionCode.
-		//
-		// LwDeviceID/LwShumeiID/LwAirKey were originally set from the same in.DeviceID/
-		// in.ShumeiBoxId/in.AirKey values used for the top-level request fields elsewhere in
-		// this function. That leaked those live secrets in cleartext: this whole blob gets
-		// JSON-marshaled and stored as a single opaque string under the "ta" key, and
-		// sfs.SFSObject.StringRedacted() only masks known-sensitive *keys* -- it has no way to see
-		// or sfs.Redact secrets embedded inside another field's string value. sfs.SensitiveSFSKeys now
-		// also lists "ta" itself (see sfsobject.go) as defense-in-depth, but the real fix is
-		// here: never put a live credential into a field that isn't itself a redacted key.
-		// These three fields are placeholders (empty string, matching this struct's existing
-		// pattern for telemetry we have no way to observe, e.g. Carrier/LwLine below) until/
-		// unless a live capture confirms the server actually validates their content -- their
-		// mere presence in the JSON shape is preserved in case some undocumented check depends
-		// on the keys existing at all.
-		blob := iosAnalyticsBlob{
-			OS: "iOS", Disk: "50.0/100.0", DeviceID: "00000000-0000-0000-0000-000000000000",
-			OSVersion: "0.0", SystemLanguage: "en", BundleID: iosPackageName, Carrier: "",
-			AppVersion: effectiveAppVersion, FPS: 0, RAM: "0.0/0.0", Simulator: false, ZoneOffset: 0,
-			Manufacturer: "Apple", ScreenHeight: 0, NetworkType: "WIFI", DeviceModel: "unknown",
-			ScreenWidth: 0, InstallTime: "2000-01-01 00:00:00.000",
-			LwNet: "wifi", LwResVersion: lwResVersion, LwBuildcode: effectiveVersionCode, LwLine: "",
-			PdDl: 0, LwAb: "0", LwPlatform: "AppStore",
-			LwGameSessionID: "00000000-0000-0000-0000-000000000000", LwFirstLaunch: false,
-			LwAllianceID: "00000000000000000000000000000000",
-			LwDeviceID:   "", LwDeviceLevel: 0, LwMainLevel: 0,
-			LwShumeiID: "", LwAirKey: "",
-			LwVersion: "0.0.0", LwPower: 0, LwZone: "APS" + in.ServerID,
-		}
-		if b, err := json.Marshal(blob); err == nil {
-			ta = string(b)
-		}
+		osName, manufacturer, deviceModel, lwVersion = "iOS", "Apple", "unknown", "0.0.0"
+	}
+
+	// The ta analytics blob is part of the login gate for an established account. Confirmed live
+	// on 2026-10-13 (found by C485, discussion #22): an Android Login into the real account with an
+	// Android-issued token and ta="{}" gets ec=28/E005, and the same Login with this blob is
+	// accepted. A guest Login was accepted with "{}" and is with this blob too. Which keys the
+	// server reads isn't isolated; the platform markers (#os, #bundle_id, lw_platform) are the
+	// likely ones. Every Android E005 this project recorded before also sent "{}", which the
+	// platform-binding reading in crossserver.go never separated out.
+	//
+	// LwDeviceID/LwShumeiID/LwAirKey were originally set from the same in.DeviceID/
+	// in.ShumeiBoxId/in.AirKey values used for the top-level request fields elsewhere in
+	// this function. That leaked those live secrets in cleartext: this whole blob gets
+	// JSON-marshaled and stored as a single opaque string under the "ta" key, and
+	// sfs.SFSObject.StringRedacted() only masks known-sensitive *keys* -- it has no way to see
+	// or sfs.Redact secrets embedded inside another field's string value. sfs.SensitiveSFSKeys now
+	// also lists "ta" itself (see sfsobject.go) as defense-in-depth, but the real fix is
+	// here: never put a live credential into a field that isn't itself a redacted key.
+	// These three fields are placeholders (empty string, matching this struct's existing
+	// pattern for telemetry we have no way to observe, e.g. Carrier/LwLine below); the server
+	// accepts them blank, and their keys stay in case some check depends on them existing.
+	blob := analyticsBlob{
+		OS: osName, Disk: "50.0/100.0", DeviceID: "00000000-0000-0000-0000-000000000000",
+		OSVersion: "0.0", SystemLanguage: "en", BundleID: build.PackageName, Carrier: "",
+		AppVersion: effectiveAppVersion, FPS: 0, RAM: "0.0/0.0", Simulator: false, ZoneOffset: 0,
+		Manufacturer: manufacturer, ScreenHeight: 0, NetworkType: "WIFI", DeviceModel: deviceModel,
+		ScreenWidth: 0, InstallTime: "2000-01-01 00:00:00.000",
+		LwNet: "wifi", LwResVersion: lwResVersion, LwBuildcode: effectiveVersionCode, LwLine: "",
+		PdDl: 0, LwAb: "0", LwPlatform: storefrontPF(in.IOSMode),
+		LwGameSessionID: "00000000-0000-0000-0000-000000000000", LwFirstLaunch: false,
+		LwAllianceID: "00000000000000000000000000000000",
+		LwDeviceID:   "", LwDeviceLevel: 0, LwMainLevel: 0,
+		LwShumeiID: "", LwAirKey: "",
+		LwVersion: lwVersion, LwPower: 0, LwZone: "APS" + in.ServerID,
+	}
+	// lw_zone repeats the zone, which DoCrossServerLogin accepts up to the full string cap; a blob
+	// that would no longer encode falls back to "{}" rather than making the whole Login unsendable.
+	// An established account rejected an Android Login with "{}" (E005), so it is logged. The blob
+	// holds only strings, ints and bools, so Marshal can't fail.
+	ta := "{}"
+	if b, _ := json.Marshal(blob); len(b) <= sfs.MaxUtfStringBytes {
+		ta = string(b)
+	} else {
+		slog.Warn("ta: the analytics blob is too long to encode; sending {}, which an established account rejected with E005 (seen on Android)",
+			"len", len(b), "max", sfs.MaxUtfStringBytes, "zoneLen", len(in.ServerID))
 	}
 	p.PutUtfString("ta", ta)
 	p.PutUtfString("distinct_id", "")

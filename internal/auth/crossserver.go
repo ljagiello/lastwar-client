@@ -112,7 +112,9 @@ func (p CrossServerLoginParams) LogValue() slog.Value { return slog.StringValue(
 // happened to be obtained by a real iOS session. `p.at` must be INCLUDED
 // (a missing/empty token gets ec=28/E011 outright), and the Platform
 // fields must match whatever identity actually obtained the token
-// (IOSMode) -- see identity.go's BuildLoginParams.
+// (IOSMode) -- see identity.go's BuildLoginParams. That includes the ta
+// blob: an Android Login into an established account with an Android-issued
+// token still gets E005 when ta is "{}" (confirmed live 2026-10-13, #22).
 //
 // Bug fixed here: this function used to accept the login response
 // unconditionally and hand back a connection, even when that response

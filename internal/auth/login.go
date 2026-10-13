@@ -332,7 +332,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	// disabled: ANY reconnect attempt on this server -- with un="",
 	// composite un, fresh access token, stale access token, any
 	// combination -- reliably fails with ec=28/E011 or E005, even for a
-	// brand-new guest that connected once seconds earlier. Reconnecting
+	// brand-new guest that connected once seconds earlier. (All of those
+	// Android Logins sent ta as "{}", which on its own gets E005 for an
+	// established account, see BuildLoginParams and #22.) Reconnecting
 	// doesn't recover a missing init; it just turns a working session
 	// into a broken one. maxLoginAttempts is kept at 1 (no retry) with a
 	// single longer wait window instead. The serverInfo{ip,port,zone,uid}
@@ -394,7 +396,10 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		// simply connected once before -- not just for an established
 		// real account. `un=""` (letting the server resolve identity from
 		// deviceId/airKey alone) is the only combination that has ever
-		// worked, in every test run tonight. Best guess:
+		// worked, in every test run tonight. (Those runs sent Android ta as
+		// "{}"; with a filled ta, a cross-server Login with un = gameUid
+		// works, confirmed live 2026-10-13, see BuildLoginParams and #22.)
+		// Best guess:
 		// AccountCredentialManager.SetUID is only actually called from the
 		// role-picker flow (UIRoleLoginView.OnClickLogin) in real play,
 		// not populated automatically from a plain GSL response the way

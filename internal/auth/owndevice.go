@@ -14,12 +14,11 @@ import (
 // captured from the real app, these tokens belong to this device alone, so refreshing them (GSL
 // opt=refresh) couldn't invalidate the real app's tokens or the other way round.
 //
-// EXPERIMENTAL, confirmed live 2026-10-04 only up to the token exchange: GSL opt=login returned an
-// at/rt pair (at.time is the issue time, in unix seconds) and the role's server (APS783, its three
-// gateway hostnames). The base-zone Login with that token and this client's Android identity was
-// then rejected with ec=28/E005, as in docs/live-validation.mdx's reconnect-wall row 2. A missing
-// shumeiBoxId is not the cause: the captured iOS session logs in fine without one, tested the same
-// night. The actual gate is still open.
+// EXPERIMENTAL. Confirmed live 2026-10-04: GSL opt=login returned an at/rt pair (at.time is the
+// issue time, in unix seconds) and the role's server (APS783, its three gateway hostnames). The
+// base-zone Login with that token and this client's Android identity got ec=28/E005 while Android
+// ta was "{}"; confirmed live 2026-10-13, the same token logs in once Android ta is filled
+// (BuildLoginParams, discussion #22).
 type OwnDeviceSession struct {
 	DeviceID              string
 	GameUid               string

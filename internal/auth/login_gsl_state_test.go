@@ -336,12 +336,14 @@ func TestBuildLoginParamsResVersion(t *testing.T) {
 		{liveResVersion, liveResVersion, liveResVersion},
 	}
 	for _, c := range cases {
-		p := BuildLoginParams(LoginParamsInput{IOSMode: true, ServerID: "783", ResVersion: c.in})
-		if got := p.GetString("resVersion"); got != c.wantRes {
-			t.Errorf("ResVersion %q: resVersion = %q, want %q", c.in, got, c.wantRes)
-		}
-		if ta := p.GetString("ta"); !strings.Contains(ta, `"lw_res_version":"`+c.wantTa+`"`) {
-			t.Errorf("ResVersion %q: ta lacks lw_res_version %q: %s", c.in, c.wantTa, ta)
+		for _, iosMode := range []bool{true, false} {
+			p := BuildLoginParams(LoginParamsInput{IOSMode: iosMode, ServerID: "783", ResVersion: c.in})
+			if got := p.GetString("resVersion"); got != c.wantRes {
+				t.Errorf("IOSMode=%v ResVersion %q: resVersion = %q, want %q", iosMode, c.in, got, c.wantRes)
+			}
+			if ta := p.GetString("ta"); !strings.Contains(ta, `"lw_res_version":"`+c.wantTa+`"`) {
+				t.Errorf("IOSMode=%v ResVersion %q: ta lacks lw_res_version %q: %s", iosMode, c.in, c.wantTa, ta)
+			}
 		}
 	}
 }
