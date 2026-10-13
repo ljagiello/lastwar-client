@@ -36,9 +36,10 @@ type SessionConfig struct {
 	// bound to it); empty means the built-in defaults. cmd/pcap -session-out fills both in.
 	AppVersion  string `json:"appVersion,omitempty"`
 	VersionCode string `json:"versionCode,omitempty"`
-	// RefreshToken (with GSL's at.time/rt.time, unix seconds of issue) is only present for the
-	// client's own device (-own-device-session, experimental). Nothing consumes it yet: the real
-	// client's own E011 recovery is GSL opt=refresh with it, and that retry isn't implemented.
+	// RefreshToken (with GSL's at.time/rt.time, unix seconds of issue) is present for the client's
+	// own device (-own-device-session), or after a -cs-rt run. As in the real client, a run refreshes
+	// with it (GSL opt=refresh) when the access token is missing or 30 days old, and once after a
+	// Login E011, and saves the new pair here before logging in with it.
 	RefreshToken     string `json:"refreshToken,omitempty"`
 	AccessTokenTime  int64  `json:"accessTokenTime,omitempty"`
 	RefreshTokenTime int64  `json:"refreshTokenTime,omitempty"`
@@ -144,6 +145,43 @@ func SaveSessionConfig(cfg *SessionConfig, path string) error {
 		return err
 	}
 	return auth.AtomicWriteStateFile(path, string(data))
+}
+
+// saveRefreshedTokens stores deviceID's refreshed token pair in the session config at path right
+// away, re-reading the file first so every other field stays as it is on disk. The real client
+// stores a refresh reply's at/rt before it logs in with them; saving here, not only after a
+// successful Login, keeps a rotated refresh token even when that Login fails. Tokens belong to the
+// device they were issued to, so they aren't saved into a config made for another one (the owner
+// rule saveShumeiInstall uses), as after a -cs-rt run under -cs-deviceid. A run without a session
+// config (path "") has nowhere to keep them. A failure is only logged: the run can still use them.
+func saveRefreshedTokens(path, deviceID string, t auth.Tokens) {
+	if path == "" {
+		slog.Warn("GSL refresh: no session config to keep the refreshed tokens in; the next run starts from the old ones")
+		return
+	}
+	cfg, err := LoadSessionConfig(path)
+	if err != nil {
+		slog.Warn("GSL refresh: could not re-read the session config to save the refreshed tokens", "path", path, "error", err)
+		return
+	}
+	owner := cfg.DeviceID
+	if owner == "" {
+		owner = cfg.ShumeiInstall.DeviceID
+	}
+	if owner != "" && owner != deviceID {
+		slog.Warn("GSL refresh: not saving the refreshed tokens; the session config holds another device's", "path", path,
+			"configDeviceIdLen", len(owner), "runDeviceIdLen", len(deviceID))
+		return
+	}
+	cfg.AccessToken, cfg.AccessTokenTime = t.AccessTok, t.AccessTokTime
+	cfg.RefreshToken, cfg.RefreshTokenTime = t.RefreshTok, t.RefreshTokTime
+	if err := SaveSessionConfig(cfg, path); err != nil {
+		slog.Warn("GSL refresh: could not save the refreshed tokens to the session config", "path", path, "error", err)
+		return
+	}
+	slog.Info("saved the refreshed tokens to the session config", "path", path,
+		"accessTokenLen", len(t.AccessTok), "accessTokenTime", t.AccessTokTime,
+		"refreshTokenLen", len(t.RefreshTok), "refreshTokenTime", t.RefreshTokTime)
 }
 
 // errOtherDeviceID is saveShumeiInstall refusing to store one deviceId's install in a session

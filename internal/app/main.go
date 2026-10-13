@@ -295,9 +295,19 @@ func Run() {
 	var cfgFeatures map[string]bool
 	var cfgDuelPolicy map[string]string
 	var cfgShumeiInstall shumei.Install
+	var cfgRefreshTok string
+	var cfgAccessTokTime, cfgRefreshTokTime int64
 	if cfg != nil {
 		cfgAppVersion, cfgVersionCode, cfgFeatures = cfg.AppVersion, cfg.VersionCode, cfg.Features
 		cfgDuelPolicy, cfgShumeiInstall = cfg.DuelPolicy, cfg.ShumeiInstall
+		// The config's token times describe the config's own tokens: at.time means nothing for a
+		// -cs-at token, and the refresh token is bound to the config's device, not a -cs-deviceid one.
+		if !csAtSetExplicitly {
+			cfgAccessTokTime = cfg.AccessTokenTime
+		}
+		if !csDeviceIDSetExplicitly {
+			cfgRefreshTok, cfgRefreshTokTime = cfg.RefreshToken, cfg.RefreshTokenTime
+		}
 		slog.Info("loaded session config", "path", cfgSource)
 		// Round 33 fix (originally scoped to -cs-ip/-cs-port/-cs-gameuid only; round 34 extends it
 		// to -cs-zone/-cs-deviceid/-cs-shumei/-cs-at, the four siblings round 33 missed):
@@ -352,8 +362,9 @@ func Run() {
 
 	// An ip, a refresh token or an access token selects the cross-server reconnect. The access token
 	// counts on its own because the game server address is optional: with none given,
-	// runCrossServerTest looks it up with GSL getserverlist.
-	crossServer := *csIP != "" || *csRt != "" || *csAt != ""
+	// runCrossServerTest looks it up with GSL getserverlist. A session config's refresh token counts
+	// too: with no access token, runCrossServerTest refreshes one first, as the real client does.
+	crossServer := *csIP != "" || *csRt != "" || *csAt != "" || cfgRefreshTok != ""
 
 	// Symmetric to the -email/-code-pipe-ignored warnings just below (for the opposite direction):
 	// if any -cs-* flag was explicitly set on the command line but the cross-server dispatch branch
@@ -388,6 +399,7 @@ func Run() {
 			interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
 			shumeiGen: *csShumeiGen, shumeiDevice: shumeiDevice, shumeiInstall: cfgShumeiInstall,
+			refreshTok: cfgRefreshTok, accessTokTime: cfgAccessTokTime, refreshTokTime: cfgRefreshTokTime,
 			ipExplicit: csIPSetExplicitly, portExplicit: csPortSetExplicitly,
 			zoneExplicit: csZoneSetExplicitly, gameUidExplicit: csGameUidSetExplicitly,
 			atExplicit: csAtSetExplicitly, interactiveExplicit: interactiveSetExplicitly,
@@ -491,6 +503,13 @@ func Run() {
 	}
 
 	slog.Info("client exiting")
+}
+
+// accessTokenStale reports whether the real client would refresh before logging in
+// (gsl.ChooseOpt's opt=refresh row): a refresh token and a gameUid are held, and the access token
+// is missing or its at.time is 30 days old.
+func accessTokenStale(gameUid, accessTok string, accessTokTime int64, refreshTok string) bool {
+	return gsl.ChooseOpt(gsl.OptState{GameUid: gameUid, AccessTok: accessTok, AccessTokTime: accessTokTime, RefreshTok: refreshTok}, time.Now()).Opt == "refresh"
 }
 
 // exitIfReauthNeeded exits with code 2 when err carries GSL code 211 or 212
@@ -1037,6 +1056,13 @@ type crossServerTestOpts struct {
 	shumeiInstall                                                 shumei.Install // the session config's shumeiInstall, for -cs-shumei-gen
 	configSavePath                                                string         // if non-empty, persist a resolved serverInfo redirect back here (see runCrossServerTest)
 
+	// refreshTok/accessTokTime/refreshTokTime are the session config's refreshToken and token times
+	// (session config only, unlike rt, the -cs-rt flag). runCrossServerTest refreshes with
+	// refreshTok when the real client would: before the Login when the access token is missing or
+	// 30 days old, and once after a Login E011.
+	refreshTok                    string
+	accessTokTime, refreshTokTime int64
+
 	// httpClient/dialGame are OPTIONAL test seams (both nil in production). httpClient overrides the
 	// GSL HTTP client (default gsl.DefaultHTTPClient()); dialGame overrides the game-socket dial,
 	// threaded into CrossServerLoginParams.DialGame. A test sets both to in-memory transports (an
@@ -1130,6 +1156,12 @@ func runCrossServerTest(o crossServerTestOpts) {
 	// crossServerSaveBackNeeded's doc comment for the bug this specifically fixes.
 	origIP, origPort, origZone, origAccessTok, origGameUid := ip, port, zone, accessTok, gameUid
 
+	// The token state this run ends up with. A refresh (-cs-rt, or the session config's refreshToken
+	// below) replaces it and saves it to the session config right away, so a rotated refresh token
+	// survives a Login that fails afterwards.
+	refreshTok, accessTokTime, refreshTokTime := o.refreshTok, o.accessTokTime, o.refreshTokTime
+	refreshed := false
+
 	// Check-version, as the real client runs on every launch, with the session's zone as `server`.
 	// Its reply feeds the Login resVersion (auth.ResVersionFor, below) and, for -cs-rt, the gate host
 	// and RSA pubkey of the GSL opt=refresh call. -cs-rt NEEDS it, so a failure stays fatal there;
@@ -1222,7 +1254,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 				// warning fires for that case.
 				slog.Warn("ignoring -cs-at because -cs-rt is set (the GSL refresh response's access token replaces it)")
 			}
-			accessTok = lsr.At.Token.String()
+			accessTok, accessTokTime = lsr.At.Token.String(), int64(lsr.At.Time.Int("at.time"))
 			slog.Info("fresh access token acquired", "tokenLen", len(accessTok))
 		} else if o.at != "" {
 			// Symmetric to the "ignoring -cs-at" warning just above: the refresh call succeeded
@@ -1271,6 +1303,64 @@ func runCrossServerTest(o crossServerTestOpts) {
 				slog.Info("server selected", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone, "gameUid", srv.GameUid)
 			}
 			ip, port, zone, gameUid = srv.IP.String(), srv.Port.Int("port"), srv.Zone.String(), srv.GameUid.String()
+		}
+		// Keep the refresh token that just worked, or the one the reply rotated it to.
+		if lsr.Rt != nil && lsr.Rt.Token.String() != "" {
+			refreshTok, refreshTokTime = lsr.Rt.Token.String(), int64(lsr.Rt.Time.Int("rt.time"))
+		} else if o.rt != refreshTok {
+			refreshTok, refreshTokTime = o.rt, 0
+		}
+		refreshed = true
+		saveRefreshedTokens(o.configSavePath, deviceID, auth.Tokens{AccessTok: accessTok, RefreshTok: refreshTok, AccessTokTime: accessTokTime, RefreshTokTime: refreshTokTime})
+	}
+
+	// refreshWithConfigToken trades the session config's refresh token for a fresh access token
+	// (GSL opt=refresh) and saves the pair to the session config before any Login uses it. Unlike
+	// the older -cs-rt request above, it sends the session's zone and, under iosMode, platform=iOS,
+	// as the real client does (auth.RefreshTokens).
+	refreshWithConfigToken := func() error {
+		if gslRSAPub == nil {
+			return errors.New("GSL refresh: check-version failed, so there is no gate host or RSA key")
+		}
+		t, err := auth.RefreshTokens(auth.TokenRefresh{
+			HTTPClient: httpClient, GateHost: gslGateHost, RSAPub: gslRSAPub,
+			DeviceID: deviceID, IOSMode: o.iosMode, Zone: zone, GameUid: gameUid, RefreshTok: refreshTok,
+		})
+		if err != nil {
+			return err
+		}
+		accessTok, accessTokTime = t.AccessTok, t.AccessTokTime
+		if t.RefreshTok != "" {
+			refreshTok, refreshTokTime = t.RefreshTok, t.RefreshTokTime
+		}
+		refreshed = true
+		saveRefreshedTokens(o.configSavePath, deviceID, auth.Tokens{AccessTok: accessTok, RefreshTok: refreshTok, AccessTokTime: accessTokTime, RefreshTokTime: refreshTokTime})
+		if accessTokenStale(gameUid, accessTok, accessTokTime, refreshTok) {
+			// Live, a refresh eight days in returned the same at with its original at.time. If GSL
+			// does that at 30 days too, every run refreshes before its Login; harmless, but worth
+			// seeing in the log.
+			slog.Warn("GSL refresh: the access token it returned is still 30 days old, so every run will refresh until GSL issues a new one", "accessTokenTime", accessTokTime)
+		}
+		return nil
+	}
+
+	// Before the Login, refresh when the real client would (gsl.ChooseOpt): no access token, or
+	// at.time 30 days old.
+	if !refreshed && accessTokenStale(gameUid, accessTok, accessTokTime, refreshTok) {
+		slog.Info("access token missing or 30 days old; refreshing it with the session config's refresh token", "accessTokenLen", len(accessTok), "accessTokenTime", accessTokTime)
+		if err := refreshWithConfigToken(); err != nil {
+			if accessTok == "" {
+				slog.Error("GSL refresh failed, and there is no access token to fall back on", "error", err)
+				exitIfReauthNeeded(err)
+				os.Exit(1)
+			}
+			if errors.Is(err, gsl.ErrReauthNeeded) {
+				// GSL won't refresh this device any more. The old token may still work, so use it
+				// while it does; the real client would clear both and re-auth.
+				slog.Error("the refresh token is no longer accepted (GSL 211/212); trying the old access token, but bind the device again before it stops working", "error", err)
+			} else {
+				slog.Warn("GSL refresh failed; trying the old access token", "error", err)
+			}
 		}
 	}
 
@@ -1425,13 +1515,32 @@ func runCrossServerTest(o crossServerTestOpts) {
 			result, err = auth.DoCrossServerLogin(params)
 		}
 	}
+	// On E011 the real client clears only at, refreshes it with rt, and logs in again
+	// (csharp-native §2.3). Once per run: a token rejected right after a refresh won't improve.
+	if err != nil && errors.Is(err, session.ErrTokenRejected) && refreshTok != "" && !refreshed {
+		slog.Warn("cross-server login: access token rejected (E011); refreshing it with the session config's refresh token and logging in again", "error", err)
+		if refreshErr := refreshWithConfigToken(); refreshErr != nil {
+			// 211/212 means the device's credentials are gone (exit 2). Anything else (network,
+			// another GSL code, no check-version) says nothing about the session, and the next
+			// run tries again, so it isn't the exit-2 "session is stale" contract.
+			slog.Error("GSL refresh after E011 failed; the next run will try again", "error", refreshErr)
+			exitIfReauthNeeded(refreshErr)
+			os.Exit(1)
+		}
+		params.AccessTok = accessTok
+		result, err = auth.DoCrossServerLogin(params)
+	}
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
 		exitIfSessionEnded(err, nil)
 		if errors.Is(err, session.ErrTokenRejected) {
-			slog.Error("the session config's access token has been rotated server-side; every run will fail until it is replaced. " +
-				"Recapture: run `tcpdump -i en0 -w login.pcap 'tcp and not port 443'`, cold-start the real app until its main screen loads, " +
-				"then `pcap -in login.pcap -session-out ~/.lastwar_goclient_session.json` (see README, \"Recognizing an expired token\")")
+			if !refreshed {
+				slog.Error("the session config's access token has been rotated server-side; every run will fail until it is replaced. " +
+					"Recapture: run `tcpdump -i en0 -w login.pcap 'tcp and not port 443'`, cold-start the real app until its main screen loads, " +
+					"then `pcap -in login.pcap -session-out ~/.lastwar_goclient_session.json` (see README, \"Recognizing an expired token\")")
+			} else {
+				slog.Error("the access token was rejected even after a GSL refresh; bind the device again: run the -email flow, then -own-device-session (see docs, \"A device of its own\")")
+			}
 		}
 		// Exit code 2 marks a confirmed server-side auth rejection specifically -- see the
 		// matching comment in main() above. A bare TCP dial failure never reaches that point,
@@ -1473,6 +1582,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 						// The configured shumeiBoxId, not a minted one: that lives in
 						// ShumeiInstall, and storing it here would stop later runs registering.
 						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
+						AccessTokenTime: accessTokTime, RefreshToken: refreshTok, RefreshTokenTime: refreshTokTime,
 						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
 						Features: o.features, DuelPolicy: o.duelPolicy, ShumeiInstall: savedInstall,
 					}
