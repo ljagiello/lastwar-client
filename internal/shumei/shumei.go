@@ -63,7 +63,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"lastwar-client/internal/gsl"
 	"math/big"
 	"net/http"
 	"strings"
@@ -292,7 +291,10 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // empty. deviceData drops them, the way the SDK's serializer does. a63, the
 // input-method list, is left out entirely: SmSdkManager puts "input" in the
 // SDK's notCollect set, and the collector skips a63 when that set holds
-// "input" (l111l1111llIl), so Last War never sends it.
+// "input" (l111l1111llIl), so Last War never sends it. a85 is that set itself,
+// {"input", "protect"} in Java's HashSet order, which the collector reports
+// unless the set holds "a85". A real install would add the cloud config's
+// exclusions; this client doesn't fetch the cloud config.
 const innerTemplate = `{
   "a1": "all", "a4": "1", "a5": "default",
   "a6": "android", "a10": "12", "a7": "3.14.3",
@@ -323,7 +325,7 @@ const innerTemplate = `{
   "a72": { "status": 2, "level": 85, "scale": 100, "temp": 320, "vol": 4200 },
   "a73": 0, "a74": 0, "a75": 0, "a76": "", "a77": {}, "a78": [], "a79": "",
   "a83": "1011100",
-  "a85": [], "a86": "0111001",
+  "a85": [ "input", "protect" ], "a86": "0111001",
   "a88": "locateServiceName:android.location.ILocationManager$Stub$Proxy|phoneServiceName:com.android.internal.telephony.ITelephony$Stub$Proxy",
   "a90": 32, "a92": "1080,1920", "a93": 1,
   "a102": [], "a103": "", "a107": {}, "a108": "", "a110": "", "a114": [], "a115": [],
@@ -363,10 +365,9 @@ type Device struct {
 	// end). Zero means a random time from 150 to 600 ms.
 	CollectTime time.Duration
 
-	// AppVersion is the app's versionName, a38 (PackageInfo.versionName). It
-	// should be the build the Login claims, so the fingerprint and the Login
-	// name the same app. Empty means gsl.AppVersion, the build this client
-	// presents by default.
+	// AppVersion is the app's versionName, a38 (PackageInfo.versionName): the
+	// build the Login claims, so the fingerprint and the Login name the same
+	// app. It must be set: BoxID refuses an empty one rather than guess.
 	AppVersion string
 }
 
@@ -379,12 +380,8 @@ type WiFi struct {
 }
 
 // withHostDefaults fills d's zero clocks and Wi-Fi IP with the host's real
-// values, a zero CollectTime with a random one, and an empty AppVersion with
-// gsl.AppVersion. It leaves Install as given.
+// values and a zero CollectTime with a random one. It leaves Install as given.
 func (d Device) withHostDefaults() Device {
-	if d.AppVersion == "" {
-		d.AppVersion = gsl.AppVersion
-	}
 	if d.Now.IsZero() {
 		d.Now = time.Now()
 	}
@@ -417,7 +414,7 @@ func deviceData(deviceID string, d Device) (string, error) {
 			d.BootTime.Format(time.RFC3339), d.Now.Format(time.RFC3339))
 	}
 	if d.AppVersion == "" {
-		return "", errors.New("shumei: no app version for a38 (withHostDefaults sets one)")
+		return "", errors.New("shumei: no app version for a38 (set Device.AppVersion)")
 	}
 	in := d.Install
 	if in.AndroidID == "" || in.MediaDrmID == "" || in.PUUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() {
@@ -524,8 +521,8 @@ func javaRandomDigits(seed int64, n int) string {
 // device fingerprint, already prefixed with `"B"` to match the Login request's
 // `shumeiBoxId` field. deviceID should match the request's own deviceId so the
 // server can bind the fingerprint to the same device identity. dev carries
-// the install values, which must be filled (see Device.Install), and the clock
-// and Wi-Fi fields; zero clocks and no Wi-Fi report the host's clocks and no
+// the install values, which must be filled (see Device.Install), the app
+// version the Login claims (Device.AppVersion), and the clock and Wi-Fi fields; zero clocks and no Wi-Fi report the host's clocks and no
 // Wi-Fi, like a real Last War install.
 //
 // Note on scope: the device-data fingerprint this mints is a spoofed Android

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"crypto/rsa"
 	"errors"
 	"flag"
@@ -1538,9 +1539,10 @@ func runCrossServerTest(o crossServerTestOpts) {
 		// device-fingerprint token (the backend-assigned `smid`), instead of sending an empty
 		// shumeiBoxId. Optional: the server accepts an empty one (see docs/live-validation.mdx),
 		// so this only runs when -cs-shumei-gen is set and no token was already supplied.
-		// The fingerprint's app version (a38) names the build this Login claims.
+		// The fingerprint's app version (a38) names the build this Login claims: the session
+		// config's appVersion, or the default Android build's (auth's loginBuild).
 		dev := o.shumeiDevice
-		dev.AppVersion = o.appVersion
+		dev.AppVersion = cmp.Or(o.appVersion, gsl.AppVersion)
 		shumeiBoxId, shumeiInstall = mintShumeiBoxID(httpClient, deviceID, dev, o.shumeiInstall, o.configSavePath)
 	}
 	params := auth.CrossServerLoginParams{
