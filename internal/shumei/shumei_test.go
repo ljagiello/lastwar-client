@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -117,8 +118,13 @@ func testDevice() Device {
 	return Device{
 		Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000),
 		Install: testInstall, CollectTime: 287 * time.Millisecond,
+		AppVersion: testAppVersion,
 	}
 }
+
+// testAppVersion isn't gsl.AppVersion, so a test can tell the Device's version
+// from the client's default build.
+const testAppVersion = "1.0.399"
 
 // mustDeviceData is deviceData, failing the test on an error.
 func mustDeviceData(t *testing.T, deviceID string, d Device) string {
@@ -145,16 +151,22 @@ func TestBoxIDErrors(t *testing.T) {
 		{"malformed JSON", http.StatusOK, "not json", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			calls := 0
 			client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				calls++
 				return &http.Response{
 					StatusCode: c.status,
 					Body:       io.NopCloser(strings.NewReader(c.body)),
 					Header:     http.Header{},
 				}, nil
 			})}
-			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall})
+			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall, AppVersion: testAppVersion})
 			if err == nil {
 				t.Fatalf("BoxID = %q, nil; want an error", boxID)
+			}
+			// The reply must be what failed, not a check before the request.
+			if calls != 1 {
+				t.Errorf("BoxID made %d requests, want 1 (error: %v)", calls, err)
 			}
 			if got := errors.Is(err, ErrUnassigned); got != c.unassigned {
 				t.Errorf("errors.Is(%v, ErrUnassigned) = %v, want %v", err, got, c.unassigned)
@@ -172,9 +184,23 @@ func TestBoxIDNeedsInstall(t *testing.T) {
 		calls++
 		return nil, errors.New("unexpected request")
 	})}
-	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{})
-	if err == nil || !strings.Contains(err.Error(), "unset") || calls != 0 {
+	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{AppVersion: testAppVersion})
+	if err == nil || !strings.Contains(err.Error(), "install values are unset") || calls != 0 {
 		t.Errorf("BoxID with no install = %q, %v after %d requests; want the unset-install error and no request", boxID, err, calls)
+	}
+}
+
+// TestBoxIDNeedsAppVersion checks BoxID refuses a Device without the Login's
+// app version before it contacts the server, rather than guess a38.
+func TestBoxIDNeedsAppVersion(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("unexpected request")
+	})}
+	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall})
+	if err == nil || !strings.Contains(err.Error(), "no app version") || calls != 0 {
+		t.Errorf("BoxID with no app version = %q, %v after %d requests; want the no-app-version error and no request", boxID, err, calls)
 	}
 }
 
@@ -193,7 +219,7 @@ func TestProtectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rsa.GenerateKey = %v", err)
 	}
-	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall}.withHostDefaults())
+	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall, AppVersion: testAppVersion}.withHostDefaults())
 	data, ep, tn, err := protect(&priv.PublicKey, in)
 	if err != nil {
 		t.Fatalf("protect = %v", err)
@@ -333,10 +359,22 @@ func TestDeviceData(t *testing.T) {
 		// No smid cached yet: the cache file doesn't exist, so both are 0.
 		"a167": "0",
 		"a168": "0",
+		// versionName: the build the Login claims, not a fixed one.
+		"a38": testAppVersion,
+		"a39": "com.fun.lastwar.gp",
 	} {
 		if got := fmt.Sprint(m[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
 		}
+	}
+	// The exclusion set: SmSdkManager's notCollect plus the SDK's built-in cloud
+	// config's, as a JSON array in Java's HashSet order.
+	if want := []any{"input", "tel", "gps", "protect"}; !reflect.DeepEqual(m["a85"], want) {
+		t.Errorf("a85 = %#v, want %#v", m["a85"], want)
+	}
+	// SmSdkManager puts "input" in notCollect, so the collector never fills a63.
+	if v, ok := m["a63"]; ok {
+		t.Errorf("a63 = %v, want it absent: Last War never collects the input-method list", v)
 	}
 	for _, key := range []string{"a19", "a30", "a31"} {
 		if v, ok := m[key]; ok {
@@ -360,6 +398,16 @@ func TestDeviceData(t *testing.T) {
 	backwards.Now, backwards.BootTime = d.BootTime, d.Now
 	if _, err := deviceData(id, backwards); err == nil {
 		t.Error("deviceData with the boot time after the collection time = nil error, want an error")
+	}
+	newer := d
+	newer.AppVersion = "1.0.400"
+	if got := decodeDeviceData(t, mustDeviceData(t, id, newer))["a38"]; got != "1.0.400" {
+		t.Errorf("a38 = %v for AppVersion 1.0.400, want it to follow the Device", got)
+	}
+	noVersion := d
+	noVersion.AppVersion = ""
+	if _, err := deviceData(id, noVersion); err == nil {
+		t.Error("deviceData with no app version = nil error, want an error")
 	}
 	unset := d
 	unset.Install = Install{}

@@ -165,8 +165,8 @@ To mint a real `smid`, the next agent needs to (in this order):
 
 ## Current Go code (for the next agent)
 
-- `internal/shumei/shumei.go` — `BoxID(client, deviceID, device)`, `Device` (clock, Wi-Fi and
-  per-install fields, see `docs/shumei.mdx`), `DeviceProfile`, `ProfileResponse`,
+- `internal/shumei/shumei.go` — `BoxID(client, deviceID, device)`, `Device` (clock, Wi-Fi,
+  per-install and app-version fields, see `docs/shumei.mdx`), `DeviceProfile`, `ProfileResponse`,
   `protect()` (raw deflate → AES-256-CBC under `hex(MD5(r))` → base64 as `data`, plus
   RSA-OAEP of `r` as `ep` and of `"0"` as `tn`), embedded SPKI, constants. **Safe to
   ship**: `BoxID` returns `ErrUnassigned` on `1902`, and `main.go`'s `-cs-shumei-gen` logs a

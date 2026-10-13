@@ -283,12 +283,21 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // shared in https://github.com/ljagiello/lastwar-client/discussions/21.
 // deviceData adds the fields that change between collections: the device ID
 // (a2, a97), the clocks (a9, a40, a170, a171), the SDK session ID (a80), the
-// collection time (a133), and the Wi-Fi details (a19, a30, a31) when a Device
-// carries them. It also adds the per-install values from Device.Install: a24,
-// a84, a125, a126, a163, a167 and a168.
+// collection time (a133), the app version (a38), and the Wi-Fi details (a19,
+// a30, a31) when a Device carries them. It also adds the per-install values
+// from Device.Install: a24, a84, a125, a126, a163, a167 and a168.
 //
 // The empty entries stay here to document which slots this device leaves
-// empty. deviceData drops them, the way the SDK's serializer does.
+// empty. deviceData drops them, the way the SDK's serializer does. a63, the
+// input-method list, is left out entirely: SmSdkManager puts "input" in the
+// SDK's notCollect set, and the collector skips a63 when that set holds
+// "input" (l111l1111llIl), so Last War never sends it. a85 is that set itself,
+// which the collector reports unless the set holds "a85". The SDK merges the
+// cloud config's exclusions into it, and until a cloudconf reply has been
+// cached, that config is the SDK's built-in default (l11l111l1lll), which
+// excludes "gps" and "tel". So a fresh install most likely sends {"input",
+// "tel", "gps", "protect"}, in Java's HashSet order. A later server reply could
+// change the cloud half; this client doesn't fetch the cloud config.
 const innerTemplate = `{
   "a1": "all", "a4": "1", "a5": "default",
   "a6": "android", "a10": "12", "a7": "3.14.3",
@@ -305,9 +314,8 @@ const innerTemplate = `{
   "a47": [ "1,InvenSense", "4,AKM", "9,Bosch", "13,Bosch" ],
   "a18": { "ro.debuggable": "0", "ro.boot.hardware": "exynos990", "gsm.sim.state": "READY",
            "gsm.operator.alpha": "Netia", "sys.usb.state": "android,adb" },
-  "a39": "com.fun.lastwar.gp", "a38": "1.0.352",
+  "a39": "com.fun.lastwar.gp",
   "a136": "build1", "a96": "9dNCYkjHeFMYZMOjxgX8",
-  "a63": [ "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME" ],
   "a68": [], "a69": 120000000000, "a70": 130000000000, "a71": 128000000000, "a127": 12,
   "a99": "", "a100": "", "a101": "", "a113": 0, "a130": 3, "a116": {}, "a117": false,
   "a120": { "mr": 0, "mt": 0, "tr": 123456789, "tt": 987654321 }, "a121": 0, "a124": "",
@@ -320,7 +328,7 @@ const innerTemplate = `{
   "a72": { "status": 2, "level": 85, "scale": 100, "temp": 320, "vol": 4200 },
   "a73": 0, "a74": 0, "a75": 0, "a76": "", "a77": {}, "a78": [], "a79": "",
   "a83": "1011100",
-  "a85": [], "a86": "0111001",
+  "a85": [ "input", "tel", "gps", "protect" ], "a86": "0111001",
   "a88": "locateServiceName:android.location.ILocationManager$Stub$Proxy|phoneServiceName:com.android.internal.telephony.ITelephony$Stub$Proxy",
   "a90": 32, "a92": "1080,1920", "a93": 1,
   "a102": [], "a103": "", "a107": {}, "a108": "", "a110": "", "a114": [], "a115": [],
@@ -359,6 +367,11 @@ type Device struct {
 	// (the milliseconds from the start of l111l1111llIl's collection to the
 	// end). Zero means a random time from 150 to 600 ms.
 	CollectTime time.Duration
+
+	// AppVersion is the app's versionName, a38 (PackageInfo.versionName): the
+	// build the Login claims, so the fingerprint and the Login name the same
+	// app. It must be set: BoxID refuses an empty one rather than guess.
+	AppVersion string
 }
 
 // WiFi is the connected network, as Android's WifiInfo reports it to an app
@@ -403,6 +416,9 @@ func deviceData(deviceID string, d Device) (string, error) {
 		return "", fmt.Errorf("shumei: boot time %s is after the collection time %s",
 			d.BootTime.Format(time.RFC3339), d.Now.Format(time.RFC3339))
 	}
+	if d.AppVersion == "" {
+		return "", errors.New("shumei: no app version for a38 (set Device.AppVersion)")
+	}
 	in := d.Install
 	if in.AndroidID == "" || in.MediaDrmID == "" || in.PUUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() {
 		return "", errors.New("shumei: install values are unset (Install.Fill sets them)")
@@ -431,6 +447,7 @@ func deviceData(deviceID string, d Device) (string, error) {
 	start := d.Now.Add(-sdkStartLead).UnixMilli()
 	m["a80"] = fmt.Sprintf("%d-%s", start, javaRandomDigits(start, 5))
 	m["a133"] = d.CollectTime.Milliseconds()
+	m["a38"] = d.AppVersion
 
 	m["a24"] = in.AndroidID
 	m["a84"] = in.MediaDrmID
@@ -507,9 +524,10 @@ func javaRandomDigits(seed int64, n int) string {
 // device fingerprint, already prefixed with `"B"` to match the Login request's
 // `shumeiBoxId` field. deviceID should match the request's own deviceId so the
 // server can bind the fingerprint to the same device identity. dev carries
-// the install values, which must be filled (see Device.Install), and the clock
-// and Wi-Fi fields; zero clocks and no Wi-Fi report the host's clocks and no
-// Wi-Fi, like a real Last War install.
+// the install values, which must be filled (see Device.Install), the app
+// version the Login claims (Device.AppVersion), and the clock and Wi-Fi
+// fields; zero clocks and no Wi-Fi report the host's clocks and no Wi-Fi, like
+// a real Last War install.
 //
 // Note on scope: the device-data fingerprint this mints is a spoofed Android
 // profile for a device that does not exist. The game server does not require a
