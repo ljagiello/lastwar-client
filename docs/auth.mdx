@@ -183,7 +183,7 @@ Confirmed live on 2026-10-13: one run bound a fresh device to the real account's
 - **`accountArr` carries no `loginKey`.** The `loginKey` is the account's, at the push's top level. Each `accountArr` entry is a role: the server's `id`, `zone`, `name`, `ip`, and `port`, the role's `gameUid`, `gameUserName`, `gameUserLevel`, and `power`, and also the device `uuid` the role was created on and the server's internal database and cache hosts. `goclient` logs only the server and role fields.
 - **A quick second code request sent no email.** A second `account.login.send.verify.code` about two minutes after the first was acknowledged, but no email came. Twelve minutes later one did. A code that already completed a binding was refused with `errorCode=208193`.
 - **A failed bind leaves a guest behind.** After a bind that failed at the code, the same device's next guest `Login`, with the access token GSL `opt=new` returned for it, got `ec=28`, `ep=[E011]`. Bind again from a fresh `LASTWAR_STATE_DIR`; the run warns when the device already logged in as a guest.
-- **Two own devices keep working tokens.** After a second device was bound and logged in, the first device's config still logged in. Each `Login` still takes the role's one live connection, so they don't play at the same time.
+- **Own devices keep working tokens, alongside the real app's.** After a second device was bound and logged in, the first device's config still logged in. On 2026-10-13, after three more devices were bound to the account and own devices logged in nine times between 00:13 and 02:16 PDT, the scheduled 03:00 run with the access token captured from the real iOS app still logged in (confirmed live). Each `Login` still takes the role's one live connection, so they don't play at the same time.
 
 ### Refreshing the access token
 
@@ -207,7 +207,7 @@ Confirmed live on 2026-10-13 with the own device's eight-day-old pair:
 These need live observation; [Findings & further work](/findings) tracks them.
 
 - Does `opt=refresh` rotate `at` or `rt` once `at` is 30 days old? Eight days after issue it returned the current `at` and no `rt` (2026-10-13). The client stores whatever arrives non-empty.
-- Does a device of its own leave the real app's tokens valid? Two own devices kept working tokens side by side (2026-10-13), but the real app's token wasn't checked against them.
+- Does the real app's own refresh, every 30 days, affect a device of its own? Binding and using own devices left the real app's token working (2026-10-13), but the other direction hasn't been seen yet.
 - Does the server check `platform`, `uuid`, or `airKey` on `opt=refresh`? The client always sends the values the token was issued under.
 
 ## Post-login sequence
