@@ -505,9 +505,6 @@ func Run() {
 	slog.Info("client exiting")
 }
 
-// exitIfReauthNeeded exits with code 2 when err carries GSL code 211 or 212
-// (gsl.ErrReauthNeeded): the server no longer accepts this device's at/rt/loginKey, so retrying
-// cannot help. Code 2 is the README's "session is stale" exit code for cron wrappers.
 // accessTokenStale reports whether the real client would refresh before logging in
 // (gsl.ChooseOpt's opt=refresh row): a refresh token and a gameUid are held, and the access token
 // is missing or its at.time is 30 days old.
@@ -515,6 +512,9 @@ func accessTokenStale(gameUid, accessTok string, accessTokTime int64, refreshTok
 	return gsl.ChooseOpt(gsl.OptState{GameUid: gameUid, AccessTok: accessTok, AccessTokTime: accessTokTime, RefreshTok: refreshTok}, time.Now()).Opt == "refresh"
 }
 
+// exitIfReauthNeeded exits with code 2 when err carries GSL code 211 or 212
+// (gsl.ErrReauthNeeded): the server no longer accepts this device's at/rt/loginKey, so retrying
+// cannot help. Code 2 is the README's "session is stale" exit code for cron wrappers.
 func exitIfReauthNeeded(err error) {
 	if !errors.Is(err, gsl.ErrReauthNeeded) {
 		return
