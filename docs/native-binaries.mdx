@@ -59,12 +59,12 @@ The `.mdl` XOR scheme itself is unchanged, see [Extraction methodology](/methodo
       <td>
         <strong>None</strong>: actually <code>SHA1(packageName)</code>, a constant public string; trivially
         reproducible without touching the APK's real signature. The field that genuinely depends on the signing
-        cert is <code>psh</code> (see [Identity, login & session](/auth)), and the Go client reproduces it correctly
-        for the Android identity; 1.0.364 is signed with the same certificate, so the value is unchanged. Under iOS
-        mode it still sends the Android-derived value. The 2026-10-04 capture of the real iOS app shows its
-        <code>psh</code> doesn't match that formula, yet the server accepted the Android-derived value from the
-        iOS-mode client for weeks. <code>psh</code> is an app-integrity signature, so the iOS routine is left
-        unexamined; reproducing it is out of scope for this project.
+        cert is <code>psh</code> (see [Identity, login & session](/auth)), and the Go client reproduces the
+        Android formula correctly; 1.0.364 is signed with the same certificate, so that value is unchanged.
+        Under <code>-cs-ios</code> it sends <code>MD5("@3com.lastwar.ios" + cmdBaseTime)</code>, recovered by
+        static analysis of <code>SdkManager rg_getPsh:</code> on 2026-10-13. That formula has not been checked
+        live against a captured iOS Login. Before that change, iOS mode sent the Android-derived value, which
+        the server accepted for weeks; the 2026-10-04 capture's <code>psh</code> does not match the Android formula.
       </td>
     </tr>
     <tr>

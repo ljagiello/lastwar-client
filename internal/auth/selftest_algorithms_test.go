@@ -6,14 +6,69 @@ import (
 )
 
 func TestSecurityCodeAlgorithm(t *testing.T) {
-	// Just verify determinism + length (32 hex chars), not a known vector.
-	sc := securityCode("1700000000", "guest123")
-	if len(sc) != 32 {
-		t.Errorf("expected 32-char md5 hex, got %d: %q", len(sc), sc)
+	// MD5(cmdBaseTime + salt + gameUid), UTF-8, lowercase hex.
+	const ts = "1700000000"
+	if got, want := securityCode(ts, "guest123"), "da23365e5910b2cf3db45f43fe970809"; got != want {
+		t.Errorf("securityCode(%q, guest123) = %q, want %q", ts, got, want)
 	}
-	oneCode, coreV := oneCodeAndCoreV()
-	if len(oneCode) != 64 || len(coreV) != 64 {
-		t.Errorf("expected 64-char interleaved codes, got %d/%d", len(oneCode), len(coreV))
+	if got, want := securityCode(ts, ""), "724c23edce38133f6a71e64196441746"; got != want {
+		t.Errorf("securityCode(%q, empty uid) = %q, want %q", ts, got, want)
+	}
+}
+
+func TestPshFieldKnownVectors(t *testing.T) {
+	const ts = "1700000000"
+	if got, want := pshField(false, ts), "0028a51a469d640c9900bbbc44125e78"; got != want {
+		t.Errorf("android psh(%q) = %q, want %q", ts, got, want)
+	}
+	// MD5("@3com.lastwar.ios" + cmdBaseTime). 1791619531 is the analysis example timestamp.
+	if got, want := pshField(true, "1791619531"), "47c7fe713586a84a005f4f2eb8804042"; got != want {
+		t.Errorf("ios psh(1791619531) = %q, want %q", got, want)
+	}
+	if got, want := pshField(true, ts), "6ac8640d65bd32891818e55a83cac990"; got != want {
+		t.Errorf("ios psh(%q) = %q, want %q", ts, got, want)
+	}
+}
+
+func TestOneCodeAndCoreVKnownSeed(t *testing.T) {
+	const rand32 = "01234567890123456789012345678901"
+	oneCode, coreV := oneCodeAndCoreVFrom(rand32)
+	const wantOne = "209182b3f405169778a90051124394e5366768b960b1b26314853657a819c011"
+	const wantCore = "4b747073d2427e77a8936943ea901e369b335762b13ea820d26e7533b4ea3589"
+	if oneCode != wantOne {
+		t.Errorf("OneCode = %q, want %q", oneCode, wantOne)
+	}
+	if coreV != wantCore {
+		t.Errorf("CoreV = %q, want %q", coreV, wantCore)
+	}
+}
+
+func TestBuildLoginParamsIntegrityFields(t *testing.T) {
+	for _, iosMode := range []bool{false, true} {
+		p := BuildLoginParams(LoginParamsInput{IOSMode: iosMode, GameUid: "guest123", ServerID: "783"})
+		ts := p.GetString("cmdBaseTime")
+		if got, want := p.GetString("psh"), pshField(iosMode, ts); got != want {
+			t.Errorf("IOSMode=%v psh = %q, want %q", iosMode, got, want)
+		}
+		if got, want := p.GetString("SecurityCode"), securityCode(ts, "guest123"); got != want {
+			t.Errorf("IOSMode=%v SecurityCode = %q, want %q", iosMode, got, want)
+		}
+		oneCode := p.GetString("OneCode")
+		coreV := p.GetString("CoreV")
+		if len(oneCode) != 64 || len(coreV) != 64 {
+			t.Fatalf("IOSMode=%v OneCode/CoreV lengths = %d/%d, want 64/64", iosMode, len(oneCode), len(coreV))
+		}
+		seed := make([]byte, 32)
+		for i := range seed {
+			seed[i] = oneCode[i*2+1]
+			if seed[i] < '0' || seed[i] > '9' {
+				t.Fatalf("IOSMode=%v OneCode[%d] = %q, want a digit", iosMode, i*2+1, seed[i])
+			}
+		}
+		wantOne, wantCore := oneCodeAndCoreVFrom(string(seed))
+		if oneCode != wantOne || coreV != wantCore {
+			t.Errorf("IOSMode=%v OneCode/CoreV do not match the shared 32-digit seed", iosMode)
+		}
 	}
 }
 
