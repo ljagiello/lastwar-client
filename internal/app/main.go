@@ -98,7 +98,7 @@ func Run() {
 	runFeature := fs.String("run", "", "after login, run only this optional feature (see -list-features) once, even if the session config doesn't enable it, log its responses, and exit -- the live validation step before enabling a feature in the session config")
 	runAnyway := fs.Bool("run-anyway", false, "with -run, run the feature even when today's Alliance Duel holds it (it scores duel points only on other days)")
 	listFeatures := fs.Bool("list-features", false, "list the optional features (name, default, whether the session config enables it) and exit")
-	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: after -email verification has bound this client's own device (state under $LASTWAR_STATE_DIR, else the home directory), trade its persisted loginKey for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit. As of 2026-10-04 the game server rejects a Login with the result (ec=28/E005), see auth.OwnDeviceSession")
+	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: after -email verification has bound this client's own device (state under $LASTWAR_STATE_DIR, else the home directory), trade its persisted loginKey for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit; run that config like any other with -config")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		// flag.ContinueOnError still runs the same failf/usage path flag.ExitOnError does
 		// internally -- it only differs in returning the error here instead of calling os.Exit

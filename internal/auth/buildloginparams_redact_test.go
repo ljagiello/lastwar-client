@@ -17,21 +17,24 @@ func TestBuildLoginParamsIOSModeDoesNotLeakSecretsInAnalyticsBlob(t *testing.T) 
 	const secretAirKey = "secret-air-key-must-not-leak-ghijkl789012"
 	const secretShumeiBoxId = "secret-shumei-box-id-must-not-leak-mnopqr345678"
 
-	p := BuildLoginParams(LoginParamsInput{
-		FutureID:    1,
-		DeviceID:    secretDeviceID,
-		AirKey:      secretAirKey,
-		GameUid:     "g-123456",
-		ServerID:    "1234",
-		ShumeiBoxId: secretShumeiBoxId,
-		IOSMode:     true,
-	})
+	// Both platforms build the blob (discussion #22), so both are checked.
+	for _, iosMode := range []bool{true, false} {
+		p := BuildLoginParams(LoginParamsInput{
+			FutureID:    1,
+			DeviceID:    secretDeviceID,
+			AirKey:      secretAirKey,
+			GameUid:     "g-123456",
+			ServerID:    "1234",
+			ShumeiBoxId: secretShumeiBoxId,
+			IOSMode:     iosMode,
+		})
 
-	got := p.StringRedacted()
-
-	for _, secret := range []string{secretDeviceID, secretAirKey, secretShumeiBoxId} {
-		if strings.Contains(got, secret) {
-			t.Errorf("StringRedacted leaks a secret identity value (possibly nested inside the ta analytics blob) in cleartext (%q): %s", secret, got)
+		for _, out := range []string{p.StringRedacted(), p.GetString("ta")} {
+			for _, secret := range []string{secretDeviceID, secretAirKey, secretShumeiBoxId} {
+				if strings.Contains(out, secret) {
+					t.Errorf("IOSMode=%v: a secret identity value leaks in cleartext (possibly nested inside the ta analytics blob) (%q): %s", iosMode, secret, out)
+				}
+			}
 		}
 	}
 }

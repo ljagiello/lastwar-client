@@ -31,12 +31,10 @@ func TestBuildLoginParamsBuildIdentity(t *testing.T) {
 			if got := p.GetString("versionCode"); got != c.wantCode {
 				t.Errorf("versionCode = %q, want %q", got, c.wantCode)
 			}
-			if c.in.IOSMode {
-				ta := p.GetString("ta")
-				for _, want := range []string{`"#app_version":"` + c.wantApp + `"`, `"lw_buildcode":"` + c.wantCode + `"`} {
-					if !strings.Contains(ta, want) {
-						t.Errorf("ta missing %s: %s", want, ta)
-					}
+			ta := p.GetString("ta")
+			for _, want := range []string{`"#app_version":"` + c.wantApp + `"`, `"lw_buildcode":"` + c.wantCode + `"`} {
+				if !strings.Contains(ta, want) {
+					t.Errorf("ta missing %s: %s", want, ta)
 				}
 			}
 		})

@@ -99,7 +99,7 @@ A rejected `Login` arrives as SFS2X `ec=28` with a reason string in `ep[0]` (see
 | `ep[0]` | Client's label | Client action |
 |---|---|---|
 | `E001`, `E002` | `ACCOUNT_NOT_EXIST` | Clears auth and server info, then reloads |
-| `E005` | `ERROR_MAINTENANCE` | Maintenance dialog, no credential change. Live, the server also returned `E005` for a token presented under the wrong platform identity |
+| `E005` | `ERROR_MAINTENANCE` | Maintenance dialog, no credential change. Live, the server also returned `E005` for a token presented under the wrong platform identity, and for an Android `Login` whose `ta` carried no platform markers (see [A device of its own](#a-device-of-its-own)) |
 | `E010` | Account deletion pending | Dialog |
 | `E011` | `ERROR_LOGIN_ACCESS_TOKEN` | Clears **only `at`** and keeps `rt`. Shows a dialog and reloads; the reload runs GSL `opt=refresh`, because `at` is now empty. Confirmed live as the whole failure signature of a rotated token |
 | `E012` | Korean real-name authentication | Dialog |
@@ -144,15 +144,23 @@ A Go client that copies the real app's tokens shares them with the app, so eithe
 1. The existing `-email` and `-code-pipe` flow bound the new device to the real account. `push.account.login.new` returned the account's `gameUid` and a `loginKey`. The `LASTWAR_STATE_DIR` environment variable kept that device's state files apart from the existing ones.
 2. The experimental `-own-device-session <path>` flag traded the `loginKey` for the device's own `at`/`rt` pair through GSL `opt=login`. The response named `lastLoggedServer` 783 and a one-entry `serverList` for `APS783`, whose `ip` held three gateway hostnames on port 10783 (see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe)). `at.time` and `rt.time` both equaled the moment of issue. The flag writes these into a session config, including `refreshToken`, `accessTokenTime`, and `refreshTokenTime`, though nothing reads the refresh token yet.
 3. A base-zone `Login` with that token and `goclient`'s Android identity (1.0.364/1892, `un` = `gameUid`, `shumeiBoxId` empty) was rejected with `ec=28`, `ep=[E005]`.
+4. On 2026-10-13 the same token, nine days old, logged in once the `Login`'s `ta` analytics blob carried the Android platform markers (confirmed live). The `init` push loaded 160 buildings. Minutes later the account's email got a "New Device Alert for Last War ID" naming an Android device in the United States, with a **Sign Out of This Device** button. So the account keeps a device list, and the server counts the Go client's device as one of them.
 
-So GSL will issue a newly bound device a token pair of its own, but the game server didn't accept a session from it. A missing `shumeiBoxId` isn't the cause, since a captured iOS session logs in without one. The open candidates are the Android identity on this account or server, the shape of the Go-generated `deviceId` (32 hex characters plus `_n3d`, where the real client's has 40), and how far the server trusts a freshly bound device. Testing stopped there on purpose, see [Findings & further work](/findings#open-questions).
+The gate was `ta`. `goclient` filled `ta` only for iOS and sent `{}` on Android. C485 found from real Android captures that the server rejects an Android `Login` whose `ta` lacks the platform markers ([discussion #22](https://github.com/ljagiello/lastwar-client/discussions/22)). On 2026-10-13 one build sent the same token twice, changing only `ta`:
+
+| Android `ta` | Result |
+|---|---|
+| `{}` | `ec=28`, `ep=[E005]` |
+| `#os` = `Android`, `#bundle_id` = `com.fun.lastwar.gp`, `lw_platform` = `market_global`, the build in `#app_version`/`lw_version`/`lw_buildcode`, `lw_zone` = `APS783` | `Login` accepted, `init` arrived |
+
+So the 2026-10-04 suspects are ruled out: the Go-generated `deviceId`'s shape, trust in a freshly bound device, and the Android identity itself. The `deviceId`, account, and server were the same in both runs. `ta`'s `lw_device_id`, `lw_shumei_id`, and `lw_airKey` stayed blank, as they are for iOS. A missing `shumeiBoxId` isn't the cause either, since the accepted `Login` sent none.
 
 ### Open questions
 
 These need live observation; [Findings & further work](/findings) tracks them.
 
 - Does `opt=refresh` return a rotated `rt`? The client stores whatever arrives non-empty.
-- Can two devices hold working sessions for one account at once? GSL issued a newly bound device its own pair, but whether that leaves other devices' tokens valid is unknown, and the one own-device `Login` attempted so far was rejected.
+- Can two devices hold working sessions for one account at once? GSL issued a newly bound device its own pair, and that device's `Login` is accepted (2026-10-13). Whether that leaves other devices' tokens valid is still unknown.
 - Does the server check `platform`, `uuid`, or `airKey` on `opt=refresh`? The client always sends the values the token was issued under.
 
 ## Post-login sequence

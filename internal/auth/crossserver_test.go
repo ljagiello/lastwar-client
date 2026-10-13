@@ -235,13 +235,12 @@ func TestDoCrossServerLoginDebugDumpBodyFileIsChmodded0600(t *testing.T) {
 
 // TestDoCrossServerLoginDebugDumpRedactsCredentialsIOSMode is the round-13 regression test for
 // the LWDEBUG_DUMP_LOGIN debug dump's IOSMode path specifically: identity.go's BuildLoginParams
-// builds an iOS-only "ta" analytics blob (JSON-marshaled into a single opaque string field) that
-// used to embed the live DeviceID/AirKey/ShumeiBoxId values directly -- a leak StringRedacted()
-// couldn't see, since it only masks known-sensitive *keys*, not secrets embedded inside another
-// field's string value, and "ta" itself wasn't even in that key list. Mirrors
-// TestDoCrossServerLoginDebugDumpRedactsCredentials but with IOSMode:true and its own
-// distinguishable secret values, so this specifically exercises the ta-blob path that test
-// (IOSMode left false, so BuildLoginParams never builds a "ta" blob at all) does not.
+// builds a "ta" analytics blob (JSON-marshaled into a single opaque string field), iOS-only at the
+// time, that used to embed the live DeviceID/AirKey/ShumeiBoxId values directly -- a leak
+// StringRedacted() couldn't see, since it only masks known-sensitive *keys*, not secrets embedded
+// inside another field's string value, and "ta" itself wasn't even in that key list. Mirrors
+// TestDoCrossServerLoginDebugDumpRedactsCredentials (Android, which builds the blob too since
+// discussion #22) but with IOSMode:true and its own distinguishable secret values.
 func TestDoCrossServerLoginDebugDumpRedactsCredentialsIOSMode(t *testing.T) {
 	t.Setenv("LWDEBUG_DUMP_LOGIN", "1")
 
