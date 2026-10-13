@@ -868,6 +868,10 @@ func shumeiDeviceFromFlags(ssid, bssid, boot string) (shumei.Device, error) {
 	return d, nil
 }
 
+// registerShumeiDevice is shumei.BoxID, a variable so a test can see the device a run registers:
+// the device data is encrypted to ShuMei's key, so the request doesn't show it.
+var registerShumeiDevice = shumei.BoxID
+
 // mintShumeiBoxID registers this session's phone with ShuMei and returns its box ID and the install
 // values as the registration leaves them. It fills any install value the session config left out
 // and, given a config path, writes the install back there whenever this call changed it, so the
@@ -885,7 +889,7 @@ func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, i
 	install, filled := install.Fill(time.Now())
 	changed = changed || filled
 	dev.Install = install
-	boxID, err := shumei.BoxID(client, deviceID, dev)
+	boxID, err := registerShumeiDevice(client, deviceID, dev)
 	if err != nil {
 		slog.Warn("shumei boxId generation failed; continuing with an empty shumeiBoxId (the server accepts it)", "error", err, "deviceIdLen", len(deviceID))
 		boxID = ""
@@ -1534,7 +1538,10 @@ func runCrossServerTest(o crossServerTestOpts) {
 		// device-fingerprint token (the backend-assigned `smid`), instead of sending an empty
 		// shumeiBoxId. Optional: the server accepts an empty one (see docs/live-validation.mdx),
 		// so this only runs when -cs-shumei-gen is set and no token was already supplied.
-		shumeiBoxId, shumeiInstall = mintShumeiBoxID(httpClient, deviceID, o.shumeiDevice, o.shumeiInstall, o.configSavePath)
+		// The fingerprint's app version (a38) names the build this Login claims.
+		dev := o.shumeiDevice
+		dev.AppVersion = o.appVersion
+		shumeiBoxId, shumeiInstall = mintShumeiBoxID(httpClient, deviceID, dev, o.shumeiInstall, o.configSavePath)
 	}
 	params := auth.CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,

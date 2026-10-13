@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"lastwar-client/internal/gsl"
 	"net/http"
 	"runtime"
 	"strings"
@@ -117,6 +118,8 @@ func testDevice() Device {
 	return Device{
 		Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000),
 		Install: testInstall, CollectTime: 287 * time.Millisecond,
+		// Not gsl.AppVersion, so a test can tell the Device's version from the default.
+		AppVersion: "1.0.399",
 	}
 }
 
@@ -333,10 +336,17 @@ func TestDeviceData(t *testing.T) {
 		// No smid cached yet: the cache file doesn't exist, so both are 0.
 		"a167": "0",
 		"a168": "0",
+		// versionName: the build the Login claims, not a fixed one.
+		"a38": "1.0.399",
+		"a39": "com.fun.lastwar.gp",
 	} {
 		if got := fmt.Sprint(m[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
 		}
+	}
+	// SmSdkManager puts "input" in notCollect, so the collector never fills a63.
+	if v, ok := m["a63"]; ok {
+		t.Errorf("a63 = %v, want it absent: Last War never collects the input-method list", v)
 	}
 	for _, key := range []string{"a19", "a30", "a31"} {
 		if v, ok := m[key]; ok {
@@ -360,6 +370,11 @@ func TestDeviceData(t *testing.T) {
 	backwards.Now, backwards.BootTime = d.BootTime, d.Now
 	if _, err := deviceData(id, backwards); err == nil {
 		t.Error("deviceData with the boot time after the collection time = nil error, want an error")
+	}
+	noVersion := d
+	noVersion.AppVersion = ""
+	if _, err := deviceData(id, noVersion); err == nil {
+		t.Error("deviceData with no app version = nil error, want an error")
 	}
 	unset := d
 	unset.Install = Install{}
@@ -460,8 +475,11 @@ func TestWithHostDefaults(t *testing.T) {
 	if d.Install != (Install{}) {
 		t.Errorf("Install = %+v, want it left empty: withHostDefaults never makes up install values", d.Install)
 	}
-	if kept := testDevice().withHostDefaults(); kept.Install != testInstall || kept.CollectTime != 287*time.Millisecond {
-		t.Errorf("withHostDefaults changed a set Install or CollectTime: %+v, %v", kept.Install, kept.CollectTime)
+	if d.AppVersion != gsl.AppVersion {
+		t.Errorf("AppVersion = %q, want gsl.AppVersion %q, the build a default Login claims", d.AppVersion, gsl.AppVersion)
+	}
+	if kept := testDevice().withHostDefaults(); kept.Install != testInstall || kept.CollectTime != 287*time.Millisecond || kept.AppVersion != "1.0.399" {
+		t.Errorf("withHostDefaults changed a set Install, CollectTime or AppVersion: %+v, %v, %q", kept.Install, kept.CollectTime, kept.AppVersion)
 	}
 
 	set := Device{Now: time.UnixMilli(2), BootTime: time.UnixMilli(1), WiFi: &WiFi{SSID: "Home"}}

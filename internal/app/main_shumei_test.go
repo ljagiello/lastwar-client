@@ -333,6 +333,26 @@ func TestRunCrossServerTestSaveBackKeepsMintedInstall(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestShumeiAppVersion checks a -cs-shumei-gen run registers the build its Login
+// claims as the fingerprint's app version (a38): the session config's appVersion when it sets one,
+// otherwise empty, which shumei.BoxID fills with gsl.AppVersion, the default Login's build.
+func TestRunCrossServerTestShumeiAppVersion(t *testing.T) {
+	register := registerShumeiDevice
+	t.Cleanup(func() { registerShumeiDevice = register })
+	for _, appVersion := range []string{"1.0.399", ""} {
+		var registered []shumei.Device
+		registerShumeiDevice = func(client shumei.Client, deviceID string, dev shumei.Device) (string, error) {
+			registered = append(registered, dev)
+			return register(client, deviceID, dev)
+		}
+		path := writeTestSessionConfig(t, &SessionConfig{DeviceID: "dev-1"})
+		runSaveBack(t, crossServerTestOpts{deviceID: "dev-1", shumeiGen: true, appVersion: appVersion, configSavePath: path})
+		if len(registered) != 1 || registered[0].AppVersion != appVersion {
+			t.Errorf("appVersion %q: registered %+v, want one device with AppVersion %q", appVersion, registered, appVersion)
+		}
+	}
+}
+
 // TestRunCrossServerTestSaveBackDropsOtherDeviceInstall checks the save-back, which writes this
 // run's deviceId, doesn't keep another deviceId's install next to it.
 func TestRunCrossServerTestSaveBackDropsOtherDeviceInstall(t *testing.T) {

@@ -63,6 +63,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"lastwar-client/internal/gsl"
 	"math/big"
 	"net/http"
 	"strings"
@@ -283,12 +284,15 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // shared in https://github.com/ljagiello/lastwar-client/discussions/21.
 // deviceData adds the fields that change between collections: the device ID
 // (a2, a97), the clocks (a9, a40, a170, a171), the SDK session ID (a80), the
-// collection time (a133), and the Wi-Fi details (a19, a30, a31) when a Device
-// carries them. It also adds the per-install values from Device.Install: a24,
-// a84, a125, a126, a163, a167 and a168.
+// collection time (a133), the app version (a38), and the Wi-Fi details (a19,
+// a30, a31) when a Device carries them. It also adds the per-install values
+// from Device.Install: a24, a84, a125, a126, a163, a167 and a168.
 //
 // The empty entries stay here to document which slots this device leaves
-// empty. deviceData drops them, the way the SDK's serializer does.
+// empty. deviceData drops them, the way the SDK's serializer does. a63, the
+// input-method list, is left out entirely: SmSdkManager puts "input" in the
+// SDK's notCollect set, and the collector skips a63 when that set holds
+// "input" (l111l1111llIl), so Last War never sends it.
 const innerTemplate = `{
   "a1": "all", "a4": "1", "a5": "default",
   "a6": "android", "a10": "12", "a7": "3.14.3",
@@ -305,9 +309,8 @@ const innerTemplate = `{
   "a47": [ "1,InvenSense", "4,AKM", "9,Bosch", "13,Bosch" ],
   "a18": { "ro.debuggable": "0", "ro.boot.hardware": "exynos990", "gsm.sim.state": "READY",
            "gsm.operator.alpha": "Netia", "sys.usb.state": "android,adb" },
-  "a39": "com.fun.lastwar.gp", "a38": "1.0.352",
+  "a39": "com.fun.lastwar.gp",
   "a136": "build1", "a96": "9dNCYkjHeFMYZMOjxgX8",
-  "a63": [ "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME" ],
   "a68": [], "a69": 120000000000, "a70": 130000000000, "a71": 128000000000, "a127": 12,
   "a99": "", "a100": "", "a101": "", "a113": 0, "a130": 3, "a116": {}, "a117": false,
   "a120": { "mr": 0, "mt": 0, "tr": 123456789, "tt": 987654321 }, "a121": 0, "a124": "",
@@ -359,6 +362,12 @@ type Device struct {
 	// (the milliseconds from the start of l111l1111llIl's collection to the
 	// end). Zero means a random time from 150 to 600 ms.
 	CollectTime time.Duration
+
+	// AppVersion is the app's versionName, a38 (PackageInfo.versionName). It
+	// should be the build the Login claims, so the fingerprint and the Login
+	// name the same app. Empty means gsl.AppVersion, the build this client
+	// presents by default.
+	AppVersion string
 }
 
 // WiFi is the connected network, as Android's WifiInfo reports it to an app
@@ -370,8 +379,12 @@ type WiFi struct {
 }
 
 // withHostDefaults fills d's zero clocks and Wi-Fi IP with the host's real
-// values and a zero CollectTime with a random one. It leaves Install as given.
+// values, a zero CollectTime with a random one, and an empty AppVersion with
+// gsl.AppVersion. It leaves Install as given.
 func (d Device) withHostDefaults() Device {
+	if d.AppVersion == "" {
+		d.AppVersion = gsl.AppVersion
+	}
 	if d.Now.IsZero() {
 		d.Now = time.Now()
 	}
@@ -403,6 +416,9 @@ func deviceData(deviceID string, d Device) (string, error) {
 		return "", fmt.Errorf("shumei: boot time %s is after the collection time %s",
 			d.BootTime.Format(time.RFC3339), d.Now.Format(time.RFC3339))
 	}
+	if d.AppVersion == "" {
+		return "", errors.New("shumei: no app version for a38 (withHostDefaults sets one)")
+	}
 	in := d.Install
 	if in.AndroidID == "" || in.MediaDrmID == "" || in.PUUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() {
 		return "", errors.New("shumei: install values are unset (Install.Fill sets them)")
@@ -431,6 +447,7 @@ func deviceData(deviceID string, d Device) (string, error) {
 	start := d.Now.Add(-sdkStartLead).UnixMilli()
 	m["a80"] = fmt.Sprintf("%d-%s", start, javaRandomDigits(start, 5))
 	m["a133"] = d.CollectTime.Milliseconds()
+	m["a38"] = d.AppVersion
 
 	m["a24"] = in.AndroidID
 	m["a84"] = in.MediaDrmID

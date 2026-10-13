@@ -252,6 +252,27 @@ shapes returned `1100` and an 88-char `smid` on 2026-10-12 (confirmed live).
 `a133` changes too: it's how long the collection took, in milliseconds
 (`l111l1111llIl`). `BoxID` picks a random 150 to 600 ms on each call.
 
+### The app version, and a field Last War skips
+
+`a38` is the app's `versionName` (`PackageInfo.versionName`, read in
+`l111l11111lIl`). `BoxID` sends the build the `Login` claims: the session
+config's `appVersion` when it sets one, otherwise `gsl.AppVersion`. The template
+used to send a fixed `1.0.352`, which contradicted the `Login`.
+
+`a63`, the input-method list (`InputMethodManager.getInputMethodList()`), is in
+the SDK's schema, but Last War never collects it. `SmSdkManager.callCreate()`
+sets the SDK's `notCollect` to `{"input", "protect"}`, and the collector skips
+`a63` whenever that set holds `"input"` or `"a63"` (`l111l1111llIl`). In the
+collector's Java, `"input"` gates only `a63`, and nothing checks `"protect"`.
+The template used to send `a63`. C485 reached the same reading in
+[discussion #21](https://github.com/ljagiello/lastwar-client/discussions/21).
+
+The SDK adds the cloud config's exclusions to that set. The `/v3/cloudconf`
+reply parser (`l11l111l1lll`) turns every `sensitive.<name>` key whose value
+isn't `true` into an exclusion, so the server can switch off a whole category
+or a single `aNN` field. `goclient` doesn't fetch the cloud config, and no live
+reply has been decrypted, so which keys Last War's server sends is unknown.
+
 ### Values one install keeps
 
 Some fields stay the same for the life of an app install. `goclient` keeps them
