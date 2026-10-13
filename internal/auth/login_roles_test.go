@@ -207,3 +207,17 @@ func TestLoginRejectsABadServerBeforeAnyRequest(t *testing.T) {
 		t.Errorf("a device identity was created before the -server check (stat err %v)", err)
 	}
 }
+
+// TestLoginIgnoresServerWithoutEmail: without -email, -server is ignored (Run says so), so a
+// malformed one doesn't fail the run; Login goes on to its first request, here a GSL host that
+// doesn't resolve.
+func TestLoginIgnoresServerWithoutEmail(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	orig := gsl.CheckVersionHosts
+	gsl.CheckVersionHosts = []string{"http://gsl.invalid"}
+	defer func() { gsl.CheckVersionHosts = orig }()
+	_, err := Login(LoginOptions{Server: "APS"})
+	if err == nil || strings.Contains(err.Error(), "-server") {
+		t.Errorf("err = %v, want a network error, not a -server one", err)
+	}
+}

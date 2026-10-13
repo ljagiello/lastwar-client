@@ -113,15 +113,15 @@ func TestPickRole(t *testing.T) {
 	}
 }
 
-func TestValidServer(t *testing.T) {
+func TestValidServerRejectsNonNumbers(t *testing.T) {
 	for _, ok := range []string{"783", "APS783", "aps8092", " 72 "} {
-		if err := ValidServer(ok); err != nil {
-			t.Errorf("ValidServer(%q) = %v, want nil", ok, err)
+		if err := validServer(ok); err != nil {
+			t.Errorf("validServer(%q) = %v, want nil", ok, err)
 		}
 	}
 	for _, bad := range []string{"APS", "", "  ", "State#783", "78x", "APS-1"} {
-		if err := ValidServer(bad); err == nil {
-			t.Errorf("ValidServer(%q) = nil, want an error", bad)
+		if err := validServer(bad); err == nil {
+			t.Errorf("validServer(%q) = nil, want an error", bad)
 		}
 	}
 }

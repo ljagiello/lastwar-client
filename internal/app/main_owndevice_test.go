@@ -28,9 +28,10 @@ func ownDeviceGSLReply() gsl.LoginServerListRespon {
 }
 
 // emailBindingGameServer walks Login's email path and pushes an account with two roles: uid-1 on
-// server 1 (the top-level pick) and uid-783 on 783, whose entry carries its own loginKey. With
-// pushError the push reports an errorCode instead, as for a refused code.
-func emailBindingGameServer(pushError bool) func(*session.GameConn) {
+// server 1 (the top-level pick) and uid-783 on 783, whose entry carries its own loginKey, then
+// push.init.build for a run that goes on into the game. mode "error" pushes an errorCode instead,
+// as for a refused code; "kick" pushes push.user.off, as when the account logs in elsewhere.
+func emailBindingGameServer(mode string) func(*session.GameConn) {
 	return func(server *session.GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
 			return
@@ -52,9 +53,13 @@ func emailBindingGameServer(pushError bool) func(*session.GameConn) {
 			}
 		}
 		push := sfs.NewSFSObject()
-		if pushError {
+		switch mode {
+		case "error":
 			push.PutInt("errorCode", 208193)
 			_ = server.SendExtension("push.account.login.new", push)
+			return
+		case "kick":
+			_ = server.SendExtension("push.user.off", sfs.NewSFSObject())
 			return
 		}
 		arr := sfs.NewSFSArray()
@@ -74,7 +79,10 @@ func emailBindingGameServer(pushError bool) func(*session.GameConn) {
 		push.PutUtfString("loginKey", "lk-account")
 		push.PutUtfString("gameUid", "uid-1")
 		push.PutSFSArray("accountArr", arr)
-		_ = server.SendExtension("push.account.login.new", push)
+		if err := server.SendExtension("push.account.login.new", push); err != nil {
+			return
+		}
+		_ = server.SendExtension("push.init.build", sfs.NewSFSObject())
 	}
 }
 
@@ -87,7 +95,7 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 		t.Setenv("HOME", home)
 		var replies []gsl.LoginServerListRespon
 		if os.Getenv("LASTWAR_TEST_BOUND") == "" {
-			addr := session.StartFakeGameServer(t, emailBindingGameServer(os.Getenv("LASTWAR_TEST_PUSH_ERROR") != ""))
+			addr := session.StartFakeGameServer(t, emailBindingGameServer(os.Getenv("LASTWAR_TEST_PUSH_MODE")))
 			host, port := testutil.SplitHostPortInt(t, addr)
 			// Login's opt=new/opt=fix: a guest token and the fake game server.
 			replies = append(replies, gsl.LoginServerListRespon{Code: "0",
@@ -121,9 +129,9 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 	type tc struct {
 		name, args   string
 		seed         map[string]string
-		plain        bool // no -own-device-session: the plain -email login
-		pushError    bool
-		wantCode     int // -1: any (the plain path goes on into the game loop)
+		plain        bool   // no -own-device-session: the plain -email login
+		pushMode     string // emailBindingGameServer's mode
+		wantCode     int
 		wantLog      []string
 		noLog        []string
 		wantGameUid  string // the persisted gameUid, and the config's when one is written
@@ -159,10 +167,17 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 		{name: "no role on -server", args: "-email player@example.com -server 999", wantCode: 1,
 			wantLog: []string{"no role on server 999", "fresh LASTWAR_STATE_DIR"},
 			noLog:   []string{"own-device bootstrap failed", "wrote own-device session config"}},
-		{name: "code refused", args: "-email player@example.com -server 783", pushError: true, wantCode: 2,
+		{name: "code refused", args: "-email player@example.com -server 783", pushMode: "error", wantCode: 2,
 			wantLog: []string{"LOGIN-WITH-CODE FAILED"},
 			noLog:   []string{"own-device bootstrap failed", "wrote own-device session config"}},
-		{name: "plain -email -server", args: "-email player@example.com -server 783", plain: true, wantCode: -1,
+		{name: "kicked while binding", args: "-email player@example.com -server 783", pushMode: "kick", wantCode: exitCodeSessionEnded,
+			wantLog: []string{"the server ended this session"},
+			noLog:   []string{"own-device bootstrap failed", "wrote own-device session config"}},
+		{name: "device identity unreadable", args: "-email player@example.com",
+			seed: map[string]string{".lastwar_goclient_device_id": "<dir>"}, wantCode: 1,
+			wantLog: []string{"load device identity failed"},
+			noLog:   []string{"step 6: request email verify code", "wrote own-device session config"}},
+		{name: "plain -email -server", args: "-email player@example.com -server 783", plain: true,
 			wantLog:     []string{"binding the role on the requested server"},
 			wantGameUid: "uid-783", wantLoginKey: "lk-role-783"},
 	} {
@@ -170,6 +185,13 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 			home := t.TempDir()
 			env := []string{"LASTWAR_TEST_HOME=" + home, "LASTWAR_TEST_ARGS=" + c.args}
 			for name, v := range c.seed {
+				if v == "<dir>" {
+					// A directory where the state file should be: the read fails.
+					if err := os.Mkdir(filepath.Join(home, name), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					continue
+				}
 				if err := os.WriteFile(filepath.Join(home, name), []byte(v), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -180,11 +202,11 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 			if c.plain {
 				env = append(env, "LASTWAR_TEST_PLAIN=1")
 			}
-			if c.pushError {
-				env = append(env, "LASTWAR_TEST_PUSH_ERROR=1")
+			if c.pushMode != "" {
+				env = append(env, "LASTWAR_TEST_PUSH_MODE="+c.pushMode)
 			}
 			code, stderr := runRefreshHelper(t, "TestMainOwnDeviceSessionWithEmail", env...)
-			if c.wantCode >= 0 && code != c.wantCode {
+			if code != c.wantCode {
 				t.Fatalf("exit code = %d, want %d; stderr=%s", code, c.wantCode, stderr)
 			}
 			if c.wantCode == 0 && !strings.Contains(stderr, "run returned") {
@@ -229,10 +251,15 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 					t.Errorf("session config: deviceId=%q iosMode=%v, want this device (%q), Android", cfg.DeviceID, cfg.IOSMode, c.wantDeviceID)
 				}
 			}
-			for _, secret := range []string{"lk-account", "lk-role-783", "at-own", "rt-own", "123456"} {
+			for _, secret := range []string{"lk-account", "lk-role-783", "at-own", "rt-own"} {
 				if strings.Contains(stderr, secret) {
 					t.Errorf("log contains %q; stderr=%s", secret, stderr)
 				}
+			}
+			// The code is six digits, which a timestamp's fraction can contain, so only a logged
+			// value counts.
+			if strings.Contains(stderr, `"123456"`) || strings.Contains(stderr, ":123456") {
+				t.Errorf("log contains the verification code; stderr=%s", stderr)
 			}
 		})
 	}
@@ -243,6 +270,7 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 func TestMainCrossServerIgnoresEmailAndServer(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
+		gsl.CheckVersionHosts = []string{"http://gsl.invalid"} // never the real GSL
 		os.Args = []string{"lastwar-client", "-no-config", "-cs-at", "at-x", "-email", "player@example.com", "-server", "783"}
 		Run()
 		return

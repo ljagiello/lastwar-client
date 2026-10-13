@@ -544,7 +544,7 @@ func bindOwnDevice(email, codePipe, server string, handshake bool) {
 	}
 	if ident.Username != "" || ident.GameUid != "" {
 		// Live on 2026-10-13, a device's second guest Login (after a bind that failed at the code)
-		// got E011: GSL opt=new returned the guest's gameUid, and the Login carrying it was refused.
+		// got E011: the Login with the access token GSL opt=new returned for it was refused.
 		slog.Warn("this device already logged in as a guest; a second guest Login has been rejected with E011. If this run fails at the Login, bind from a fresh LASTWAR_STATE_DIR")
 	}
 	result, err := auth.Login(auth.LoginOptions{Email: email, CodePipe: codePipe, Handshake: handshake, Server: server})

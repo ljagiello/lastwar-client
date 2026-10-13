@@ -93,8 +93,8 @@ func serverNumber(server string) string {
 	return s
 }
 
-// ValidServer checks a -server value ("783" or "APS783") before an email code is spent on it.
-func ValidServer(server string) error {
+// validServer checks a -server value ("783" or "APS783") before an email code is spent on it.
+func validServer(server string) error {
 	n := serverNumber(server)
 	if n == "" {
 		return fmt.Errorf("-server %q names no server number", server)

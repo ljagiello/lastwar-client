@@ -253,9 +253,10 @@ const maxServerListLogEntries = 500
 // lets GSL resolve the account directly -- the email verification-code
 // flow. Returns a live, authenticated connection with heartbeat running.
 func Login(opts LoginOptions) (*LoginResult, error) {
-	// A bad -server is caught here, before the email code it would waste.
-	if opts.Server != "" {
-		if err := ValidServer(opts.Server); err != nil {
+	// A bad -server is caught here, before the email code it would waste. Without an email it is
+	// ignored (Run and the loginKey fast path say so), so it isn't checked.
+	if opts.Server != "" && opts.Email != "" {
+		if err := validServer(opts.Server); err != nil {
 			return nil, fmt.Errorf("login: %w", err)
 		}
 	}
