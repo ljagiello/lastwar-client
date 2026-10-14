@@ -61,10 +61,12 @@ The `.mdl` XOR scheme itself is unchanged, see [Extraction methodology](/methodo
         reproducible without touching the APK's real signature. The field that genuinely depends on the signing
         cert is <code>psh</code> (see [Identity, login & session](/auth)), and the Go client reproduces the
         Android formula correctly; 1.0.364 is signed with the same certificate, so that value is unchanged.
-        Under <code>-cs-ios</code> it sends <code>MD5("@3com.lastwar.ios" + cmdBaseTime)</code>, recovered by
-        static analysis of <code>SdkManager rg_getPsh:</code> on 2026-10-13. That formula has not been checked
-        live against a captured iOS Login. Before that change, iOS mode sent the Android-derived value, which
-        the server accepted for weeks; the 2026-10-04 capture's <code>psh</code> does not match the Android formula.
+        Under <code>-cs-ios</code> it sends <code>MD5(cmdBaseTime + "7" + "com.lastwar.ios")</code>. The
+        <code>"7"</code> is the marker <code>rg_getPsh:</code> uses when <code>embedded.mobileprovision</code>
+        is absent (Mac Catalyst, and this client); a provisioned iOS device uses <code>"3"</code>. The
+        <code>"7"</code> formula matches a captured Mac Catalyst Login with <code>cmdBaseTime</code>
+        <code>1791877000</code>. Before that change, iOS mode sent the Android-derived value, which the
+        server accepted for weeks.
       </td>
     </tr>
     <tr>

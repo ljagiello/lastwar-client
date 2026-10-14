@@ -21,12 +21,17 @@ func TestPshFieldKnownVectors(t *testing.T) {
 	if got, want := pshField(false, ts), "0028a51a469d640c9900bbbc44125e78"; got != want {
 		t.Errorf("android psh(%q) = %q, want %q", ts, got, want)
 	}
-	// MD5("@3com.lastwar.ios" + cmdBaseTime). 1791619531 is the analysis example timestamp.
-	if got, want := pshField(true, "1791619531"), "47c7fe713586a84a005f4f2eb8804042"; got != want {
-		t.Errorf("ios psh(1791619531) = %q, want %q", got, want)
+	// MD5(cmdBaseTime + marker + "com.lastwar.ios"). "7" is the no-mobileprovision
+	// marker and matches a captured Mac Catalyst Login. "3" is the provisioned-device marker.
+	const iosTS = "1791877000"
+	if got, want := pshField(true, iosTS), "83413bc26feb1f628a41c04579dd708f"; got != want {
+		t.Errorf("ios psh(%q) = %q, want %q", iosTS, got, want)
 	}
-	if got, want := pshField(true, ts), "6ac8640d65bd32891818e55a83cac990"; got != want {
-		t.Errorf("ios psh(%q) = %q, want %q", ts, got, want)
+	if got, want := iosPsh(iosTS, "7"), "83413bc26feb1f628a41c04579dd708f"; got != want {
+		t.Errorf("ios psh marker 7 = %q, want %q", got, want)
+	}
+	if got, want := iosPsh(iosTS, "3"), "f26259a52222bea5becafd52c624011e"; got != want {
+		t.Errorf("ios psh marker 3 = %q, want %q", got, want)
 	}
 }
 

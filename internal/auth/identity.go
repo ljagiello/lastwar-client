@@ -54,18 +54,27 @@ func sha1Hex(s string) string {
 // pshField is the login integrity hash. -cs-ios selects the iOS formula; otherwise Android.
 //
 // Android (SdkManager.LW_PSH): MD5(cmdBaseTime + hex(signing-cert DER)).
-// iOS (SdkManager rg_getPsh:, static analysis 2026-10-13): MD5("@3" + bundle id + cmdBaseTime).
-// The leading "3" is the native v1 marker. The iOS concatenation is prefix then timestamp,
-// the reverse of the Android order. The iOS formula is not live-confirmed.
+// iOS (rg_getPsh:): MD5(cmdBaseTime + marker + bundle id). The marker is "7" when
+// embedded.mobileprovision is absent (Mac Catalyst, and this client) and "3" when
+// that file is present. "7" matches a captured Mac Catalyst Login
+// (cmdBaseTime 1791877000 -> 83413bc26feb1f628a41c04579dd708f).
 func pshField(iosMode bool, cmdBaseTime string) string {
 	if iosMode {
-		return md5Hex("@3" + iosPackageName + cmdBaseTime)
+		return iosPsh(cmdBaseTime, iosPshMarker)
 	}
 	return md5Hex(cmdBaseTime + apkCertHex)
 }
 
+// iosPshMarker is the character between cmdBaseTime and the bundle id. This client has no
+// embedded.mobileprovision, so it uses the Mac Catalyst marker.
+const iosPshMarker = "7"
+
+func iosPsh(cmdBaseTime, marker string) string {
+	return md5Hex(cmdBaseTime + marker + iosPackageName)
+}
+
 // securityCode reproduces the login field of the same name:
-// MD5(cmdBaseTime + <hardcoded salt> + gameUid).
+// MD5(cmdBaseTime + <32-hex-char salt> + gameUid).
 func securityCode(cmdBaseTime, gameUid string) string {
 	const salt = "4d1c383ccbedf3d98320d6ea06d8dedc"
 	return md5Hex(cmdBaseTime + salt + gameUid)
