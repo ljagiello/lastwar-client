@@ -73,7 +73,7 @@ type CrossServerLoginParams struct {
 	IOSMode     bool   // send an iOS-flavored identity instead of Android; see LoginParamsInput.IOSMode
 	AppVersion  string // build the token was issued under, if known; see LoginParamsInput.AppVersion
 	VersionCode string
-	ResVersion  string // see LoginParamsInput.ResVersion and ResVersionFor; "" sends "0"
+	ResVersion  string // see LoginParamsInput.ResVersion and ResVersionFrom; "" sends "0"
 
 	// DialGame, if non-nil, replaces the package-level dialGame (ultimately session.DialGame) used
 	// to open the game socket -- and is used for every redial in the serverInfo-redirect loop, not

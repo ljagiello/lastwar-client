@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"lastwar-client/internal/gsl"
+	"lastwar-client/internal/testutil"
 )
 
 func gslReply(t *testing.T, body string) *gsl.LoginServerListRespon {
@@ -74,5 +75,45 @@ func TestOwnDeviceSessionFromRefusesAnotherRole(t *testing.T) {
 	}
 	if s.GameUid != "uid-72" || s.Zone != "APS72" {
 		t.Errorf("gameUid/zone = %q/%q, want uid-72/APS72", s.GameUid, s.Zone)
+	}
+}
+
+// TestBootstrapOwnDeviceUsesTheFlagIdentity: -cs-ios trades the loginKey as iOS and records that
+// build; without it the trade stays Android.
+func TestBootstrapOwnDeviceUsesTheFlagIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ident, err := LoadOrCreateDeviceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ident.SaveLoginKey("lk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ident.SaveGameUid("uid-1"); err != nil {
+		t.Fatal(err)
+	}
+	reply := gsl.LoginServerListRespon{
+		Code:       "0",
+		ServerList: []gsl.LoginServerInfo{{ID: "1", IP: "h.example", Port: "10001", Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "at-1", Time: "10"},
+		Rt:         &gsl.LoginToken{Token: "rt-1", Time: "11"},
+	}
+	for _, ios := range []bool{false, true} {
+		client, forms := testutil.UseDecryptingGSL(t, reply)
+		s, err := BootstrapOwnDevice(client, ios)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantPlatform, wantApp, wantCode := gsl.Platform, gsl.AppVersion, gsl.VersionCode
+		if ios {
+			wantPlatform, wantApp, wantCode = "iOS", "1.0.344", "786"
+		}
+		got := forms()
+		if len(got) != 1 || got[0].Get("platform") != wantPlatform || got[0].Get("opt") != "login" {
+			t.Errorf("ios=%v GSL platform/opt = %q/%q, want %s/login", ios, got[0].Get("platform"), got[0].Get("opt"), wantPlatform)
+		}
+		if s.IOSMode != ios || s.AppVersion != wantApp || s.VersionCode != wantCode {
+			t.Errorf("ios=%v session identity = %v %s/%s, want %v %s/%s", ios, s.IOSMode, s.AppVersion, s.VersionCode, ios, wantApp, wantCode)
+		}
 	}
 }

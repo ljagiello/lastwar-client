@@ -105,15 +105,12 @@ func TestRunCrossServerTestIOSResVersionAndCheckDeviceChange(t *testing.T) {
 	if loginResVersion != "2159.1505_821F_39516.23570" {
 		t.Errorf("Login p.resVersion = %q, want the iOS-derived 2159.1505_821F_39516.23570", loginResVersion)
 	}
-	if len(cvQueries) != 2 {
-		t.Fatalf("check-version calls = %d, want 2 (Android for the gate host, iOS for resVersion)", len(cvQueries))
+	if len(cvQueries) != 1 {
+		t.Fatalf("check-version calls = %d, want 1 (the iOS build, not an Android call followed by an iOS one)", len(cvQueries))
 	}
-	if q := cvQueries[0]; q.Get("platform") != "Android" || q.Get("server") != "APS783" || q.Get("table_env") != "table_online" {
-		t.Errorf("first check-version = %v, want Android, server=APS783, table_env=table_online", q)
-	}
-	if q := cvQueries[1]; q.Get("platform") != "iOS" || q.Get("packageName") != "com.lastwar.ios" || q.Get("appVersion") != "1.0.344" ||
-		q.Get("buildId") != "786" || q.Get("server") != "APS783" || q.Get("uid") != "" || q.Get("deviceId") != "" {
-		t.Errorf("second check-version = %v, want the anonymous iOS 1.0.344/786 query", q)
+	if q := cvQueries[0]; q.Get("platform") != "iOS" || q.Get("packageName") != "com.lastwar.ios" || q.Get("appVersion") != "1.0.344" ||
+		q.Get("buildId") != "786" || q.Get("server") != "APS783" || q.Get("table_env") != "table_online" || q.Get("uid") != "" || q.Get("deviceId") != "" {
+		t.Errorf("check-version = %v, want the anonymous iOS 1.0.344/786 query", q)
 	}
 	if gslCalls != 0 {
 		t.Errorf("getserverlist.php calls = %d, want 0 without -cs-rt", gslCalls)

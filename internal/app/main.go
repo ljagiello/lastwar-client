@@ -88,7 +88,7 @@ func Run() {
 	csShumeiBoot := fs.String("cs-shumei-boot", "", "with -cs-shumei-gen, the device boot time the ShuMei fingerprint reports (a40), RFC 3339, e.g. 2026-10-01T12:20:43Z; its uptime fields count from it. Default: the host's real boot time")
 	csRt := fs.String("cs-rt", "", "if set, first does a GSL opt=refresh call with this refresh token to obtain a fresh access token before reconnecting -- IF the refresh response includes a non-empty server list, it REPLACES any explicitly-passed -cs-ip/-cs-port/-cs-zone/-cs-gameuid, and IF it includes a fresh access token, that REPLACES any explicitly-passed -cs-at; either can come back empty, in which case the corresponding -cs-* value passed here (or loaded from a session config) is used unchanged instead -- a warning is logged when that leaves a possibly-stale -cs-at in place with no refresh. If BOTH come back empty (no fresh access token AND no server list), that is NOT a graceful fallback: it is treated as a likely-rejected/expired refresh token and exits with code 2")
 	csAt := fs.String("cs-at", "", "raw access token to send directly as p.at (e.g. one captured live from a real client) -- cheap anonymous check-version calls are still made (to derive the Login resVersion), but no GSL call happens unless -cs-rt is also set; a mid-login serverInfo redirect reuses the same token, as the real client does")
-	csIOS := fs.Bool("cs-ios", false, "send an iOS-flavored Login (packageName=com.lastwar.ios, matching packageSign/platform/pf/psh) instead of Android -- an 'at' token is bound to the platform/package it was issued for")
+	csIOS := fs.Bool("cs-ios", false, "use the iOS client identity for every server call this run makes (check-version, GSL platform, Login packageName/packageSign/platform/pf/psh, and account.login.new) instead of Android. Applies to a reconnect and, on its own, to the guest/email login and -own-device-session. An access token is bound to the platform it was issued for")
 	handshake := fs.Bool("handshake", false, "experimental: send the vanilla SFS2X pre-Login Handshake (action=0) before Login -- see conn.go:DoHandshake")
 	configPath := fs.String("config", "", "path to a session config JSON (see config.example.json); if unset, auto-loads "+defaultSessionConfigPath()+" when present. Explicit -cs-* flags override individual config fields.")
 	noConfig := fs.Bool("no-config", false, "skip loading any session config, even the default file -- for a plain guest/email-flow run when a session config is also present")
@@ -181,9 +181,9 @@ func Run() {
 	}
 	if *ownDeviceSession != "" {
 		if *email != "" {
-			bindOwnDevice(*email, *codePipe, *server, *handshake)
+			bindOwnDevice(*email, *codePipe, *server, *handshake, *csIOS)
 		}
-		if err := writeOwnDeviceSession(gsl.DefaultHTTPClient(), *ownDeviceSession); err != nil {
+		if err := writeOwnDeviceSession(gsl.DefaultHTTPClient(), *ownDeviceSession, *csIOS); err != nil {
 			slog.Error("own-device bootstrap failed", "error", err)
 			exitIfReauthNeeded(err)
 			os.Exit(1)
@@ -423,7 +423,10 @@ func Run() {
 		return
 	}
 
-	result, err := auth.Login(auth.LoginOptions{Email: *email, CodePipe: *codePipe, Handshake: *handshake, Server: *server})
+	result, err := auth.Login(auth.LoginOptions{
+		Email: *email, CodePipe: *codePipe, Handshake: *handshake, Server: *server,
+		IOSMode: *csIOS, AppVersion: cfgAppVersion, VersionCode: cfgVersionCode,
+	})
 	if err != nil {
 		exitLoginFailed(err)
 	}
@@ -533,7 +536,7 @@ func exitLoginFailed(err error) {
 // device to the account (and, with server, to that role) and writes its session config. A device
 // that already holds a loginKey is bound already: Login would take the opt=login fast path and
 // skip the email, so it is left alone and the caller trades that loginKey instead. Exits on failure.
-func bindOwnDevice(email, codePipe, server string, handshake bool) {
+func bindOwnDevice(email, codePipe, server string, handshake, iosMode bool) {
 	ident, err := auth.LoadOrCreateDeviceIdentity()
 	if err != nil {
 		slog.Error("load device identity failed", "error", err)
@@ -548,7 +551,7 @@ func bindOwnDevice(email, codePipe, server string, handshake bool) {
 		// got E011: the Login with the access token GSL opt=new returned for it was refused.
 		slog.Warn("this device already logged in as a guest; a second guest Login has been rejected with E011. If this run fails at the Login, bind from a fresh LASTWAR_STATE_DIR")
 	}
-	result, err := auth.Login(auth.LoginOptions{Email: email, CodePipe: codePipe, Handshake: handshake, Server: server})
+	result, err := auth.Login(auth.LoginOptions{Email: email, CodePipe: codePipe, Handshake: handshake, Server: server, IOSMode: iosMode})
 	if err != nil {
 		exitLoginFailed(err)
 	}
@@ -818,11 +821,12 @@ func detectSwallowedFlagValue(name, value string, registeredFlagNames map[string
 // crossServerFlagNames are the -cs-* flags whose only effect is on the cross-server reconnect path
 // dispatched from -cs-ip/-cs-rt/-cs-at (see runCrossServerTest) -- -cs-ip and -cs-rt themselves are
 // excluded since those two are what GATE that path, not flags merely consumed once it's taken.
-// -cs-at gates it too but stays listed: given an empty value, it gates nothing and is ignored. Kept
-// as a package-level map (rather than inlined in ignoredCrossServerFlags) so a test can cross-check
-// it against the FlagSet's actual -cs-* declarations and catch the two ways it can drift: a new
-// -cs-* flag added to the FlagSet but forgotten here, or a stale name left here after a flag is
-// renamed/removed.
+// -cs-at gates it too but stays listed: given an empty value, it gates nothing and is ignored.
+// -cs-ios is excluded too: the guest/email login and -own-device-session read it, so it is not
+// discarded when this run is not a reconnect. Kept as a package-level map (rather than inlined in
+// ignoredCrossServerFlags) so a test can cross-check it against the FlagSet's actual -cs-*
+// declarations and catch the two ways it can drift: a new -cs-* flag added to the FlagSet but
+// forgotten here, or a stale name left here after a flag is renamed/removed.
 var crossServerFlagNames = map[string]bool{
 	"cs-at":           true,
 	"cs-port":         true,
@@ -834,7 +838,6 @@ var crossServerFlagNames = map[string]bool{
 	"cs-shumei-ssid":  true,
 	"cs-shumei-bssid": true,
 	"cs-shumei-boot":  true,
-	"cs-ios":          true,
 }
 
 // shumeiDeviceFromFlags builds the shumei.Device that -cs-shumei-ssid, -cs-shumei-bssid and
@@ -1211,7 +1214,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	refreshed := false
 
 	// Check-version, as the real client runs on every launch, with the session's zone as `server`.
-	// Its reply feeds the Login resVersion (auth.ResVersionFor, below) and, for -cs-rt, the gate host
+	// Its reply feeds the Login resVersion (auth.ResVersionFrom, below) and, for -cs-rt, the gate host
 	// and RSA pubkey of the GSL opt=refresh call. -cs-rt NEEDS it, so a failure stays fatal there;
 	// otherwise the reconnect only loses the derived resVersion ("0" is sent, as before) and goes on.
 	httpClient := o.httpClient
@@ -1221,7 +1224,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	var cv *gsl.CheckVersionResponse
 	var gslRSAPub *rsa.PublicKey
 	var gslGateHost string
-	if reply, gateHost, err := gsl.CheckVersion(httpClient, zone); err != nil {
+	if reply, gateHost, err := auth.CheckVersionFor(httpClient, o.iosMode, o.appVersion, o.versionCode, zone); err != nil {
 		if o.rt != "" {
 			slog.Error("check-version failed", "error", err)
 			os.Exit(1)
@@ -1241,8 +1244,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 
 	if o.rt != "" {
-		slog.Info("GSL getserverlist (opt=refresh)")
-		lsr, err := gsl.GetServerList(httpClient, gslGateHost, gslRSAPub, deviceID, gsl.GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
+		platform := auth.PlatformName(o.iosMode)
+		slog.Info("GSL getserverlist (opt=refresh)", "platform", platform)
+		lsr, err := gsl.GetServerListAs(httpClient, gslGateHost, gslRSAPub, platform, deviceID, gsl.GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
 		if err != nil {
 			// Unlike the ErrAuthRejected-gated os.Exit(2) sites elsewhere in this file (the
 			// plain-login failure in main(), and the SFS2X cross-server-login failure further
@@ -1523,7 +1527,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		os.Exit(1)
 	}
 
-	resVersion := auth.ResVersionFor(httpClient, cv, o.iosMode, o.appVersion, o.versionCode, zone)
+	resVersion := auth.ResVersionFrom(cv, o.iosMode, o.appVersion, o.versionCode)
 
 	shumeiBoxId, shumeiInstall := o.shumeiBoxId, o.shumeiInstall
 	if !o.shumeiGen && (o.shumeiDevice.WiFi != nil || !o.shumeiDevice.BootTime.IsZero()) {

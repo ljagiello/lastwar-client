@@ -117,7 +117,7 @@ The real client's recovery from `E011` needs the refresh token: clear `at`, run 
 
 ### Following a `serverInfo` redirect
 
-When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live) and now does the same as the real client: it redials with the same `at` and adopts `serverInfo.zone` and `serverInfo.uid`. Earlier versions called GSL `opt=fix` before redialing. Under the iOS identity that call could only swap a working token for an Android-bound one, because that GSL request claimed `platform=Android`. The `-cs-rt` refresh and the guest login still send `platform=Android`; only the game-server lookup below sends `platform=iOS` for an iOS session.
+When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live) and now does the same as the real client: it redials with the same `at` and adopts `serverInfo.zone` and `serverInfo.uid`. Earlier versions called GSL `opt=fix` before redialing. Under the iOS identity that call could only swap a working token for an Android-bound one, because that GSL request claimed `platform=Android`. With `-cs-ios`, check-version, GSL (`opt=refresh`, the guest/email `getserverlist`, and the game-server lookup), and the `Login` all claim iOS. Without it they stay Android.
 
 ### Looking up the game server
 
@@ -173,6 +173,8 @@ LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_se
 ```
 
 The run logs in as a guest, verifies the email, and logs the account's roles: each role's server, zone, `gameUid`, level, and power. Then it trades the account's `loginKey` for the device's own `at`/`rt` through GSL `opt=login` and writes the session config. A device that already holds a `loginKey` skips the email and trades it.
+
+`-cs-ios` on that command, or on a plain `-email` login, uses the iOS identity for the whole run: check-version, GSL `platform=iOS`, the guest `Login` (`com.lastwar.ios` and the iOS `psh`), and `account.login.new` `pf=AppStore`. The written session config has `iosMode` true and the iOS build (`1.0.344`/`786`). Without `-cs-ios` the same run stays Android. This iOS bind has not been tried against production.
 
 `-server` picks the role to bind, by its server number (`783`) or zone (`APS783`), from the roles the run logs; a value that names no server number is refused before the code is requested. Without it, the role `push.account.login.new` names at its top level is bound. A server the account has no role on, or two roles on one server, fails after verification without saving the binding. By then the code is spent, so bind again from a fresh `LASTWAR_STATE_DIR` with a server from the logged list. If GSL's `opt=login` reply doesn't list the picked role, the trade fails rather than writing another role's server into the config.
 

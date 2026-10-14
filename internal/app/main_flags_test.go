@@ -61,14 +61,14 @@ func TestIgnoredCrossServerFlags(t *testing.T) {
 		},
 		{"one recognized cs-* flag", []string{"cs-at"}, []string{"cs-at"}},
 		{
-			"all seven recognized cs-* flags",
-			[]string{"cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei", "cs-ios"},
-			[]string{"cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei", "cs-ios"},
+			"reconnect-only cs-* flags",
+			[]string{"cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei"},
+			[]string{"cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei"},
 		},
 		{
-			"mixed gating, recognized, and unrelated flags, order preserved",
+			"cs-ios is kept on the guest/email path, so it is not reported as ignored",
 			[]string{"cs-ip", "cs-at", "email", "cs-ios", "cs-rt"},
-			[]string{"cs-at", "cs-ios"},
+			[]string{"cs-at"},
 		},
 	}
 	for _, c := range cases {
@@ -290,14 +290,14 @@ func TestServerListOverrideFlags(t *testing.T) {
 	}
 }
 
-// TestCrossServerFlagNamesRecognizesExactlyElevenFlags pins down that crossServerFlagNames
-// recognizes precisely the 11 -cs-* flags that are consumed once the cross-server path is taken
-// (i.e. every -cs-* flag except -cs-ip/-cs-rt, which instead gate whether that path is taken at
-// all) -- neither more nor fewer.
-func TestCrossServerFlagNamesRecognizesExactlyElevenFlags(t *testing.T) {
+// TestCrossServerFlagNamesRecognizesExactlyTenFlags pins down that crossServerFlagNames
+// recognizes precisely the 10 -cs-* flags that are consumed only once the cross-server path is
+// taken (every -cs-* flag except -cs-ip/-cs-rt, which gate that path, and -cs-ios, which the
+// guest/email login also reads) -- neither more nor fewer.
+func TestCrossServerFlagNamesRecognizesExactlyTenFlags(t *testing.T) {
 	want := []string{
 		"cs-at", "cs-port", "cs-zone", "cs-gameuid", "cs-deviceid", "cs-shumei", "cs-shumei-gen",
-		"cs-shumei-ssid", "cs-shumei-bssid", "cs-shumei-boot", "cs-ios",
+		"cs-shumei-ssid", "cs-shumei-bssid", "cs-shumei-boot",
 	}
 	if len(crossServerFlagNames) != len(want) {
 		t.Fatalf("crossServerFlagNames has %d entries %v, want exactly %d: %v",
@@ -335,16 +335,17 @@ func TestCrossServerFlagNamesMatchesDeclarations(t *testing.T) {
 		declared[m[1]] = true
 	}
 
-	// -cs-ip and -cs-rt gate whether the cross-server path is taken at all, so they're correctly
-	// declared on the FlagSet but correctly absent from crossServerFlagNames -- excluded here too.
-	gating := map[string]bool{"cs-ip": true, "cs-rt": true}
+	// -cs-ip and -cs-rt gate the reconnect path. -cs-ios is read by the guest/email login too, so
+	// it is not discarded when that path runs. All three are declared on the FlagSet and absent
+	// from crossServerFlagNames.
+	notReconnectOnly := map[string]bool{"cs-ip": true, "cs-rt": true, "cs-ios": true}
 
 	for name := range declared {
-		if gating[name] {
+		if notReconnectOnly[name] {
 			continue
 		}
 		if !crossServerFlagNames[name] {
-			t.Errorf("flag %q is declared on the FlagSet in Run() but missing from crossServerFlagNames -- add it there (or to this test's gating set, if it's meant to gate the cross-server path like -cs-ip/-cs-rt)", name)
+			t.Errorf("flag %q is declared on the FlagSet in Run() but missing from crossServerFlagNames -- add it there (or to notReconnectOnly, if the guest/email path reads it too)", name)
 		}
 	}
 	for name := range crossServerFlagNames {

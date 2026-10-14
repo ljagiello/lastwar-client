@@ -29,6 +29,10 @@ type OwnDeviceSession struct {
 	IP                            string // "|"-delimited gateway hostnames, as GSL lists them
 	Port                          int
 	Zone                          string
+	// IOSMode is the identity the loginKey was traded under. AppVersion/VersionCode are that
+	// build, which the issued access token is bound to.
+	IOSMode                 bool
+	AppVersion, VersionCode string
 }
 
 func (s OwnDeviceSession) String() string   { return "[REDACTED OwnDeviceSession]" }
@@ -39,7 +43,7 @@ func (s OwnDeviceSession) GoString() string { return s.String() }
 // switch), and picks the server of the account's role from the reply. The loginKey is left on disk:
 // the real client discards it after this call, but keeping it costs nothing if the server accepts
 // it again, and saves a second email code if it does.
-func BootstrapOwnDevice(httpClient *http.Client) (*OwnDeviceSession, error) {
+func BootstrapOwnDevice(httpClient *http.Client, iosMode bool) (*OwnDeviceSession, error) {
 	ident, err := LoadOrCreateDeviceIdentity()
 	if err != nil {
 		return nil, err
@@ -47,7 +51,11 @@ func BootstrapOwnDevice(httpClient *http.Client) (*OwnDeviceSession, error) {
 	if ident.LoginKey == "" || ident.GameUid == "" {
 		return nil, errors.New("own-device bootstrap: no persisted loginKey/gameUid -- run the -email verification flow first, with the same LASTWAR_STATE_DIR")
 	}
-	cv, gateHost, err := gsl.CheckVersion(httpClient, "")
+	// Same build the email bind used, including check-version. The token this call issues is
+	// bound to that platform, and the session config records the identity so the next reconnect
+	// matches.
+	build := loginBuild(iosMode, "", "")
+	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "")
 	if err != nil {
 		return nil, err
 	}
@@ -55,11 +63,19 @@ func BootstrapOwnDevice(httpClient *http.Client) (*OwnDeviceSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	lsr, err := gsl.GetServerList(httpClient, gateHost, pub, ident.DeviceID, gsl.GSLOpt{Opt: "login", LoginKey: ident.LoginKey}, "", ident.GameUid)
+	slog.Info("own device: trading loginKey", "platform", build.Platform, "iosMode", iosMode)
+	lsr, err := gsl.GetServerListAs(httpClient, gateHost, pub, build.Platform, ident.DeviceID, gsl.GSLOpt{Opt: "login", LoginKey: ident.LoginKey}, "", ident.GameUid)
 	if err != nil {
 		return nil, err
 	}
-	return ownDeviceSessionFrom(lsr, ident.DeviceID, ident.GameUid)
+	s, err := ownDeviceSessionFrom(lsr, ident.DeviceID, ident.GameUid)
+	if err != nil {
+		return nil, err
+	}
+	s.IOSMode = iosMode
+	s.AppVersion = build.AppVersion
+	s.VersionCode = build.VersionCode
+	return s, nil
 }
 
 // ownDeviceSessionFrom validates a GSL reply (gsl.LoginServerListRespon.Err, a non-empty at) and

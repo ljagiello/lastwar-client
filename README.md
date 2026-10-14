@@ -32,8 +32,9 @@ for the current confirmed-vs-unconfirmed picture. Preview the docs locally with 
   from-scratch Go client reconnected and collected real resources over multiple days (August 2026),
   and it was re-verified after a live zone-server migration. So the server does **not** require
   `ta`'s real device sub-fields for reconnect. Still open: the *minimal* required `ta` content
-  hasn't been isolated, and a fully from-scratch login (no captured access token) hasn't been tried
-, see the next bullet. See `docs/live-validation.mdx` for the full methodology.
+  hasn't been isolated. An Android from-scratch login is live-confirmed; `-cs-ios` sends the iOS
+  identity from the first GSL call, and that path hasn't been tried live, see the next bullet.
+  See `docs/live-validation.mdx` for the full methodology.
 - The earlier "reconnect blocked" / "init push never arrives" problems were never protocol-level
   gates, they were a token-identity mismatch (the client claimed Android while replaying an
   iOS-issued token) and an unimplemented Zstd decoder, respectively. A real server merge later
@@ -42,8 +43,8 @@ for the current confirmed-vs-unconfirmed picture. Preview the docs locally with 
   root-cause writeups.
 - **Not yet general-purpose:** the reconnect path needs a session config: one captured from a real
   client login (see below), or one `-own-device-session` writes for a device of its own, which
-  refreshes its own tokens. A from-scratch login using `-cs-ios`-equivalent identity from the very
-  first GSL call hasn't been tried yet.
+  refreshes its own tokens. `-cs-ios` on a guest or email login sends the iOS identity from the
+  first GSL call through `account.login.new`; that path hasn't been tried live.
 
 ## Scope
 
@@ -220,6 +221,15 @@ LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -email you@example.com 
   -code-pipe /tmp/lw_code_pipe -own-device-session ~/own_device_session.json &
 echo 123456 > /tmp/lw_code_pipe
 LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_session.json -collect
+
+# The same bind as iOS. Add -cs-ios: check-version, GSL, the Login, and account.login.new
+# all claim com.lastwar.ios, and the session config is written with iosMode true.
+# That iOS bind has not been tried live. Use a fresh LASTWAR_STATE_DIR and -no-config
+# so an existing session file does not reconnect instead of sending the email code:
+LASTWAR_STATE_DIR=~/.lastwar_ios_device ./lastwar-client -no-config -cs-ios \
+  -email you@example.com -code-pipe /tmp/lw_code_pipe \
+  -own-device-session ~/ios_session.json &
+echo 123456 > /tmp/lw_code_pipe
 ```
 
 Device identity also persists across runs in `~/.lastwar_goclient_*` (deviceId, username, gameUid,
