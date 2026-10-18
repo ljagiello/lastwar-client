@@ -21,8 +21,10 @@ func TestPshFieldKnownVectors(t *testing.T) {
 	if got, want := pshField(false, ts), "0028a51a469d640c9900bbbc44125e78"; got != want {
 		t.Errorf("android psh(%q) = %q, want %q", ts, got, want)
 	}
-	// MD5(cmdBaseTime + marker + "com.lastwar.ios"). "7" is the no-mobileprovision
-	// marker and matches a captured Mac Catalyst Login. "3" is the provisioned-device marker.
+	// MD5(cmdBaseTime + marker + "com.lastwar.ios"). The marker -cs-ios sends is "7".
+	// That matches a captured Login from the iPhone/iPad build in Wrapper/LastWar.app
+	// (cmdBaseTime 1791877000). rg_getPsh: selects "3" when embedded.mobileprovision
+	// is in the app bundle. No captured Login has taken that branch.
 	const iosTS = "1791877000"
 	if got, want := pshField(true, iosTS), "83413bc26feb1f628a41c04579dd708f"; got != want {
 		t.Errorf("ios psh(%q) = %q, want %q", iosTS, got, want)

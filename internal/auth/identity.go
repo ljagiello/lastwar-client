@@ -54,10 +54,12 @@ func sha1Hex(s string) string {
 // pshField is the login integrity hash. -cs-ios selects the iOS formula; otherwise Android.
 //
 // Android (SdkManager.LW_PSH): MD5(cmdBaseTime + hex(signing-cert DER)).
-// iOS (rg_getPsh:): MD5(cmdBaseTime + marker + bundle id). The marker is "7" when
-// embedded.mobileprovision is absent (Mac Catalyst, and this client) and "3" when
-// that file is present. "7" matches a captured Mac Catalyst Login
-// (cmdBaseTime 1791877000 -> 83413bc26feb1f628a41c04579dd708f).
+// iOS (rg_getPsh:): MD5(cmdBaseTime + marker + bundle id). The marker -cs-ios sends
+// is "7". That matches a captured Login from the iPhone/iPad build in
+// Wrapper/LastWar.app (cmdBaseTime 1791877000 -> 83413bc26feb1f628a41c04579dd708f).
+// rg_getPsh: selects "7" when embedded.mobileprovision is absent, which is an App
+// Store install. The same method selects "3" when that file is in the app bundle.
+// No captured Login has taken that branch.
 func pshField(iosMode bool, cmdBaseTime string) string {
 	if iosMode {
 		return iosPsh(cmdBaseTime, iosPshMarker)
@@ -66,7 +68,7 @@ func pshField(iosMode bool, cmdBaseTime string) string {
 }
 
 // iosPshMarker is the character between cmdBaseTime and the bundle id. This client has no
-// embedded.mobileprovision, so it uses the Mac Catalyst marker.
+// embedded.mobileprovision, so it uses "7".
 const iosPshMarker = "7"
 
 func iosPsh(cmdBaseTime, marker string) string {

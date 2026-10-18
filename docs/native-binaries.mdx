@@ -62,11 +62,12 @@ The `.mdl` XOR scheme itself is unchanged, see [Extraction methodology](/methodo
         cert is <code>psh</code> (see [Identity, login & session](/auth)), and the Go client reproduces the
         Android formula correctly; 1.0.364 is signed with the same certificate, so that value is unchanged.
         Under <code>-cs-ios</code> it sends <code>MD5(cmdBaseTime + "7" + "com.lastwar.ios")</code>. The
-        <code>"7"</code> is the marker <code>rg_getPsh:</code> uses when <code>embedded.mobileprovision</code>
-        is absent (Mac Catalyst, and this client); a provisioned iOS device uses <code>"3"</code>. The
-        <code>"7"</code> formula matches a captured Mac Catalyst Login with <code>cmdBaseTime</code>
-        <code>1791877000</code>. Before that change, iOS mode sent the Android-derived value, which the
-        server accepted for weeks.
+        marker <code>-cs-ios</code> sends is <code>"7"</code>. That matches a captured Login from the
+        iPhone/iPad build in <code>Wrapper/LastWar.app</code> (<code>cmdBaseTime</code> <code>1791877000</code>).
+        <code>rg_getPsh:</code> selects <code>"7"</code> when <code>embedded.mobileprovision</code> is absent,
+        which is an App Store install. The same method selects <code>"3"</code> when that file is in the app
+        bundle. No captured Login has taken that branch. Before that change, iOS mode sent the
+        Android-derived value, which the server accepted for weeks.
       </td>
     </tr>
     <tr>

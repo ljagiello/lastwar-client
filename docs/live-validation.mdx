@@ -175,7 +175,7 @@ A cold-start capture of the real iOS / Mac Catalyst app (1.0.344, hot-updated) w
 | After `init`: `change.user.parseid`, `check.device.change` (answered `r:false`), about 220 mostly read-only requests in 5 s, and `login.ext {info, add}` | None of these | Tolerated live |
 | Never sends `login.init` | Sends `login.init` as a fallback if `init` is slow | n/a |
 | Sends `mail.delete.batch {type:"auto", uids}` nine times on login: the real client auto-deletes mail | Never deletes mail | n/a |
-| iOS `psh`: `MD5(cmdBaseTime + "7" + "com.lastwar.ios")` (no `embedded.mobileprovision`; a provisioned device uses `"3"`) | The same `"7"` formula under `-cs-ios` | Matches a captured Mac Catalyst Login (`cmdBaseTime` `1791877000`) |
+| iOS `psh`: `MD5(cmdBaseTime + "7" + "com.lastwar.ios")` (no `embedded.mobileprovision`) | The same `"7"` formula under `-cs-ios` | Matches a captured Login from the iPhone/iPad build in `Wrapper/LastWar.app` (`cmdBaseTime` `1791877000`) |
 
 Other facts from the same capture, all observed live:
 
@@ -185,7 +185,7 @@ Other facts from the same capture, all observed live:
 - `init.mixedInfo.todayLoginTimes` counts logins per server day, including every `goclient` run.
 - Over 328 s, the server answered all 83 heartbeats. There was no kick, no redirect, and no token-expiry hint anywhere in `init`.
 
-`dataConfigMd5`, `init.add`, `login.ext`, and the probe template are app-integrity and anti-fraud surfaces. They're recorded here as protocol facts only; reproducing them is out of scope for this project. `psh` is sent: the Android certificate hash by default, and `MD5(cmdBaseTime + "7" + "com.lastwar.ios")` under `-cs-ios` (a provisioned iOS device uses `"3"` instead of `"7"`; see [Identity, login & session](/auth)). `shumeiBoxId` is in scope: `goclient` reproduces the ShuMei device-profile registration that mints it, see [ShuMei device fingerprint](/shumei).
+`dataConfigMd5`, `init.add`, `login.ext`, and the probe template are app-integrity and anti-fraud surfaces. They're recorded here as protocol facts only; reproducing them is out of scope for this project. `psh` is sent: the Android certificate hash by default. The marker `-cs-ios` sends is `"7"`. That matches a captured Login from the iPhone/iPad build in `Wrapper/LastWar.app` (`cmdBaseTime` `1791877000`). `rg_getPsh:` selects `"7"` when `embedded.mobileprovision` is absent, which is an App Store install. The same method selects `"3"` when that file is in the app bundle. No captured Login has taken that branch. See [Identity, login & session](/auth). `shumeiBoxId` is in scope: `goclient` reproduces the ShuMei device-profile registration that mints it, see [ShuMei device fingerprint](/shumei).
 
 ## `ec`/`ep` vs `errorMessage`: two distinct error channels
 
