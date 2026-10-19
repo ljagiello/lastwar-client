@@ -67,7 +67,7 @@ In October 2026, eleven analysis agents went through the whole 1.0.364 APK with 
 | Native libraries | 39 | 0 | 39 |
 | **All** | **22,401** | **4,827** | **17,574** |
 
-"Covered" doesn't mean "read". The main caveats: no native library was read, only surveyed; 3,022 of the 3,104 `Message` classes were parsed by script, and hand-checked samples matched on request params in 84 of 84 cases and on response fields in 77 of 84; and inside Assembly-CSharp, 130 types (about 11,500 lines) were read line by line while the other 3,539 were summarized from the type index and key methods. Anti-cheat and anti-fraud code (Tencent ACE, ShuMei, `psh`, the `init.add` challenge, `login.ext`, the probe template, and client-computed mini-game validation) was inventoried as a surface only, never analysed.
+"Covered" doesn't mean "read". The main caveats: no native library was read, only surveyed; 3,022 of the 3,104 `Message` classes were parsed by script, and hand-checked samples matched on request params in 84 of 84 cases and on response fields in 77 of 84; and inside Assembly-CSharp, 130 types (about 11,500 lines) were read line by line while the other 3,539 were summarized from the type index and key methods. Anti-cheat and anti-fraud code (Tencent ACE, ShuMei, `psh`, the `init.add` challenge, `login.ext`, the probe template, and client-computed mini-game validation) was inventoried as a surface only, never analysed. `psh`'s iOS formula was later recovered from the iOS binary, see [Identity, login & session](/auth).
 
 ### Headline results
 

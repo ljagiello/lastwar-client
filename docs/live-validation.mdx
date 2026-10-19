@@ -24,6 +24,7 @@ Everything documented elsewhere in this dossier up to this point was static anal
 | Recovering from a server-side token rotation (`ec=28`, `ep=[E011]`) | **Confirmed** live on 2026-10-04: a fresh capture of the real app, turned into a session config by `pcap -session-out`, restored the scheduled runs, see "The 2026-10-02 token rotation" below |
 | Logging in with a device of its own (email-bound Go device, its own GSL `opt=login` token pair, Android identity) | **Confirmed** live on 2026-10-13, once Android `ta` was filled; with `ta` = `{}` the same token gets `ec=28`, `ep=[E005]`, see the 2026-10-13 update under "The reconnect wall" |
 | Setting up a device of its own in one run (`-email`, `-server`, `-own-device-session`) | **Confirmed** live on 2026-10-13 (`-server` picked the account's only role; picking another role is static analysis only): a fresh device was bound to the real account's role on 783, its config written, and a `Login` with it loaded 160 buildings; a second own device left the first one's tokens working, see [Identity, login & session](/auth#setting-up-a-device-of-its-own-in-one-run) |
+| Sending the iOS app's own `psh` in iOS mode (`MD5(cmdBaseTime + "7" + "com.lastwar.ios")`) | **Confirmed** live on 2026-10-18: the formula matches a capture of the real 1.0.364/900 App Store app on a Mac, and a reconnect into the real account with a copy of the scheduled runs' captured iOS session sent it, logged in, and loaded 159 buildings, see [Identity, login & session](/auth) |
 | Refreshing a device's own access token (GSL `opt=refresh`) | **Confirmed** live on 2026-10-13: after an `E011`, with a 31-day-old `accessTokenTime`, and with no access token; each refresh returned the current `at` and no `rt`, and each `Login` after it was accepted, see [Identity, login & session](/auth#refreshing-the-access-token) |
 | Falling back through a zone's gateway list | **Confirmed** live: with an unreachable TEST-NET address as the first gateway, the dial timed out after 10 s and login succeeded through the next one, see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe) |
 | Reading today's Alliance Duel entry (`hero.event.info.get {activityId: "70000"}`) | **Confirmed** live on 2026-10-06: the theme, scoring ids, chest thresholds and day window, after two fixes (ask for the entry's `activityid`; read `st`/`et`), see "Alliance Duel and duel spend commands" below |
@@ -175,7 +176,7 @@ A cold-start capture of the real iOS / Mac Catalyst app (1.0.344, hot-updated) w
 | After `init`: `change.user.parseid`, `check.device.change` (answered `r:false`), about 220 mostly read-only requests in 5 s, and `login.ext {info, add}` | None of these | Tolerated live |
 | Never sends `login.init` | Sends `login.init` as a fallback if `init` is slow | n/a |
 | Sends `mail.delete.batch {type:"auto", uids}` nine times on login: the real client auto-deletes mail | Never deletes mail | n/a |
-| iOS `psh` | The Android-derived `psh`, which doesn't match the iOS value | Tolerated live for weeks; see [Native binaries & security](/native-binaries) |
+| A `psh` that doesn't match the Android formula (this capture's value wasn't kept) | The Android value at the time. Since 2026-10-18, iOS mode sends the iOS formula, which matches two later captures, see [Identity, login & session](/auth) | Tolerated live for weeks; the iOS formula is confirmed live (2026-10-18) |
 
 Other facts from the same capture, all observed live:
 
@@ -185,7 +186,7 @@ Other facts from the same capture, all observed live:
 - `init.mixedInfo.todayLoginTimes` counts logins per server day, including every `goclient` run.
 - Over 328 s, the server answered all 83 heartbeats. There was no kick, no redirect, and no token-expiry hint anywhere in `init`.
 
-`psh`, `dataConfigMd5`, `init.add`, `login.ext`, and the probe template are app-integrity and anti-fraud surfaces. They're recorded here as protocol facts only; reproducing them is out of scope for this project. `shumeiBoxId` is in scope: `goclient` reproduces the ShuMei device-profile registration that mints it, see [ShuMei device fingerprint](/shumei).
+`dataConfigMd5`, `init.add`, `login.ext`, and the probe template are app-integrity and anti-fraud surfaces. They're recorded here as protocol facts only; reproducing them is out of scope for this project. `psh` and `shumeiBoxId` are in scope. `goclient` sends the real client's `psh` for its platform, see [Identity, login & session](/auth). It also reproduces the ShuMei device-profile registration that mints `shumeiBoxId`, see [ShuMei device fingerprint](/shumei).
 
 ## `ec`/`ep` vs `errorMessage`: two distinct error channels
 

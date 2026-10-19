@@ -51,8 +51,18 @@ func sha1Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// pshField reproduces SdkManager.LW_PSH: MD5(cmdBaseTime + certHex).
-func pshField(cmdBaseTime string) string {
+// pshField is the Login's psh for the platform the Login claims (iosMode).
+//
+// Android (SdkManager.LW_PSH): MD5(cmdBaseTime + hex(signing-cert DER)).
+// iOS (rg_getPsh:): MD5(cmdBaseTime + "7" + bundle id). rg_getPsh: puts "7" there when the app
+// bundle has no embedded.mobileprovision, as in an App Store install, and "3" when it has one
+// (static analysis only). goclient presents as the App Store app, so it sends "7". That matches
+// two captures of the real App Store app (cmdBaseTime 1791877000 and 1792390017, 1.0.364/900),
+// and a Login sending it into the real account was accepted on 2026-10-18 (confirmed live).
+func pshField(iosMode bool, cmdBaseTime string) string {
+	if iosMode {
+		return md5Hex(cmdBaseTime + "7" + iosPackageName)
+	}
 	return md5Hex(cmdBaseTime + apkCertHex)
 }
 
@@ -77,7 +87,13 @@ func randomDigitString(n int) string {
 // oneCodeAndCoreV reproduces the OneCode/CoreV construction from
 // LoginMessage.CSSetData -- both derived from the same 32-digit rand32.
 func oneCodeAndCoreV() (oneCode, coreV string) {
-	rand32 := randomDigitString(32)
+	return oneCodeAndCoreVFrom(randomDigitString(32))
+}
+
+// oneCodeAndCoreVFrom is oneCodeAndCoreV for a caller-supplied 32-digit seed.
+// OneCode interleaves MD5(seed) with the seed. CoreV is MD5(reversed Base64(seed))
+// interleaved with MD5(that digest + seed).
+func oneCodeAndCoreVFrom(rand32 string) (oneCode, coreV string) {
 	md5Rand := md5Hex(rand32)
 
 	oneBytes := make([]byte, 0, 64)
@@ -487,7 +503,7 @@ type LoginParamsInput struct {
 	ServerID    string // zone minus "APS" prefix
 	ShumeiBoxId string // anti-fraud device-fingerprint token, if a real one is known
 
-	// IOSMode switches PackageName/packageSign/Platform/pf (and adds the
+	// IOSMode switches PackageName/packageSign/Platform/pf/psh (and adds the
 	// iOS-only idfa/idfv/phone_native_screen fields) to match a real iOS
 	// client instead of the default Android identity. Confirmed live: an
 	// `at` access token is bound to the PackageName/Platform it was issued
@@ -702,19 +718,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		p.PutUtfString("AndroidID", "")
 		p.PutUtfString("IMEI", "")
 	}
-	// Deliberately NOT gated on in.IOSMode, unlike every other Platform-specific field in this
-	// function. pshField always hashes cmdBaseTime against apkCertHex -- the Android APK
-	// (com.fun.lastwar.gp)'s own signing certificate DER bytes -- so under IOSMode this sends an
-	// Android-derived psh alongside an otherwise fully iOS-flavored identity. That's a real,
-	// known internal inconsistency, not an overlooked branch: unlike PackageName/Platform/pf/
-	// AppVersion/VersionCode/idfa/idfv/phone_native_screen above (all confirmed live from a real
-	// captured iOS session, see docs/live-validation.mdx), there is no live iOS capture of this
-	// field to isolate what a genuine iOS client actually sends for it, and per this project's
-	// standing convention (docs/AGENTS.md) an unconfirmed formula must not be guessed at just to
-	// look more Platform-consistent. Left Android-derived on purpose until a fresh iOS capture
-	// settles it -- this is an open question, not a proven-working alternative, the same way
-	// `ta`'s exact minimal iOS content is flagged as open in docs/live-validation.mdx.
-	p.PutUtfString("psh", pshField(cmdBaseTime))
+	p.PutUtfString("psh", pshField(in.IOSMode, cmdBaseTime))
 	p.PutUtfString("mt", "")
 	p.PutUtfString("deviceId", in.DeviceID)
 	p.PutUtfString("airKey", in.AirKey)
