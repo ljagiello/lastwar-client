@@ -21,19 +21,15 @@ func TestPshFieldKnownVectors(t *testing.T) {
 	if got, want := pshField(false, ts), "0028a51a469d640c9900bbbc44125e78"; got != want {
 		t.Errorf("android psh(%q) = %q, want %q", ts, got, want)
 	}
-	// MD5(cmdBaseTime + marker + "com.lastwar.ios"). The marker -cs-ios sends is "7".
-	// That matches a captured Login from the iPhone/iPad build in Wrapper/LastWar.app
-	// (cmdBaseTime 1791877000). rg_getPsh: selects "3" when embedded.mobileprovision
-	// is in the app bundle. No captured Login has taken that branch.
-	const iosTS = "1791877000"
-	if got, want := pshField(true, iosTS), "83413bc26feb1f628a41c04579dd708f"; got != want {
-		t.Errorf("ios psh(%q) = %q, want %q", iosTS, got, want)
-	}
-	if got, want := iosPsh(iosTS, "7"), "83413bc26feb1f628a41c04579dd708f"; got != want {
-		t.Errorf("ios psh marker 7 = %q, want %q", got, want)
-	}
-	if got, want := iosPsh(iosTS, "3"), "f26259a52222bea5becafd52c624011e"; got != want {
-		t.Errorf("ios psh marker 3 = %q, want %q", got, want)
+	// MD5(cmdBaseTime + "7" + "com.lastwar.ios"): the cmdBaseTime/psh pairs of two separate
+	// captures of the real App Store app on a Mac (2026-10-13, and 1.0.364/900 on 2026-10-18).
+	for _, c := range []struct{ ts, want string }{
+		{"1791877000", "83413bc26feb1f628a41c04579dd708f"},
+		{"1792390017", "240c39b96a881558197b3061b29d6513"},
+	} {
+		if got := pshField(true, c.ts); got != c.want {
+			t.Errorf("ios psh(%q) = %q, want %q", c.ts, got, c.want)
+		}
 	}
 }
 

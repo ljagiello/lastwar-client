@@ -61,13 +61,9 @@ The `.mdl` XOR scheme itself is unchanged, see [Extraction methodology](/methodo
         reproducible without touching the APK's real signature. The field that genuinely depends on the signing
         cert is <code>psh</code> (see [Identity, login & session](/auth)), and the Go client reproduces the
         Android formula correctly; 1.0.364 is signed with the same certificate, so that value is unchanged.
-        Under <code>-cs-ios</code> it sends <code>MD5(cmdBaseTime + "7" + "com.lastwar.ios")</code>. The
-        marker <code>-cs-ios</code> sends is <code>"7"</code>. That matches a captured Login from the
-        iPhone/iPad build in <code>Wrapper/LastWar.app</code> (<code>cmdBaseTime</code> <code>1791877000</code>).
-        <code>rg_getPsh:</code> selects <code>"7"</code> when <code>embedded.mobileprovision</code> is absent,
-        which is an App Store install. The same method selects <code>"3"</code> when that file is in the app
-        bundle. No captured Login has taken that branch. Before that change, iOS mode sent the
-        Android-derived value, which the server accepted for weeks.
+        In iOS mode it sends the iOS app's own formula, recovered from the iOS binary's
+        <code>rg_getPsh:</code>; see [Identity, login & session](/auth). Until 2026-10-18 iOS mode sent the
+        Android value, which the server accepted for weeks.
       </td>
     </tr>
     <tr>

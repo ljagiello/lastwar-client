@@ -432,7 +432,7 @@ var SensitiveSFSKeys = map[string]bool{
 	// SecurityCode/OneCode/CoreV/packageSign/psh were considered and deliberately excluded: per
 	// docs/auth.mdx, they're reproducible MD5/SHA1 hashes over non-secret/publicly-extractable
 	// inputs (cmdBaseTime, gameUid, packageName, a hardcoded salt, and -- for psh specifically --
-	// the APK's own signing-cert DER bytes, which are themselves not secret) rather than live
+	// the APK's own signing-cert DER bytes, or on iOS the bundle id, none of them secret) rather than live
 	// bearer tokens or PII, so this decision doesn't need re-deriving next round.
 }
 

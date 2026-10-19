@@ -51,32 +51,23 @@ func sha1Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// pshField is the login integrity hash. -cs-ios selects the iOS formula; otherwise Android.
+// pshField is the Login's psh for the platform the Login claims (iosMode).
 //
 // Android (SdkManager.LW_PSH): MD5(cmdBaseTime + hex(signing-cert DER)).
-// iOS (rg_getPsh:): MD5(cmdBaseTime + marker + bundle id). The marker -cs-ios sends
-// is "7". That matches a captured Login from the iPhone/iPad build in
-// Wrapper/LastWar.app (cmdBaseTime 1791877000 -> 83413bc26feb1f628a41c04579dd708f).
-// rg_getPsh: selects "7" when embedded.mobileprovision is absent, which is an App
-// Store install. The same method selects "3" when that file is in the app bundle.
-// No captured Login has taken that branch.
+// iOS (rg_getPsh:): MD5(cmdBaseTime + "7" + bundle id). rg_getPsh: puts "7" there when the app
+// bundle has no embedded.mobileprovision, as in an App Store install, and "3" when it has one
+// (static analysis only). goclient presents as the App Store app, so it sends "7". That matches
+// two captures of the real App Store app (cmdBaseTime 1791877000 and 1792390017, 1.0.364/900),
+// and a Login sending it into the real account was accepted on 2026-10-18 (confirmed live).
 func pshField(iosMode bool, cmdBaseTime string) string {
 	if iosMode {
-		return iosPsh(cmdBaseTime, iosPshMarker)
+		return md5Hex(cmdBaseTime + "7" + iosPackageName)
 	}
 	return md5Hex(cmdBaseTime + apkCertHex)
 }
 
-// iosPshMarker is the character between cmdBaseTime and the bundle id. This client has no
-// embedded.mobileprovision, so it uses "7".
-const iosPshMarker = "7"
-
-func iosPsh(cmdBaseTime, marker string) string {
-	return md5Hex(cmdBaseTime + marker + iosPackageName)
-}
-
 // securityCode reproduces the login field of the same name:
-// MD5(cmdBaseTime + <32-hex-char salt> + gameUid).
+// MD5(cmdBaseTime + <hardcoded salt> + gameUid).
 func securityCode(cmdBaseTime, gameUid string) string {
 	const salt = "4d1c383ccbedf3d98320d6ea06d8dedc"
 	return md5Hex(cmdBaseTime + salt + gameUid)
@@ -512,7 +503,7 @@ type LoginParamsInput struct {
 	ServerID    string // zone minus "APS" prefix
 	ShumeiBoxId string // anti-fraud device-fingerprint token, if a real one is known
 
-	// IOSMode switches PackageName/packageSign/Platform/pf (and adds the
+	// IOSMode switches PackageName/packageSign/Platform/pf/psh (and adds the
 	// iOS-only idfa/idfv/phone_native_screen fields) to match a real iOS
 	// client instead of the default Android identity. Confirmed live: an
 	// `at` access token is bound to the PackageName/Platform it was issued
