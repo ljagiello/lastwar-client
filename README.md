@@ -222,8 +222,9 @@ LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -email you@example.com 
 echo 123456 > /tmp/lw_code_pipe
 LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_session.json -collect
 
-# The same bind as iOS. Add -cs-ios: check-version, GSL, the Login, and account.login.new
-# all claim com.lastwar.ios, and the session config is written with iosMode true.
+# The same bind as iOS. -cs-ios makes check-version and the Login claim com.lastwar.ios,
+# GSL send platform=iOS, and account.login.new send pf=AppStore. The session config
+# is written with iosMode true.
 # That iOS bind has not been tried live. Use a fresh LASTWAR_STATE_DIR and -no-config
 # so an existing session file does not reconnect instead of sending the email code:
 LASTWAR_STATE_DIR=~/.lastwar_ios_device ./lastwar-client -no-config -cs-ios \

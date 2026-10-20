@@ -505,9 +505,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			// (unlike a wrong-typed ip) it doesn't stop the redirect itself from being followed.
 			newZone := redirectZone(siObj, "login.go base-zone Login")
 			// The real client adopts serverInfo.uid as its gameUid and reconnects with the same
-			// at, making no GSL call (LoginMessage.CSHandleResponse, A-CS:82799-82858). A fresh
-			// GSL call here could only disturb token state: it sends platform=Android whatever
-			// identity the token belongs to.
+			// at, making no GSL call (LoginMessage.CSHandleResponse, A-CS:82799-82858). Earlier
+			// versions called GSL opt=fix here. That request claimed platform=Android, so it
+			// could swap an iOS-issued token for an Android-bound one.
 			newGameUid := redirectUid(siObj, "login.go base-zone Login")
 			slog.Info("serverInfo redirect: reconnecting to new address with the same access token", "newAddr", newAddr, "newZone", newZone,
 				"oldAddr", addr, "oldZone", zone, "newGameUid", newGameUid, "oldGameUid", gameUid, "accessTokLen", len(accessTok))

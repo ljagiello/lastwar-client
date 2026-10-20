@@ -138,7 +138,7 @@ func (p CrossServerLoginParams) LogValue() slog.Value { return slog.StringValue(
 // the gameUid, and the redial reuses the same access token with no GSL call
 // in between. This function used to fetch a "fresh" token via GSL opt=fix
 // first, on a suspicion that tokens were single-use per connection; the real
-// client never does that, and since that GSL call claims platform=Android it
+// client never does that, and that GSL call claimed platform=Android, so it
 // could only swap an iOS-issued token for an incompatible one.
 func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, error) {
 	if p.AccessTok == "" {
