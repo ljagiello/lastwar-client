@@ -73,7 +73,7 @@ type CrossServerLoginParams struct {
 	IOSMode     bool   // send an iOS-flavored identity instead of Android; see LoginParamsInput.IOSMode
 	AppVersion  string // build the token was issued under, if known; see LoginParamsInput.AppVersion
 	VersionCode string
-	ResVersion  string // see LoginParamsInput.ResVersion and ResVersionFor; "" sends "0"
+	ResVersion  string // see LoginParamsInput.ResVersion and ResVersionFrom; "" sends "0"
 
 	// DialGame, if non-nil, replaces the package-level dialGame (ultimately session.DialGame) used
 	// to open the game socket -- and is used for every redial in the serverInfo-redirect loop, not
@@ -138,7 +138,7 @@ func (p CrossServerLoginParams) LogValue() slog.Value { return slog.StringValue(
 // the gameUid, and the redial reuses the same access token with no GSL call
 // in between. This function used to fetch a "fresh" token via GSL opt=fix
 // first, on a suspicion that tokens were single-use per connection; the real
-// client never does that, and since that GSL call claims platform=Android it
+// client never does that, and that GSL call claimed platform=Android, so it
 // could only swap an iOS-issued token for an incompatible one.
 func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, error) {
 	if p.AccessTok == "" {

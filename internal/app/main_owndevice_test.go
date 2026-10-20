@@ -136,6 +136,7 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 		wantLoginKey string // the persisted loginKey ("" = none)
 		wantZone     string // the config's zone; "" = no config written
 		wantDeviceID string // the config's deviceId when seeded
+		wantIOS      bool   // the config's iosMode, and the iOS build
 	}
 	for _, c := range []tc{
 		{name: "fresh device, -server 783", args: "-email player@example.com -server 783",
@@ -143,6 +144,13 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 			noLog:   []string{"ignoring -email", "this device already logged in as a guest"},
 			// The 783 entry carries its own loginKey, which wins over the account's.
 			wantGameUid: "uid-783", wantLoginKey: "lk-role-783", wantZone: lookupZone},
+		// The bind's Login and the loginKey trade both run as iOS: the first two lines are the
+		// Login's own, the third the trade's, and nothing in the run says Android.
+		{name: "fresh device, -cs-ios", args: "-email player@example.com -cs-ios",
+			wantLog: []string{`"check-version: fetch RSA pubkey and pick gate host","iosMode":true`, `"step 2: GSL getserverlist","opt":"new","platform":"iOS"`,
+				`"own device: trading loginKey","platform":"iOS"`, "device bound by email verification", "wrote own-device session config"},
+			noLog:       []string{`"platform":"Android"`, `"iosMode":false`},
+			wantGameUid: "uid-1", wantLoginKey: "lk-account", wantZone: "APS1", wantIOS: true},
 		{name: "fresh device, no -server", args: "-email player@example.com",
 			wantLog:     []string{"account role", "device bound by email verification", "wrote own-device session config"},
 			noLog:       []string{"binding the role on the requested server"},
@@ -178,6 +186,11 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 		{name: "plain -email -server", args: "-email player@example.com -server 783", plain: true,
 			wantLog:     []string{"binding the role on the requested server"},
 			wantGameUid: "uid-783", wantLoginKey: "lk-role-783"},
+		// The plain login reads -cs-ios too, so the flag isn't reported as ignored.
+		{name: "plain -email -cs-ios", args: "-email player@example.com -cs-ios", plain: true,
+			wantLog:     []string{`"check-version: fetch RSA pubkey and pick gate host","iosMode":true`, `"step 2: GSL getserverlist","opt":"new","platform":"iOS"`},
+			noLog:       []string{`"platform":"Android"`, `"iosMode":false`, "ignoring -cs-* flags"},
+			wantGameUid: "uid-1", wantLoginKey: "lk-account"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -245,8 +258,11 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 				if cfg.AccessToken != "at-own" || cfg.RefreshToken != "rt-own" || cfg.GameUid != c.wantGameUid || cfg.Zone != c.wantZone {
 					t.Errorf("session config: at=%q rt=%q gameUid=%q zone=%q, want at-own rt-own %s %s", cfg.AccessToken, cfg.RefreshToken, cfg.GameUid, cfg.Zone, c.wantGameUid, c.wantZone)
 				}
-				if cfg.DeviceID == "" || (c.wantDeviceID != "" && cfg.DeviceID != c.wantDeviceID) || cfg.IOSMode {
-					t.Errorf("session config: deviceId=%q iosMode=%v, want this device (%q), Android", cfg.DeviceID, cfg.IOSMode, c.wantDeviceID)
+				if cfg.DeviceID == "" || (c.wantDeviceID != "" && cfg.DeviceID != c.wantDeviceID) || cfg.IOSMode != c.wantIOS {
+					t.Errorf("session config: deviceId=%q iosMode=%v, want this device (%q), iosMode=%v", cfg.DeviceID, cfg.IOSMode, c.wantDeviceID, c.wantIOS)
+				}
+				if c.wantIOS && (cfg.AppVersion != "1.0.344" || cfg.VersionCode != "786") {
+					t.Errorf("session config build = %s/%s, want the iOS 1.0.344/786", cfg.AppVersion, cfg.VersionCode)
 				}
 			}
 			for _, secret := range []string{"lk-account", "lk-role-783", "at-own", "rt-own"} {

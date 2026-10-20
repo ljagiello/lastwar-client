@@ -138,6 +138,53 @@ func TestRunCrossServerTestLooksUpMissingAddress(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestIOSLookupUsesTheIOSCheckVersion: an iOS session with no address fetches
+// check-version once, as iOS, and seals its lookup with that reply's RSA key, with platform=iOS. The
+// one check-version is what ties the key to the iOS reply; the fake decrypts only a form sealed with
+// the key it served. This is how the cron host's iOS session finds its server again after the
+// address moves.
+func TestRunCrossServerTestIOSLookupUsesTheIOSCheckVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	client, forms := testutil.UseDecryptingGSL(t, lookupReply())
+	var mu sync.Mutex
+	var cvPlatforms []string
+	base := client.Transport
+	client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "getlsu3dversion.php") {
+			mu.Lock()
+			cvPlatforms = append(cvPlatforms, r.URL.Query().Get("platform"))
+			mu.Unlock()
+		}
+		return base.RoundTrip(r)
+	})
+	dial, dialed := recordingDial(nil)
+
+	synctest.Test(t, func(t *testing.T) {
+		runCrossServerTest(crossServerTestOpts{
+			zone: lookupZone, gameUid: lookupGameUid, at: "at-1", iosMode: true,
+			httpClient: client, dialGame: dial,
+		})
+		synctest.Wait()
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(cvPlatforms) != 1 || cvPlatforms[0] != "iOS" {
+		t.Errorf("check-version platforms = %v, want [iOS]", cvPlatforms)
+	}
+	got := forms()
+	if len(got) != 1 {
+		t.Fatalf("getserverlist requests = %d, want 1 (the lookup)", len(got))
+	}
+	if f := got[0]; f.Get("platform") != "iOS" || f.Get("zone") != lookupZone || f.Get("gameuid") != lookupGameUid {
+		t.Errorf("lookup form platform=%q zone=%q gameuid=%q, want iOS %s %s (an empty form wasn't sealed with the check-version key)",
+			f.Get("platform"), f.Get("zone"), f.Get("gameuid"), lookupZone, lookupGameUid)
+	}
+	if d := dialed(); len(d) != 1 || d[0] != "gw-a.example:10783" {
+		t.Errorf("dialed %v, want [gw-a.example:10783]", d)
+	}
+}
+
 // TestRunCrossServerTestDoesNotLookUpAWorkingAddress: a configured address that answers needs no
 // GSL call, so a working cron run sends exactly what it sent before the lookup existed.
 func TestRunCrossServerTestDoesNotLookUpAWorkingAddress(t *testing.T) {

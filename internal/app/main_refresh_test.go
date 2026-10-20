@@ -777,6 +777,45 @@ func TestRunCrossServerTestRefreshRequest(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestCsRtSendsPlatform: the -cs-rt refresh (o.rt, not the session config's
+// refresh token) sends platform=iOS under -cs-ios and Android otherwise.
+func TestRunCrossServerTestCsRtSendsPlatform(t *testing.T) {
+	for _, c := range []struct {
+		iosMode      bool
+		wantPlatform string
+	}{{false, gsl.Platform}, {true, "iOS"}} {
+		t.Run(c.wantPlatform, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			client, forms := testutil.UseDecryptingGSL(t, refreshReply())
+			var seen loginAts
+			// The refresh reply's server list replaces -cs-ip, so the Login dials its first gateway.
+			dial, _ := recordingDial(map[string]func(*session.GameConn){"gw-a.example:10783": tokenCheckingServer(refreshedAt, &seen)})
+
+			synctest.Test(t, func(t *testing.T) {
+				runCrossServerTest(crossServerTestOpts{
+					ip: "10.0.0.1", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid, deviceID: "dev-cfg",
+					at: "at-old", rt: "rt-flag", iosMode: c.iosMode, httpClient: client, dialGame: dial,
+				})
+				synctest.Wait()
+			})
+
+			if got := seen.get(); fmt.Sprint(got) != fmt.Sprint([]string{refreshedAt}) {
+				t.Errorf("Login access tokens = %v, want only the refreshed one", got)
+			}
+			got := forms()
+			if len(got) != 1 {
+				t.Fatalf("getserverlist requests = %d, want 1 (the -cs-rt refresh only)", len(got))
+			}
+			if g := got[0].Get("platform"); g != c.wantPlatform {
+				t.Errorf("platform = %q, want %q", g, c.wantPlatform)
+			}
+			if g := got[0].Get("opt"); g != "refresh" {
+				t.Errorf("opt = %q, want refresh", g)
+			}
+		})
+	}
+}
+
 // TestRunCrossServerTestCsRtRefreshesOnce: a -cs-rt refresh whose reply still carries a 30-day-old
 // at.time (GSL returned the original time, live) is not followed by a second refresh before the
 // Login.

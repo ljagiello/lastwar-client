@@ -39,6 +39,14 @@ type LoginOptions struct {
 	// Server, with Email, binds the account's role on this server ("783" or "APS783", see
 	// pickRole) instead of the one push.account.login.new names at its top level.
 	Server string
+	// IOSMode sends the iOS identity on this login: check-version, GSL platform (so the access
+	// token is issued for that package), and the iOS Login fields (packageName, psh, platform,
+	// pf). -cs-ios sets it. Left false, this path stays Android.
+	IOSMode bool
+	// AppVersion/VersionCode, when non-empty, replace the build this login claims. Empty keeps
+	// the platform default (the iOS capture's 1.0.344/786 under IOSMode).
+	AppVersion  string
+	VersionCode string
 }
 
 // String/GoString are the round-49 regression fix for the MINOR finding that LoginOptions --
@@ -262,10 +270,11 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	httpClient := gsl.DefaultHTTPClient()
 
-	slog.Info("check-version: fetch RSA pubkey and pick gate host")
+	slog.Info("check-version: fetch RSA pubkey and pick gate host", "iosMode", opts.IOSMode)
 	// No zone yet: the persisted identity doesn't record one, so `server` stays empty, as on a
-	// real client's first launch.
-	cv, gateHost, err := gsl.CheckVersion(httpClient, "")
+	// real client's first launch. The request claims the same build the Login will.
+	build := loginBuild(opts.IOSMode, opts.AppVersion, opts.VersionCode)
+	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "")
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +291,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("device identity", "deviceIdLen", len(ident.DeviceID))
+	slog.Info("device identity", "deviceIdLen", len(ident.DeviceID), "iosMode", opts.IOSMode)
 	slog.Info("air key", "airKeyLen", len(ident.AirKey()))
 	// Not "username": ident.Username -- that would print the operator's real persisted account
 	// username in cleartext at Info level on every run. Mirrors the emailLen pattern used
@@ -290,8 +299,10 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	slog.Info("persisted state", "usernameLen", len(ident.Username), "gameUid", ident.GameUid, "loginKey", sfs.Redact(ident.LoginKey))
 
 	opt := gslOptFor(ident)
-	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt)
-	lsr, err := gsl.GetServerList(httpClient, gateHost, pub, ident.DeviceID, opt, "", ident.GameUid)
+	// The access token GSL issues is bound to this platform. An iOS Login with an Android-issued
+	// token is refused (ec=28/E005), so -cs-ios has to start here, not only at BuildLoginParams.
+	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt, "platform", build.Platform)
+	lsr, err := gsl.GetServerListAs(httpClient, gateHost, pub, build.Platform, ident.DeviceID, opt, "", ident.GameUid)
 	if err != nil {
 		return nil, err
 	}
@@ -320,8 +331,8 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	// account [0] can be another role, and Login would then succeed while every command times out.
 	stateSrv := lsr.PickServer(ident.GameUid)
 	slog.Info("GSL server selected", "id", stateSrv.ID, "zone", stateSrv.Zone, "lastLoggedServer", lsr.LastLoggedServer)
-	resVersion := ResVersionFor(httpClient, cv, false, "", "", "")
 	zone := capOversizedIdentityField("zone", stateSrv.Zone.String(), "", "login initial GSL response")
+	resVersion := ResVersionFrom(cv, opts.IOSMode, opts.AppVersion, opts.VersionCode)
 	gameUid := capOversizedIdentityField("gameUid", stateSrv.GameUid.String(), "", "login initial GSL response")
 	if gameUid != "" && gameUid != ident.GameUid {
 		if err := ident.SaveGameUid(gameUid); err != nil {
@@ -416,13 +427,16 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		// this dossier's static reading assumed -- so ServerInfo.uid is
 		// genuinely empty at this call site in normal operation too.
 		loginParams := BuildLoginParams(LoginParamsInput{
-			FutureID:   1,
-			DeviceID:   ident.DeviceID,
-			AirKey:     ident.AirKey(),
-			GameUid:    "",
-			AccessTok:  accessTok,
-			ServerID:   serverID,
-			ResVersion: resVersion,
+			FutureID:    1,
+			DeviceID:    ident.DeviceID,
+			AirKey:      ident.AirKey(),
+			GameUid:     "",
+			AccessTok:   accessTok,
+			ServerID:    serverID,
+			ResVersion:  resVersion,
+			IOSMode:     opts.IOSMode,
+			AppVersion:  opts.AppVersion,
+			VersionCode: opts.VersionCode,
 		})
 		loginPF = loginParams.GetString("pf")
 		loginContent := sfs.NewSFSObject()
@@ -491,9 +505,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			// (unlike a wrong-typed ip) it doesn't stop the redirect itself from being followed.
 			newZone := redirectZone(siObj, "login.go base-zone Login")
 			// The real client adopts serverInfo.uid as its gameUid and reconnects with the same
-			// at, making no GSL call (LoginMessage.CSHandleResponse, A-CS:82799-82858). A fresh
-			// GSL call here could only disturb token state: it sends platform=Android whatever
-			// identity the token belongs to.
+			// at, making no GSL call (LoginMessage.CSHandleResponse, A-CS:82799-82858). Earlier
+			// versions called GSL opt=fix here. That request claimed platform=Android, so it
+			// could swap an iOS-issued token for an Android-bound one.
 			newGameUid := redirectUid(siObj, "login.go base-zone Login")
 			slog.Info("serverInfo redirect: reconnecting to new address with the same access token", "newAddr", newAddr, "newZone", newZone,
 				"oldAddr", addr, "oldZone", zone, "newGameUid", newGameUid, "oldGameUid", gameUid, "accessTokLen", len(accessTok))

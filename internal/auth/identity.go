@@ -522,7 +522,7 @@ type LoginParamsInput struct {
 	AppVersion  string
 	VersionCode string
 
-	// ResVersion is the hot-update state to report (see ResVersionFor); "" sends "0", the value
+	// ResVersion is the hot-update state to report (see ResVersionFrom); "" sends "0", the value
 	// this client sent for months. It also fills ta's lw_res_version.
 	ResVersion string
 }
@@ -538,6 +538,12 @@ const (
 	iosDefaultVersionCode = "786"
 	iosPlatformName       = "iOS" // GameUtility.GetPlatformName() on iOS (BU:1945-1961)
 )
+
+// PlatformName is the GSL form's `platform` for this identity: "iOS" under -cs-ios, otherwise
+// "Android". An access token is bound to it.
+func PlatformName(iosMode bool) string {
+	return loginBuild(iosMode, "", "").Platform
+}
 
 // loginBuild is the client build a Login claims: gsl.AndroidBuild, or the iOS capture's build under
 // iosMode, with a session config's appVersion/versionCode (when non-empty) replacing the defaults.

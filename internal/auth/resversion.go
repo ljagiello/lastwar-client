@@ -6,41 +6,28 @@ import (
 	"net/http"
 )
 
-// ResVersionFor returns the Login resVersion for the build a Login claims (see
-// gsl.CheckVersionResponse.ResVersion), or "" when it cannot be derived, in which case
-// BuildLoginParams keeps sending "0". It never fails a login: every failure is one Warn.
-//
-// androidCV is the Android check-version reply the caller already fetched for the gate host and the
-// GSL RSA key, and it only serves an Android-mode Login. iOS mode makes a second, anonymous
-// check-version GET as the iOS build (gsl.CheckVersionAs: no uid, deviceId or token), used for
-// nothing but this value. Two calls are needed because the access token is bound to the iOS build
-// it was issued under, so an iOS-mode Login claims that build, and the hot-update versions differ by
-// platform (Android 2343.1502_826F vs iOS 2159.1505_821F in October 2026). Reusing the Android
-// reply would pair an iOS 1.0.344 Login with Android's manifest versions, a combination no real
-// client sends. The gate host, RSA key and every GSL call still come from the Android reply, so no
-// token path changes. With no Android reply (androidCV nil: every host failed) the iOS GET is
-// skipped, since it would try the same hosts.
-func ResVersionFor(httpClient *http.Client, androidCV *gsl.CheckVersionResponse, iosMode bool, appVersion, versionCode, zone string) string {
-	cv, build := androidCV, gsl.AndroidBuild
-	if iosMode {
-		build = loginBuild(true, appVersion, versionCode)
-		if androidCV == nil {
-			// The Android check-version already failed on every host; trying the same hosts
-			// again would only delay the login by up to one timeout per host.
-			slog.Warn(`resVersion: no check-version reply this run; skipping the iOS check-version and sending resVersion "0"`)
-			return ""
-		}
-		var err error
-		if cv, _, err = gsl.CheckVersionAs(httpClient, build, zone); err != nil {
-			slog.Warn(`resVersion: iOS check-version failed; sending resVersion "0"`,
-				"appVersion", build.AppVersion, "versionCode", build.VersionCode, "error", err)
-			return ""
-		}
+// CheckVersionFor fetches check-version as the build a Login will claim: the iOS build under
+// -cs-ios, otherwise the Android build. zone is the session's zone ("APS783"), or "" when it is
+// not known yet. The reply's host is the gate for the GSL calls that follow, and its resMsg is
+// their RSA key.
+func CheckVersionFor(httpClient *http.Client, iosMode bool, appVersion, versionCode, zone string) (*gsl.CheckVersionResponse, string, error) {
+	return gsl.CheckVersionAs(httpClient, loginBuild(iosMode, appVersion, versionCode), zone)
+}
+
+// ResVersionFrom returns the Login resVersion for a check-version reply already fetched as the
+// build that Login will claim (see gsl.CheckVersionResponse.ResVersion), or "" when it cannot be
+// derived, in which case BuildLoginParams sends "0". It never fails a login: a missing reply or a
+// reply without the manifest fields is one Warn.
+func ResVersionFrom(cv *gsl.CheckVersionResponse, iosMode bool, appVersion, versionCode string) string {
+	build := loginBuild(iosMode, appVersion, versionCode)
+	if cv == nil {
+		slog.Warn(`resVersion: no check-version reply this run; sending resVersion "0"`, "packageName", build.PackageName)
+		return ""
 	}
 	rv := cv.ResVersion()
 	if rv == "" {
 		slog.Warn(`resVersion: check-version lacks GameRes, DllRes, lwfile2, table_version or locale; sending resVersion "0"`,
-			"packageName", build.PackageName, "haveReply", cv != nil)
+			"packageName", build.PackageName)
 		return ""
 	}
 	slog.Info("resVersion derived from check-version", "resVersion", rv, "packageName", build.PackageName)

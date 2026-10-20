@@ -2,8 +2,13 @@ package auth
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"lastwar-client/internal/crypto"
 	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -12,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -239,90 +245,249 @@ func TestLoginPicksTheAccountsServer(t *testing.T) {
 	}
 }
 
-func TestResVersionFor(t *testing.T) {
+func TestResVersionFrom(t *testing.T) {
 	liveAndroid := &gsl.CheckVersionResponse{
 		HotUpdateMsg: "GameRes,2343,1,1;DllRes,1502,1,1", LwFile2: "826|1",
 		TableVersion: "39516,1,x", Locale: "23570,en",
 	}
-
-	t.Run("android reuses the reply it is given", func(t *testing.T) {
-		f := newFakeGSL(t, liveCheckVersionTables, gsl.LoginServerListRespon{})
-		testutil.UseFakeGSLServer(t, f.Server)
-		if got := ResVersionFor(gsl.DefaultHTTPClient(), liveAndroid, false, "", "", "APS783"); got != "2343.1502_826F_39516.23570" {
-			t.Errorf("ResVersionFor = %q", got)
-		}
-		if n := len(f.checkVersionQueries()); n != 0 {
-			t.Errorf("check-version calls = %d, want 0", n)
-		}
-	})
-
-	iosCases := []struct {
-		name                   string
-		appVersion, code       string
-		wantAppVersion, wantID string
-	}{
-		{"ios default build", "", "", "1.0.344", "786"},
-		{"ios build from the session config", "1.0.350", "801", "1.0.350", "801"},
+	liveIOS := &gsl.CheckVersionResponse{
+		HotUpdateMsg: "GameRes,2159,1,2;DllRes,1505,3,4;", LwFile2: "821|1|2|3|4;820|1|2",
+		TableVersion: "39516,19518361,f1d9e6a3a8ec1610607583645e3f8377,3418147826;39500|48261|1",
+		Locale:       "23570,pl,ja,en",
 	}
-	for _, c := range iosCases {
+	if got := ResVersionFrom(liveAndroid, false, "", ""); got != "2343.1502_826F_39516.23570" {
+		t.Errorf("android ResVersionFrom = %q", got)
+	}
+	if got := ResVersionFrom(liveIOS, true, "", ""); got != liveResVersion {
+		t.Errorf("ios ResVersionFrom = %q, want %q", got, liveResVersion)
+	}
+
+	incomplete := &gsl.CheckVersionResponse{HotUpdateMsg: "GameRes,1,1,1;DllRes,2,1,1", LwFile2: "3|1", Locale: "4,en"}
+	for _, c := range []struct {
+		name string
+		cv   *gsl.CheckVersionResponse
+		want string
+	}{
+		{"no reply", nil, "no check-version reply"},
+		{"reply lacks table_version", incomplete, "lacks GameRes"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			got := ResVersionFrom(c.cv, true, "", "")
+			slog.SetDefault(orig)
+			if got != "" {
+				t.Errorf("ResVersionFrom = %q, want \"\"", got)
+			}
+			if n := strings.Count(buf.String(), `level=WARN msg="resVersion:`); n != 1 || !strings.Contains(buf.String(), c.want) {
+				t.Errorf("want one resVersion Warn mentioning %q, got:\n%s", c.want, buf.String())
+			}
+		})
+	}
+}
+
+// TestCheckVersionForClaimsTheLoginBuild: -cs-ios fetches check-version as the iOS build, and the
+// Android path still fetches the Android build. There is no second, other-platform request.
+func TestCheckVersionForClaimsTheLoginBuild(t *testing.T) {
+	cases := []struct {
+		name, app, code, wantApp, wantID, wantPkg, wantPlatform string
+		ios                                                     bool
+	}{
+		{"android", "", "", gsl.AppVersion, gsl.VersionCode, gsl.PackageName, "Android", false},
+		{"ios default", "", "", "1.0.344", "786", "com.lastwar.ios", "iOS", true},
+		{"ios from the session config", "1.0.350", "801", "1.0.350", "801", "com.lastwar.ios", "iOS", true},
+	}
+	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFakeGSL(t, liveCheckVersionTables, gsl.LoginServerListRespon{})
 			testutil.UseFakeGSLServer(t, f.Server)
-			if got := ResVersionFor(gsl.DefaultHTTPClient(), liveAndroid, true, c.appVersion, c.code, "APS783"); got != liveResVersion {
-				t.Errorf("ResVersionFor = %q, want %q (from the iOS reply, not the Android one)", got, liveResVersion)
+			if _, _, err := CheckVersionFor(gsl.DefaultHTTPClient(), c.ios, c.app, c.code, "APS783"); err != nil {
+				t.Fatal(err)
 			}
 			qs := f.checkVersionQueries()
 			if len(qs) != 1 {
 				t.Fatalf("check-version calls = %d, want 1", len(qs))
 			}
 			want := url.Values{
-				"packageName": {"com.lastwar.ios"}, "platform": {"iOS"}, "appVersion": {c.wantAppVersion},
+				"packageName": {c.wantPkg}, "platform": {c.wantPlatform}, "appVersion": {c.wantApp},
 				"buildId": {c.wantID}, "server": {"APS783"}, "table_env": {"table_online"},
 				"gm": {"0"}, "uid": {""}, "deviceId": {""}, "returnJson": {"1"}, "unityVersion": {"440"},
 			}
 			if qs[0].Encode() != want.Encode() {
-				t.Errorf("iOS check-version query =\n %s\nwant\n %s", qs[0].Encode(), want.Encode())
+				t.Errorf("check-version query =\n %s\nwant\n %s", qs[0].Encode(), want.Encode())
 			}
 		})
 	}
+}
 
-	fallbacks := []struct {
-		name    string
-		ios     bool
-		cv      *gsl.CheckVersionResponse
-		hosts   func(t *testing.T) []string
-		wantLog string
-	}{
-		{"android without a reply", false, nil, nil, "lacks GameRes"},
-		// The Android check-version already failed, so the iOS one is not tried: CheckVersionHosts
-		// is left unreachable, and a call would add a host-failure Warn to the count below.
-		{"ios without an Android reply", true, nil, func(*testing.T) []string { return []string{"http://127.0.0.1:1"} }, "skipping the iOS check-version"},
-		{"ios check-version fails", true, liveAndroid, func(*testing.T) []string { return []string{"http://127.0.0.1:1"} }, "iOS check-version failed"},
-		{"ios reply lacks table_version", true, liveAndroid, func(t *testing.T) []string {
-			return []string{newFakeGSL(t, map[string]any{"hotUpdateMsg": "GameRes,1,1,1;DllRes,2,1,1", "lwfile2": "3|1", "locale": "4,en"}, gsl.LoginServerListRespon{}).URL}
-		}, "lacks GameRes"},
+// loginRecordingGSL is a check-version and getserverlist stand-in that records the check-version
+// query and the decrypted getserverlist form. Login reaches it through CheckVersionHosts.
+func loginRecordingGSL(t *testing.T, tables map[string]any, resp gsl.LoginServerListRespon) (forms, queries func() []url.Values) {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range fallbacks {
-		t.Run(c.name, func(t *testing.T) {
-			if c.hosts != nil {
-				orig := gsl.CheckVersionHosts
-				gsl.CheckVersionHosts = c.hosts(t)
-				t.Cleanup(func() { gsl.CheckVersionHosts = orig })
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := base64.StdEncoding.EncodeToString(der)
+	var mu sync.Mutex
+	var gotForms, gotQueries []url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "getlsu3dversion.php"):
+			mu.Lock()
+			gotQueries = append(gotQueries, r.URL.Query())
+			mu.Unlock()
+			body := map[string]any{"resMsg": pub}
+			for k, v := range tables {
+				body[k] = v
 			}
-			var buf bytes.Buffer
-			orig := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-			got := ResVersionFor(gsl.DefaultHTTPClient(), c.cv, c.ios, "", "", "APS783")
-			slog.SetDefault(orig)
-			if got != "" {
-				t.Errorf("ResVersionFor = %q, want \"\" (BuildLoginParams then sends \"0\")", got)
+			_ = json.NewEncoder(w).Encode(body)
+		case strings.HasSuffix(r.URL.Path, "getserverlist.php"):
+			form := url.Values{}
+			if err := r.ParseForm(); err == nil {
+				saltCT, _ := crypto.URLSafeB64Decode(r.FormValue("uuid"))
+				if salt, err := rsa.DecryptPKCS1v15(rand.Reader, priv, saltCT); err == nil { //nolint:staticcheck // SA1019: the fake mirrors the protocol's PKCS#1 v1.5 salt
+					data, _ := crypto.URLSafeB64Decode(r.FormValue("data"))
+					if plain, err := crypto.AESECBDecryptPKCS7(data, crypto.MD5HexKey(string(salt))); err == nil {
+						form, _ = url.ParseQuery(string(plain))
+					}
+				}
 			}
-			// One resVersion Warn; gsl.CheckVersionAs adds its own per-host failure trail.
-			if n := strings.Count(buf.String(), `level=WARN msg="resVersion:`); n != 1 || !strings.Contains(buf.String(), c.wantLog) {
-				t.Errorf("want exactly one resVersion Warn mentioning %q, got:\n%s", c.wantLog, buf.String())
+			mu.Lock()
+			gotForms = append(gotForms, form)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	testutil.UseFakeGSLServer(t, srv)
+	return func() []url.Values {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]url.Values(nil), gotForms...)
+		}, func() []url.Values {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]url.Values(nil), gotQueries...)
+		}
+}
+
+// TestLoginIOSModeUsesTheIOSIdentity: with IOSMode, check-version, GSL, the zone Login, and
+// account.login.new all claim iOS. The Android path is unchanged when IOSMode is false.
+func TestLoginIOSModeUsesTheIOSIdentity(t *testing.T) {
+	for _, ios := range []bool{false, true} {
+		t.Run(map[bool]string{false: "android", true: "ios"}[ios], func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			wantPkg, wantPlatform, wantPF := gsl.PackageName, "Android", "market_global"
+			if ios {
+				wantPkg, wantPlatform, wantPF = iosPackageName, "iOS", "AppStore"
 			}
-			if c.ios && c.cv == nil && strings.Contains(buf.String(), "host failed") {
-				t.Errorf("the iOS check-version was attempted without an Android reply:\n%s", buf.String())
+			loginP := make(chan *sfs.SFSObject, 1)
+			finishPF := make(chan string, 1)
+			addr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+				env, err := server.ReadEnvelope()
+				if err != nil {
+					return
+				}
+				if pv, ok := env.Content.Get("p"); ok {
+					if p, ok := pv.Val.(*sfs.SFSObject); ok {
+						loginP <- p
+					}
+				}
+				ok := sfs.NewSFSObject()
+				ok.PutBool("success", true)
+				if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, ok); err != nil {
+					return
+				}
+				if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
+					return
+				}
+				if _, err := session.ReadNextExtension(server); err != nil {
+					return
+				}
+				if err := server.SendExtension("account.login.send.verify.code", ok); err != nil {
+					return
+				}
+				finish, err := session.ReadNextExtension(server)
+				if err != nil {
+					return
+				}
+				finishPF <- finish.Params.GetString("pf")
+				if err := server.SendExtension("account.login.new", ok); err != nil {
+					return
+				}
+				push := sfs.NewSFSObject()
+				push.PutUtfString("loginKey", "lk")
+				push.PutUtfString("gameUid", "uid-1")
+				_ = server.SendExtension("push.account.login.new", push)
+			})
+			host, port := testutil.SplitHostPortInt(t, addr)
+			forms, queries := loginRecordingGSL(t, liveCheckVersionTables, gsl.LoginServerListRespon{
+				Code:       "0",
+				ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: "APS1"}},
+				At:         &gsl.LoginToken{Token: "tok-1"},
+			})
+			pipe := mkfifoT(t, t.TempDir(), "code.pipe")
+			go func() {
+				f, err := os.OpenFile(pipe, os.O_WRONLY, 0)
+				if err != nil {
+					return
+				}
+				defer func() { _ = f.Close() }()
+				_, _ = f.WriteString("123456\n")
+			}()
+
+			result, err := Login(LoginOptions{Email: "player@example.com", CodePipe: pipe, IOSMode: ios})
+			if err != nil {
+				t.Fatalf("Login: %v", err)
+			}
+			defer func() { _ = result.Conn.Close() }()
+
+			qs := queries()
+			if len(qs) != 1 {
+				t.Fatalf("check-version calls = %d, want 1", len(qs))
+			}
+			if qs[0].Get("packageName") != wantPkg || qs[0].Get("platform") != wantPlatform {
+				t.Errorf("check-version package/platform = %s/%s, want %s/%s", qs[0].Get("packageName"), qs[0].Get("platform"), wantPkg, wantPlatform)
+			}
+			gotForms := forms()
+			if len(gotForms) != 1 {
+				t.Fatalf("GSL calls = %d, want 1", len(gotForms))
+			}
+			if gotForms[0].Get("platform") != wantPlatform {
+				t.Errorf("GSL platform = %q, want %s", gotForms[0].Get("platform"), wantPlatform)
+			}
+			select {
+			case p := <-loginP:
+				if p.GetString("packageName") != wantPkg || p.GetString("platform") != map[bool]string{false: "1", true: "0"}[ios] || p.GetString("pf") != wantPF {
+					t.Errorf("Login package/platform/pf = %s/%s/%s", p.GetString("packageName"), p.GetString("platform"), p.GetString("pf"))
+				}
+				if got, want := p.GetString("psh"), pshField(ios, p.GetString("cmdBaseTime")); got != want {
+					t.Errorf("psh = %q, want %q", got, want)
+				}
+				if p.GetString("resVersion") != liveResVersion {
+					t.Errorf("resVersion = %q, want %q from the %s check-version", p.GetString("resVersion"), liveResVersion, wantPlatform)
+				}
+				if ios && (p.Has("AndroidID") || p.Has("google_available")) {
+					t.Error("iOS Login still carries Android-only fields")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("fake server never received a Login")
+			}
+			select {
+			case pf := <-finishPF:
+				if pf != wantPF {
+					t.Errorf("account.login.new pf = %q, want %q", pf, wantPF)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("fake server never received account.login.new")
 			}
 		})
 	}
