@@ -99,21 +99,26 @@ func TestBootstrapOwnDeviceUsesTheFlagIdentity(t *testing.T) {
 		Rt:         &gsl.LoginToken{Token: "rt-1", Time: "11"},
 	}
 	for _, ios := range []bool{false, true} {
-		client, forms := testutil.UseDecryptingGSL(t, reply)
-		s, err := BootstrapOwnDevice(client, ios)
-		if err != nil {
-			t.Fatal(err)
-		}
 		wantPlatform, wantApp, wantCode := gsl.Platform, gsl.AppVersion, gsl.VersionCode
 		if ios {
 			wantPlatform, wantApp, wantCode = "iOS", "1.0.344", "786"
 		}
-		got := forms()
-		if len(got) != 1 || got[0].Get("platform") != wantPlatform || got[0].Get("opt") != "login" {
-			t.Errorf("ios=%v GSL platform/opt = %q/%q, want %s/login", ios, got[0].Get("platform"), got[0].Get("opt"), wantPlatform)
-		}
-		if s.IOSMode != ios || s.AppVersion != wantApp || s.VersionCode != wantCode {
-			t.Errorf("ios=%v session identity = %v %s/%s, want %v %s/%s", ios, s.IOSMode, s.AppVersion, s.VersionCode, ios, wantApp, wantCode)
-		}
+		t.Run(wantPlatform, func(t *testing.T) {
+			client, forms := testutil.UseDecryptingGSL(t, reply)
+			s, err := BootstrapOwnDevice(client, ios)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := forms()
+			if len(got) != 1 {
+				t.Fatalf("GSL requests = %d, want 1 (the opt=login trade)", len(got))
+			}
+			if got[0].Get("platform") != wantPlatform || got[0].Get("opt") != "login" {
+				t.Errorf("GSL platform/opt = %q/%q, want %s/login", got[0].Get("platform"), got[0].Get("opt"), wantPlatform)
+			}
+			if s.IOSMode != ios || s.AppVersion != wantApp || s.VersionCode != wantCode {
+				t.Errorf("session identity = %v %s/%s, want %v %s/%s", s.IOSMode, s.AppVersion, s.VersionCode, ios, wantApp, wantCode)
+			}
+		})
 	}
 }

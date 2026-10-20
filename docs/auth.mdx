@@ -117,7 +117,7 @@ The real client's recovery from `E011` needs the refresh token: clear `at`, run 
 
 ### Following a `serverInfo` redirect
 
-When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live) and now does the same as the real client: it redials with the same `at` and adopts `serverInfo.zone` and `serverInfo.uid`. Earlier versions called GSL `opt=fix` before redialing. Under the iOS identity that call could only swap a working token for an Android-bound one, because that GSL request claimed `platform=Android`. With `-cs-ios`, check-version, GSL (`opt=refresh`, the guest/email `getserverlist`, and the game-server lookup), and the `Login` all claim iOS. Without it they stay Android.
+When the `Login` response carries `serverInfo`, the real client saves the new ip, port, zone, and uid, clears its network config, runs the normal `Login`-response handler, and reconnects. The cached IP is now set, so the reconnect goes **straight to `ConnectGame`: no GSL call, and the same `at`**. `serverInfo.uid` replaces `gameUid`. `goclient` follows redirects too (confirmed live) and now does the same as the real client: it redials with the same `at` and adopts `serverInfo.zone` and `serverInfo.uid`. Earlier versions called GSL `opt=fix` before redialing. Under the iOS identity that call could only swap a working token for an Android-bound one, because that GSL request claimed `platform=Android`. With `-cs-ios`, or on a reconnect a session config's `iosMode`, check-version, every GSL call (`opt=refresh`, the guest/email `getserverlist`, the own-device `opt=login` trade, and the game-server lookup), and the `Login` claim iOS. Otherwise they stay Android.
 
 ### Looking up the game server
 
@@ -136,6 +136,8 @@ Confirmed live on 2026-10-10 against a session captured from the iOS app, with t
 - **No `opt`** returned code `0` and one entry: `State#783`, zone `APS783`, port `10783`, the three `lastwar-game-tcp-*` gateway hostnames, and the session's `gameUid`. It returned no `at` or `rt`.
 - **With no address in the session config**, `goclient` looked the server up, logged in, and saved the gateway list and port.
 - **With the pre-August address** (the captured gateway IPs on port `17783`), the first gateway timed out and the second reset the connection. `goclient` looked the server up once, retried at the hostnames on `10783`, logged in, and saved the new address.
+
+An iOS session no longer asks the Android check-version for these. It makes one check-version as the iOS build, as the iOS app does, and the lookup and the session's own refresh use that reply's gate host and RSA key. Confirmed live on 2026-10-19 with an equivalent build of this path: a copy of the scheduled runs' captured iOS session, with no address, sent one iOS check-version and a `platform=iOS` lookup sealed with that reply's key, then logged in and loaded 159 buildings. If that check-version fails, the run still dials a configured address, but it can't look the server up or refresh its token.
 
 ### A device of its own
 

@@ -788,7 +788,8 @@ func TestRunCrossServerTestCsRtSendsPlatform(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			client, forms := testutil.UseDecryptingGSL(t, refreshReply())
 			var seen loginAts
-			dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer(refreshedAt, &seen)})
+			// The refresh reply's server list replaces -cs-ip, so the Login dials its first gateway.
+			dial, _ := recordingDial(map[string]func(*session.GameConn){"gw-a.example:10783": tokenCheckingServer(refreshedAt, &seen)})
 
 			synctest.Test(t, func(t *testing.T) {
 				runCrossServerTest(crossServerTestOpts{
@@ -798,6 +799,9 @@ func TestRunCrossServerTestCsRtSendsPlatform(t *testing.T) {
 				synctest.Wait()
 			})
 
+			if got := seen.get(); fmt.Sprint(got) != fmt.Sprint([]string{refreshedAt}) {
+				t.Errorf("Login access tokens = %v, want only the refreshed one", got)
+			}
 			got := forms()
 			if len(got) != 1 {
 				t.Fatalf("getserverlist requests = %d, want 1 (the -cs-rt refresh only)", len(got))

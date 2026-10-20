@@ -28,95 +28,106 @@ func (rt handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return rec.Result(), nil
 }
 
-// TestRunCrossServerTestIOSResVersionAndCheckDeviceChange drives the cron path in iOS mode:
-// check-version goes out as Android with the session zone (gate host and RSA key), then once more
-// as the iOS build for resVersion; the Login carries the iOS-derived resVersion; and
-// check.device.change follows init.
-func TestRunCrossServerTestIOSResVersionAndCheckDeviceChange(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	pub := testutil.RSAPubKeyDER(t)
+// TestRunCrossServerTestCheckVersionAndCheckDeviceChange drives the cron path in both modes:
+// check-version goes out once, as the build the Login claims (iOS under iosMode, else Android),
+// with the session zone; the Login carries that platform's resVersion; and check.device.change
+// follows init.
+func TestRunCrossServerTestCheckVersionAndCheckDeviceChange(t *testing.T) {
+	for _, c := range []struct {
+		iosMode                        bool
+		wantPlatform, wantPkg, wantApp string
+		wantBuildID, wantResVersion    string
+	}{
+		{false, gsl.Platform, gsl.PackageName, gsl.AppVersion, gsl.VersionCode, "2343.1502_826F_39516.23570"},
+		{true, "iOS", "com.lastwar.ios", "1.0.344", "786", "2159.1505_821F_39516.23570"},
+	} {
+		t.Run(c.wantPlatform, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			pub := testutil.RSAPubKeyDER(t)
 
-	var mu sync.Mutex
-	var cvQueries []url.Values
-	var gslCalls int
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		if !strings.HasSuffix(r.URL.Path, "getlsu3dversion.php") {
-			gslCalls++
-			http.NotFound(w, r)
-			return
-		}
-		q := r.URL.Query()
-		cvQueries = append(cvQueries, q)
-		body := map[string]any{"resMsg": pub, "updateType": "3", "lwfile2": "826|1", "table_version": "39516,1,x", "locale": "23570,en",
-			"hotUpdateMsg": "GameRes,2343,1,1;DllRes,1502,1,1"}
-		if q.Get("platform") == "iOS" {
-			body["lwfile2"], body["hotUpdateMsg"] = "821|1", "GameRes,2159,1,1;DllRes,1505,1,1"
-		}
-		_ = json.NewEncoder(w).Encode(body)
-	})
-	orig := gsl.CheckVersionHosts
-	gsl.CheckVersionHosts = []string{"http://gsl.invalid"}
-	t.Cleanup(func() { gsl.CheckVersionHosts = orig })
-
-	var loginResVersion string
-	var afterInit []string
-	dial := session.NewInMemoryGameDial(func(server *session.GameConn) {
-		env, err := server.ReadEnvelope()
-		if err != nil {
-			return
-		}
-		if pv, ok := env.Content.Get("p"); ok {
-			if p, ok := pv.Val.(*sfs.SFSObject); ok {
+			var mu sync.Mutex
+			var cvQueries []url.Values
+			var gslCalls int
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
-				loginResVersion = p.GetString("resVersion")
+				defer mu.Unlock()
+				if !strings.HasSuffix(r.URL.Path, "getlsu3dversion.php") {
+					gslCalls++
+					http.NotFound(w, r)
+					return
+				}
+				q := r.URL.Query()
+				cvQueries = append(cvQueries, q)
+				body := map[string]any{"resMsg": pub, "updateType": "3", "lwfile2": "826|1", "table_version": "39516,1,x", "locale": "23570,en",
+					"hotUpdateMsg": "GameRes,2343,1,1;DllRes,1502,1,1"}
+				if q.Get("platform") == "iOS" {
+					body["lwfile2"], body["hotUpdateMsg"] = "821|1", "GameRes,2159,1,1;DllRes,1505,1,1"
+				}
+				_ = json.NewEncoder(w).Encode(body)
+			})
+			orig := gsl.CheckVersionHosts
+			gsl.CheckVersionHosts = []string{"http://gsl.invalid"}
+			t.Cleanup(func() { gsl.CheckVersionHosts = orig })
+
+			var loginResVersion string
+			var afterInit []string
+			dial := session.NewInMemoryGameDial(func(server *session.GameConn) {
+				env, err := server.ReadEnvelope()
+				if err != nil {
+					return
+				}
+				if pv, ok := env.Content.Get("p"); ok {
+					if p, ok := pv.Val.(*sfs.SFSObject); ok {
+						mu.Lock()
+						loginResVersion = p.GetString("resVersion")
+						mu.Unlock()
+					}
+				}
+				resp := sfs.NewSFSObject()
+				resp.PutBool("success", true)
+				if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp); err != nil {
+					return
+				}
+				if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
+					return
+				}
+				msg, err := session.ReadNextExtension(server)
+				if err != nil {
+					return
+				}
+				mu.Lock()
+				afterInit = append(afterInit, msg.Cmd)
 				mu.Unlock()
+			})
+
+			synctest.Test(t, func(t *testing.T) {
+				runCrossServerTest(crossServerTestOpts{
+					ip: "gw.invalid", port: 10783, zone: "APS783", gameUid: "uid-1", at: "tok-1", iosMode: c.iosMode,
+					httpClient: &http.Client{Transport: handlerTransport{handler}},
+					dialGame:   dial,
+				})
+				synctest.Wait()
+			})
+
+			mu.Lock()
+			defer mu.Unlock()
+			if loginResVersion != c.wantResVersion {
+				t.Errorf("Login p.resVersion = %q, want the %s-derived %s", loginResVersion, c.wantPlatform, c.wantResVersion)
 			}
-		}
-		resp := sfs.NewSFSObject()
-		resp.PutBool("success", true)
-		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp); err != nil {
-			return
-		}
-		if err := server.SendExtension("init", sfs.NewSFSObject()); err != nil {
-			return
-		}
-		msg, err := session.ReadNextExtension(server)
-		if err != nil {
-			return
-		}
-		mu.Lock()
-		afterInit = append(afterInit, msg.Cmd)
-		mu.Unlock()
-	})
-
-	synctest.Test(t, func(t *testing.T) {
-		runCrossServerTest(crossServerTestOpts{
-			ip: "gw.invalid", port: 10783, zone: "APS783", gameUid: "uid-1", at: "tok-1", iosMode: true,
-			httpClient: &http.Client{Transport: handlerTransport{handler}},
-			dialGame:   dial,
+			if len(cvQueries) != 1 {
+				t.Fatalf("check-version calls = %d, want 1 (the Login's own build only)", len(cvQueries))
+			}
+			if q := cvQueries[0]; q.Get("platform") != c.wantPlatform || q.Get("packageName") != c.wantPkg || q.Get("appVersion") != c.wantApp ||
+				q.Get("buildId") != c.wantBuildID || q.Get("server") != "APS783" || q.Get("table_env") != "table_online" || q.Get("uid") != "" || q.Get("deviceId") != "" {
+				t.Errorf("check-version = %v, want the anonymous %s %s/%s query", q, c.wantPlatform, c.wantApp, c.wantBuildID)
+			}
+			if gslCalls != 0 {
+				t.Errorf("getserverlist.php calls = %d, want 0 without -cs-rt", gslCalls)
+			}
+			if len(afterInit) != 1 || afterInit[0] != "check.device.change" {
+				t.Errorf("first command after init = %v, want check.device.change", afterInit)
+			}
 		})
-		synctest.Wait()
-	})
-
-	mu.Lock()
-	defer mu.Unlock()
-	if loginResVersion != "2159.1505_821F_39516.23570" {
-		t.Errorf("Login p.resVersion = %q, want the iOS-derived 2159.1505_821F_39516.23570", loginResVersion)
-	}
-	if len(cvQueries) != 1 {
-		t.Fatalf("check-version calls = %d, want 1 (the iOS build, not an Android call followed by an iOS one)", len(cvQueries))
-	}
-	if q := cvQueries[0]; q.Get("platform") != "iOS" || q.Get("packageName") != "com.lastwar.ios" || q.Get("appVersion") != "1.0.344" ||
-		q.Get("buildId") != "786" || q.Get("server") != "APS783" || q.Get("table_env") != "table_online" || q.Get("uid") != "" || q.Get("deviceId") != "" {
-		t.Errorf("check-version = %v, want the anonymous iOS 1.0.344/786 query", q)
-	}
-	if gslCalls != 0 {
-		t.Errorf("getserverlist.php calls = %d, want 0 without -cs-rt", gslCalls)
-	}
-	if len(afterInit) != 1 || afterInit[0] != "check.device.change" {
-		t.Errorf("first command after init = %v, want check.device.change", afterInit)
 	}
 }
 

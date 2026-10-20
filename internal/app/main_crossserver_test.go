@@ -1111,7 +1111,7 @@ func TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling(t *testing.T) 
 			rsaParse:    true,
 			rt:          "",
 			wantExit:    1, // from the unrelated port=0 check, not from the RSA parse itself
-			wantContain: "WARN parse RSA pubkey failed; continuing (only -cs-rt needs it)",
+			wantContain: "WARN parse RSA pubkey failed; continuing with no GSL refresh or server lookup",
 			wantAbsent:  "ERROR parse RSA pubkey failed",
 		},
 	}

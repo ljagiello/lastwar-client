@@ -1214,9 +1214,11 @@ func runCrossServerTest(o crossServerTestOpts) {
 	refreshed := false
 
 	// Check-version, as the real client runs on every launch, with the session's zone as `server`.
-	// Its reply feeds the Login resVersion (auth.ResVersionFrom, below) and, for -cs-rt, the gate host
-	// and RSA pubkey of the GSL opt=refresh call. -cs-rt NEEDS it, so a failure stays fatal there;
-	// otherwise the reconnect only loses the derived resVersion ("0" is sent, as before) and goes on.
+	// Its reply feeds the Login resVersion (auth.ResVersionFrom, below) and gives the gate host and
+	// RSA pubkey of every GSL call this run can make: the -cs-rt refresh, the session config's own
+	// refresh, and the game-server lookup. -cs-rt NEEDS it, so a failure stays fatal there.
+	// Otherwise the reconnect goes on with resVersion "0" and without the config refresh and the
+	// lookup, so a configured address that has moved can't be recovered this run.
 	httpClient := o.httpClient
 	if httpClient == nil {
 		httpClient = gsl.DefaultHTTPClient()
@@ -1229,7 +1231,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			slog.Error("check-version failed", "error", err)
 			os.Exit(1)
 		}
-		slog.Warn(`check-version failed; continuing with resVersion "0"`, "error", err)
+		slog.Warn(`check-version failed; continuing with resVersion "0" and no GSL refresh or server lookup`, "error", err)
 	} else {
 		cv = reply
 		if pub, err := crypto.ParseRSAPubKeyFromDER(cv.ResMsg.String()); err != nil {
@@ -1237,7 +1239,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 				slog.Error("parse RSA pubkey failed", "error", err)
 				os.Exit(1)
 			}
-			slog.Warn("parse RSA pubkey failed; continuing (only -cs-rt needs it)", "error", err)
+			slog.Warn("parse RSA pubkey failed; continuing with no GSL refresh or server lookup", "error", err)
 		} else {
 			gslRSAPub, gslGateHost = pub, gateHost
 		}
