@@ -1036,20 +1036,20 @@ func TestRunCrossServerTestExitsWhenGameUidExplicitlyEmpty(t *testing.T) {
 }
 
 // TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling is the round-51 regression test for
-// the MINOR finding that runCrossServerTest's gsl.CheckVersion and RSA-pubkey-parse error branches
-// (main.go, right after the unconditional gsl.CheckVersion call, before the -cs-rt/-cs-* checks) had
+// the MINOR finding that runCrossServerTest's check-version and RSA-pubkey-parse error branches
+// (main.go, right after the unconditional auth.CheckVersionFor call, before the -cs-rt/-cs-* checks) had
 // zero test coverage of any kind: every other test in this file relies on testutil.NewFakeGSLServer/
-// testutil.UseFakeGSLServer, which always makes gsl.CheckVersion succeed with a valid pubkey, so neither the
+// testutil.UseFakeGSLServer, which always makes check-version succeed with a valid pubkey, so neither the
 // check-version-itself-fails path nor the check-version-succeeds-but-the-returned-pubkey-doesn't-
 // parse path was ever exercised. Both branches share the identical o.rt-conditional shape (fatal
 // os.Exit(1) when -cs-rt is set, since the opt=refresh call below genuinely needs GSL capability;
-// a Warn-and-degrade otherwise, since every other path can proceed without it) -- this table drives
-// all four combinations.
+// a Warn-and-degrade otherwise: the run still dials a configured address, but without the server
+// lookup or the session config's own refresh) -- this table drives all four combinations.
 //
 // The rt-empty cases reuse TestRunCrossServerTestExitsWhenPortNotGiven's port=0 trick to force a
 // second, already-covered, fast and deterministic exit right after the warn fires, rather than
 // actually completing a cross-server login -- what's under test here is that stderr shows the Warn
-// (not the Error) and that the process does NOT exit inside the gsl.CheckVersion/RSA-parse block itself.
+// (not the Error) and that the process does NOT exit inside the check-version/RSA-parse block itself.
 func TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS_CS_CV") == "1" {
 		t.Setenv("HOME", t.TempDir())
@@ -1070,7 +1070,7 @@ func TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling(t *testing.T) 
 		if rt == "" {
 			// Port left at its zero value deliberately forces a second, unrelated, already-
 			// covered exit (TestRunCrossServerTestExitsWhenPortNotGiven) shortly after the
-			// gsl.CheckVersion/RSA-parse Warn fires, keeping this subprocess fast and deterministic
+			// check-version/RSA-parse Warn fires, keeping this subprocess fast and deterministic
 			// instead of attempting a real cross-server login.
 			opts.ip = "1.2.3.4"
 		}
@@ -1095,7 +1095,7 @@ func TestRunCrossServerTestCheckVersionAndRSAParseFailureHandling(t *testing.T) 
 		{
 			name:        "check-version fails, -cs-rt empty: warns and continues",
 			rt:          "",
-			wantExit:    1, // from the unrelated port=0 check, not from gsl.CheckVersion itself
+			wantExit:    1, // from the unrelated port=0 check, not from check-version itself
 			wantContain: "WARN check-version failed; continuing with resVersion",
 			wantAbsent:  "ERROR check-version failed",
 		},

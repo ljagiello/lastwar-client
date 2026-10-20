@@ -139,9 +139,10 @@ func TestRunCrossServerTestLooksUpMissingAddress(t *testing.T) {
 }
 
 // TestRunCrossServerTestIOSLookupUsesTheIOSCheckVersion: an iOS session with no address fetches
-// check-version once, as iOS, and seals its lookup with that reply's RSA key (the fake decrypts only
-// a form sealed with the key it served), with platform=iOS. This is how the cron host's iOS session
-// finds its server again after the address moves.
+// check-version once, as iOS, and seals its lookup with that reply's RSA key, with platform=iOS. The
+// one check-version is what ties the key to the iOS reply; the fake decrypts only a form sealed with
+// the key it served. This is how the cron host's iOS session finds its server again after the
+// address moves.
 func TestRunCrossServerTestIOSLookupUsesTheIOSCheckVersion(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	client, forms := testutil.UseDecryptingGSL(t, lookupReply())

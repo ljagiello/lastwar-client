@@ -29,19 +29,22 @@ func (rt handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // TestRunCrossServerTestCheckVersionAndCheckDeviceChange drives the cron path in both modes:
-// check-version goes out once, as the build the Login claims (iOS under iosMode, else Android),
-// with the session zone; the Login carries that platform's resVersion; and check.device.change
-// follows init.
+// check-version goes out once, as the build the Login claims (iOS under iosMode, else Android, with
+// a session config's appVersion/versionCode when it has them), with the session zone; the Login
+// carries that platform's resVersion; and check.device.change follows init.
 func TestRunCrossServerTestCheckVersionAndCheckDeviceChange(t *testing.T) {
 	for _, c := range []struct {
+		name                           string
 		iosMode                        bool
+		appVersion, versionCode        string // the session config's build; "" = the default
 		wantPlatform, wantPkg, wantApp string
 		wantBuildID, wantResVersion    string
 	}{
-		{false, gsl.Platform, gsl.PackageName, gsl.AppVersion, gsl.VersionCode, "2343.1502_826F_39516.23570"},
-		{true, "iOS", "com.lastwar.ios", "1.0.344", "786", "2159.1505_821F_39516.23570"},
+		{"Android", false, "", "", gsl.Platform, gsl.PackageName, gsl.AppVersion, gsl.VersionCode, "2343.1502_826F_39516.23570"},
+		{"iOS", true, "", "", "iOS", "com.lastwar.ios", "1.0.344", "786", "2159.1505_821F_39516.23570"},
+		{"iOS, config build", true, "1.0.350", "801", "iOS", "com.lastwar.ios", "1.0.350", "801", "2159.1505_821F_39516.23570"},
 	} {
-		t.Run(c.wantPlatform, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			pub := testutil.RSAPubKeyDER(t)
 
@@ -103,6 +106,7 @@ func TestRunCrossServerTestCheckVersionAndCheckDeviceChange(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				runCrossServerTest(crossServerTestOpts{
 					ip: "gw.invalid", port: 10783, zone: "APS783", gameUid: "uid-1", at: "tok-1", iosMode: c.iosMode,
+					appVersion: c.appVersion, versionCode: c.versionCode,
 					httpClient: &http.Client{Transport: handlerTransport{handler}},
 					dialGame:   dial,
 				})

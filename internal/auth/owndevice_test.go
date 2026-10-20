@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -78,8 +79,21 @@ func TestOwnDeviceSessionFromRefusesAnotherRole(t *testing.T) {
 	}
 }
 
-// TestBootstrapOwnDeviceUsesTheFlagIdentity: -cs-ios trades the loginKey as iOS and records that
-// build; without it the trade stays Android.
+// checkVersionPlatforms passes requests on to base and records each check-version's platform.
+type checkVersionPlatforms struct {
+	base      http.RoundTripper
+	platforms []string
+}
+
+func (c *checkVersionPlatforms) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(r.URL.Path, "getlsu3dversion.php") {
+		c.platforms = append(c.platforms, r.URL.Query().Get("platform"))
+	}
+	return c.base.RoundTrip(r)
+}
+
+// TestBootstrapOwnDeviceUsesTheFlagIdentity: -cs-ios fetches check-version and trades the loginKey
+// as iOS and records that build; without it both stay Android.
 func TestBootstrapOwnDeviceUsesTheFlagIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ident, err := LoadOrCreateDeviceIdentity()
@@ -105,9 +119,14 @@ func TestBootstrapOwnDeviceUsesTheFlagIdentity(t *testing.T) {
 		}
 		t.Run(wantPlatform, func(t *testing.T) {
 			client, forms := testutil.UseDecryptingGSL(t, reply)
+			cv := &checkVersionPlatforms{base: client.Transport}
+			client.Transport = cv
 			s, err := BootstrapOwnDevice(client, ios)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if len(cv.platforms) != 1 || cv.platforms[0] != wantPlatform {
+				t.Errorf("check-version platforms = %v, want [%s]", cv.platforms, wantPlatform)
 			}
 			got := forms()
 			if len(got) != 1 {
