@@ -45,11 +45,11 @@ import (
 //     upgrade.
 //
 // production-upgrades-plan logs the same choices and sends nothing.
-// The chain budget: how long one run keeps starting upgrades as earlier ones end (well inside the
-// service's 15 min TimeoutStartSec), the length of one table second and the margin added to each
-// upgrade's table time before opening it. Tests shrink them.
+// The chain budget: how long one run keeps starting upgrades as earlier ones end (inside the
+// service's TimeoutStartSec, 2 h on this host), the length of one table second and the margin added
+// to each upgrade's table time before opening it. Tests shrink them.
 var (
-	productionUpgradeChain  = 10 * time.Minute
+	productionUpgradeChain  = 90 * time.Minute
 	productionUpgradeSecond = time.Second
 	productionUpgradeSlack  = 3 * time.Second
 )
