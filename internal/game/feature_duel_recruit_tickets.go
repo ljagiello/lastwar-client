@@ -564,6 +564,11 @@ func (g *duelSpendGuard) check() error {
 	return nil
 }
 
+// spendReplyEchoesGold lists spend commands whose request carries a "gold" parameter (a payment
+// mode, not a balance) that the reply's top level can echo; there it is not read as the balance.
+// free.building.up.new's reply carried gold=0 on 2026-10-21 while the account's diamonds rose.
+var spendReplyEchoesGold = map[string]bool{}
+
 // observe reads the balances a message carries. sent is the command whose reply is awaited.
 func (g *duelSpendGuard) observe(msg *session.ExtensionMessage, sent string) {
 	p := msg.Params
@@ -571,6 +576,9 @@ func (g *duelSpendGuard) observe(msg *session.ExtensionMessage, sent string) {
 	case sent, duelGoldProbeCmd, duelPushResourceInfo, duelPushRemainGold, duelPushErrRemainGold:
 		for _, o := range []*sfs.SFSObject{p, evObject(p, "resource"), evObject(p, "resources")} {
 			for _, k := range []string{"gold", "remainGold"} {
+				if o == p && k == "gold" && msg.Cmd == sent && spendReplyEchoesGold[sent] {
+					continue
+				}
 				if n, ok := evNum(o, k); ok {
 					g.seeGold(msg.Cmd, n)
 				}

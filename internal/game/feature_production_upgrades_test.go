@@ -286,3 +286,77 @@ func TestProductionUpgradesChainsWithinBudget(t *testing.T) {
 		t.Errorf("order %v, want %v", order, want)
 	}
 }
+
+// The live reply of 2026-10-21 carried gold=0, the echo of the request's payment mode, while the
+// account had diamonds: it must not trip the guard.
+func TestProductionUpgradesReplyGoldEchoIsNotABalance(t *testing.T) {
+	withUpgradeChain(t, 0)
+	lines := []upgradeLine{{uuid: 1, bID: int(BuildingGoldMine), lv: 2}, {uuid: 2, bID: int(BuildingIronMine), lv: 2}}
+	queues := []upgradeQueue{{uuid: 11, typ: 0, unlock: 1}, {uuid: 12, typ: 0, unlock: 1}}
+	in := upgradeInit(6, 1_000_000, 1_000_000, 0, lines, queues)
+	conn, f := startDuelSpendFake(t, nil, func(cmd string, p *sfs.SFSObject) []duelSpendMsg {
+		if cmd == productionUpgradeCmd {
+			return []duelSpendMsg{duelReply(duelObj("gold", 0, "uuid", p.GetString("uuid")))}
+		}
+		return nil // the gold check gets no balance, as live
+	})
+	if err := runProductionUpgrades(conn, in, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if n := len(upgradesOf(t, f)); n != 2 {
+		t.Errorf("%d upgrades sent, want 2", n)
+	}
+	if duelSpendHalted.Load() {
+		t.Error("the echoed gold=0 tripped the guard")
+	}
+}
+
+// A pushed balance lower than init still trips it.
+func TestProductionUpgradesPushedDiamondDropTrips(t *testing.T) {
+	withUpgradeChain(t, 0)
+	lines := []upgradeLine{{uuid: 1, bID: int(BuildingGoldMine), lv: 2}, {uuid: 2, bID: int(BuildingIronMine), lv: 2}}
+	queues := []upgradeQueue{{uuid: 11, typ: 0, unlock: 1}, {uuid: 12, typ: 0, unlock: 1}}
+	in := upgradeInit(6, 1_000_000, 1_000_000, 0, lines, queues)
+	conn, f := startDuelSpendFake(t, nil, func(cmd string, p *sfs.SFSObject) []duelSpendMsg {
+		if cmd == productionUpgradeCmd {
+			return []duelSpendMsg{duelPush(duelPushRemainGold, duelObj("gold", int64(10))), duelReply(duelObj("gold", 0))}
+		}
+		return nil
+	})
+	if err := runProductionUpgrades(conn, in, false); err == nil {
+		t.Fatal("want the tripwire error")
+	}
+	if n := len(upgradesOf(t, f)); n != 1 {
+		t.Errorf("%d upgrades sent, want 1", n)
+	}
+}
+
+func TestProductionUpgradesAsksAllianceHelp(t *testing.T) {
+	withUpgradeChain(t, 0)
+	lines := []upgradeLine{{uuid: 1, bID: int(BuildingGoldMine), lv: 2}}
+	queues := []upgradeQueue{{uuid: 11, typ: 0, unlock: 1}}
+	for _, inAlliance := range []bool{true, false} {
+		in := upgradeInit(6, 1_000_000, 1_000_000, 0, lines, queues)
+		if inAlliance {
+			in.Raw.PutSFSObject("alliance", duelObj("uid", "a1"))
+		}
+		conn, f := startDuelSpendFake(t, nil, upgradeServer(1000))
+		if err := runProductionUpgrades(conn, in, false); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		helps := f.only(callHelpCmd)
+		if !inAlliance {
+			if len(helps) != 0 {
+				t.Errorf("help asked outside an alliance")
+			}
+			continue
+		}
+		if len(helps) != 1 {
+			t.Fatalf("%d help requests, want 1", len(helps))
+		}
+		h := helps[0].Params
+		if h.GetLong("uuid") != 1 || h.GetInt("type") != 0 || h.GetInt("qType") != 0 || h.GetString("itemId") != "" {
+			t.Errorf("help params %v", h)
+		}
+	}
+}

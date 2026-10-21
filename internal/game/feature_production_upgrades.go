@@ -37,6 +37,10 @@ import (
 //   - Chain: when an upgrade started this run ends within productionUpgradeChain, the run waits
 //     (still reading pushes), opens it and starts the next level, so short low-level upgrades
 //     don't wait for the next scheduled run.
+//   - Alliance help: right after an upgrade starts, the run sends the upgrade's free help request
+//     (al.call.help) when the player is in an alliance.
+//   - Never diamonds: gold is always No (0), no goldCost, no speed-up. The reply's top-level gold
+//     echoes that parameter, so the spend guard doesn't read it as the balance.
 //   - Every send goes through the duel spend guard: the diamond tripwire and a gold check after each
 //     upgrade.
 //
@@ -62,6 +66,7 @@ type productionUpgradeCost struct {
 }
 
 func init() {
+	spendReplyEchoesGold[productionUpgradeCmd] = true
 	registerFeature(Feature{
 		Name:    "production-upgrades",
 		Summary: "OPT-IN: upgrade Farmlands, Iron/Gold Mines and Training Bases up to the HQ level, one per free build queue, iron/food/gold only (diamond tripwire)",
@@ -182,6 +187,8 @@ func runProductionUpgrades(conn *session.GameConn, in *Init, plan bool) error {
 	}
 	now := evNow().UnixMilli()
 	if plan {
+		gold, _ := evNum(in.Object("user"), "gold")
+		slog.Info(feature+": diamonds", "user.gold", gold)
 		productionUpgradeLogRaw(in, feature)
 	}
 	opened, openErr := productionUpgradeOpenEnded(conn, in, feature, now, plan)
@@ -245,10 +252,16 @@ func runProductionUpgrades(conn *session.GameConn, in *Init, plan bool) error {
 				slog.Info(label+" (plan: not sent)", "cmd", productionUpgradeCmd, "queue", q, "seconds", t.Cost.Seconds,
 					"params", params.StringRedacted())
 			} else {
-				if _, err := g.spend(label, productionUpgradeCmd, params); err != nil {
+				if msg, err := g.spend(label, productionUpgradeCmd, params); err != nil {
+					if msg != nil {
+						slog.Error(label+": reply", "response", msg.Params.StringRedacted())
+					}
 					return errors.Join(append(errs, err)...)
 				}
 				if err := g.check(); err != nil {
+					return errors.Join(append(errs, err)...)
+				}
+				if err := productionUpgradeCallHelp(conn, in, feature, t); session.ContainsNonTimeoutNetError(err) {
 					return errors.Join(append(errs, err)...)
 				}
 				end := time.Now().Add(time.Duration(t.Cost.Seconds)*productionUpgradeSecond + productionUpgradeSlack)
@@ -290,6 +303,26 @@ func runProductionUpgrades(conn *session.GameConn, in *Init, plan bool) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// productionUpgradeCallHelp presses the upgrade's alliance help button: al.call.help {uuid: Long
+// building, type: Int 0 (AllianceHelpType building), qType: Int 0, itemId: ""}, the city bubble's
+// request (AllianceCallHelpMessage.lua:12-15; see feature_alliance_call_help.go). Free; each member
+// who helps shortens the timer. A failure is logged and the run goes on.
+func productionUpgradeCallHelp(conn *session.GameConn, in *Init, feature string, t productionUpgradeTarget) error {
+	if !claimInAlliance(in) {
+		return nil
+	}
+	p := sfs.NewSFSObject()
+	p.PutLong("uuid", t.UUID)
+	p.PutInt("type", 0)
+	p.PutInt("qType", 0)
+	p.PutUtfString("itemId", "")
+	_, err := session.SendAndWait(conn, fmt.Sprintf("%s: alliance help request for %s", feature, t.describe()), callHelpCmd, p)
+	if err != nil && !session.ContainsNonTimeoutNetError(err) {
+		slog.Warn(feature+": alliance help request failed; the upgrade runs anyway", "uuid", t.UUID, "error", err)
+	}
+	return err
 }
 
 // productionUpgradeSort puts the cheapest level first.
