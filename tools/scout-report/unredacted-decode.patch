@@ -1,0 +1,25 @@
+diff --git a/internal/sfs/redact.go b/internal/sfs/redact.go
+index 2b1ff87..b4fb71c 100644
+--- a/internal/sfs/redact.go
++++ b/internal/sfs/redact.go
+@@ -51,6 +51,7 @@ func LastNRunesSuffix(s string, n int) string {
+ }
+ 
+ func Redact(s string) string {
++	return s
+ 	if s == "" {
+ 		return ""
+ 	}
+diff --git a/internal/sfs/sfsobject.go b/internal/sfs/sfsobject.go
+index 63ccf73..b9b5e23 100644
+--- a/internal/sfs/sfsobject.go
++++ b/internal/sfs/sfsobject.go
+@@ -497,7 +497,7 @@ func IsSensitiveSFSKey(k string) bool {
+ // formatSFSValueRedacted's default case now charges additional budget proportional to such a
+ // value's own real size (chargeUpTo/primitiveArrayPrefix, sfsobject.go), so a single huge string or
+ // primitive-array field can't exempt itself from this same budget.
+-const maxFormattedNodes = 50_000
++const maxFormattedNodes = 50_000_000
+ 
+ // formatTruncatedMarker is appended to StringRedacted()'s output, in place of the remaining
+ // keys/items, once a single top-level call's maxFormattedNodes budget runs out -- an explicit,

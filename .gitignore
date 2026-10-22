@@ -58,3 +58,6 @@ capture.pcap
 
 # Node / Mintlify docs tooling (docs/package.json)
 node_modules/
+
+# Python bytecode (tools/)
+__pycache__/

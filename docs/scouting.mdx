@@ -1,0 +1,386 @@
+---
+title: "Scouting and attacks"
+description: "The scout march (world.march.formation.new target 17), the scout-report mail and its protobuf payload, the alliance-shared scout data, the attack march (target 11) and why goclient's marches are refused, and the exact commands used to capture, decode and annotate a real scout on 2026-10-22."
+---
+
+A scout is an ordinary march. The client sends the same `world.march.formation.new` command as an attack, with `target=17` and a dedicated scout formation that carries no heroes and no soldiers. The server answers with the created march, a mail that holds the report as a base64 protobuf blob, and finally the scout's return.
+
+Everything on this page comes from **one** capture of the real Android app on the real account (server 550), taken with PCAPdroid on 2026-10-22 around 21:01 UTC. The request and response shapes are confirmed live. The meaning of most report fields is **static-analysis-only**: the protobuf has no field names on the wire, and the names below were inferred by cross-checking values. Each one says how sure it is.
+
+## The scout request
+
+```text
+world.march.formation.new {
+  worldId          = 0
+  worldType        = 0
+  target           = 17                       // scout (11 is attack a city)
+  targetUid        = <uuid of the target world point>
+  path             = "186010;182018"          // own city point ; target point
+  formationUuid    = <scout_formation uuid>
+  formationParam   = { heroInfos = [], formations = [], uuid = <scout_formation uuid> }
+  soldierType      = 1
+  waitTimeIndex    = -1
+  autoBackHome     = true
+  targetServer     = 550
+  clientCreateUuid = <random GUID v4>
+}
+```
+
+Differences from the attack captured the same day:
+
+| Field | Scout | Attack |
+|---|---|---|
+| `target` | `17` | `11` (ATTACK_CITY) |
+| `formationUuid` | the account's `scout_formation` (type 2) | a normal squad |
+| `formationParam.heroInfos` | empty | one entry per hero |
+| `waitTimeIndex` | `-1` | `1` |
+
+The scout formation exists on its own. The server pushes it as `scout_formation` in `push.formation.update.new`: one entry, `type=2`, `heroes=[]`, `soldiers=[]`, `state` 1 while out and 0 once back.
+
+## What the server sends back
+
+In order, all within the same second:
+
+1. `push.formation.update.new` with `scout_formation[0].state = 1`.
+2. The `world.march.formation.new` response: the march `uuid`, the echoed `clientCreateUuid`, the account's `resource` block, and a `_proto` byte array (the march's protobuf world record).
+3. `push.mail`: the report (see below).
+4. `push.army.return` with `scout_formation[0].state = 0`.
+
+The report mail:
+
+| Field | Value |
+|---|---|
+| `type` | `8` |
+| `contentsLocal.b.content.dialog.id` | `311051`, params: `user {name, uid}` and `scout {target: "BASE", targetId: "10100000"}` |
+| `contentsLocal.mailId` | `80002` |
+| `contentsLocal.obj.scoutContent` | the report: base64 of a protobuf message |
+| `title.h.title.dialog.id` / `subTitle` | `300617` / `311104` |
+| `custom` | `{"c":{"seasonId":6}}` |
+| `expireTime - sendTime` | 259 200 000 ms (3 days) |
+
+`10100000` is the HQ building id, the same `buildId` cities carry on `world.get.block` tiles (see [World map](/world-map)).
+
+## Alliance-shared scout data
+
+`world.get.detail.new` on a city already returns the last scout an alliance member made of it, without sending any march:
+
+```text
+allianceScout = {
+  scoutData = {
+    "data": [ {"id":1,"value":24980}, {"id":14,"value":24980}, {"id":2,"value":11626} ],
+    "visible": 1, "defendSize": 1, "defendTotalPower": 0,
+    "mailUuid": "<report mail uid>", "mailToUser": "<uid of the scout's owner>"
+  },
+  endTime = <ms>
+}
+```
+
+`data` is the lootable resources by resource id: 1 Metal, 14 Food (Bread), 2 Wood (see [Entity ID reference](/entity-id-reference)). This is read-only and needs no march, so a session that can't send marches can still read it.
+
+## The report payload (`scoutContent`)
+
+The C# side has a generated class for it, `LwScoutReport` (see [Findings](/findings)), but that schema isn't in this repo. The tree below was decoded schema-less with `tools/scout-report/pbraw.py`, so only field numbers are known. The names are inferences.
+
+| Path | Meaning | Confidence |
+|---|---|---|
+| `1.2` | target player name | sure |
+| `1.3` | avatar (`player_head_N`) | sure |
+| `1.5.1.1` / `1.5.2.1` / `1.5.3.1` | server / X / Y of the target | sure (matches the march `path`) |
+| `1.6` | target uid | sure |
+| `1.9` | HQ level | likely |
+| `1.10` | server | sure |
+| `2.1.1` / `2.2.1` | city durability, current / max (10000 = full) | likely |
+| `3.1[]` | lootable resources: `.3.1` resource id, `.2.1` and `.4.1` amount | sure (same values as `allianceScout`) |
+| `4.1.1[0]` | defending squad 1; `4.1.1[1]` is squad 2 | likely |
+| `4.1.1[n].2[]` | heroes of that squad, one entry per slot | sure |
+| `…2[].1.1` | hero id | sure |
+| `…2[].2.1` | hero level | sure |
+| `…2[].4.1` | rank or star step (raw value) | guess |
+| `…2[].5.1` | slot 1-5 | sure |
+| `…2[].6.1` / `…2[].7.1` | same number, equal to stat `50014` | guess: power or HP |
+| `…2[].11[]` | hero stats: `.1` stat id, `.2` float value (absent = flag/zero) | sure (format), names unknown |
+| `4.1.4` | one number per squad (24 360 here) | unknown, maybe troop power |
+| `4.1.5[]` | soldiers: `.2.1` soldier id (3005-3015 = level 1-11), `.3.1` count (empty = 0) | likely |
+| `4.1.7` | one extra stat (`50137` = 1050) | unknown |
+| `15`, `16` | account-wide stat lists (`15.4[]`, `16.10[]`) and seven section ids in `16.5[]` | unknown |
+
+### The decoded example
+
+The target is anonymized here; the numbers are the real ones from the capture.
+
+**Target**: a server-550 player, HQ 9 (likely), city durability 10000/10000.
+
+**Lootable resources**
+
+| Resource | Amount |
+|---|---|
+| Metal (1) | 2 747 219 |
+| Food (14) | 2 742 908 |
+| Wood (2) | 1 124 933 |
+
+**Defending squad 1** (squad 2 is listed but has no heroes)
+
+| Slot | Hero (id) | Type | Level | Raw rank | Stat 50014 |
+|---|---|---|---|---|---|
+| 1 | Murphy (50006) | Legendary · Tank · Defense | 45 | 1 | 66 223 |
+| 2 | Violet (40012) | Tank · Defense | 45 | 5 | 49 604 |
+| 3 | Mason (40010) | Tank | 45 | 12 | 51 481 |
+| 4 | Monica (40020) | Tank · Support | 45 | 5 | 41 491 |
+| 5 | Sarah (40019) | Aircraft · Support | 45 | 1 | 27 003 |
+
+**Soldiers**: 350 × 3005 (level 1), 456 × 3006 (level 2), none of 3007-3015: 806 in total.
+
+**Hero stats**: 84 distinct stat ids, 48 with a value. `·` = stat absent for that hero, `—` = present without a value.
+
+| Stat id | Murphy | Violet | Mason | Monica | Sarah |
+|---|---|---|---|---|---|
+| 50005 | · | · | 9363.86 | 8489.07 | 5030.1 |
+| 50006 | 54792.5 | 38338.1 | 30925.4 | 21900.6 | 15090.7 |
+| 50007 | 791.661 | 567.998 | 1684.99 | 843.466 | 554.176 |
+| 50008 | · | · | 104.15 | 320.94 | 41.66 |
+| 50009 | 204.243 | 144.705 | 217.319 | 131.076 | 88.3201 |
+| 50010 | · | · | 23.26 | 61.78 | 10.42 |
+| 50011 | 0.05 | 0.05 | 0.05 | 0.05 | 0.05 |
+| 50012 | 2 | 2 | 2 | 2 | 2 |
+| 50013 | 1 | 1 | 1 | 1 | 1 |
+| 50014 | 66223.4 | 49604.4 | 51481.5 | 41491.7 | 27003.8 |
+| 50015 | 1346.95 | 1121.05 | 2353.36 | 1720.21 | 952.705 |
+| 50016 | 799.578 | 573.678 | 1701.84 | 851.901 | 554.176 |
+| 50017 | 299.784 | 239.651 | 336.251 | 287.666 | 154.139 |
+| 50018 | 206.285 | 146.152 | 219.492 | 132.387 | 88.3201 |
+| 50019 | 55340.4 | 38721.4 | 31234.7 | 22119.6 | 15090.7 |
+| 50020 | — | — | 9363.86 | 8489.07 | 5030.1 |
+| 50021 | — | — | 104.15 | 320.94 | 41.66 |
+| 50022 | — | — | 23.26 | 61.78 | 10.42 |
+| 50039 | 4000 | 4000 | 4000 | 4000 | · |
+| 50040 | 8500 | 8500 | 8500 | 8500 | · |
+| 50041 | 190.5 | 190.5 | 190.5 | 190.5 | · |
+| 50042 | 404.8 | 404.8 | 404.8 | 404.8 | · |
+| 50043 | 38.1 | 38.1 | 38.1 | 38.1 | · |
+| 50044 | 81 | 81 | 81 | 81 | · |
+| 50053 | · | · | · | · | 4500 |
+| 50055 | · | · | · | · | 214.3 |
+| 50057 | · | · | · | · | 42.9 |
+| 50060 | 4500 | 4500 | 4500 | 4500 | 4500 |
+| 50061 | 214.3 | 214.3 | 214.3 | 214.3 | 214.3 |
+| 50062 | 42.9 | 42.9 | 42.9 | 42.9 | 42.9 |
+| 50072 | 31 | 31 | 31 | 31 | 31 |
+| 50079 | 171 | 169 | 169 | 169 | 138 |
+| 50084 | 2383 | 2383 | 2383 | 2383 | 2383 |
+| 50085 | 142.569 | 142.569 | 142.569 | 142.569 | 142.569 |
+| 50086 | 12.4993 | 12.4993 | 12.4993 | 12.4993 | 12.4993 |
+| 50155 | · | · | · | 0.259 | · |
+| 75053 | 0.01 | 0.01 | 0.01 | 0.01 | · |
+| 75153 | 0.01 | 0.01 | 0.01 | 0.01 | · |
+| 75253 | 0.01 | 0.01 | 0.01 | 0.01 | · |
+| 75953 | · | · | · | 0.05 | · |
+| 76053 | · | · | 0.025 | 0.025 | · |
+| 80008 | 140 | 138 | 138 | 138 | 138 |
+| 100000 | 92681 | 77823 | 144237 | 90138 | 61425 |
+| 100001 | 63976 | 40308.3 | 36455.5 | 36751.6 | 36654.9 |
+| 100002 | 16560 | 14940 | 58350 | 14940 | 14940 |
+| 100003 | — | — | 10079.2 | 17619.8 | 3400.5 |
+| 100008 | — | 10429.8 | 27208.1 | 8681.59 | — |
+| 100009 | 12145 | 12145 | 12145 | 12145 | 6430.25 |
+
+What the shape alone says, without stat names:
+
+- Rows equal for every hero (50011-50013, 50060-50062, 50072, 50084-50086) are probably account-wide bonuses (tech, buildings, alliance), not per-hero stats.
+- 50039-50044 are present on the four tanks and absent on Sarah, the only aircraft: probably tank-type bonuses. Sarah has 50053/50055/50057 instead, with the same values as 50060-50062.
+- `dominator_train_level.attr_value_hero` and `lw_monster_opt.property` (`{50006, 50007, 50009, 50011, 50012, 50013}`) use the same id space (`52005;5264|52015;126|52025;26`), which supports reading these ids as hero attribute ids.
+
+### Stat names: `lw_effect_number`
+
+The stat ids are rows of the `lw_effect_number` table (table version 39806), the only table holding all 42 ids below 100000. `find_all.lua` found it on 2026-10-22. Its `name` and `desc` columns are localization keys (`152006`…), and the locale archive wasn't fetched, so the names below come from each row's **icon** and type columns, not from the game's own strings. The `100000`-`100009` ids aren't in `lw_effect_number` (they only collide with unrelated tables such as `battlepass_v2` and `dominator_train_level`), so they stay unknown.
+
+Columns that decode the rows:
+
+- `target_unit_type`: `1` = the hero itself, `2` = the soldiers it leads.
+- `target_army_type`: `0` = all, `1` = tank, `3` = aircraft (missile is presumably `2`).
+- `type`: `0` = flat value, `1` and `2` = ratio (0.01 = 1 %).
+- `name` key: `152006` with the `life` icon = HP, `152007` with `atk_up` = attack, `152009` with `defense` = defense.
+- `sequence_equip` / `category_equip 151124`: set on the gear rows.
+
+| Stat ids | Meaning | Evidence |
+|---|---|---|
+| 50014 / 50015 / 50017 | hero HP / attack / defense | key 152006/7/9, unit 1, `basic_attributes`, `sequence` 1/2/3 |
+| 50006 / 50007 / 50009 | HP / attack / defense of the hero's soldiers | key 152006/7/9, unit 2 |
+| 50019 / 50016 / 50018 | soldier HP / attack / defense, second set (no name key) | unit 2, same `power` weights 0.5 / 12.5 / 35 |
+| 50005 / 50008 / 50010 | gear bonus: soldier HP / attack / defense | key 152006/7/9, `category_equip 151124`; zero on Murphy and Violet |
+| 50020 / 50021 / 50022 | same gear values again (no name key) | equal to 50005/8/10 on every hero |
+| 50011 | critical rate (5 %) | type 1, `category 151099`; value 0.05 |
+| 50012 | critical damage (×2) | small icon `zxl_shuxing_baoji` (baoji = crit) |
+| 50013 | unknown (1 on every hero) | key 152018, type 1 |
+| 50039 / 50041 / 50043 and 50040 / 50042 / 50044 | tank-only soldier HP / attack / defense | unit 2, army 1; absent on Sarah |
+| 50053 / 50055 / 50057 | aircraft-only hero HP / attack / defense | unit 1, army 3; only on Sarah |
+| 50060 / 50061 / 50062 | hero HP / attack / defense from the drone / tactical weapon | icons `zhanshuwuqi` (tactical weapon), `wurenji` (drone); `season_condition 2;96` |
+| 50084 / 50085 / 50086 | tactical-weapon base HP / attack / defense | icons `lrb_zhanshuwuqi_jichu_shuxing_*` |
+| 50079 | total troop capacity (march size) | small icon `…_daibingliang` (daibingliang = troops led) |
+| 50072 | troop capacity, tank bonus (+31) | key 211248 = 76201's; see the correction below |
+| 50155 | a skill effect (Monica, 0.259) | name `skill_desc_2000040` |
+| 75053 / 75153 / 75253 | tank soldier HP / attack / defense +1 % | type 2, unit 2, army 1, life/atk/defense icons |
+| 75953 | damage against zombies +5 % | small icon `zxl_shuxing_sangshishanghai` (sangshi shanghai = zombie damage) |
+| 76053 | unknown ratio (+2.5 %) | key 152043, type 1 |
+| 80008 | base troop capacity (138-140) | 80008 + 50072 = 50079 for the tanks |
+
+Correction from a second lookup (`tools/scout-report/effect.lua`): 50072 shares its name key `211248` with 76201 (tank soldiers) and its desc key `211246` with 50071, whose icon is `daibingliang`. So **troop capacity** is 80008 (base: 140 Murphy, 138 the others) + 50072 (tank bonus, +31) = 50079 (total: 171, 169, 169, 169). Sarah, an aircraft, gets no 50072 bonus: 138 + 0 = 138. The 50072 = 31 shown on her row is listed but not applied.
+
+### The rest of the report
+
+| Path | Content | Reading |
+|---|---|---|
+| `15` | `1: 1000`, `2: 1`, then 15 stats | **the drone / tactical weapon**: 50081 HP 23 830, 50082 attack 1 296, 50083 defense 113.6 (icons `zhanshuwuqi`); 50091-50093 = 1000 / 1100 / 1100 (type 8, unknown); 50098-50100 and 50006/7/9 repeat the same three values. 50084-50086 (2 383 / 142.6 / 12.5, on every hero) are exactly 10 % of it: the share each hero gets from the drone |
+| `4.1.7` | 50137 = 1050 | icon `zhuchengyiyuan` (main-city hospital): **hospital capacity**, likely |
+| `16.10[]` | 13 ratio stats | city-wide soldier bonuses: tank HP / attack / defense +1 % (75053 / 75153 / 75253), all soldiers +2 % and +1 % (75957, 75959, names 221008 / 221009); the others (75066, 75068, 75166, 75168, 75266, 75268, 75965, 75967: tank and aircraft HP / attack / defense) at 0 |
+| `16.5[]` | 3, 4, 10, 11, 12, 5, 6 | unknown list of ids |
+| `16.15.3[]` | slots 1-5, each `3: 1` | five unlocked slots, unknown what |
+| `4.1.3[]` | 11 empty entries | unknown; possibly empty reinforcement slots |
+| `4.1.4` | 24 360 | unknown |
+| `2.3`, `3.2`, `5.2`, `7.3`, `17`, `101` | 1, 1, 1, 3, 1, 1 | flags or versions, unknown |
+
+The hero stat lists also carry about 36 ids with no value (zero). By `lw_effect_number` they are: gathering bonuses (71013, 71016, icon `res_harvest`), skill damage (75949, 75950, icon `jinengshanghai`), drone-derived hero HP / attack / defense (53000, 53010, 53020), more HP / attack / defense variants (50052-50056, 50063, 50064, 51001, 51051, 51101, 75050-75255) and troop-capacity variants (50071, 50073, 50074, 76201, 76203).
+
+To get the game's own wording, fetch the locale archive named by check-version's `locale` field (23601 on 2026-10-22, with `fr` among the languages) and look the keys up there. Its CDN path isn't documented yet.
+
+## Finding cities on the map
+
+All read-only, confirmed live from `goclient` on 2026-10-22:
+
+- The own city's point is `worldMainPoint` in the `init` push (186010 here). Formations are `army_formation` in `init` (one squad, 4 heroes, `soldiers=[]` on that day).
+- `world.get.block` around that point returns the tiles. Cities have `pointType=6` and `buildId=10100000`. Their protobuf `BuildInfo` carries: field 4 = HQ level, 7 = allianceId, 11 = shield end (Unix seconds), 13 = durability (10000 = full).
+- `world.get.detail.new {point, serverId, worldId, previewAssistance=10, pointType, uid}` returns the player's name, power and alliance, plus `allianceScout` (above). It doesn't return the HQ level or the shield.
+
+## The attack march
+
+```text
+world.march.formation.new {
+  formationUuid    = <squad uuid>
+  target           = 11                       // ATTACK_CITY
+  targetUid        = <uuid of the target point>
+  path             = "<own point>;<target point>"
+  soldierType      = 1
+  worldId          = 0
+  worldType        = 0
+  waitTimeIndex    = 1
+  autoBackHome     = true
+  targetServer     = 550
+  clientCreateUuid = <random GUID v4>          // filled C#-side, SceneManager.World.SaveCreateMarchRecordTime
+  formationParam   = { formations = [], uuid = <squad uuid>, heroInfos = [ {index, heroUuid}, … ] }
+}
+```
+
+This is the field set of two real phone captures, both confirmed live: one on another account (server 67), and one on the real account on 2026-10-22 around 13:29 UTC (target 180010). In both, the server created the march. Right before it, the phone sent `world.get.block`, `world.get.detail.new` and `get.user.info.multi`. No hidden token is in the request.
+
+## Marches from `goclient`: `token error`
+
+The same request from `goclient`, on the same account, was refused every time with `{errorCode=E000000, errorMsg=token error}` and nothing sent (diamonds unchanged). Confirmed live on 2026-10-22:
+
+| # | UTC | What changed | Answer |
+|---|---|---|---|
+| 1 | — | first try, `clientCreateUuid` = timestamp, no `formationParam` | `token error` |
+| 2 | — | `clientCreateUuid` = GUID v4 | `token error` |
+| 3 | 13:08 | exact capture format: `formationParam` with 5 heroes, `waitTimeIndex=1`, GUID | `token error` |
+| 4 | 13:18 | the capture's own `clientCreateUuid` | `token error` |
+| 5 | 13:36 | the phone's sequence in one session: `world.get.block` (OK, target seen: HQ 4, no shield), `world.get.detail.new` (OK), `get.user.info.multi {uids LongArray, allservers 1}` (`E000000`), then the march | `token error` |
+
+The phone's identical request on the same account was accepted 7 minutes before try 5. The parameters, the GUID and the call sequence are ruled out, so the refusal is tied to the `goclient` **session**. The phone's login carries `SecurityCode`, `OneCode`, `CoreV` and `psh`, which `goclient` computes itself (`internal/auth/identity.go`), and the anti-fraud ShuMei fingerprint (see [ShuMei device fingerprint](/shumei)); the server evidently doesn't trust that session for marches. Getting past that check would mean defeating the game's anti-fraud, which is out of scope (see `AGENTS.md`). Attacks, rallies and scouts stay on the phone.
+
+A scout uses the same command, so the same answer is expected. Not tried. Never send `world.march.speed.up`: `useGold=true` spends diamonds.
+
+What `goclient` can do without a march: read the map (above) and `world.get.detail.new`'s `allianceScout`. Joining a rally is a march too (`RALLY_JOIN = 6` in [Entity ID reference](/entity-id-reference)), so the same refusal is expected.
+
+### Decoding a capture that starts mid-session
+
+When the capture starts after the login, the stream doesn't begin on a packet boundary. Dump the raw streams with `pcap -out <prefix>`, then resynchronize on the first offset where three valid SFS2X packets follow each other. The tool used on 2026-10-22 (`resync`) lived in a scratch directory and wasn't kept.
+
+## Reproducing it: commands
+
+`$WORK` is any scratch directory outside the repo. Captures and decodes contain live session secrets (`at`, `SecurityCode`, `OneCode`, `CoreV`, `psh`, `airKey`, `shumeiBoxId`): keep them `chmod 600`, never commit them (`.gitignore` already excludes `*.pcap`), delete them when done.
+
+### 1. Capture
+
+On the phone, PCAPdroid with the Last War app selected, then do the scout in the game and stop the capture. Copy the `.pcap` to the analysis machine.
+
+### 2. Build the decoder (Docker, Go version from `go.mod`)
+
+```bash
+cd /opt/lastwar-client/src
+GOVER=$(awk '/^go /{print $2}' go.mod)
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -e CGO_ENABLED=0 -e GOTOOLCHAIN=local \
+  -v "$PWD":/src:ro -v "$WORK":/out -w /src golang:$GOVER \
+  sh -c 'go build -trimpath -buildvcs=false -o /out/pcap ./cmd/pcap'
+```
+
+### 3. Find the game stream and decode it
+
+```bash
+$WORK/pcap -in capture.pcap -list            # the game socket is the "plain" stream on port 10550, usually idx 0
+$WORK/pcap -in capture.pcap -stream 0 -decode > $WORK/decoded.txt
+grep -n 'world.march.formation.new\|push.mail\|allianceScout\|scout_formation' $WORK/decoded.txt
+```
+
+On 2026-10-22 the capture had 3 plain streams and 13 TLS ones; stream 0 (`136.107.113.253:10550`) held 157 client requests, the scout being `#156`.
+
+`-decode` redacts sensitive fields (`Redact()`, first/last 4 characters) and cuts any packet over 50 000 nodes. For a complete, unredacted dump, build a throwaway copy with `tools/scout-report/unredacted-decode.patch` applied, never the deployed binary:
+
+```bash
+cp -r /opt/lastwar-client/src $WORK/src-raw && rm -rf $WORK/src-raw/.git
+(cd $WORK/src-raw && patch -p1 < tools/scout-report/unredacted-decode.patch)
+# then step 2 with -v "$WORK/src-raw":/src:ro and -o /out/pcap-raw
+```
+
+### 4. Extract and decode the report
+
+```bash
+grep -oE '"scoutContent":"[^"]+"' $WORK/decoded.txt | cut -d'"' -f4 > $WORK/report.b64
+python3 -I tools/scout-report/pbraw.py $WORK/report.b64 > $WORK/report.txt            # indented tree
+python3 -I tools/scout-report/pbpaths.py $WORK/report.b64 tools/scout-report > $WORK/paths.txt  # one leaf per line
+python3 -I tools/scout-report/pbtable.py $WORK/report.b64 > $WORK/table.md   # every leaf: raw bytes | value | meaning (French)
+```
+
+`pbpaths.py` prints paths such as `.4[0].1[0].1[0].2[3].1[0].1[0] 40020`; the hero-stat table above is `…2[h].11[i].1[0]` (id) against `…2[h].11[i].2[0]` (value).
+
+### 5. Get the current data tables
+
+`cmd/checkversion` makes the client's anonymous check-version call and prints `table_version` (`version,size,md5,crc;patch chain`):
+
+```bash
+# build like step 2 with ./cmd/checkversion, then:
+$WORK/checkversion
+# 2026-10-22: table_version 39806,19530879,82a8d224c448e8a741f18d1a1b10ad6b,4048400295;…
+curl -o $WORK/tables.zip \
+  https://lastwar-cdn.akamaized.net/hotupdate/table/table_39806_82a8d224c448e8a741f18d1a1b10ad6b.data
+md5sum $WORK/tables.zip     # must equal the md5 above
+python3 -I -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" $WORK/tables.zip $WORK/x
+```
+
+1 299 tables in 39806 (see [Game data tables](/data-tables)).
+
+### 6. Make the tables loadable
+
+Each table is Lua 5.3 bytecode with the game's modified header (format byte 1, no instruction-size byte; see [Methodology](/methodology)) built for **32-bit** (`size_t` = 4). Fix the header, then load them with a 32-bit `lua5.3`:
+
+```bash
+python3 -I tools/scout-report/fix_lua_header.py $WORK/x $WORK/x2     # "fixed 1299 unrecognized 0"
+cp tools/scout-report/find*.lua $WORK/
+```
+
+A stock 64-bit `lua5.3` (`alpine`) silently loads nothing; `i386/alpine` runs natively on an x86-64 host.
+
+### 7. Look ids up
+
+Loading a table runs it, so do it in a throwaway container with the tables mounted read-only:
+
+```bash
+# every table that has any of the ids, with the matching row
+docker run --rm -v $WORK:/w:ro -w /w i386/alpine:3.20 \
+  sh -c 'apk add -q lua5.3 >/dev/null && lua5.3 find.lua x2 50005 50014 50060 80008 2>&1 | head -60'
+
+# only the tables that have ALL the ids (the stat table)
+docker run --rm -v $WORK:/w:ro -w /w i386/alpine:3.20 \
+  sh -c 'apk add -q lua5.3 >/dev/null && lua5.3 find_all.lua x2 50005 50006 50007 50008 50009 50010 50011 50012 50013 50014 50015 50016 50017 50018 50019 50020 50021 50022 50039 50040 50041 50042 50043 50044 50053 50055 50057 50060 50061 50062 50072 50079 50084 50085 50086 50155 75053 75153 75253 75953 76053 80008 2>&1 | head -150'
+```
+
+`find_all.lua` with the 42 stat ids below 100000 returned only `lw_effect_number` (see [Stat names](#stat-names-lw-effect-number)). With the six `100000`+ ids it returned `battlepass_v2`, `dominator_train_level`, `goods_sources`, `lw_monster_B_split1`, `lw_monster_C_split1` and `lw_monster_opt`, none of them stats. With the keys `152006`-`152018` it returned nothing: localization keys aren't in the table archive.
+
+What the single-id search (`find.lua`, 14 ids) returned on 2026-10-22, all false positives that share ids with the stats: `AcitivitySeven_New`, `activity`, `activity_crystal_talentlevel`, `activity_dig_para`, `aps_city_buff`, `aps_pve_level`, `armed_truck_hero`, `battle_card_recommend`, `battlefield_season_config`, `battlepass`, `battlepass_v2`, `decoration_recruit_random_info`, `detect_zombie_bus`, `dominator_train_group`, `dominator_train_level`, `effect` (`100001 = {arm_all 35000, arm_1 35001, arm_2 35002, arm_3 35003}`), `exchange_split1`, `goods_sources`.
