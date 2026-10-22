@@ -3,6 +3,7 @@ package game
 import (
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,13 +96,13 @@ func upgradesOf(t *testing.T, f *duelSpendFake) []string {
 func TestProductionUpgradesState(t *testing.T) {
 	withEvNow(t, evTestNow)
 	lines := []upgradeLine{
-		{uuid: 1, bID: int(BuildingFarmland), lv: 3},
-		{uuid: 2, bID: int(BuildingIronMine), lv: 1},
+		{uuid: 1, bID: int(BuildingFarmland), lv: 3},                       // 117 s
+		{uuid: 2, bID: int(BuildingIronMine), lv: 1},                       // 12 s
 		{uuid: 3, bID: int(BuildingGoldMine), lv: 5},                       // at the HQ level
 		{uuid: 4, bID: int(BuildingTrainingBase), lv: 2, uT: time.Hour},    // upgrading
 		{uuid: 5, bID: int(BuildingTrainingBase), lv: 2, uT: -time.Minute}, // ended, not collected yet
-		{uuid: 6, bID: 10103000, lv: 1},                                    // Military Camp: not a target
-		{uuid: 7, bID: int(BuildingIronMine), lv: 0},                       // not built
+		{uuid: 6, bID: 10103000, lv: 1},                                    // Military Camp, 3 s
+		{uuid: 7, bID: int(BuildingIronMine), lv: 0},                       // not built: its row needs PvE
 	}
 	queues := []upgradeQueue{
 		{uuid: 11, typ: 0, unlock: 1},                     // free
@@ -114,18 +115,112 @@ func TestProductionUpgradesState(t *testing.T) {
 		{uuid: 18, typ: 6, unlock: 1},                     // research queue
 	}
 	s := productionUpgradeStateOf(upgradeInit(5, 0, 0, 0, lines, queues), evTestNow.UnixMilli(), nil)
-	if s.HQ != 5 || s.Busy != 2 {
-		t.Errorf("hq %d busy %d, want 5 and 2", s.HQ, s.Busy)
+	busy := 0
+	for _, b := range s.Buildings {
+		if b.Busy {
+			busy++
+		}
 	}
-	var got []int64
-	for _, tg := range s.Targets {
-		got = append(got, tg.UUID)
+	if s.HQ != 5 || busy != 2 {
+		t.Errorf("hq %d busy %d, want 5 and 2", s.HQ, busy)
 	}
-	if !slices.Equal(got, []int64{2, 1}) {
-		t.Errorf("targets %v, want [2 1] (cheapest level first)", got)
+	// The HQ 5 -> 6 needs a Wall and a Drill Ground at 5, which this city lacks.
+	if got := targetUUIDs(productionUpgradeTargets(s.Buildings, nil)); !slices.Equal(got, []int64{6, 2, 1}) {
+		t.Errorf("targets %v, want [6 2 1] (shortest first)", got)
+	}
+	if got := targetUUIDs(productionUpgradeTargets(s.Buildings, map[int64]bool{6: true})); !slices.Equal(got, []int64{2, 1}) {
+		t.Errorf("targets skipping 6: %v, want [2 1]", got)
 	}
 	if !slices.Equal(s.Queues, []int64{11, 13, 16}) {
 		t.Errorf("queues %v, want [11 13 16]", s.Queues)
+	}
+}
+
+func targetUUIDs(ts []productionUpgradeTarget) []int64 {
+	var out []int64
+	for _, tg := range ts {
+		out = append(out, tg.UUID)
+	}
+	return out
+}
+
+// The HQ goes first once its prerequisites are met; before that, the buildings it needs do.
+func TestProductionUpgradesHQAndItsNeedsFirst(t *testing.T) {
+	bs := []productionUpgradeBuilding{
+		{UUID: 9000, BID: claimHQBuildingID, Lv: 4},
+		{UUID: 1, BID: int64(BuildingFarmland), Lv: 1}, // 12 s
+		{UUID: 2, BID: 10107000, Lv: 3},                // Wall, 117 s: HQ 4 -> 5 needs it at 4
+		{UUID: 3, BID: 10103000, Lv: 4},                // Military Camp at 4: met
+	}
+	if got := targetUUIDs(productionUpgradeTargets(bs, nil)); !slices.Equal(got, []int64{2, 1}) {
+		t.Errorf("targets %v, want [2 1] (the HQ's prerequisite first)", got)
+	}
+	bs[2].Lv = 4
+	if got := targetUUIDs(productionUpgradeTargets(bs, nil)); !slices.Equal(got, []int64{9000, 1}) {
+		t.Errorf("targets %v, want [9000 1] (the HQ first)", got)
+	}
+	bs[0].Lv = productionUpgradeHQCap
+	for _, tg := range productionUpgradeTargets(bs, nil) {
+		if tg.BID == claimHQBuildingID {
+			t.Errorf("HQ %d is past the cap", productionUpgradeHQCap)
+		}
+	}
+}
+
+// While the HQ is allowed but not affordable, nothing else spends what it needs.
+func TestProductionUpgradesSavesForTheHQ(t *testing.T) {
+	lines := []upgradeLine{
+		{uuid: 2, bID: 10107000, lv: 5}, // Wall
+		{uuid: 3, bID: 10104000, lv: 5}, // Drill Ground
+		{uuid: 1, bID: int(BuildingFarmland), lv: 1},
+	}
+	queues := []upgradeQueue{{uuid: 11, typ: 0, unlock: 1}, {uuid: 12, typ: 0, unlock: 1}}
+	withUpgradeChain(t, 0)
+
+	// HQ 5 -> 6 costs 91000 iron and food: affordable, then the Farmland fits in what is left.
+	conn, f := startDuelSpendFake(t, nil, upgradeServer(1000))
+	if err := runProductionUpgrades(conn, upgradeInit(5, 100_000, 100_000, 0, lines, queues), false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := upgradesOf(t, f); !slices.Equal(got, []string{"9000>6@11", "1>2@12"}) {
+		t.Errorf("sent %v, want [9000>6@11 1>2@12]", got)
+	}
+
+	// Not affordable: the Farmland would eat into the HQ's savings, so nothing starts.
+	conn, f = startDuelSpendFake(t, nil, upgradeServer(1000))
+	if err := runProductionUpgrades(conn, upgradeInit(5, 91_100, 50_000, 0, lines, queues), false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := upgradesOf(t, f); len(got) != 0 {
+		t.Errorf("sent %v while saving for the HQ", got)
+	}
+}
+
+func TestProductionUpgradesListsMissingBuildings(t *testing.T) {
+	bs := []productionUpgradeBuilding{
+		{UUID: 9000, BID: claimHQBuildingID, Lv: 6},
+		{UUID: 2, BID: 10107000, Lv: 6},
+		{UUID: 6, BID: 10106000, Lv: 1}, // Alliance Center, needed for HQ 8
+		{UUID: 7, BID: 10124000, Lv: 1}, // Hospital, needed for HQ 10
+	}
+	missing := productionUpgradeMissing(bs)
+	if len(missing) == 0 || missing[0] != "Tank Center (needed for HQ 7)" {
+		t.Errorf("missing %v, want the Tank Center first", missing)
+	}
+	if slices.ContainsFunc(missing[1:], func(m string) bool { return strings.HasPrefix(m, "Tank Center") }) {
+		t.Errorf("Tank Center listed twice: %v", missing)
+	}
+	if len(missing) != 1 {
+		t.Errorf("missing %v, want only the Tank Center (the Tech Center unlocks at HQ 7)", missing)
+	}
+	// HQ 8 unlocks a third Iron Mine; the Tech Center the HQ needs is now unlocked too.
+	bs = append(bs, productionUpgradeBuilding{UUID: 3, BID: int64(BuildingIronMine), Lv: 8},
+		productionUpgradeBuilding{UUID: 4, BID: int64(BuildingIronMine), Lv: 8},
+		productionUpgradeBuilding{UUID: 5, BID: 10116000, Lv: 8})
+	bs[0].Lv = 8
+	missing = productionUpgradeMissing(bs)
+	if !slices.Contains(missing, "1st Tech Center (needed for HQ 9)") || !slices.Contains(missing, "Iron Mine 2/3") {
+		t.Errorf("missing %v, want the Tech Center and a third Iron Mine", missing)
 	}
 }
 
@@ -188,32 +283,41 @@ func TestProductionUpgradesStopsOnDiamondDropAndError(t *testing.T) {
 		t.Errorf("%d upgrades sent, want 1 before the tripwire", n)
 	}
 
+	// A refused upgrade skips that building and the run tries the next one.
 	in = upgradeInit(5, 1_000_000, 1_000_000, 0, lines, queues)
 	conn, f = startDuelSpendFake(t, nil, func(cmd string, p *sfs.SFSObject) []duelSpendMsg {
-		if cmd == productionUpgradeCmd {
-			return []duelSpendMsg{duelReply(duelObj("errorCode", "E100"))}
+		if cmd == productionUpgradeCmd && p.GetString("uuid") == "1" {
+			return []duelSpendMsg{duelReply(duelObj("errorCode", "E100009"))}
 		}
 		return upgradeServer(1000)(cmd, p)
 	})
-	if err := runProductionUpgrades(conn, in, false); err == nil {
-		t.Fatal("want the errorCode error")
+	if err := runProductionUpgrades(conn, in, false); err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	if n := len(upgradesOf(t, f)); n != 1 {
-		t.Errorf("%d upgrades sent, want 1 before stopping", n)
+	if got := upgradesOf(t, f); !slices.Equal(got, []string{"1>2@11", "2>2@11"}) {
+		t.Errorf("sent %v, want [1>2@11 2>2@11] (the refused one, then the next)", got)
 	}
 }
 
-func TestProductionUpgradeCostsTable(t *testing.T) {
-	for _, bID := range []int32{BuildingFarmland, BuildingIronMine, BuildingGoldMine, BuildingTrainingBase} {
-		levels := productionUpgradeCosts[bID]
-		if len(levels) != productionUpgradeMaxLevel-1 {
-			t.Errorf("%s: %d levels, want %d", BuildingNameOf(bID), len(levels), productionUpgradeMaxLevel-1)
+func TestBuildingUpgradeRulesTable(t *testing.T) {
+	hq := buildingUpgradeRules[claimHQBuildingID]
+	for lv := int64(1); lv < productionUpgradeHQCap; lv++ {
+		r, ok := hq.Levels[lv]
+		if !ok || r.Metal <= 0 || r.Seconds <= 0 || len(r.Needs) == 0 || r.Gate != "" {
+			t.Errorf("HQ lv%d: %+v", lv, r)
 		}
-		for lv := int64(1); lv < productionUpgradeMaxLevel; lv++ {
-			if c := levels[lv]; c.Metal <= 0 || c.Seconds <= 0 {
-				t.Errorf("%s lv%d: %+v", BuildingNameOf(bID), lv, c)
+	}
+	for _, bID := range []int32{BuildingFarmland, BuildingIronMine, BuildingGoldMine, BuildingTrainingBase} {
+		for lv := int64(1); lv < productionUpgradeHQCap; lv++ {
+			r := buildingUpgradeRules[bID].Levels[lv]
+			if r.Metal <= 0 || r.Seconds <= 0 || !slices.Equal(r.Needs, []buildingNeed{{int64(claimHQBuildingID), lv + 1}}) {
+				t.Errorf("%s lv%d: %+v", BuildingNameOf(bID), lv, r)
 			}
 		}
+	}
+	// Live 2026-10-21: the Wall 5 -> 6 cost 91000 iron, 30000 food and took 2106 s.
+	if r := buildingUpgradeRules[10107000].Levels[5]; r.Metal != 91000 || r.Money != 30000 || r.Seconds != 2106 {
+		t.Errorf("Wall lv5: %+v", r)
 	}
 }
 
@@ -248,7 +352,8 @@ func TestProductionUpgradesOpensEndedUpgradesFirst(t *testing.T) {
 	}
 }
 
-func TestProductionUpgradesKeepsHQ8WhileShielded(t *testing.T) {
+// Kevin chose to go past HQ 8: its ended upgrade is opened even while the newbie shield is up.
+func TestProductionUpgradesOpensHQ8UnderTheShield(t *testing.T) {
 	in := upgradeInit(7, 0, 0, 0, nil, nil)
 	in.Objects("building_new")[0].PutLong("uT", evTestNow.Add(-time.Minute).UnixMilli())
 	in.Raw.PutSFSObject("defend_wall", duelObj("protectEndTime", evTestNow.Add(time.Hour).UnixMilli()))
@@ -257,8 +362,8 @@ func TestProductionUpgradesKeepsHQ8WhileShielded(t *testing.T) {
 	if err := runProductionUpgrades(conn, in, false); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if n := len(f.only(finishedTimersUpgradeCmd)); n != 0 {
-		t.Errorf("opened the HQ 8 upgrade under the shield")
+	if n := len(f.only(finishedTimersUpgradeCmd)); n != 1 {
+		t.Errorf("opened %d upgrades, want the HQ 8 one", n)
 	}
 }
 
@@ -358,5 +463,46 @@ func TestProductionUpgradesAsksAllianceHelp(t *testing.T) {
 		if h.GetLong("uuid") != 1 || h.GetInt("type") != 0 || h.GetInt("qType") != 0 || h.GetString("itemId") != "" {
 			t.Errorf("help params %v", h)
 		}
+	}
+}
+
+// A full queue at login no longer ends the run: it waits for the running upgrade, opens it and
+// starts the next one.
+func TestProductionUpgradesWaitsForARunningUpgrade(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withUpgradeChain(t, 5*time.Second)
+	lines := []upgradeLine{
+		{uuid: 1, bID: int(BuildingIronMine), lv: 1, uT: 200 * time.Millisecond}, // ends soon, on queue 11
+		{uuid: 2, bID: int(BuildingGoldMine), lv: 1},
+	}
+	in := upgradeInit(3, 1_000_000, 1_000_000, 0, lines, []upgradeQueue{{uuid: 11, typ: 0, unlock: 1, occupant: "1"}})
+	conn, f := startDuelSpendFake(t, nil, upgradeServer(1000))
+	if err := runProductionUpgrades(conn, in, false); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var order []string
+	for _, r := range f.requests() {
+		switch r.Cmd {
+		case finishedTimersUpgradeCmd:
+			order = append(order, "open "+strconv.FormatInt(r.Params.GetLong("uuid"), 10))
+		case productionUpgradeCmd:
+			order = append(order, "up "+r.Params.GetString("uuid")+">"+strconv.Itoa(int(r.Params.GetInt("upLevel"))))
+		}
+	}
+	// The Iron Mine opens at 2; then the shortest of Gold Mine 1->2 (12 s) and Iron Mine 2->3 (47 s).
+	if len(order) < 2 || order[0] != "open 1" || order[1] != "up 2>2" {
+		t.Errorf("order %v, want [open 1, up 2>2, ...]", order)
+	}
+}
+
+func TestProductionUpgradesLeavesGatedAndPaidTypes(t *testing.T) {
+	bs := []productionUpgradeBuilding{
+		{UUID: 9000, BID: claimHQBuildingID, Lv: 6},
+		{UUID: 1, BID: 10144000, Lv: 0}, // Secret Command Post: mono_condition
+		{UUID: 2, BID: 10145000, Lv: 0}, // 4th Squad: month card
+		{UUID: 3, BID: 10120000, Lv: 1}, // Tavern
+	}
+	if got := targetUUIDs(productionUpgradeTargets(bs, nil)); !slices.Equal(got, []int64{3}) {
+		t.Errorf("targets %v, want only the Tavern", got)
 	}
 }
