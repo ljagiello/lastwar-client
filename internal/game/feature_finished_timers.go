@@ -48,7 +48,10 @@ import (
 // init effect carries only the base, so init effect["30122"] is a lower bound: checking against it
 // can only skip a collect the client would allow, never the reverse. Without effect["30122"] or
 // resource_items (or with an effect value that is not a number), hospital, rebirth and camp collects
-// are skipped. Static-only: not sent live yet.
+// are skipped. Each planned camp collect adds its prodBase to the total before the next check: the
+// server fills the stock part-way from one camp (its reply keeps prodST) and answers the next with
+// E000000 "addNum error" (addNum:0), seen live on 2026-10-18 and 2026-10-24 when the room was
+// checked once for every camp. The hospital checks are static-only: not sent live yet.
 const (
 	finishedTimersUpgradeCmd = "free.building.upgrade.finish"
 	finishedTimersRepairCmd  = "user.finish.fix.building"
@@ -154,7 +157,7 @@ func runFinishedTimers(conn *session.GameConn, in *Init) error {
 	}
 	now := claimNow(in).UnixMilli()
 	soldiers, stockCap, stockKnown := finishedTimersStockRoom(in)
-	stockRoom := stockKnown && soldiers < stockCap
+	stockRoom := func() bool { return stockKnown && soldiers < stockCap }
 
 	var actions []func() error
 	send := func(label, cmd string, uuid int64) {
@@ -191,11 +194,12 @@ func runFinishedTimers(conn *session.GameConn, in *Init) error {
 			switch bID {
 			case finishedTimersMilitaryCamp:
 				prodBase, _ := claimInt(b, "prodBase")
-				if !stockRoom || prodBase > stockCap {
+				if !stockRoom() || prodBase > stockCap {
 					slog.Info("finished-timers: camp output skipped (troop stock full or unknown)", "uuid", uuid,
 						"soldiers", soldiers, "stockCap", stockCap, "known", stockKnown)
 					continue
 				}
+				soldiers += prodBase
 				send("collect camp "+name, finishedTimersCampCmd, uuid)
 			case finishedTimersSmithShop:
 				send("collect smith "+name, finishedTimersCampCmd, uuid)
@@ -213,7 +217,7 @@ func runFinishedTimers(conn *session.GameConn, in *Init) error {
 		case finishedTimersQueueResearch:
 			send(fmt.Sprintf("finish research queue %d", q.UUID), finishedTimersQueueCmd, q.UUID)
 		case finishedTimersQueueHospital, finishedTimersQueueRebirth:
-			if !stockRoom {
+			if !stockRoom() {
 				slog.Info("finished-timers: healed troops left in the hospital (troop stock full or unknown)",
 					"queue", q.UUID, "type", q.Type, "soldiers", soldiers, "stockCap", stockCap, "known", stockKnown)
 				continue

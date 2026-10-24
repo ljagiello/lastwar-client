@@ -197,6 +197,44 @@ func TestFinishedTimersHQShieldAndStockCap(t *testing.T) {
 	}
 }
 
+// The camps share the stock room with each other and with healed troops. Checking each against the
+// init total alone sent a second camp after the first had filled the stock, and the server answered
+// it E000000 "addNum error" (live, 2026-10-24 13:48, these prodBase values and cap).
+func TestFinishedTimersCountsEachCampAgainstTheStock(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-time.Minute)
+	base := timerInit{
+		buildings: []timerBuilding{
+			{uuid: 845, bID: 10103000, lv: 27, prodST: now.Add(-time.Hour), prodET: past, prodBase: 132},
+			{uuid: 507, bID: 10103000, lv: 27, prodST: now.Add(-time.Hour), prodET: past, prodBase: 658},
+		},
+		queues:   []timerQueue{{uuid: 23, qType: 3, start: now.Add(-time.Hour), end: past}},
+		stockCap: 44390,
+	}
+	for name, c := range map[string]struct {
+		soldiers int64
+		want     []timerSent
+	}{
+		"room for both camps and the heal": {43_500,
+			[]timerSent{{finishedTimersCampCmd, 845}, {finishedTimersCampCmd, 507}, {finishedTimersQueueCmd, 23}}},
+		"both camps reach the cap, no heal": {43_600,
+			[]timerSent{{finishedTimersCampCmd, 845}, {finishedTimersCampCmd, 507}}},
+		"the first camp fills the stock": {44_300, []timerSent{{finishedTimersCampCmd, 845}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ti := base
+			ti.soldiers = c.soldiers
+			sent, err := runTimers(t, ti.build(), okTimers)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if !slices.Equal(sent, c.want) {
+				t.Errorf("sent %v, want %v", sent, c.want)
+			}
+		})
+	}
+}
+
 func TestFinishedTimersChipFactoryFallsBackToChipCollect(t *testing.T) {
 	now := time.Now()
 	in := timerInit{buildings: []timerBuilding{
