@@ -174,7 +174,7 @@ A cold-start capture of the real iOS / Mac Catalyst app (1.0.344, hot-updated) w
 | `netType=1` on Wi-Fi (`1` = Wi-Fi, `2` = mobile, inferred) | `netType=2`, while its own `ta` says `WIFI` | Tolerated live |
 | `resVersion` = `2159.1505_821F_39516.23570` | Derived from that platform's check-version reply; `"0"` when a part is missing. Under `-cs-ios` the reply is the iOS build's | `"0"` was tolerated live for months |
 | `dataConfigMd5` = a server-issued value | `""` | Tolerated live |
-| After `init`: `change.user.parseid`, `check.device.change` (answered `r:false`), about 220 mostly read-only requests in 5 s, and `login.ext {info, add}` | None of these | Tolerated live |
+| After `init`: `change.user.parseid`, `check.device.change` (answered `r:false`), about 220 mostly read-only requests in 5 s, and `login.ext {info, add}` | None of these | Tolerated live for what `goclient` sends, which includes no march, see below |
 | Never sends `login.init` | Sends `login.init` as a fallback if `init` is slow | n/a |
 | Sends `mail.delete.batch {type:"auto", uids}` nine times on login: the real client auto-deletes mail | Never deletes mail | n/a |
 | A `psh` that doesn't match the Android formula (this capture's value wasn't kept) | The Android value at the time. Since 2026-10-18, iOS mode sends the iOS formula, which matches two later captures, see [Identity, login & session](/auth) | Tolerated live for weeks; the iOS formula is confirmed live (2026-10-18) |
@@ -186,6 +186,8 @@ Other facts from the same capture, all observed live:
 - `init.user` carries the account's email address. `goclient` now masks `email` and `shumeiId` in every redacted dump, alongside `mail` and `shumeiBoxId`.
 - `init.mixedInfo.todayLoginTimes` counts logins per server day, including every `goclient` run.
 - Over 328 s, the server answered all 83 heartbeats. There was no kick, no redirect, and no token-expiry hint anywhere in `init`.
+
+Skipping the post-`init` sequence is tolerated only for what `goclient` sends, and `goclient` never sends a march. Four people whose clients add marches report the same failure (October 2026, not tested here). Every `world.march.formation.new` (gather, attack, rally join) comes back with `errorCode` `E000000` and `errorMsg` `"token error"`. `Login`, reads, city actions, and `go.to.world` keep working. Two of them say marches go through once the session has answered `login.ext`. Despite the message, this isn't a rejected access token: that fails at `Login` with `ec=28`, `ep=[E011]`, before any read.
 
 `dataConfigMd5`, `init.add`, `login.ext`, and the probe template are app-integrity and anti-fraud surfaces. They're recorded here as protocol facts only; reproducing them is out of scope for this project. `psh` and `shumeiBoxId` are in scope. `goclient` sends the real client's `psh` for its platform, see [Identity, login & session](/auth). It also reproduces the ShuMei device-profile registration that mints `shumeiBoxId`, see [ShuMei device fingerprint](/shumei).
 
