@@ -90,7 +90,17 @@
   "footer": {
     "socials": {
       "github": "https://github.com/ljagiello/lastwar-client"
-    }
+    },
+    "links": [
+      {
+        "items": [
+          {
+            "label": "By Lukasz Jagiello",
+            "href": "https://lukasz.jagiello.org"
+          }
+        ]
+      }
+    ]
   },
   "integrations": {
     "ga4": {
