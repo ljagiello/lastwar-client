@@ -102,6 +102,11 @@
       }
     ]
   },
+  "seo": {
+    "metatags": {
+      "author": "Lukasz Jagiello"
+    }
+  },
   "integrations": {
     "ga4": {
       "measurementId": "G-905X2BN6YZ"

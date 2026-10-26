@@ -353,3 +353,5 @@ layer only imports the ones below it (`session` -> `game` -> `auth` -> `app`).
 ## License
 
 Apache License 2.0 -- see [LICENSE](LICENSE).
+
+Created by [Lukasz Jagiello](https://lukasz.jagiello.org).
