@@ -111,7 +111,7 @@ A rejected `Login` arrives as SFS2X `ec=28` with a reason string in `ep[0]` (see
 | `49` (with `;` details) | `TRAFFIC_CONTROL_BANNED_USER` | UI only |
 | `55`-`58` | Role deletion: applied, deleted, refused, confirmed. New in 1.0.364 | UI only |
 
-None of the numeric codes is a credential problem, and none is worth retrying. The `E1xx` codes (`E101`-`E117`) are client-local loading and network codes; the server never sends them. `goclient` reports `E011` as `session.ErrTokenRejected`, the numeric codes above as `session.ErrAccountBlocked`, and every other rejection as `ErrAuthRejected`. A blocked account exits with code `4`, because neither a fresh capture nor a token refresh can fix it. The other rejections exit with code `2`.
+None of the numeric codes is a credential problem, and none is worth retrying. The `E1xx` codes (`E101`-`E117`) are client-local loading and network codes; the server never sends them. `goclient` reports `E011` as `session.ErrTokenRejected`, the numeric codes above as `session.ErrAccountBlocked`, and every other rejection as `ErrAuthRejected`. A blocked account, role, device or IP exits with code `4`, because neither a fresh capture nor a token refresh can fix it. The other rejections exit with code `2`.
 
 The real client's recovery from `E011` needs the refresh token: clear `at`, run GSL `opt=refresh` with `rt`, store the new pair, and log in again. `goclient` does the same for a session config that holds a refresh token, such as an own-device one (see [Refreshing the access token](#refreshing-the-access-token)). A config captured from the real app has no refresh token, so its recovery is a fresh capture, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token).
 

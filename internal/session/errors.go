@@ -25,12 +25,11 @@ var ErrTokenRejected = fmt.Errorf("access token rejected (E011): %w", ErrAuthRej
 
 // ErrAccountBlocked is the ErrAuthRejected case where the server refused the account, role,
 // device or IP: a ban, an IP or device blacklist, traffic control, or an account or role deletion
-// state.
-// These are the numeric ep[0] codes of the client's LoginErrorCode table (Global/EnumType.lua:7-41);
-// the real client only shows a dialog for them and never retries. A fresh capture or a token
+// state. These are the numeric ep[0] codes of the client's LoginErrorCode table
+// (Global/EnumType.lua:7-41); the real client never retries them. A fresh capture or a token
 // refresh can't change them, so main.go exits with its own code instead of the "recapture" 2.
 // Every Login rejection error built from one is an *AccountBlockedError.
-var ErrAccountBlocked = fmt.Errorf("account or role blocked: %w", ErrAuthRejected)
+var ErrAccountBlocked = fmt.Errorf("login blocked: %w", ErrAuthRejected)
 
 // loginBanCode is ERROR_BANID, the only blocked code whose ep[0] details are read here.
 const loginBanCode = "4"

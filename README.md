@@ -322,8 +322,8 @@ Two things worth checking after setup, not just once but as ongoing habits:
   (both the plain-login and cross-server-reconnect paths) exit `2` specifically, distinct from
   the generic exit `1` used for other failures -- a cron wrapper can check `$?` directly and
   know to recapture a fresh session (see "Session config" above) without needing to grep the log
-  at all. GSL codes 211/212 ("re-auth needed") also exit `2`. A blocked account or role exits
-  `4` instead, see below.
+  at all. GSL codes 211/212 ("re-auth needed") also exit `2`. A blocked account, role, device or
+  IP exits `4` instead, see below.
 - **Exit code 3 means the server ended the session on purpose.** `push.user.off` (the account
   logged in on another device), `push.server.stop` (maintenance) and `init.error` stop the run
   without reconnecting, as the real client does. Nothing needs fixing: the next scheduled run

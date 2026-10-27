@@ -513,7 +513,7 @@ func accessTokenStale(gameUid, accessTok string, accessTokTime int64, refreshTok
 	return gsl.ChooseOpt(gsl.OptState{GameUid: gameUid, AccessTok: accessTok, AccessTokTime: accessTokTime, RefreshTok: refreshTok}, time.Now()).Opt == "refresh"
 }
 
-// exitLoginFailed logs a failed auth.Login and exits: 4 for a blocked account or role
+// exitLoginFailed logs a failed auth.Login and exits: 4 for a blocked account, role, device or IP
 // (ErrAccountBlocked), 2 for any other confirmed server-side auth rejection (ErrAuthRejected, or
 // GSL 211/212), 1 for anything else.
 func exitLoginFailed(err error) {
