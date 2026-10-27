@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"lastwar-client/internal/auth"
 	"lastwar-client/internal/gsl"
@@ -12,6 +13,7 @@ import (
 	"lastwar-client/internal/shumei"
 	"lastwar-client/internal/testutil"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -378,12 +380,20 @@ func banningServer(server *session.GameConn) {
 	_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp)
 }
 
-// TestRunCrossServerTestBannedExits4: a banned role exits 4 with the "open the real app" message,
-// with no GSL refresh even though the config holds a refresh token, and no recapture hint.
+// TestRunCrossServerTestBannedExits4: a banned role exits 4 with the stop-the-runs message, with no
+// recapture hint and no GSL refresh even though the config holds a refresh token. Any getserverlist
+// request fails, so a refresh would end the run with 1, not 4.
 func TestRunCrossServerTestBannedExits4(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
 		client := testutil.UseInMemoryGSL(t, refreshReply())
+		gslServe := client.Transport
+		client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "getserverlist.php") {
+				return nil, errors.New("a banned Login must not reach GSL getserverlist")
+			}
+			return gslServe.RoundTrip(r)
+		})
 		dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": banningServer})
 		runCrossServerTest(crossServerTestOpts{
 			ip: "10.0.0.1", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid,
@@ -395,11 +405,11 @@ func TestRunCrossServerTestBannedExits4(t *testing.T) {
 	if code != exitCodeAccountBlocked {
 		t.Errorf("exit code = %d, want %d; stderr=%s", code, exitCodeAccountBlocked, stderr)
 	}
-	if !strings.Contains(stderr, "ban, permanent, reason 703") || !strings.Contains(stderr, "Open the real app on this account") {
-		t.Errorf("want the ban details and the open-the-real-app message; stderr=%s", stderr)
+	if !strings.Contains(stderr, "reason 703") || !strings.Contains(stderr, "Stop the scheduled runs") {
+		t.Errorf("want the ban's reason and the stop-the-runs message; stderr=%s", stderr)
 	}
-	if strings.Contains(stderr, "GSL getserverlist") || strings.Contains(stderr, "Recapture:") {
-		t.Errorf("a ban must not refresh the token or ask for a recapture; stderr=%s", stderr)
+	if strings.Contains(stderr, "Recapture:") {
+		t.Errorf("a ban must not ask for a recapture; stderr=%s", stderr)
 	}
 }
 

@@ -1316,8 +1316,9 @@ func TestDoCrossServerLoginAccountBlocked(t *testing.T) {
 	if !errors.Is(err, session.ErrAccountBlocked) || errors.Is(err, session.ErrTokenRejected) {
 		t.Errorf("err = %v, want ErrAccountBlocked and not ErrTokenRejected", err)
 	}
-	if !strings.Contains(err.Error(), "ban, permanent, reason 703") {
-		t.Errorf("err = %v, want the ban details", err)
+	var blocked *session.AccountBlockedError
+	if !errors.As(err, &blocked) || !blocked.Permanent || blocked.Reason != "703" {
+		t.Errorf("err = %v, want a permanent ban with reason 703", err)
 	}
 }
 

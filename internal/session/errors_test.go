@@ -17,9 +17,8 @@ func loginReject(ep ...string) *sfs.SFSObject {
 	return o
 }
 
-// TestLoginRejectionBlocked: every numeric LoginErrorCode is an *AccountBlockedError, and a ban's
-// details come from inside the one ep string. The ban samples are discussion #53's packet: its §1
-// banTime is below the int64 range, which only the sign check survives.
+// TestLoginRejectionBlocked: a ban's details come from inside the one ep string. The ban samples
+// are the two ban times quoted in discussion #53.
 func TestLoginRejectionBlocked(t *testing.T) {
 	cases := []struct {
 		name string
@@ -28,7 +27,7 @@ func TestLoginRejectionBlocked(t *testing.T) {
 	}{
 		{"permanent ban", "4;-9223372036847575810;13;703;Role",
 			AccountBlockedError{Code: "4", Label: "ban", Permanent: true, BanTime: "-9223372036847575810", Reason: "703"}},
-		{"ban time below int64", "4;-9223372036855575810;13;703;Role",
+		{"#53's other ban time", "4;-9223372036855575810;13;703;Role",
 			AccountBlockedError{Code: "4", Label: "ban", Permanent: true, BanTime: "-9223372036855575810", Reason: "703"}},
 		{"all-time ban", "4;9223372036854775806;13;706;Role",
 			AccountBlockedError{Code: "4", Label: "ban", Permanent: true, BanTime: "9223372036854775806", Reason: "706"}},
@@ -61,6 +60,16 @@ func TestLoginRejectionBlocked(t *testing.T) {
 	}
 }
 
+// TestLoginRejectionEveryBlockedCode: each numeric code the docs promise exit 4 for, written out
+// rather than read from blockedLoginCodes, so dropping one from the table fails here.
+func TestLoginRejectionEveryBlockedCode(t *testing.T) {
+	for _, code := range []string{"4", "43", "44", "45", "46", "47", "48", "49", "55", "56", "57", "58"} {
+		if err := LoginRejection(loginReject(code)); !errors.Is(err, ErrAccountBlocked) {
+			t.Errorf("LoginRejection(%q) = %v, want ErrAccountBlocked", code, err)
+		}
+	}
+}
+
 func TestLoginRejectionNotBlocked(t *testing.T) {
 	cases := []struct {
 		name string
@@ -86,12 +95,12 @@ func TestLoginRejectionNotBlocked(t *testing.T) {
 
 func TestAccountBlockedErrorMessage(t *testing.T) {
 	err := LoginRejection(loginReject("4;-9223372036847575810;13;703;Role"))
-	const want = "ban, permanent, reason 703 (ep code 4): account or role blocked: server rejected authentication"
+	want := "ban, permanent, reason 703 (ep code 4): " + ErrAccountBlocked.Error()
 	if err.Error() != want {
 		t.Errorf("Error() = %q, want %q", err.Error(), want)
 	}
 	err = LoginRejection(loginReject("4;1793000000000;13;Role"))
-	const wantTimed = "ban, until 1793000000000 (ep code 4): account or role blocked: server rejected authentication"
+	wantTimed := "ban, until 1793000000000 (ep code 4): " + ErrAccountBlocked.Error()
 	if err.Error() != wantTimed {
 		t.Errorf("Error() = %q, want %q", err.Error(), wantTimed)
 	}

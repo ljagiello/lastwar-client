@@ -328,11 +328,12 @@ Two things worth checking after setup, not just once but as ongoing habits:
   logged in on another device), `push.server.stop` (maintenance) and `init.error` stop the run
   without reconnecting, as the real client does. Nothing needs fixing: the next scheduled run
   starts a fresh session. Playing on another device during a cron run is the usual cause.
-- **Exit code 4 means the server refused the account or role itself.** A ban, an IP or device
-  blacklist, or an account or role deletion state (the numeric `ep` codes in `docs/auth.mdx`,
-  "Login rejection codes"). A fresh capture or a token refresh can't fix it, so don't recapture:
-  open the real app on that account to see why, and stop the cron until it's resolved. The log's
-  error line says whether a ban is permanent and gives its reason code.
+- **Exit code 4 means the server refused the account, role, device or IP.** A ban, an IP or
+  device blacklist, or an account or role deletion state (the numeric `ep` codes in
+  `docs/auth.mdx`, "Login rejection codes"). A fresh capture or a token refresh can't fix it, so
+  don't recapture: stop the cron until it's resolved. The log's error line names the code, and for
+  a ban, whether it is permanent and its reason code. For a ban or a deletion, the real app on that
+  account shows why.
 - **`-log-level` controls the JSON log verbosity** (`debug`, `warn`, or its alias `warning`, or `error`; default `info`) --
   handy for trimming a noisy cron log down to warnings/errors only, or turning on `debug` output
   while chasing down a problem run.

@@ -652,10 +652,10 @@ func shouldAbortBeforeInteractive(err error, interactiveRequested bool) bool {
 // the next scheduled run" apart from both without parsing the log.
 const exitCodeSessionEnded = 3
 
-// exitCodeAccountBlocked is the exit code for a Login the server refused because of the account
-// or role itself (session.ErrAccountBlocked): a ban, a blacklist or a deletion state. It is
-// distinct from 2 because a fresh capture or a token refresh can't fix it: only the player can,
-// in the real app, so a cron wrapper should stop the scheduled runs.
+// exitCodeAccountBlocked is the exit code for a Login the server refused because of the account,
+// role, device or IP (session.ErrAccountBlocked): a ban, a blacklist or a deletion state. It is
+// distinct from 2 because a fresh capture or a token refresh can't fix it, so a cron wrapper
+// should stop the scheduled runs.
 const exitCodeAccountBlocked = 4
 
 // exitIfAccountBlocked exits with exitCodeAccountBlocked when err carries
@@ -665,8 +665,9 @@ func exitIfAccountBlocked(err error) {
 	if !errors.Is(err, session.ErrAccountBlocked) {
 		return
 	}
-	slog.Error("the server refused this account or role (ban, blacklist or deletion); a fresh capture or a token refresh can't fix it. "+
-		"Open the real app on this account to see why, and stop the scheduled runs until it is resolved",
+	slog.Error("the server refused this account, role, device or IP (the error above names the ban, blacklist or deletion state); "+
+		"a fresh capture or a token refresh can't fix it. Stop the scheduled runs until it is resolved; "+
+		"for a ban or a deletion, the real app on this account shows why",
 		"exitCode", exitCodeAccountBlocked)
 	os.Exit(exitCodeAccountBlocked)
 }

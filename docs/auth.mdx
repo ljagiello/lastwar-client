@@ -105,7 +105,7 @@ A rejected `Login` arrives as SFS2X `ec=28` with a reason string in `ep[0]` (see
 | `E012` | Korean real-name authentication | Dialog |
 | `E013`, `E015`, `E016` | Season register ban, season start, season stop or maintenance | `E013` clears all user data |
 | `E014` | `ERROR_OLD_UID_USE_NEW_RT` | Clears `gameUid`, `at`, `rt`, and `loginKey`, then reloads |
-| `4` (with `;` details) | `ERROR_BANID`: a ban | Ban dialog only, see [Reading a ban](#reading-a-ban) |
+| `4` (with `;` details) | `ERROR_BANID`: a ban | Ban dialog, see [Reading a ban](#reading-a-ban). The ban view also calls `AccountCredentialManager.ClearAll()` (`UIAccountBanView.lua:223`); when it does isn't recorded |
 | `43`, `44` | IP blacklist, device blacklist | No C# case; falls through to the generic `E117` |
 | `45`-`48` | Account deletion: applied, deleted, refused, confirmed | UI only |
 | `49` (with `;` details) | `TRAFFIC_CONTROL_BANNED_USER` | UI only |
@@ -129,7 +129,7 @@ A ban's `ep[0]` is one string with its details separated by `;` inside it, for e
 
 The dialog names a reason only for `705` (Data Error), `706` (Exploitation of Glitches), `727` (Violation of Speech Rules), and `602` (character deletion). Any other code, such as the `703` in #53, displays as "Data Error", so the dialog doesn't tell you the real reason. Don't read the ban time's other digits as a duration: the client ignores them.
 
-`goclient` logs the code, whether a ban is permanent, and its reason, then exits with code `4`. It reads the sign from the text, because a ban time doesn't have to fit an int64: #53 quotes two ban times, and one of them, `-9223372036855575810`, doesn't.
+`goclient` logs the code, whether a ban is permanent, and its reason, then exits with code `4`. It reads the sign from the text, so it never parses the number.
 
 ### Following a `serverInfo` redirect
 

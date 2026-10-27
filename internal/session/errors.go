@@ -23,8 +23,9 @@ var ErrAuthRejected = errors.New("server rejected authentication")
 // ClearAccessToken() -- and the only fix is a fresh capture of the real app logging in.
 var ErrTokenRejected = fmt.Errorf("access token rejected (E011): %w", ErrAuthRejected)
 
-// ErrAccountBlocked is the ErrAuthRejected case where the server refused the account or role
-// itself: a ban, an IP or device blacklist, traffic control, or an account or role deletion state.
+// ErrAccountBlocked is the ErrAuthRejected case where the server refused the account, role,
+// device or IP: a ban, an IP or device blacklist, traffic control, or an account or role deletion
+// state.
 // These are the numeric ep[0] codes of the client's LoginErrorCode table (Global/EnumType.lua:7-41);
 // the real client only shows a dialog for them and never retries. A fresh capture or a token
 // refresh can't change them, so main.go exits with its own code instead of the "recapture" 2.
@@ -60,7 +61,7 @@ var blockedLoginCodes = map[string]string{
 // A ban's ep[0] is "4;banTime;banType;reason;roleName", or "4;banTime;banType;roleName" with no
 // reason (UIAccountBanView.lua:155-176, as C485 reported in discussion #53; not re-checked against
 // this repo's decompile). The client only looks at banTime's sign: negative is permanent. The
-// sign is read from the text because the number need not fit an int64.
+// sign is read from the text, so the number is never parsed.
 type AccountBlockedError struct {
 	Code      string // ep[0]'s first ;-field, e.g. "4"
 	Label     string // blockedLoginCodes[Code]
