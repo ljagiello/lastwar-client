@@ -463,7 +463,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		}
 		if ec, ok := env.Content.Get("ec"); ok {
 			_ = conn.Close()
-			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), session.ErrAuthRejected)
+			return nil, fmt.Errorf("LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), session.LoginRejection(env.Content))
 		}
 		// session.WarnIfWrongTypedField below adds a diagnostic for the "field present but wrong-typed"
 		// case specifically, matching the push.account.login.new un/loginKey/gameUid/

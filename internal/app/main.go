@@ -513,11 +513,13 @@ func accessTokenStale(gameUid, accessTok string, accessTokTime int64, refreshTok
 	return gsl.ChooseOpt(gsl.OptState{GameUid: gameUid, AccessTok: accessTok, AccessTokTime: accessTokTime, RefreshTok: refreshTok}, time.Now()).Opt == "refresh"
 }
 
-// exitLoginFailed logs a failed auth.Login and exits: 2 for a confirmed server-side auth rejection
-// (ErrAuthRejected, or GSL 211/212), 1 for anything else.
+// exitLoginFailed logs a failed auth.Login and exits: 4 for a blocked account or role
+// (ErrAccountBlocked), 2 for any other confirmed server-side auth rejection (ErrAuthRejected, or
+// GSL 211/212), 1 for anything else.
 func exitLoginFailed(err error) {
 	slog.Error("login failed", "error", err)
 	exitIfSessionEnded(err, nil)
+	exitIfAccountBlocked(err)
 	exitIfReauthNeeded(err)
 	// Exit code 2 (rather than the generic 1) specifically marks a
 	// confirmed server-side auth rejection (ErrAuthRejected) -- the
@@ -649,6 +651,25 @@ func shouldAbortBeforeInteractive(err error, interactiveRequested bool) bool {
 // distinct from 1 (generic) and 2 (stale session) so a cron wrapper can tell "do not retry before
 // the next scheduled run" apart from both without parsing the log.
 const exitCodeSessionEnded = 3
+
+// exitCodeAccountBlocked is the exit code for a Login the server refused because of the account
+// or role itself (session.ErrAccountBlocked): a ban, a blacklist or a deletion state. It is
+// distinct from 2 because a fresh capture or a token refresh can't fix it: only the player can,
+// in the real app, so a cron wrapper should stop the scheduled runs.
+const exitCodeAccountBlocked = 4
+
+// exitIfAccountBlocked exits with exitCodeAccountBlocked when err carries
+// session.ErrAccountBlocked, and returns otherwise. The caller has already logged err, which
+// carries the code and, for a ban, whether it is permanent and its reason.
+func exitIfAccountBlocked(err error) {
+	if !errors.Is(err, session.ErrAccountBlocked) {
+		return
+	}
+	slog.Error("the server refused this account or role (ban, blacklist or deletion); a fresh capture or a token refresh can't fix it. "+
+		"Open the real app on this account to see why, and stop the scheduled runs until it is resolved",
+		"exitCode", exitCodeAccountBlocked)
+	os.Exit(exitCodeAccountBlocked)
+}
 
 // exitIfSessionEnded exits with exitCodeSessionEnded when err carries session.ErrSessionEnded,
 // and returns otherwise. The real client never reconnects after these pushes, so this exits even
@@ -1591,6 +1612,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
 		exitIfSessionEnded(err, nil)
+		exitIfAccountBlocked(err)
 		if errors.Is(err, session.ErrTokenRejected) {
 			if !refreshed {
 				slog.Error("the session config's access token has been rotated server-side; every run will fail until it is replaced. " +

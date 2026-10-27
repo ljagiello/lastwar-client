@@ -367,6 +367,59 @@ func TestRunCrossServerTestNoRefreshTokenKeepsRecaptureHint(t *testing.T) {
 	}
 }
 
+// banningServer rejects every Login with discussion #53's ban, ep=["4;banTime;type;reason;role"].
+func banningServer(server *session.GameConn) {
+	if _, err := server.ReadEnvelope(); err != nil {
+		return
+	}
+	resp := sfs.NewSFSObject()
+	resp.PutValue("ep", sfs.SFSValue{Type: 16, Val: []string{"4;-9223372036847575810;13;703;Role"}}) // 16 = UTF_STRING_ARRAY
+	resp.PutShort("ec", 28)
+	_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp)
+}
+
+// TestRunCrossServerTestBannedExits4: a banned role exits 4 with the "open the real app" message,
+// with no GSL refresh even though the config holds a refresh token, and no recapture hint.
+func TestRunCrossServerTestBannedExits4(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		client := testutil.UseInMemoryGSL(t, refreshReply())
+		dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": banningServer})
+		runCrossServerTest(crossServerTestOpts{
+			ip: "10.0.0.1", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid,
+			at: "at-old", refreshTok: "rt-old", httpClient: client, dialGame: dial,
+		})
+		return
+	}
+	code, stderr := runRefreshHelper(t, "TestRunCrossServerTestBannedExits4")
+	if code != exitCodeAccountBlocked {
+		t.Errorf("exit code = %d, want %d; stderr=%s", code, exitCodeAccountBlocked, stderr)
+	}
+	if !strings.Contains(stderr, "ban, permanent, reason 703") || !strings.Contains(stderr, "Open the real app on this account") {
+		t.Errorf("want the ban details and the open-the-real-app message; stderr=%s", stderr)
+	}
+	if strings.Contains(stderr, "GSL getserverlist") || strings.Contains(stderr, "Recapture:") {
+		t.Errorf("a ban must not refresh the token or ask for a recapture; stderr=%s", stderr)
+	}
+}
+
+// TestExitLoginFailedBannedExits4: the guest/email Login path exits 4 for a blocked account too.
+func TestExitLoginFailedBannedExits4(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		content := sfs.NewSFSObject()
+		content.PutValue("ep", sfs.SFSValue{Type: 16, Val: []string{"44"}}) // 16 = UTF_STRING_ARRAY
+		exitLoginFailed(fmt.Errorf("LOGIN FAILED: ec=28: %w", session.LoginRejection(content)))
+		return
+	}
+	code, stderr := runRefreshHelper(t, "TestExitLoginFailedBannedExits4")
+	if code != exitCodeAccountBlocked {
+		t.Errorf("exit code = %d, want %d; stderr=%s", code, exitCodeAccountBlocked, stderr)
+	}
+	if !strings.Contains(stderr, "device blacklist") {
+		t.Errorf("want the device blacklist label; stderr=%s", stderr)
+	}
+}
+
 // TestMainUsesSessionConfigRefreshToken runs Run() end to end. The fake GSL lists the fake game
 // server, so a config needs no address of its own.
 //   - A config holding only a refresh token (no address, no access token) selects the reconnect by
