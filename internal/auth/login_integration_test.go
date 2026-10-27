@@ -344,6 +344,43 @@ func TestLoginRejectsAuthRejection(t *testing.T) {
 	}
 }
 
+// TestLoginClassifiesRejection: the base-zone Login reads ep the way the cross-server one does, so
+// E011 is ErrTokenRejected and a ban is ErrAccountBlocked, both still ErrAuthRejected.
+func TestLoginClassifiesRejection(t *testing.T) {
+	cases := []struct {
+		ep   string
+		want error
+	}{
+		{"E011", session.ErrTokenRejected},
+		{"4;-9223372036847575810;13;703;Role", session.ErrAccountBlocked},
+	}
+	for _, c := range cases {
+		t.Run(c.ep, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			addr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+				if _, err := server.ReadEnvelope(); err != nil {
+					return
+				}
+				resp := sfs.NewSFSObject()
+				resp.PutValue("ep", sfs.SFSValue{Type: 16, Val: []string{c.ep}}) // 16 = UTF_STRING_ARRAY
+				resp.PutShort("ec", 28)
+				_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp)
+			})
+			host, port := testutil.SplitHostPortInt(t, addr)
+			testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
+				Code:       "0",
+				ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+				At:         &gsl.LoginToken{Token: "tok-1"},
+			}))
+
+			_, err := Login(LoginOptions{})
+			if !errors.Is(err, c.want) || !errors.Is(err, session.ErrAuthRejected) {
+				t.Errorf("err = %v, want errors.Is %v and ErrAuthRejected", err, c.want)
+			}
+		})
+	}
+}
+
 // TestLoginBaseZoneResponseWaitConnectionFailure is the round-51 regression test for the MAJOR
 // finding that Login()'s base-zone login-response wait's own network-failure branch (the
 // `if err != nil { conn.Close(); return nil, err }` right after the base-zone waitFor call,

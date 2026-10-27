@@ -203,7 +203,7 @@ Errors on extension responses are per handler; the 1.0.364 Lua has no generic er
 - A failed request carries `errorCode`, a UtfString holding either an error code or a locale key.
 - An optional `errorPara2` (UtfStringArray) carries tip parameters. The client shows `Localization:GetString(errorCode, table.unpack(errorPara2))`.
 - `E000000` is the generic "unknown error" (`SeverErrorCode` in `ConstDefine.lua`). A few handlers treat it as a soft "no data" result, for example a rank preview with nothing to rank.
-- `Login` rejections don't use `errorCode`. They arrive as SFS2X's own `ec` (a short) and `ep` (a UTF string array), formatted through the stock SFS2X error table. Code `28` is that table's `"{0}"` passthrough, which carries the game's `E0xx` strings in `ep[0]`, see [Identity, login & session](/auth#login-rejection-codes).
+- `Login` rejections don't use `errorCode`. They arrive as SFS2X's own `ec` (a short) and `ep` (a UTF string array), formatted through the stock SFS2X error table. Code `28` is that table's `"{0}"` passthrough, which carries the game's `E0xx` strings, or a numeric code such as a ban's `4;…`, in `ep[0]`, see [Identity, login & session](/auth#login-rejection-codes).
 - Fatal conditions come only from the C#: a `Login` rejection, `push.user.off` (kicked: the client quits and doesn't reconnect), `push.server.stop` / `push.server.tostop`, and connection loss.
 
 ## Server-controlled transport switches

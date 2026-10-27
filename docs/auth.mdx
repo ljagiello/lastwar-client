@@ -75,7 +75,7 @@ else:
     else                       -> no opt field at all
 ```
 
-So a returning client refreshes its token on its own once `at.time` is 30 days old, and right after an `E011` clears `at`. The form fields and their order are on [Gate-server RSA+AES handshake](/gate-server-crypto#request-fields). `goclient` sends `opt=login`, `opt=fix`, or `opt=new`, and sends `opt=refresh` only through the manual `-cs-rt` flag. Its game-server lookup sends no `opt` field (see [Looking up the game server](#looking-up-the-game-server)).
+So a returning client refreshes its token on its own once `at.time` is 30 days old, and right after an `E011` clears `at`. The form fields and their order are on [Gate-server RSA+AES handshake](/gate-server-crypto#request-fields). `goclient` sends `opt=login`, `opt=fix`, or `opt=new` on the guest and email paths. It sends `opt=refresh` for a session config that holds a refresh token (see [Refreshing the access token](#refreshing-the-access-token)) and through the manual `-cs-rt` flag. Its game-server lookup sends no `opt` field (see [Looking up the game server](#looking-up-the-game-server)).
 
 ### GSL result codes
 
@@ -105,15 +105,31 @@ A rejected `Login` arrives as SFS2X `ec=28` with a reason string in `ep[0]` (see
 | `E012` | Korean real-name authentication | Dialog |
 | `E013`, `E015`, `E016` | Season register ban, season start, season stop or maintenance | `E013` clears all user data |
 | `E014` | `ERROR_OLD_UID_USE_NEW_RT` | Clears `gameUid`, `at`, `rt`, and `loginKey`, then reloads |
-| `4` (with `;` details) | Ban | UI only |
+| `4` (with `;` details) | `ERROR_BANID`: a ban | Ban dialog, see [Reading a ban](#reading-a-ban). The ban view also calls `AccountCredentialManager.ClearAll()` (`UIAccountBanView.lua:223`); when it does isn't recorded |
 | `43`, `44` | IP blacklist, device blacklist | No C# case; falls through to the generic `E117` |
 | `45`-`48` | Account deletion: applied, deleted, refused, confirmed | UI only |
 | `49` (with `;` details) | `TRAFFIC_CONTROL_BANNED_USER` | UI only |
 | `55`-`58` | Role deletion: applied, deleted, refused, confirmed. New in 1.0.364 | UI only |
 
-None of the numeric codes is a credential problem, and none is worth retrying. The `E1xx` codes (`E101`-`E117`) are client-local loading and network codes; the server never sends them. `goclient` reports `E011` as `session.ErrTokenRejected` and every other rejection as `ErrAuthRejected`; both exit with code `2`.
+None of the numeric codes is a credential problem, and none is worth retrying. The `E1xx` codes (`E101`-`E117`) are client-local loading and network codes; the server never sends them. `goclient` reports `E011` as `session.ErrTokenRejected`, the numeric codes above as `session.ErrAccountBlocked`, and every other rejection as `ErrAuthRejected`. A blocked account, role, device or IP exits with code `4`, because neither a fresh capture nor a token refresh can fix it. The other rejections exit with code `2`.
 
-The real client's recovery from `E011` needs the refresh token: clear `at`, run GSL `opt=refresh` with `rt`, store the new pair, and log in again. `goclient` doesn't persist `rt` from GSL responses, so its recovery is a fresh capture, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token).
+The real client's recovery from `E011` needs the refresh token: clear `at`, run GSL `opt=refresh` with `rt`, store the new pair, and log in again. `goclient` does the same for a session config that holds a refresh token, such as an own-device one (see [Refreshing the access token](#refreshing-the-access-token)). A config captured from the real app has no refresh token, so its recovery is a fresh capture, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token).
+
+#### Reading a ban
+
+A ban's `ep[0]` is one string with its details separated by `;` inside it, for example `4;-9223372036847575810;13;703;<roleName>`. It is not five array elements. This layout comes from C485's report in [discussion #53](https://github.com/ljagiello/lastwar-client/discussions/53), which cites `UIAccountBanView.lua:155-176`. It hasn't been re-checked against this project's 1.0.364 decompile, and no ban has been seen live here.
+
+| Field | Example | Meaning |
+|---|---|---|
+| 1 | `4` | `ERROR_BANID`: the client opens its ban dialog |
+| 2 | `-9223372036847575810` | Ban time. The client checks only its sign: negative means permanent. #53 also names `9223372036854775806` as the client's all-time value. Any other value is the ban's end, which the dialog displays |
+| 3 | `13` | Ban type. The dialog doesn't use it |
+| 4 | `703` | Reason code. With only four fields, there is no reason and field 4 is the role name |
+| 5 | `<roleName>` | The role name the dialog shows |
+
+The dialog names a reason only for `705` (Data Error), `706` (Exploitation of Glitches), `727` (Violation of Speech Rules), and `602` (character deletion). Any other code, such as the `703` in #53, displays as "Data Error", so the dialog doesn't tell you the real reason. Don't read the ban time's other digits as a duration: the client ignores them.
+
+`goclient` logs the code, whether a ban is permanent, and its reason, then exits with code `4`. It reads the sign from the text, so it never parses the number.
 
 ### Following a `serverInfo` redirect
 

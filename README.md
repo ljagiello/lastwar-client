@@ -132,6 +132,10 @@ same as initial setup.
 In both real recurrences so far (2026-08-16 and 2026-10-02), `shumeiBoxId` had also changed, not just
 `accessToken`, and the 2026-10-02 one happened server-side with no other login on that device.
 The client now logs a dedicated "access token has been rotated" error for this case (exit code 2).
+`ec=28` on its own says nothing: the reason is in `ep`. An `ep` that starts with `4;`, such as
+`ep=[4;-9223372036847575810;13;703;<roleName>]`, is a ban, not a token problem (reported in
+discussion #53, not seen here). A fresh capture can't fix it, so the client exits with code 4
+instead, see `docs/auth.mdx`, "Reading a ban".
 
 **A device of its own refreshes itself, confirmed live:** a config written by `-own-device-session`
 holds the device's `refreshToken`. On `E011`, or once `accessTokenTime` is 30 days old, the client
@@ -318,11 +322,18 @@ Two things worth checking after setup, not just once but as ongoing habits:
   (both the plain-login and cross-server-reconnect paths) exit `2` specifically, distinct from
   the generic exit `1` used for other failures -- a cron wrapper can check `$?` directly and
   know to recapture a fresh session (see "Session config" above) without needing to grep the log
-  at all. GSL codes 211/212 ("re-auth needed") also exit `2`.
+  at all. GSL codes 211/212 ("re-auth needed") also exit `2`. A blocked account, role, device or
+  IP exits `4` instead, see below.
 - **Exit code 3 means the server ended the session on purpose.** `push.user.off` (the account
   logged in on another device), `push.server.stop` (maintenance) and `init.error` stop the run
   without reconnecting, as the real client does. Nothing needs fixing: the next scheduled run
   starts a fresh session. Playing on another device during a cron run is the usual cause.
+- **Exit code 4 means the server refused the account, role, device or IP.** A ban, an IP or
+  device blacklist, or an account or role deletion state (the numeric `ep` codes in
+  `docs/auth.mdx`, "Login rejection codes"). A fresh capture or a token refresh can't fix it, so
+  don't recapture: stop the cron until it's resolved. The log's error line names the code, and for
+  a ban, whether it is permanent and its reason code. For a ban or a deletion, the real app on that
+  account shows why.
 - **`-log-level` controls the JSON log verbosity** (`debug`, `warn`, or its alias `warning`, or `error`; default `info`) --
   handy for trimming a noisy cron log down to warnings/errors only, or turning on `debug` output
   while chasing down a problem run.

@@ -8,7 +8,6 @@ import (
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"os"
-	"slices"
 	"time"
 )
 
@@ -280,12 +279,8 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			// Wrapped in ErrAuthRejected (defined in errors.go) so callers can
 			// distinguish "server actively rejected this login" (ec present) from
 			// a bare dial/timeout/I/O failure above, which stay unwrapped.
-			cause := session.ErrAuthRejected
-			ep, _ := env.Content.Get("ep")
-			if codes, _ := ep.Val.([]string); slices.Contains(codes, "E011") {
-				cause = session.ErrTokenRejected
-			}
-			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), cause)
+			// LoginRejection narrows it to ErrTokenRejected or ErrAccountBlocked from ep.
+			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), session.LoginRejection(env.Content))
 		}
 		slog.Info("login OK")
 

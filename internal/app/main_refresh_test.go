@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"lastwar-client/internal/auth"
 	"lastwar-client/internal/gsl"
@@ -12,6 +13,7 @@ import (
 	"lastwar-client/internal/shumei"
 	"lastwar-client/internal/testutil"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -364,6 +366,67 @@ func TestRunCrossServerTestNoRefreshTokenKeepsRecaptureHint(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "Recapture:") || strings.Contains(stderr, "GSL getserverlist") {
 		t.Errorf("want the recapture hint and no GSL call; stderr=%s", stderr)
+	}
+}
+
+// banningServer rejects every Login with discussion #53's ban, ep=["4;banTime;type;reason;role"].
+func banningServer(server *session.GameConn) {
+	if _, err := server.ReadEnvelope(); err != nil {
+		return
+	}
+	resp := sfs.NewSFSObject()
+	resp.PutValue("ep", sfs.SFSValue{Type: 16, Val: []string{"4;-9223372036847575810;13;703;Role"}}) // 16 = UTF_STRING_ARRAY
+	resp.PutShort("ec", 28)
+	_ = server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp)
+}
+
+// TestRunCrossServerTestBannedExits4: a banned role exits 4 with the stop-the-runs message, with no
+// recapture hint and no GSL refresh even though the config holds a refresh token. Any getserverlist
+// request fails, so a refresh would end the run with 1, not 4.
+func TestRunCrossServerTestBannedExits4(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		client := testutil.UseInMemoryGSL(t, refreshReply())
+		gslServe := client.Transport
+		client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(r.URL.Path, "getserverlist.php") {
+				return nil, errors.New("a banned Login must not reach GSL getserverlist")
+			}
+			return gslServe.RoundTrip(r)
+		})
+		dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": banningServer})
+		runCrossServerTest(crossServerTestOpts{
+			ip: "10.0.0.1", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid,
+			at: "at-old", refreshTok: "rt-old", httpClient: client, dialGame: dial,
+		})
+		return
+	}
+	code, stderr := runRefreshHelper(t, "TestRunCrossServerTestBannedExits4")
+	if code != exitCodeAccountBlocked {
+		t.Errorf("exit code = %d, want %d; stderr=%s", code, exitCodeAccountBlocked, stderr)
+	}
+	if !strings.Contains(stderr, "reason 703") || !strings.Contains(stderr, "Stop the scheduled runs") {
+		t.Errorf("want the ban's reason and the stop-the-runs message; stderr=%s", stderr)
+	}
+	if strings.Contains(stderr, "Recapture:") {
+		t.Errorf("a ban must not ask for a recapture; stderr=%s", stderr)
+	}
+}
+
+// TestExitLoginFailedBannedExits4: the guest/email Login path exits 4 for a blocked account too.
+func TestExitLoginFailedBannedExits4(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		content := sfs.NewSFSObject()
+		content.PutValue("ep", sfs.SFSValue{Type: 16, Val: []string{"44"}}) // 16 = UTF_STRING_ARRAY
+		exitLoginFailed(fmt.Errorf("LOGIN FAILED: ec=28: %w", session.LoginRejection(content)))
+		return
+	}
+	code, stderr := runRefreshHelper(t, "TestExitLoginFailedBannedExits4")
+	if code != exitCodeAccountBlocked {
+		t.Errorf("exit code = %d, want %d; stderr=%s", code, exitCodeAccountBlocked, stderr)
+	}
+	if !strings.Contains(stderr, "device blacklist") {
+		t.Errorf("want the device blacklist label; stderr=%s", stderr)
 	}
 }
 
