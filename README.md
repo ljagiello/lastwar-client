@@ -12,6 +12,15 @@ real production servers versus what's still static analysis. Start with
 for the current confirmed-vs-unconfirmed picture. Preview the docs locally with `mint dev` from inside
 `docs/`.
 
+**Use at your own risk: accounts can get banned.** Running a third-party client is likely against
+the game's terms of service, and the server can refuse an account outright. In October 2026 a
+research account was permanently banned
+([discussion #53](https://github.com/ljagiello/lastwar-client/discussions/53)). Its client can send
+marches, chat messages and `login.ext` answers, none of which this one does, and the ban's reason
+code (703) is one the game doesn't explain, so what triggered it isn't known. Don't run this client
+on an account you can't afford to lose. A banned or otherwise blocked account makes it exit with
+code 4, see "Running unattended (cron)".
+
 ## Status
 
 - **Fully working, live-confirmed:** GSL crypto, SFS2X packet framing (including Zstandard
