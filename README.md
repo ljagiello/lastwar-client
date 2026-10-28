@@ -41,8 +41,8 @@ code 4, see "Running unattended (cron)".
   from-scratch Go client reconnected and collected real resources over multiple days (August 2026),
   and it was re-verified after a live zone-server migration. So the server does **not** require
   `ta`'s real device sub-fields for reconnect. Still open: the *minimal* required `ta` content
-  hasn't been isolated. An Android from-scratch login is live-confirmed; `-cs-ios` sends the iOS
-  identity from the first GSL call, and that path hasn't been tried live, see the next bullet.
+  hasn't been isolated. An Android from-scratch login is live-confirmed. An iOS one (`-cs-ios`)
+  worked in a third-party report, see the next bullet.
   See `docs/live-validation.mdx` for the full methodology.
 - The earlier "reconnect blocked" / "init push never arrives" problems were never protocol-level
   gates, they were a token-identity mismatch (the client claimed Android while replaying an
@@ -53,7 +53,10 @@ code 4, see "Running unattended (cron)".
 - **Not yet general-purpose:** the reconnect path needs a session config: one captured from a real
   client login (see below), or one `-own-device-session` writes for a device of its own, which
   refreshes its own tokens. `-cs-ios` on a guest or email login sends the iOS identity from the
-  first GSL call through `account.login.new`; that path hasn't been tried live.
+  first GSL call through `account.login.new`. An iOS own-device bind, its `Login` and one token
+  refresh worked in a third-party report on 2026-10-28 ([discussion
+  #56](https://github.com/ljagiello/lastwar-client/discussions/56): one established account, one
+  run); it hasn't been reproduced here.
 
 ## Scope
 
@@ -237,9 +240,9 @@ LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_se
 
 # The same bind as iOS. -cs-ios makes check-version and the Login claim com.lastwar.ios,
 # GSL send platform=iOS, and account.login.new send pf=AppStore. The session config
-# is written with iosMode true.
-# That iOS bind has not been tried live. Use a fresh LASTWAR_STATE_DIR: a device that
-# already holds a loginKey skips the email and trades that key instead:
+# is written with iosMode true. A third-party report says this iOS bind works
+# (discussion #56); it hasn't been reproduced here. Use a fresh LASTWAR_STATE_DIR: a
+# device that already holds a loginKey skips the email and trades that key instead:
 LASTWAR_STATE_DIR=~/.lastwar_ios_device ./lastwar-client -cs-ios \
   -email you@example.com -code-pipe /tmp/lw_code_pipe \
   -own-device-session ~/ios_session.json &
