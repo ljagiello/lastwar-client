@@ -41,8 +41,7 @@ code 4, see "Running unattended (cron)".
   from-scratch Go client reconnected and collected real resources over multiple days (August 2026),
   and it was re-verified after a live zone-server migration. So the server does **not** require
   `ta`'s real device sub-fields for reconnect. Still open: the *minimal* required `ta` content
-  hasn't been isolated. An Android from-scratch login is live-confirmed. An iOS one (`-cs-ios`)
-  worked in a third-party report, see the next bullet.
+  hasn't been isolated. An Android from-scratch login is live-confirmed.
   See `docs/live-validation.mdx` for the full methodology.
 - The earlier "reconnect blocked" / "init push never arrives" problems were never protocol-level
   gates, they were a token-identity mismatch (the client claimed Android while replaying an
