@@ -198,7 +198,7 @@ A third party ran this iOS bind against production on 2026-10-28 and reported it
 
 - **The bind:** the fresh device's iOS guest `Login` was accepted and its `init` arrived. Email verification and the `loginKey` trade then wrote a config with `iosMode` true and `1.0.344`/`786`.
 - **A `Login` with that config** was accepted with `shumeiBoxId` empty and loaded the account's buildings. It sent the filled iOS `ta`: `#os` = `iOS`, `#bundle_id` = `com.lastwar.ios`, `lw_platform` = `AppStore`, the build and `lw_zone`, with `lw_device_id`, `lw_shumei_id` and `lw_airKey` blank. `ta` = `{}` wasn't tried.
-- **One `opt=refresh`** with the config's refresh token returned code `0` and an access token. The report doesn't say whether it was a new one.
+- **One `opt=refresh`** with the config's refresh token, a few minutes after the bind, returned code `0`, the current `at` with its original `at.time`, and no `rt`. The Android pair returned the same eight days after issue (see [Refreshing the access token](#refreshing-the-access-token)), so on iOS too an early refresh rotates neither token.
 
 `-server` picks the role to bind, by its server number (`783`) or zone (`APS783`), from the roles the run logs; a value that names no server number is refused before the code is requested. Without it, the role `push.account.login.new` names at its top level is bound. A server the account has no role on, or two roles on one server, fails after verification without saving the binding. By then the code is spent, so bind again from a fresh `LASTWAR_STATE_DIR` with a server from the logged list. If GSL's `opt=login` reply doesn't list the picked role, the trade fails rather than writing another role's server into the config.
 
