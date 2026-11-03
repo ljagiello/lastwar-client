@@ -91,7 +91,7 @@ Score types `goclient` uses (`ScoreType`, `EnumType.lua:15728-15744`, plus table
 | 42 | Recruit one hero | |
 | 51 | One minute of speed-up | the queue sped up: `4` training, `6` research, `7` construction, `9` healing (`SpeedScoreValue`) |
 | 82 | Complete one radar task | |
-| 98 | Dispatch a UR trade truck | |
+| 98 | Dispatch a UR trade truck | `5` (truck quality; whether the quality-10 sleigh scores is open) |
 | 99 | Perform a UR secret task | |
 | 119 | Use an item | `itemId\|count` |
 | 120 | Recruit one survivor | |
@@ -151,6 +151,7 @@ The duel-aware features are all off by default; see the README for the full list
 | `duel-recruit-tickets` | hold, types 42 / 120 | ticket pulls, only while a ticket is held |
 | `duel-troop-training` | hold, types 4 / 51 `4` | `building.camp.training` on idle camps |
 | `secret-tasks-start` | always, type 99 | `hero.dispatch.start` for UR tasks |
+| `truck-deploy` | always, type 98 / `5` | `train.send` for parked UR trucks (the sleigh too); unused sends are lost at the reset |
 | `radar-execute` | always, type 82 | march-free radar task flows, see [Radar tasks](#radar-tasks) |
 
 `duel-speedups-plan`, `secret-tasks-start-plan`, and `radar-inventory` are read-only previews.

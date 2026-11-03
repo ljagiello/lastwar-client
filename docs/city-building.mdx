@@ -81,7 +81,7 @@ Each season's set includes one week-card building: 764000, 775000, 785000, 80500
 
 Crystal Factory (`LW_BUILD_CRYSTAL_STONE`) is the only `BuildingTypes` entry 1.0.364 added: 299 → 300, with nothing removed or renumbered. It belongs to the new Crystal system, and the client shows it only while `CrystalBuyDataManager:IsOpen` is true.
 
-Six buildings that once looked like production lines aren't in either set: 10143000 Tactical Center, 10227000 Armament Institute (`LW_T11_Research`), and 10138000-10141000 Truck Station I-IV. Every collect attempt on them across 342 consecutive scheduled runs returned `errorCode=602026`, never `status=1` (confirmed live), and `goclient` no longer sends one.
+Six buildings that once looked like production lines aren't in either set: 10143000 Tactical Center, 10227000 Armament Institute (`LW_T11_Research`), and 10138000-10141000 Truck Station I-IV (locale "Trade Fleet -1" to "-Ω", the berths of the four railway trade trucks, whose cargo is claimed with `train.batch.reward`). Every collect attempt on them across 342 consecutive scheduled runs returned `errorCode=602026`, never `status=1` (confirmed live), and `goclient` no longer sends one.
 
 The real client also never sends a collect for a building that isn't producing. `ProductLineManager:GetNextCollectTime` returns `-1` for a building with no `prodST` in its `building_new` entry, and when computed storage is 0 the client shows tip 602026 locally instead of sending anything. `goclient` mirrors the `prodST` rule.
 

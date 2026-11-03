@@ -18,18 +18,25 @@ import (
 // (DataCenter/RewardManager/RewardManager.lua:13-198, 808-964, ParseRewardInfo :2177-2199, as
 // summarized in coverage/reports/net-protocol.md "Wire reward array"), not from a live capture.
 
-// rewardTypeNames maps RewardType ids (Global/EnumType.lua:143-226) to log names. 5 GOLD is the
-// premium currency the UI calls diamonds; 20 FOOD is "money" on the wire.
+// rewardTypeNames maps RewardType ids (Global/EnumType.lua:143-226) to log names. Resources are
+// named as the reward popup shows them (RewardManager:GetNameByType → RewardToResType →
+// aps_resources.name), not by their enum names:
+//   - 1 METAL is iron (resource.metal on the wire).
+//   - 31 WOOD is coins (resource.wood), the Gold Mine's output; only 31 is credited by
+//     AddOneReward. 2 Wood maps to the same resource.
+//   - 20 FOOD is food (resource.money).
+//   - 5 GOLD is diamonds.
+//   - 47 PETROLEUM is what the UI calls Oil. 0 OIL is a banned legacy row.
 var rewardTypeNames = map[int32]string{
-	0: "oil", 1: "metal", 2: "wood", 5: "diamonds", 6: "exp", 7: "item", 8: "general", 9: "power",
+	0: "legacy_oil", 1: "iron", 2: "coin_type2", 5: "diamonds", 6: "exp", 7: "item", 8: "general", 9: "power",
 	10: "honor", 11: "alliance_point", 12: "house", 13: "hospital", 14: "equip", 15: "material",
 	16: "part", 17: "item_effect", 18: "battle_honor", 19: "water", 20: "food", 21: "electricity",
 	22: "people", 23: "troops", 24: "manor", 25: "hero", 26: "ptgold", 27: "resource_item",
-	28: "pve_point", 29: "detect_event", 30: "formation_stamina", 31: "wood", 32: "stamina",
+	28: "pve_point", 29: "detect_event", 30: "formation_stamina", 31: "coin", 32: "stamina",
 	33: "pve_monument_time", 34: "pve_act_score", 35: "museum_artifact", 36: "worker", 37: "visitor",
 	38: "common_equip", 39: "decoration", 40: "dragon_world_point", 41: "building", 42: "obsidian",
 	43: "flint", 44: "resistance_point", 45: "alliance_battle_reward", 46: "tw_skill_chip",
-	47: "petroleum", 48: "tactical_card", 49: "emotion_select", 50: "chat_emotion",
+	47: "oil", 48: "tactical_card", 49: "emotion_select", 50: "chat_emotion",
 	888: "party_monster", 999: "favor", 1001: "sevenday_score", 1002: "golloes", 1003: "sapphire",
 	1004: "alliance_donate", 1005: "alliance_tech_point", 1007: "unlock_module", 1008: "hero_exp",
 	1009: "battle_pass", 1010: "talent", 1011: "resource", 1012: "alliance_gift", 1013: "month_card",
@@ -121,12 +128,19 @@ func decodeRewardGrant(e *sfs.SFSObject) (rewardGrant, bool) {
 		if c, ok := claimInt(obj, "count"); ok && countIsTotal {
 			g.Total, g.HasTotal = c, true
 		}
-		if n, ok := claimFirstInt(obj, "rewardAdd", "addNum", "num", "add", "changeNum"); ok {
+		if g.Type == rewardTypeCommonEquip {
+			// RewardManager's CommonEquip case shows changes[1].changeNum as the count. num is the
+			// owned total (CommonEquipInfo), so it must not be read as the gain.
+			g.Total, g.HasTotal = claimInt(obj, "num")
+			g.Gained, g.HasGained = claimInt(obj, "changeNum")
+		} else if n, ok := claimFirstInt(obj, "rewardAdd", "addNum", "num", "add", "changeNum"); ok {
 			g.Gained, g.HasGained = n, true
 		} else if c, ok := claimInt(obj, "count"); ok && !countIsTotal {
 			g.Gained, g.HasGained = c, true
 		}
-		return g, !g.HasGained || g.Gained != 0
+		// A zero gain with a new total is kept, as in the scalar case below: AddOneReward still
+		// applies the total, and callers follow item counts through HasTotal.
+		return g, !g.HasGained || g.Gained != 0 || g.HasTotal
 	}
 	g.Gained, g.HasGained = claimInt(e, "value")
 	return g, !g.HasGained || g.Gained != 0 || g.HasTotal
@@ -152,6 +166,10 @@ func (g rewardGrant) String() string {
 	return b.String()
 }
 
+// resourceWireNames renames the resource{} keys whose wire name isn't what the player sees
+// (ResourceInfo.lua): money is food, wood is coins, metal is iron.
+var resourceWireNames = map[string]string{"money": "food", "wood": "coin", "metal": "iron"}
+
 // describeGrants is the one-line summary of what a claim response granted: the reward entries,
 // or, when there are none, the resource{} balances the server sent instead (absolute totals, so
 // they show that something changed, not by how much).
@@ -169,7 +187,11 @@ func describeGrants(p *sfs.SFSObject, keys ...string) string {
 			parts := make([]string, 0, len(res.Keys()))
 			for _, k := range res.Keys() {
 				if n, ok := claimInt(res, k); ok {
-					parts = append(parts, fmt.Sprintf("%s=%d", k, n))
+					name := k
+					if alias, ok := resourceWireNames[k]; ok {
+						name = alias
+					}
+					parts = append(parts, fmt.Sprintf("%s=%d", name, n))
 				}
 			}
 			return "resource balances " + strings.Join(parts, ", ")

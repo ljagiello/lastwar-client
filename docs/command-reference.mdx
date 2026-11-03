@@ -30,7 +30,7 @@ Two independent axes describe every command: which gameplay system it belongs to
 | Domain | Count | Priority | Covers |
 |---|---:|---|---|
 | Activity | 900 | **Deprioritize** | Time-limited live-ops: holiday events, gacha minigames, themed raids (~98 sub-features) |
-| Season | 754 | **Deprioritize** | Recurring seasonal state-vs-state metagame: cross-server war, city occupation, alliance train |
+| Season | 754 | **Deprioritize** | Recurring seasonal state-vs-state metagame: cross-server war, city occupation, the warzone "Fortune" train (`season.*zone.train*`) |
 | Alliance | 310 | **Core** | Guild membership, roles, world-map marks, mutual aid |
 | Shop/Economy/IAP | 188 | **Core** | Real-money IAP, VIP subscriptions, trading center, storage shop |
 | World Map | 166 | **Core** | Open world layer: marching, finding, radar, PVE encounters |
@@ -46,6 +46,8 @@ Two independent axes describe every command: which gameplay system it belongs to
 | System | 26 | **Infra** | Maintenance notices, SDK plumbing |
 | Admin/Debug | 7 | **Skip** | GM-only, debug-gated client-side |
 | Misc | 108 | **Triage** | Leaderboards, player career/talent, photo album, titles |
+
+Trade trucks (`train.*`) and the alliance train (`alliance.train.*`) are the 60-command `Net/Msgs/Railway` module in 1.0.364, not Season; the alliance train runs under activity type 203. This 1.0.351 split has no row for them.
 
 These rows sum to 3,057, not the 3,047 mechanically-extracted main-table figure quoted above (and not the 3,178 grand total, which also includes the 131 chat-table commands this per-domain breakdown doesn't cover) -- a handful of commands land ambiguously between two domains and were counted in each, so this table is a categorization aid, not an exact partition.
 
@@ -64,7 +66,7 @@ The chat table grew from 131 to 133 wire names but wasn't diffed entry by entry;
 |---|---:|---|
 | CrystalBoss (new "Red Boss" activity) | 13 | `red.boss.get.march`, `red.boss.battle.report`, `get.red.boss.user.record`, `red.boss.get.achievement.info`, `red.boss.receive.achievement.reward`, `red.boss.get.progress`, `red.boss.claim.all {type}`, `red.boss.claim.daily.reward`, and 5 `push.red.boss.*` pushes |
 | Account | 8 | `user.del.user`, `user.del.check`, `del.account.get.max.pay.user`, `push.account.del.max.pay.user`, `account.passkey.init`, `push.account.passkey.init`, `account.passkey.list`, `account.passkey.delete`: role and account deletion, and passkeys. `goclient` never sends the deletion commands |
-| DispatchRecover | 7 | `reward.recover.param`, `dispatch.recover.reward.list`, `dispatch.recover.reward.log`, `dispatch.recover.reward {customId}`, `train.recover.reward.list`, `train.recover.reward.log`, `train.recover.reward {customId}`: recovering missed dispatch and train rewards |
+| DispatchRecover | 7 | `reward.recover.param`, `dispatch.recover.reward.list`, `dispatch.recover.reward.log`, `dispatch.recover.reward {customId}`, `train.recover.reward.list`, `train.recover.reward.log`, `train.recover.reward {customId}`: Reward Recovery, which reissues part of the rewards for Secret Tasks and trade-truck transports left unstarted on recent days. `reward.recover.param` switches each half on (`recover_reward_a`, `recover_reward_b`) and names its claim cost (`a_k5`, `b_k5`, as `type,id,num`); the client checks the cost only when that string parses. Records older than the last seven are mailed. Static-analysis-only |
 | `Net.Msgs` root | 5 | `age.signal.record` (age-signal compliance), `exchange.goods.buy`, `world.alliance.expedition.info`, `world.give.up.alliance.building`, `push.bp.score.repair` |
 | PVPFormationPreset | 5 | `formation.preset.save`, `.apply`, `.rename`, `.delete`, and `push.formation.preset` |
 | Social | 3 | `social.status.update`, `.clear`, `.view` |
@@ -119,9 +121,9 @@ resource: {oil, metal, money, electricity, water, pvePoint, wood, people, dragon
 ```
 
 - `type` is a `RewardType` id; the full id-to-name table is in the [Entity ID reference](/entity-id-reference#resources-155).
-- For plain resources and currencies (`OIL`, `METAL`, `FOOD`, `GOLD` for diamonds, stamina, and so on), `value` is the amount gained and `total` the new balance.
-- For goods (type `7`), `value` is `{itemId, count, rewardAdd}`: `count` is the new owned count and `rewardAdd` the amount gained. Resource items (`27`) use `{id, num}`, heroes (`25`) `{heroId, rewardAdd, uuid}`, and soldiers (`23`) `{itemId, count}`.
-- `resource` holds absolute balances, applied before the `reward` entries. Food is `money` on the wire.
+- For plain resources and currencies (`METAL` for iron, `WOOD` (31) for coins, `FOOD`, `GOLD` for diamonds, `PETROLEUM` for oil, stamina, and so on), `value` is the amount gained and `total` the new balance.
+- For goods (type `7`), `value` is `{itemId, count, rewardAdd}`: `count` is the new owned count and `rewardAdd` the amount gained. Resource items (`27`) use `{id, num}`, heroes (`25`) `{heroId, rewardAdd, uuid}`, and soldiers (`23`) `{itemId, count}`. Common equipment (`38`) nests under `value.changes[]` as `{equipUid, cfgId, num, changeNum}`: `num` is the new owned count, `changeNum` the gain.
+- `resource` holds absolute balances, applied before the `reward` entries. On the wire, food is `money`, coins are `wood`, and iron is `metal`.
 - Some responses also carry a top-level `gold`, and a few counters arrive as their own top-level fields rather than as `reward` entries.
 
 ## Search the full catalog
