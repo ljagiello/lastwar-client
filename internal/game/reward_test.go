@@ -349,3 +349,40 @@ func TestDecodeRewardGrantsResourceItemAndNested(t *testing.T) {
 		}
 	}
 }
+
+func TestRewardNamesFollowTheRewardPopup(t *testing.T) {
+	p := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
+	for _, typ := range []int32{1, 31, 20, 47, 0} {
+		e := sfs.NewSFSObject()
+		e.PutInt("type", typ)
+		e.PutInt("value", 10)
+		arr.AddSFSObject(e)
+	}
+	equip := sfs.NewSFSObject() // 38 with no gain but a new total: kept, like a scalar total
+	equip.PutInt("type", 38)
+	ev := sfs.NewSFSObject()
+	changes := sfs.NewSFSArray()
+	ch := sfs.NewSFSObject()
+	ch.PutInt("cfgId", 9001)
+	ch.PutInt("num", 8)
+	ch.PutInt("changeNum", 0)
+	changes.AddSFSObject(ch)
+	ev.PutSFSArray("changes", changes)
+	equip.PutSFSObject("value", ev)
+	arr.AddSFSObject(equip)
+	p.PutSFSArray("reward", arr)
+	want := "iron +10, coin +10, food +10, oil +10, legacy_oil +10, common_equip 9001 +0 (now 8)"
+	if got := describeGrants(p); got != want {
+		t.Errorf("describeGrants = %q, want %q", got, want)
+	}
+	res := sfs.NewSFSObject()
+	bal := sfs.NewSFSObject()
+	bal.PutLong("wood", 5)
+	bal.PutLong("metal", 6)
+	bal.PutLong("money", 7)
+	res.PutSFSObject("resource", bal)
+	if got, want := describeGrants(res), "resource balances coin=5, iron=6, food=7"; got != want {
+		t.Errorf("describeGrants = %q, want %q", got, want)
+	}
+}

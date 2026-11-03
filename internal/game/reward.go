@@ -131,7 +131,9 @@ func decodeRewardGrant(e *sfs.SFSObject) (rewardGrant, bool) {
 		if g.Type == rewardTypeCommonEquip {
 			// RewardManager's CommonEquip case shows changes[1].changeNum as the count. num is the
 			// owned total (CommonEquipInfo), so it must not be read as the gain.
-			g.Total, g.HasTotal = claimInt(obj, "num")
+			if n, ok := claimInt(obj, "num"); ok {
+				g.Total, g.HasTotal = n, true
+			}
 			g.Gained, g.HasGained = claimInt(obj, "changeNum")
 		} else if n, ok := claimFirstInt(obj, "rewardAdd", "addNum", "num", "add", "changeNum"); ok {
 			g.Gained, g.HasGained = n, true

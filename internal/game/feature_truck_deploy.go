@@ -114,9 +114,9 @@ func runTruckDeploy(conn *session.GameConn, in *Init) error {
 	}
 	add, _ := initEffect(in, truckDeploySendsAdd)
 	maxSends := truckDeployBaseSends + int64(math.Floor(add))
-	sent, _ := claimInt(station, "dailySendCount")
-	if sent >= maxSends {
-		slog.Info(feature+": no truck sends left today", "sent", sent, "max", maxSends)
+	sent, ok := claimInt(station, "dailySendCount")
+	if !ok || sent >= maxSends {
+		slog.Info(feature+": daily send count unknown or used up", "sent", sent, "max", maxSends, "known", ok)
 		return nil
 	}
 
@@ -169,7 +169,7 @@ func runTruckDeploy(conn *session.GameConn, in *Init) error {
 			slog.Info(feature+": squad skipped: one of its heroes is out with a truck", "squad", sq.slot)
 			continue
 		}
-		squads = append(squads, ranked{sq, railwayPower(in, sq, stats)})
+		squads = append(squads, ranked{sq, railwayPower(in, sq, stats, false)})
 	}
 	slices.SortStableFunc(squads, func(a, b ranked) int { return cmp.Compare(b.power, a.power) })
 	slices.SortStableFunc(ready, func(a, b ownTruck) int {
@@ -200,10 +200,11 @@ func runTruckDeploy(conn *session.GameConn, in *Init) error {
 				p.PutInt("chipEquipGroup", sq.chip)
 			}
 			msg, err := session.SendAndWait(conn, feature+" send", truckDeploySendCmd, p)
-			if session.ContainsNonTimeoutNetError(err) {
+			if msg == nil {
+				// A timeout or a dead connection: a late reply could match the next send.
 				return errors.Join(append(errs, err)...)
 			}
-			if err == nil && msg != nil && !msg.Params.Has("errorCode") {
+			if !msg.Params.Has("errorCode") {
 				sent++ // never let a reply lower the count
 				if n, ok := claimInt(msg.Params, "dailySendCount"); ok {
 					sent = max(sent, n)
@@ -212,14 +213,12 @@ func runTruckDeploy(conn *session.GameConn, in *Init) error {
 					"squad", sq.slot, "squadPowerAtLeast", sq.power, "sentToday", sent)
 				break
 			}
-			if msg != nil && msg.Params.Has("uuid") {
+			if msg.Params.Has("uuid") {
 				slog.Info(feature+": squad is escorting a truck; trying the next one", "squad", sq.slot)
 				continue
 			}
-			if err != nil {
-				errs = append(errs, err)
-			}
-			break
+			// Any other refusal (e.g. no sends left) stops the run.
+			return errors.Join(append(errs, err)...)
 		}
 	}
 	return errors.Join(errs...)

@@ -286,7 +286,7 @@ All are off by default. Every dig write passes a per-command key allowlist that 
 
 ### Railway features
 
-Both are off by default and static-analysis-only: their requests come from the 1.0.364 client and haven't been sent live yet. Before each send they save the squad with `formation.save.template`, as the client does. They skip a run while the city is in another warzone, while the station is still fogged, and before its opening reward is taken.
+Both are off by default and static-analysis-only: their requests come from the 1.0.364 client and haven't been sent live yet. Before each truck send or truck attack they save the squad with `formation.save.template`, and before each train attack they fetch the train lineup with `alliance.train.formation`, as the client does. They skip a run while the city is in another warzone, while the station is still fogged, before its opening reward is taken, and when the station doesn't report today's count. A timeout or any refusal stops the run, except a target someone else just looted (`E400207`).
 
 | Feature | What it does |
 |---|---|
@@ -297,7 +297,10 @@ Both are off by default and static-analysis-only: their requests come from the 1
 
 - **Never your own server.** The target's `serverId` must differ from init `user.serverId` and from `user.crossFightSrcServerId`. With neither known, it plunders nothing. The game doesn't enforce this: it only checks the server-sent `trainServers`, and your own server can be in that list.
 - **Trucks: UR only**, the sleigh included.
-- **Weaker than you.** The target's defensive power must be below the attacking power. For a truck that's your strongest attack squad; for a train, your three strongest together. The attacking power is a lower bound on what the game shows: hero power plus the virtual soldiers' power from the game's own formula, leaving out the tactical weapon, chip set, T11 and Overlord terms.
+- **Weaker than you.** The target's defensive power must be known and below the attacking power. A truck's power is its `marchInfo.power`. A train's is the sum of its defending teams, unknown if any team lacks a power.
+  - The attacking power is your strongest attack squad for a truck. For a train it's the three teams of the lineup the server returns, or your three strongest attack squads when it returns none.
+  - It's a lower bound on what the game shows: hero power plus the virtual soldiers' power from the game's own formula. It leaves out the tactical weapon, chip set, T11 and Overlord terms.
+  - It's built only from fresh `hero.init.detail.get` stats. Without them, or with a hero missing, nothing is plundered.
 
 After those come the game's own gates: 4 plunders a day shared by trucks and trains, 2 per truck and 1 per sleigh, the train cap and its protection time, matched servers, travelling targets only, and never your own alliance's.
 

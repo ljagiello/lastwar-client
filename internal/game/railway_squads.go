@@ -48,19 +48,21 @@ func railwayTruckQuality(cfgID int64) int32 {
 func railwayIsURTruck(cfgID int64) bool { return railwayTruckQuality(cfgID) != 0 }
 
 // railwayHomeServers returns every server id that counts as the account's own: init
-// user.serverId, and user.crossFightSrcServerId when it is >= 0 (the home server during a
-// cross-server fight, PlayerInfo:GetSourceServerId). ok is false when neither can be read, and
-// callers must then plunder nothing.
+// user.serverId, and user.crossFightSrcServerId when it is set (the home server during a
+// cross-server fight, PlayerInfo:GetSourceServerId). The client treats 0 and -1 as unset for both
+// (PlayerInfo defaults, GetSelfServerId). ok is false unless user.serverId is known, and callers
+// must then plunder nothing.
 func railwayHomeServers(in *Init) (map[int64]bool, bool) {
 	user := in.Object("user")
-	out := map[int64]bool{}
-	if id, ok := claimInt(user, "serverId"); ok && id > 0 {
-		out[id] = true
+	id, ok := claimInt(user, "serverId")
+	if !ok || id <= 0 {
+		return nil, false
 	}
-	if id, ok := claimInt(user, "crossFightSrcServerId"); ok && id >= 0 {
-		out[id] = true
+	out := map[int64]bool{id: true}
+	if src, ok := claimInt(user, "crossFightSrcServerId"); ok && src > 0 {
+		out[src] = true
 	}
-	return out, len(out) > 0
+	return out, true
 }
 
 // railwayOwnIDs returns the account's uid and alliance id ("" when not in an alliance). The
@@ -107,10 +109,9 @@ const (
 type railwayHero struct {
 	uuid  int64
 	index int32 // 1..5, or railwayOverlordSlot
-	// Template fallbacks for the hero's power (effect 100000) and leadership (effect 50079),
-	// used when hero.init.detail.get didn't cover the hero (ArenaArmyFormationInfo heroDataMap).
-	power, lead       float64
-	hasPower, hasLead bool
+	// Template copies of the hero's power (effect 100000) and leadership (effect 50079)
+	// (ArenaArmyFormationInfo heroDataMap); only truck-deploy's ranking falls back to them.
+	power, lead float64
 }
 
 // railwaySquad is one truck squad as the client would send it.
@@ -118,7 +119,7 @@ type railwaySquad struct {
 	slot    int32 // 1..4, sent as squadNoClient on deploy
 	heroes  []railwayHero
 	squadNo int32 // team buff 1..4 (localSquadNo)
-	chip    int32 // chipEquipGroup 1..4
+	chip    int32 // chipEquipGroup, sent only when 1..4
 	soldier int32 // template soldierType; 0 means the highest trainable unit
 }
 
@@ -134,7 +135,7 @@ func (s railwaySquad) mainHeroes() int {
 }
 
 // railwayUnlockedSquads is the set of world squad slots that exist: army_formation entries with a
-// non-zero uuid (ArmyFormationDataManager:HasArmyFormationInIndex).
+// non-zero uuid (ArmyFormationDataManager:HasArmyFormationInIndex), with their slot 1..5 heroes.
 func railwayUnlockedSquads(in *Init) map[int32][]railwayHero {
 	out := map[int32][]railwayHero{}
 	for _, f := range claimObjectsOrMap(in.Raw, "army_formation") {
@@ -148,52 +149,66 @@ func railwayUnlockedSquads(in *Init) map[int32][]railwayHero {
 	return out
 }
 
-// railwayHeroesOf reads heroes|heros[{heroUuid, index, power?, effect_50079?}]. withOverlord keeps
-// the slot-6 entry; the client drops it when it copies a world squad (InitTruckFormationWithoutServerHelper).
+// railwayHeroesOf reads heroes|heros[{heroUuid, index, power?, effect_50079?}] the way
+// ArmyFormationInfo:ParseData fills localHeroes (uuid -> slot) and localIndexToHeroDic (slot ->
+// uuid): a later entry wins a slot, and a uuid keeps its last slot. withOverlord keeps the slot-6
+// entry; the client drops it when it copies a world squad (InitTruckFormationWithoutServerHelper).
 func railwayHeroesOf(f *sfs.SFSObject, withOverlord bool) []railwayHero {
 	list := claimObjects(f, "heroes")
 	if len(list) == 0 {
 		list = claimObjects(f, "heros")
 	}
-	var out []railwayHero
-	seen := map[int64]bool{}
+	bySlot := map[int32]railwayHero{}
+	slotOf := map[int64]int32{}
 	for _, o := range list {
 		uuid, ok := claimFirstInt(o, "heroUuid", "uuid")
 		idx, _ := claimInt(o, "index")
-		if !ok || uuid == 0 || seen[uuid] || idx < 1 || idx > railwayOverlordSlot || (idx == railwayOverlordSlot && !withOverlord) {
+		if !ok || uuid == 0 || idx < 1 || idx > railwayOverlordSlot || (idx == railwayOverlordSlot && !withOverlord) {
 			continue
 		}
-		seen[uuid] = true
 		h := railwayHero{uuid: uuid, index: int32(idx)}
-		h.power, h.hasPower = duelFloat(o, "power")
-		h.lead, h.hasLead = duelFloat(o, "effect_50079")
-		out = append(out, h)
+		h.power, _ = duelFloat(o, "power")
+		h.lead, _ = duelFloat(o, "effect_50079")
+		bySlot[h.index] = h
+		slotOf[uuid] = h.index
+	}
+	var out []railwayHero
+	for _, h := range bySlot {
+		if slotOf[h.uuid] == h.index {
+			out = append(out, h)
+		}
 	}
 	slices.SortFunc(out, func(a, b railwayHero) int { return cmp.Compare(a.index, b.index) })
 	return out
 }
 
 // railwaySquads returns the truck squads of one set (railwayDefenceAction or railwayAttackAction)
-// in slot order, as LWMyStationDataManager parses formation_template: only unlocked slots, a hero
-// kept in the lowest slot when two squads of the set share it (CheckIfHasMultiHero; the client's
-// pairs order is not deterministic), team buffs filled by InitTeamUsingBuff, and chip set 1 when
-// the template has none (ArmyFormationInfo default). With no truck templates at all the client
-// copies the world squads (InitTruckFormationWithoutServerHelper), squadNo and chip = slot.
+// in slot order, as LWMyStationDataManager:InitArmyFormationListData parses formation_template:
+//   - only templates of unlocked slots;
+//   - a slot 1..5 hero kept in the lowest slot when two squads of the set share it
+//     (CheckIfHasMultiHero walks localHeroes, which never holds the Overlord; the client's pairs
+//     order is not deterministic);
+//   - team buffs filled by InitTeamUsingBuff;
+//   - chip set 1 when the template has none (ArmyFormationInfo default), and none sent when it has
+//     one outside 1..4.
+//
+// When the set has no template for an unlocked slot at all, the client copies the world squads'
+// heroes instead (InitTruckFormationWithoutServerHelper), with squadNo and chip = slot.
 func railwaySquads(in *Init, action int32) []railwaySquad {
 	unlocked := railwayUnlockedSquads(in)
-	anyTemplate := false
 	bySlot := map[int32]*sfs.SFSObject{}
 	for _, t := range claimObjectsOrMap(in.Raw, "formation_template") {
 		idx, _ := claimInt(t, "index")
-		if idx >= 5 && idx <= 12 {
-			anyTemplate = true
+		s := int32(idx) - action
+		if idx <= int64(action) || s < 1 || s > 4 {
+			continue
 		}
-		if s := int32(idx) - action; idx > int64(action) && s >= 1 && s <= 4 {
+		if _, open := unlocked[s]; open {
 			bySlot[s] = t
 		}
 	}
 	var out []railwaySquad
-	if !anyTemplate {
+	if len(bySlot) == 0 {
 		for s := int32(1); s <= 4; s++ {
 			if heroes, ok := unlocked[s]; ok {
 				out = append(out, railwaySquad{slot: s, heroes: heroes, squadNo: s, chip: s})
@@ -205,21 +220,27 @@ func railwaySquads(in *Init, action int32) []railwaySquad {
 	buffs := map[int32]bool{}
 	for s := int32(1); s <= 4; s++ {
 		t, ok := bySlot[s]
-		if _, open := unlocked[s]; !ok || !open {
-			continue
+		if !ok {
+			continue // the client saves an empty squad here; it has no hero to send
 		}
 		sq := railwaySquad{slot: s, chip: 1}
 		for _, h := range railwayHeroesOf(t, true) {
-			if !used[h.uuid] {
+			if h.index != railwayOverlordSlot {
+				if used[h.uuid] {
+					continue
+				}
 				used[h.uuid] = true
-				sq.heroes = append(sq.heroes, h)
 			}
+			sq.heroes = append(sq.heroes, h)
 		}
 		if n, ok := claimInt(t, "squadNo"); ok && n >= 1 && n <= 4 {
 			sq.squadNo = int32(n)
 		}
-		if n, ok := claimInt(t, "chipEquipGroup"); ok && n >= 1 && n <= 4 {
-			sq.chip = int32(n)
+		if n, ok := claimInt(t, "chipEquipGroup"); ok {
+			sq.chip = 0
+			if n >= 1 && n <= 4 {
+				sq.chip = int32(n)
+			}
 		}
 		if n, ok := claimInt(t, "soldierType"); ok && n > 0 {
 			sq.soldier = int32(n)
@@ -256,12 +277,11 @@ type railwayHeroStat struct{ power, lead float64 }
 
 // railwayHeroStats sends hero.init.detail.get {} (read-only; the real client sends it after every
 // init, HeroDataManager:InitData) and maps each userHero uuid to its effect 100000 and 50079
-// (HeroInfo:RefreshHeroPower, GetSoldierCapacity). A failed or empty reply returns nil: squad
-// power then falls back to the template fields, and missing heroes count as 0.
+// (HeroInfo:RefreshHeroPower, GetSoldierCapacity). A failed or empty reply returns nil.
 func railwayHeroStats(conn *session.GameConn) map[int64]railwayHeroStat {
 	msg, err := session.SendAndWait(conn, "hero details", "hero.init.detail.get", sfs.NewSFSObject())
 	if err != nil || msg == nil || msg.Params.Has("errorCode") {
-		slog.Info("railway: hero.init.detail.get gave no hero details; squad power uses the template fields only", "err", err)
+		slog.Info("railway: hero.init.detail.get gave no hero details", "err", err)
 		return nil
 	}
 	out := map[int64]railwayHeroStat{}
@@ -301,14 +321,18 @@ const (
 // terms and leaves out the rest, which are all >= 0 (T11 attributes, tactical weapon, chip set,
 // Overlord power), so the estimate never exceeds what the client would show:
 //   - heroes: floor(effect 100000) per hero in slots 1..5;
-//   - soldiers: floor(leadership) virtual soldiers per hero (and the Overlord), all of the
-//     template's soldierType or else the highest unit the camps can train, each worth
-//     SoldierDataManager:CalcSoldierPower with the init game effects.
+//   - soldiers: floor(leadership) virtual soldiers per hero (and the Overlord), each worth
+//     SoldierDataManager:CalcSoldierPower with the init game effects. The unit is the template's
+//     soldierType, or the highest one the camps can train when the template names none. A
+//     soldierType this table doesn't know (e.g. a Mummy unit) adds no soldier power.
 //
-// A hero with no known stats counts as 0.
-func railwayPower(in *Init, sq railwaySquad, stats map[int64]railwayHeroStat) int64 {
-	unit, ok := railwaySoldierStats[sq.soldier]
-	if !ok {
+// strict is railway-plunder's mode. Power comes only from hero.init.detail.get, and any slot 1..5
+// hero it doesn't cover makes the result 0 (unknown), because a template copy can be stale and
+// higher than now. The Overlord's stats aren't in that reply, so its soldiers are left out. Without
+// strict (truck-deploy, which only ranks squads), the template copies stand in.
+func railwayPower(in *Init, sq railwaySquad, stats map[int64]railwayHeroStat, strict bool) int64 {
+	soldier := sq.soldier
+	if soldier == 0 {
 		var lv int64
 		for _, b := range in.Objects("building_new") {
 			if id, _ := evNum(b, "bId"); id == railwayMilitaryCamp {
@@ -318,9 +342,10 @@ func railwayPower(in *Init, sq railwaySquad, stats map[int64]railwayHeroStat) in
 			}
 		}
 		if top, found := duelTopUnit(lv, duelTrainUnlocksOf(in)); found {
-			unit, ok = railwaySoldierStats[top.id]
+			soldier = top.id
 		}
 	}
+	unit, ok := railwaySoldierStats[soldier]
 	eff := func(id string) float64 { f, _ := initEffect(in, id); return f }
 	life := (unit.life + eff("50065")) * (1 + eff("50076"))
 	atk := (unit.attack + eff("50067")) * (1 + eff("50077"))
@@ -328,14 +353,19 @@ func railwayPower(in *Init, sq railwaySquad, stats map[int64]railwayHeroStat) in
 	var total int64
 	for _, h := range sq.heroes {
 		st, known := stats[h.uuid]
-		power, lead := st.power, st.lead
-		if !known {
-			power, lead = h.power, h.lead
+		switch {
+		case known:
+		case strict && h.index == railwayOverlordSlot:
+			continue
+		case strict:
+			return 0
+		default:
+			st = railwayHeroStat{power: h.power, lead: h.lead}
 		}
 		if h.index <= 5 {
-			total += int64(math.Floor(power))
+			total += int64(math.Floor(st.power))
 		}
-		if n := math.Floor(lead); ok && n > 0 {
+		if n := math.Floor(st.lead); ok && n > 0 {
 			total += int64(math.Floor(life*railwayLifePower*n)) + int64(math.Floor(atk*railwayAttackPower*n)) +
 				int64(math.Floor(def*railwayDefensePower*n))
 		}
