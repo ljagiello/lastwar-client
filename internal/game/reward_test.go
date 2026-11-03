@@ -59,6 +59,9 @@ func startRewardFake(t *testing.T, reply func(cmd string, p *sfs.SFSObject) *sfs
 			if resp == nil {
 				return
 			}
+			if resp == rewardNoReply {
+				continue // leave this request unanswered but keep reading
+			}
 			if err := server.SendExtension(msg.Cmd, resp); err != nil {
 				return
 			}
@@ -71,6 +74,10 @@ func startRewardFake(t *testing.T, reply func(cmd string, p *sfs.SFSObject) *sfs
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn, f
 }
+
+// rewardNoReply, returned by a startRewardFake reply func, leaves that request unanswered on a live
+// connection, so the client sees a timeout.
+var rewardNoReply = sfs.NewSFSObject()
 
 // rewardOK is a success response granting 50 diamonds.
 func rewardOK() *sfs.SFSObject {
@@ -190,7 +197,7 @@ func TestDescribeGrantsFallbacks(t *testing.T) {
 	res := sfs.NewSFSObject()
 	res.PutLong("money", 12345)
 	p.PutSFSObject("resource", res)
-	if got := describeGrants(p); got != "resource balances money=12345" {
+	if got := describeGrants(p); got != "resource balances food=12345" {
 		t.Errorf("resource-only response = %q", got)
 	}
 
@@ -324,12 +331,13 @@ func TestDecodeRewardGrantsResourceItemAndNested(t *testing.T) {
 	resItem.PutSFSObject("value", rv)
 	arr.AddSFSObject(resItem)
 
-	equip := sfs.NewSFSObject() // 38: the entry sits under value.changes[0]
+	equip := sfs.NewSFSObject() // 38: the entry sits under value.changes[0]; num is the owned total
 	equip.PutInt("type", 38)
 	ev := sfs.NewSFSObject()
 	changes := sfs.NewSFSArray()
 	ch := sfs.NewSFSObject()
 	ch.PutInt("cfgId", 9001)
+	ch.PutInt("num", 8)
 	ch.PutInt("changeNum", 3)
 	changes.AddSFSObject(ch)
 	ev.PutSFSArray("changes", changes)
@@ -338,7 +346,7 @@ func TestDecodeRewardGrantsResourceItemAndNested(t *testing.T) {
 	p.PutSFSArray("reward", arr)
 
 	got := decodeRewardGrants(p)
-	want := []string{"resource_item 630011 +5 (now 40)", "common_equip 9001 +3"}
+	want := []string{"resource_item 630011 +5 (now 40)", "common_equip 9001 +3 (now 8)"}
 	if len(got) != len(want) {
 		t.Fatalf("decoded %v, want %v", got, want)
 	}
@@ -346,5 +354,42 @@ func TestDecodeRewardGrantsResourceItemAndNested(t *testing.T) {
 		if g.String() != want[i] {
 			t.Errorf("grant %d = %q, want %q", i, g.String(), want[i])
 		}
+	}
+}
+
+func TestRewardNamesFollowTheRewardPopup(t *testing.T) {
+	p := sfs.NewSFSObject()
+	arr := sfs.NewSFSArray()
+	for _, typ := range []int32{1, 31, 20, 47, 0} {
+		e := sfs.NewSFSObject()
+		e.PutInt("type", typ)
+		e.PutInt("value", 10)
+		arr.AddSFSObject(e)
+	}
+	equip := sfs.NewSFSObject() // 38 with no gain but a new total: kept, like a scalar total
+	equip.PutInt("type", 38)
+	ev := sfs.NewSFSObject()
+	changes := sfs.NewSFSArray()
+	ch := sfs.NewSFSObject()
+	ch.PutInt("cfgId", 9001)
+	ch.PutInt("num", 8)
+	ch.PutInt("changeNum", 0)
+	changes.AddSFSObject(ch)
+	ev.PutSFSArray("changes", changes)
+	equip.PutSFSObject("value", ev)
+	arr.AddSFSObject(equip)
+	p.PutSFSArray("reward", arr)
+	want := "iron +10, coin +10, food +10, oil +10, legacy_oil +10, common_equip 9001 +0 (now 8)"
+	if got := describeGrants(p); got != want {
+		t.Errorf("describeGrants = %q, want %q", got, want)
+	}
+	res := sfs.NewSFSObject()
+	bal := sfs.NewSFSObject()
+	bal.PutLong("wood", 5)
+	bal.PutLong("metal", 6)
+	bal.PutLong("money", 7)
+	res.PutSFSObject("resource", bal)
+	if got, want := describeGrants(res), "resource balances coin=5, iron=6, food=7"; got != want {
+		t.Errorf("describeGrants = %q, want %q", got, want)
 	}
 }

@@ -79,9 +79,9 @@ import (
 // card's farm building (846000) belongs to the same Spore Factory family as
 // 842000-845000; both are collected now, unconfirmed live.
 //
-// "Armed Truck" itself is RESOLVED, and it's neither of the above two
-// leads: it's not a building at all, and not LW_BUILD_TRUCK_STATION_1-4
-// (kept below anyway since that pairing still looks real, see above).
+// "Armed Truck" itself is RESOLVED: it's building 10115000
+// LW_BUILD_BATTLE_HANGUP_REWARD (locale 135202), not
+// LW_BUILD_TRUCK_STATION_1-4, and its reward isn't collected per building.
 // Confirmed via a live packet capture of the real game client (not a
 // guess): "Armed Truck" is one of two independent tracks in a dedicated
 // "Truck Rewards" idle/AFK panel (the other is "Overlord"), collected via
@@ -93,13 +93,11 @@ import (
 // updated account resource totals in the response, followed by an empty
 // pool on the next peek.
 //
-// Scene/LWHummerScene is the one clearly-separate thing here: a genuinely
-// distinct real-time driving/combat minigame (its own
-// HummerSceneUnitType/TriggerType/BuffType enums). No network command
-// referencing "hummer" exists anywhere in the ~3,178-command catalog; its
-// rewards come from actually playing a timed 3D session, not a single
-// request/response call. This is not automatable the way every other
-// entry in this file is, and is NOT included below.
+// Scene/LWHummerScene is the Armed Truck's own 3D scene ("Jeep
+// Adventure"): it reads stage_idle_reward and lastIdleRewardTimeStamp, and
+// its reward button sends lw.pve.idle.reward {action: 0}; nothing played in
+// it changes the reward (1.0.364 Lua, static-analysis-only).
+// CollectIdleReward covers it.
 const (
 	BuildingFarmland          int32 = 10201000 // LW_BUILD_FARMLAND
 	BuildingIronMine          int32 = 10202000 // LW_BUILD_QUARRY
@@ -115,7 +113,7 @@ const (
 	BuildingSporeFactory2     int32 = 843000   // LW_BUILD_SEASON6_QUARTZ_FACTORY2
 	BuildingSporeFactory3     int32 = 844000   // LW_BUILD_SEASON6_QUARTZ_FACTORY3
 	BuildingSporeFactory4     int32 = 845000   // LW_BUILD_SEASON6_QUARTZ_FACTORY4
-	BuildingTruckStation1     int32 = 10138000 // LW_BUILD_TRUCK_STATION_1 -- NOT "Armed Truck" (see CollectIdleReward for the real thing); no locale display name found; unconfirmed valid production-line pairing, kept speculatively
+	BuildingTruckStation1     int32 = 10138000 // LW_BUILD_TRUCK_STATION_1, locale "Trade Fleet -1": the first of four berths for the account's railway trade trucks (LWMyStationDataManager TruckBuildId2Index); not a production line and never collected. Its cargo is railway-cargo's train.batch.reward
 	BuildingTruckStation2     int32 = 10139000 // LW_BUILD_TRUCK_STATION_2
 	BuildingTruckStation3     int32 = 10140000 // LW_BUILD_TRUCK_STATION_3
 	BuildingTruckStation4     int32 = 10141000 // LW_BUILD_TRUCK_STATION_4
@@ -188,10 +186,10 @@ var buildingNames = map[int32]string{
 	BuildingSporeFactory2:     "Spore Factory II",
 	BuildingSporeFactory3:     "Spore Factory III",
 	BuildingSporeFactory4:     "Spore Factory IV",
-	BuildingTruckStation1:     "Truck Station I (not Armed Truck)",
-	BuildingTruckStation2:     "Truck Station II (not Armed Truck)",
-	BuildingTruckStation3:     "Truck Station III (not Armed Truck)",
-	BuildingTruckStation4:     "Truck Station IV (not Armed Truck)",
+	BuildingTruckStation1:     "Trade Fleet -1 (Truck Station I)",
+	BuildingTruckStation2:     "Trade Fleet -2 (Truck Station II)",
+	BuildingTruckStation3:     "Trade Fleet -3 (Truck Station III)",
+	BuildingTruckStation4:     "Trade Fleet -Ω (Truck Station IV)",
 	BuildingComponentFactory:  "Component Factory",
 	BuildingTacticalInstitute: "Tactical Institute",
 	BuildingSporeFactoryCard:  "Spore Factory (Week Card)",

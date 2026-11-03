@@ -40,6 +40,24 @@ On a season "nine palaces" map, the 1.0.364 C# sets the world size to **3000** w
 
 `world.get.march.infos {x, y, needCross}` finds marches passing near a raw tile coordinate. March state then streams as C#-handled pushes: `push.world.march.new` carries a protobuf `WorldMarch` (or a `WorldMarchDeltaMeta` delta), and `push.world.march.del` carries the march `uuid` and `isBattleFail`. In all, 29 world, scene, and season `push.*` messages are handled only in C#.
 
+## Railway trucks and alliance trains
+
+Trucks and trains are marches, but their cargo and raid state come from the railway module (1.0.364 Lua, static-analysis-only).
+
+- **The list:** `train.list {isRefresh: Bool}` returns other players' trucks in `ls[]`, alliance trains in `allianceTrainList[]`, and the servers you're matched against in `trainServers`, a comma-separated string. The client sends `isRefresh: true` from the list's Refresh button, and on its first call of the server day.
+- **Entry type:** each entry's `type` is `1` (truck) or `2` (alliance train), and `cfgId` is a `train_property` row. For trucks, quality 1-5 is N to UR, and quality 10 is the Reindeer Sleigh. The wire carries only `cfgId`, not the quality.
+- **Truck cargo:** `baseGoods` and `extraGoods`, each `{full, cur}`. `full` is what the truck set out with and `cur` what's left. Goods entries are `{type, value}` with a `RewardType`: 1 iron, 20 food, 31 coins, 7 an item `{id, num}`.
+- **Train cargo:** per carriage, in `marchInfo.carriageList[].trainGoods`.
+- **Past raids:** `marchInfo.plunderRecord[]`.
+- **Raid count and caps:** the count is `marchInfo.robTimes`. A truck takes at most `train_para` row 21 raids (2), the sleigh 1, and an alliance train `alliance_train.k10` (3), less one with a VIP aboard.
+- **`completeness`:** shown as "Integrity: {0}%".
+- **Defensive power:** `marchInfo.power`, or the sum of `marchInfo.heroInfo[].power` for a truck. For a train it's the sum of `marchInfo.formation.armyUnit1-3.power`.
+- **One entry:** `train.refresh {uuid, serverId}` re-reads it. The reply is the whole `train`, or only `{uuid, lastUpdateTime}`. The client sends it at most every 600 s for others' trucks (`train_para` 39) and every 60 s for its own (row 51).
+- **On the world map:** a truck march's `WorldMarch` carries the same `train` object, which the C# hands to the same store (`CSharpCallLuaInterface.AddOrUpdateTrain`).
+- **Your own count:** your raids today are `trainData.dailyRobCount` (in init and in `train.data`), capped by `train_para` row 11 (4) and shared by trucks and trains.
+
+The opt-in `railway-plunder` feature drops every truck and train on the account's own server before anything else: `user.serverId`, and `user.crossFightSrcServerId` during a cross-server fight. The client doesn't enforce this. `CheckTrainInMatchServer` only checks the server-sent `trainServers`, and your own server can be in that list.
+
 ## Core commands
 
 | cmd | Purpose |

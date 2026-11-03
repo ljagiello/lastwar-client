@@ -284,6 +284,26 @@ All are off by default. Every dig write passes a per-command key allowlist that 
 | `treasure-hunt` / `-plan` | Treasure Hunt events (v1/v2): digs with owned pickaxes only and claims the tier and stored rewards |
 | `season-dig`, `offseason-dig`, `alliance-boss-dig` / `-plan` | Alliance dig vaults: opens your one free stone and claims relic and personal rewards |
 
+### Railway features
+
+Both are off by default and static-analysis-only: their requests come from the 1.0.364 client and haven't been sent live yet. Before each truck send or truck attack they save the squad with `formation.save.template`, and before each train attack they fetch the train lineup with `alliance.train.formation`, as the client does. They skip a run while the city is in another warzone, while the station is still fogged, before its opening reward is taken, and when the station doesn't report today's count. A timeout or any refusal stops the run, except a target someone else just looted (`E400207`).
+
+| Feature | What it does |
+|---|---|
+| `truck-deploy` | Sends your own parked trucks (`train.send`), **UR only**: quality 5 and the Reindeer Sleigh (10), never anything below. Each gets the strongest free defence squad. It stops at the daily send limit (4 plus effect 90103). Unused sends are lost at the reset, so it runs every day; a UR dispatch scores Alliance Duel type 98 on Tue and Sat |
+| `railway-plunder` | Plunders other players' trucks (`train.attack`) and other alliances' trains (`alliance.train.attack.kof`, or `alliance.train.attack` before the KOF mode). See the rules below |
+
+`railway-plunder` drops a target that breaks any of these rules, before anything else:
+
+- **Never your own server.** The target's `serverId` must differ from init `user.serverId` and from `user.crossFightSrcServerId`. Without a known `user.serverId`, it plunders nothing. The game doesn't enforce this: it only checks the server-sent `trainServers`, and your own server can be in that list.
+- **Trucks: UR only**, the sleigh included.
+- **Weaker than you.** The target's defensive power must be known and below the attacking power. A truck's power is its `marchInfo.power`. A train's is the sum of its defending teams, unknown if any team lacks a power.
+  - The attacking power is your strongest attack squad for a truck. For a train it's the three teams of the lineup the server returns, or your three strongest attack squads when it returns none.
+  - It's a lower bound on what the game shows: hero power plus the virtual soldiers' power from the game's own formula. It leaves out the tactical weapon, chip set, T11 and Overlord terms.
+  - It's built only from fresh `hero.init.detail.get` stats. Without them, or with a hero missing, nothing is plundered.
+
+After those come the game's own gates: 4 plunders a day shared by trucks and trains, 2 per truck and 1 per sleigh, the train cap and its protection time, matched servers, travelling targets only, and never your own alliance's.
+
 Every run with a feature enabled logs one `alliance duel` line (theme, score, next chest, day end),
 and every `push.act.score.obtain` the server sends is logged as `activity score obtained` with the
 request sent just before it.

@@ -196,7 +196,7 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | `10114000` | `Lw_BUILD_BATTLE_FEATURE_ENTRY` | Radar Vehicle | core city building |
 | `10103000` | `LW_BUILD_MILITARY_CAMP` | Barracks | core city building |
 | `10104000` | `LW_BUILD_ARMY_YARD` | Drill Ground | core city building |
-| `10115000` | `LW_BUILD_BATTLE_HANGUP_REWARD` | (no locale display name; "Armed Truck" was an earlier, corrected guess, see [Live validation against production](/live-validation) for what "Armed Truck" actually is) | core city building |
+| `10115000` | `LW_BUILD_BATTLE_HANGUP_REWARD` | Armed Truck (locale `135202`; its idle reward is claimed account-wide by `lw.pve.idle.reward`, with no building `uuid`, see [Live validation against production](/live-validation#armed-truck-a-building-whose-reward-is-claimed-account-wide)) | core city building |
 | `10107000` | `LW_BUILD_GATE` | Wall | core city building |
 | `10101000` | `LW_BUILD_SMITH_SHOP` | Gear Factory | core city building |
 | `10120000` | `LW_BUILD_PUB` | Tavern | core city building |
@@ -211,10 +211,10 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | `10126000` | `LW_FIRST_PAY` | Rocket Shadow | core city building |
 | `10127000` | `LW_BUILD_RAILWAY_STATION` | Trade Station | core city building |
 | `10128000` | `LW_GIFT_PACKAGE` | Rocket Shadow | core city building |
-| `10138000` | `LW_BUILD_TRUCK_STATION_1` | (no locale display name found; NOT "Armed Truck", see [Live validation against production](/live-validation) for what "Armed Truck" actually is; unconfirmed valid production-line pairing, kept speculatively) | core city building |
-| `10139000` | `LW_BUILD_TRUCK_STATION_2` | (no locale display name found; see `10138000`'s row) | core city building |
-| `10140000` | `LW_BUILD_TRUCK_STATION_3` | (no locale display name found; see `10138000`'s row) | core city building |
-| `10141000` | `LW_BUILD_TRUCK_STATION_4` | (no locale display name found; see `10138000`'s row) | core city building |
+| `10138000` | `LW_BUILD_TRUCK_STATION_1` | Trade Fleet -1 (locale `457554`; berth for one of the four railway trade trucks; not a production line, see [City & building](/city-building#which-buildings-are-production-lines)) | core city building |
+| `10139000` | `LW_BUILD_TRUCK_STATION_2` | Trade Fleet -2 (see `10138000`'s row) | core city building |
+| `10140000` | `LW_BUILD_TRUCK_STATION_3` | Trade Fleet -3 (see `10138000`'s row) | core city building |
+| `10141000` | `LW_BUILD_TRUCK_STATION_4` | Trade Fleet -Ω (see `10138000`'s row) | core city building |
 | `10208000` | `LW_COIN_STORAGE` | Coin Vault | core city building |
 | `10302000` | `LW_STRENGTHEN_FACTORY` | - | core city building |
 | `10303000` | `LW_HERO_STRATEGY_HALL` | - | core city building |
@@ -522,16 +522,16 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | ID | Internal name | Display name | Category |
 |---|---|---|---|
 | `-1` | `ResourceType.None` | - | ResourceType |
-| `0` | `ResourceType.Oil` | Gas | ResourceType |
-| `1` | `ResourceType.Metal` | Metal | ResourceType |
-| `2` | `ResourceType.Wood` | Wood | ResourceType |
+| `0` | `ResourceType.Oil` | - (legacy, banned row; `aps_resources` reuses key `100014` "Coin") | ResourceType |
+| `1` | `ResourceType.Metal` | Iron | ResourceType |
+| `2` | `ResourceType.Wood` | Coin (the Gold Mine's output) | ResourceType |
 | `3` | `ResourceType.PVE_STAMINA` | Stamina | ResourceType |
 | `4` | `ResourceType.People` | - | ResourceType |
 | `10` | `ResourceType.OBSIDIAN` | Mutant Crystal | ResourceType |
 | `11` | `ResourceType.Water` | Water | ResourceType |
 | `12` | `ResourceType.Electricity` | Electricity | ResourceType |
 | `13` | `ResourceType.FLINT` | Immune Protein | ResourceType |
-| `14` | `ResourceType.Food` | Bread | ResourceType |
+| `14` | `ResourceType.Food` | Food | ResourceType |
 | `15` | `ResourceType.Gold` | Diamond | ResourceType |
 | `17` | `ResourceType.PvePoint` | Exploration Guide | ResourceType |
 | `18` | `ResourceType.MedalOfWisdom` | - | ResourceType |
@@ -539,7 +539,7 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | `20` | `ResourceType.DETECT_EVENT` | Radar Task | ResourceType |
 | `21` | `ResourceType.FORMATION_STAMINA` | Stamina | ResourceType |
 | `22` | `ResourceType.BattlePass` | - | ResourceType |
-| `23` | `ResourceType.Petroleum` | - | ResourceType |
+| `23` | `ResourceType.Petroleum` | Oil | ResourceType |
 | `24` | `ResourceType.GoldBrick` | Gold Brick | ResourceType |
 | `25` | `ResourceType.BatteryPower` | - | ResourceType |
 | `100` | `ResourceType.Max` | - | ResourceType |
@@ -561,9 +561,9 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | `12000` | `ResourceType.SkyBattleGold` | - | ResourceType |
 | `9002` | `ResourceType.PAID_GOLD` | - | ResourceType |
 | `12001` | `ResourceType.GoldProgress` | - | ResourceType |
-| `0` | `RewardType.OIL` | Gas | RewardType |
-| `1` | `RewardType.METAL` | Metal | RewardType |
-| `2` | `RewardType.Wood` | Wood | RewardType |
+| `0` | `RewardType.OIL` | - (legacy, see `ResourceType.Oil`) | RewardType |
+| `1` | `RewardType.METAL` | Iron | RewardType |
+| `2` | `RewardType.Wood` | Coin | RewardType |
 | `5` | `RewardType.GOLD` | Diamond | RewardType |
 | `6` | `RewardType.EXP` | - | RewardType |
 | `7` | `RewardType.GOODS` | - | RewardType |
@@ -579,7 +579,7 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | `17` | `RewardType.ITEM_EFFECT` | - | RewardType |
 | `18` | `RewardType.BATTLE_HONOR` | - | RewardType |
 | `19` | `RewardType.WATER` | Water | RewardType |
-| `20` | `RewardType.FOOD` | Bread | RewardType |
+| `20` | `RewardType.FOOD` | Food | RewardType |
 | `21` | `RewardType.ELECTRICITY` | Electricity | RewardType |
 | `22` | `RewardType.PEOPLE` | - | RewardType |
 | `23` | `RewardType.ARM` | - | RewardType |
@@ -590,7 +590,7 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | `28` | `RewardType.PVE_POINT` | Exploration Guide | RewardType |
 | `29` | `RewardType.DETECT_EVENT` | Radar Task | RewardType |
 | `30` | `RewardType.FORMATION_STAMINA` | Stamina | RewardType |
-| `31` | `RewardType.WOOD` | Wood | RewardType |
+| `31` | `RewardType.WOOD` | Coin | RewardType |
 | `32` | `RewardType.PVE_STAMINA` | Stamina | RewardType |
 | `33` | `RewardType.PVE_MONUMENT_TIME` | - | RewardType |
 | `34` | `RewardType.PVE_ACT_SCORE` | - | RewardType |
@@ -606,7 +606,7 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | `44` | `RewardType.Resistance_Point` | - | RewardType |
 | `45` | `RewardType.AllianceBattleReward` | - | RewardType |
 | `46` | `RewardType.TWSkillChip` | - | RewardType |
-| `47` | `RewardType.PETROLEUM` | - | RewardType |
+| `47` | `RewardType.PETROLEUM` | Oil | RewardType |
 | `48` | `RewardType.TACTICAL_CARD` | - | RewardType |
 | `49` | `RewardType.EMOTION_SELECT` | - | RewardType |
 | `50` | `RewardType.CHAT_EMOTION` | - | RewardType |
@@ -656,14 +656,14 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | `18` | `ResourceItemRealType.MummySoldier` | - | ResourceItemRealType |
 | `1101` | `ResourceItemRealType.OpeningHeroStar` | - | ResourceItemRealType |
 | `20` | `ResourceItemRealType.MasterExp` | - | ResourceItemRealType |
-| `1` | `TaskResourceType[1] -> ResourceType.Oil` | Gas | TaskResourceType |
-| `2` | `TaskResourceType[2] -> ResourceType.Metal` | Metal | TaskResourceType |
+| `1` | `TaskResourceType[1] -> ResourceType.Oil` | - (legacy) | TaskResourceType |
+| `2` | `TaskResourceType[2] -> ResourceType.Metal` | Iron | TaskResourceType |
 | `3` | `TaskResourceType[3] -> ResourceType.Water` | Water | TaskResourceType |
 | `4` | `TaskResourceType[4] -> ResourceType.Electricity` | Electricity | TaskResourceType |
 | `731000` | `ResourceTypeScience[ResourceType.Metal]` | - | ResourceTypeScience |
 | `751000` | `ResourceTypeScience[ResourceType.Oil]` | - | ResourceTypeScience |
 | `732000` | `ResourceTypeScience[ResourceType.Water]` | - | ResourceTypeScience |
-| `100013` | `ResourceTypeTxt[RewardType.METAL]` | Diamond | ResourceTypeTxt |
+| `100013` | `ResourceTypeTxt[RewardType.METAL]` | Diamond (stale key in the client; the reward popup shows Iron via `100021`) | ResourceTypeTxt |
 | `100014` | `ResourceTypeTxt[RewardType.OIL]` | Coin | ResourceTypeTxt |
 | `100546` | `ResourceTypeTxt[RewardType.WATER]` | Water | ResourceTypeTxt |
 | `100002` | `ResourceTypeTxt[RewardType.ELECTRICITY]` | Electricity | ResourceTypeTxt |
@@ -673,11 +673,13 @@ This table reflects 1.0.351. 1.0.364 adds exactly one building, `10310000` `LW_B
 | `400011` | `ResourceTypeTxt[RewardType.PVE_POINT]` | Exploration Guide | ResourceTypeTxt |
 | `140073` | `ResourceTypeTxt[RewardType.DETECT_EVENT]` | Radar Task | ResourceTypeTxt |
 | `100510` | `ResourceTypeTxt[RewardType.FORMATION_STAMINA / PVE_STAMINA]` | Stamina | ResourceTypeTxt |
-| `180265` | `ResourceTypeTxt[RewardType.WOOD]` | Wood | ResourceTypeTxt |
+| `180265` | `ResourceTypeTxt[RewardType.WOOD]` | Wood (secondary lookup only; the reward popup shows Coin via `100014`) | ResourceTypeTxt |
 | `resource_name004` | `ResourceTypeTxt[RewardType.FLINT]` | Immune Protein | ResourceTypeTxt |
 | `resource_name003` | `ResourceTypeTxt[RewardType.OBSIDIAN]` | Mutant Crystal | ResourceTypeTxt |
 
 </Accordion>
+
+Resource display names above come from the reward popup's path, `RewardToResType` → `aps_resources.name` (rechecked against 1.0.364). `ResourceTypeTxt` is a secondary lookup, read only by `RewardUtil.GetName` and the world-point reward list, and several of its keys are stale.
 
 ### Items/Equipment (108)
 
