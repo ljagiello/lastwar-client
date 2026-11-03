@@ -59,6 +59,9 @@ func startRewardFake(t *testing.T, reply func(cmd string, p *sfs.SFSObject) *sfs
 			if resp == nil {
 				return
 			}
+			if resp == rewardNoReply {
+				continue // leave this request unanswered but keep reading
+			}
 			if err := server.SendExtension(msg.Cmd, resp); err != nil {
 				return
 			}
@@ -71,6 +74,10 @@ func startRewardFake(t *testing.T, reply func(cmd string, p *sfs.SFSObject) *sfs
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn, f
 }
+
+// rewardNoReply, returned by a startRewardFake reply func, leaves that request unanswered on a live
+// connection, so the client sees a timeout.
+var rewardNoReply = sfs.NewSFSObject()
 
 // rewardOK is a success response granting 50 diamonds.
 func rewardOK() *sfs.SFSObject {

@@ -295,7 +295,7 @@ Both are off by default and static-analysis-only: their requests come from the 1
 
 `railway-plunder` drops a target that breaks any of these rules, before anything else:
 
-- **Never your own server.** The target's `serverId` must differ from init `user.serverId` and from `user.crossFightSrcServerId`. With neither known, it plunders nothing. The game doesn't enforce this: it only checks the server-sent `trainServers`, and your own server can be in that list.
+- **Never your own server.** The target's `serverId` must differ from init `user.serverId` and from `user.crossFightSrcServerId`. Without a known `user.serverId`, it plunders nothing. The game doesn't enforce this: it only checks the server-sent `trainServers`, and your own server can be in that list.
 - **Trucks: UR only**, the sleigh included.
 - **Weaker than you.** The target's defensive power must be known and below the attacking power. A truck's power is its `marchInfo.power`. A train's is the sum of its defending teams, unknown if any team lacks a power.
   - The attacking power is your strongest attack squad for a truck. For a train it's the three teams of the lineup the server returns, or your three strongest attack squads when it returns none.

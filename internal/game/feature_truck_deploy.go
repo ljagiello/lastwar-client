@@ -86,7 +86,7 @@ func railwayOwnTrucks(in *Init, station *sfs.SFSObject) []ownTruck {
 		}
 		if hi := evObject(mi, "heroInfo"); hi != nil {
 			for _, k := range hi.Keys() {
-				if id, ok := claimInt(evObject(hi, k), "id"); ok {
+				if id, ok := claimInt(evObject(hi, k), "id"); ok && id != 0 {
 					tr.heroIDs = append(tr.heroIDs, id)
 				}
 			}
@@ -165,7 +165,7 @@ func runTruckDeploy(conn *session.GameConn, in *Init) error {
 		if busy[sq.slot] || sq.mainHeroes() == 0 {
 			continue
 		}
-		if slices.ContainsFunc(sq.heroes, func(h railwayHero) bool { return busyHeroIDs[heroID[h.uuid]] }) {
+		if slices.ContainsFunc(sq.heroes, func(h railwayHero) bool { id := heroID[h.uuid]; return id != 0 && busyHeroIDs[id] }) {
 			slog.Info(feature+": squad skipped: one of its heroes is out with a truck", "squad", sq.slot)
 			continue
 		}
@@ -185,11 +185,8 @@ func runTruckDeploy(conn *session.GameConn, in *Init) error {
 			sq := squads[0]
 			squads = squads[1:]
 			if err := railwaySaveSquad(conn, feature, sq.railwaySquad, railwayDefenceAction); err != nil {
-				errs = append(errs, err)
-				if session.ContainsNonTimeoutNetError(err) {
-					return errors.Join(errs...)
-				}
-				continue
+				// Any save failure stops the run, a timeout included (a late reply could match).
+				return errors.Join(append(errs, err)...)
 			}
 			p := sfs.NewSFSObject()
 			p.PutLong("uuid", tr.uuid)

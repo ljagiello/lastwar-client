@@ -402,7 +402,7 @@ func TestRailwayPlunderGates(t *testing.T) {
 	for name, fill := range map[string]func(raw *sfs.SFSObject){
 		"another warzone": func(raw *sfs.SFSObject) {
 			u := evObject(raw, "user")
-			u.PutInt("crossFightSrcServerId", plTestOther)
+			u.PutInt("crossFightSrcServerId", 900) // not the target's server, so only the gate holds it
 		},
 		"opening reward not taken": td(func(td *sfs.SFSObject) { td.PutInt("openReward", 0) }),
 		"not started yet":          td(func(td *sfs.SFSObject) { td.PutLong("openTime", time.Now().Add(time.Hour).UnixMilli()) }),

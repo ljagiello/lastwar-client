@@ -110,25 +110,17 @@ func railwayTargetOf(o *sfs.SFSObject, uid string) railwayTarget {
 	return t
 }
 
-// railwayTrainPower is the sum of a train's defending teams (TrainData). It is 0 (unknown) when no
-// team is present or a present team has no positive power.
+// railwayTrainPower is the sum of a train's three defending teams (TrainData). It is 0 (unknown)
+// unless all three are present with a positive power: a missing team or power could hide a
+// defender and undercount the train.
 func railwayTrainPower(f *sfs.SFSObject) int64 {
 	var sum float64
-	teams := 0
 	for _, k := range []string{"armyUnit1", "armyUnit2", "armyUnit3"} {
-		u := evObject(f, k)
-		if u == nil {
-			continue
-		}
-		p, ok := duelFloat(u, "power")
+		p, ok := duelFloat(evObject(f, k), "power")
 		if !ok || p <= 0 {
 			return 0
 		}
 		sum += p
-		teams++
-	}
-	if teams == 0 {
-		return 0
 	}
 	return railwayCeil(sum)
 }
@@ -208,14 +200,19 @@ func railwayLineup(reply *sfs.SFSObject) ([]railwaySquad, bool) {
 	buffs := map[int32]bool{}
 	for i, k := range []string{"armyUnit1", "armyUnit2", "armyUnit3"} {
 		u := evObject(f, k)
-		sq := railwaySquad{slot: int32(i + 1), chip: int32(i + 1), heroes: railwayHeroesOf(u, true)}
+		// ArenaArmyFormationInfo:ParseData: chip set 1 when absent, the team index when <= 0.
+		sq := railwaySquad{slot: int32(i + 1), chip: 1, heroes: railwayHeroesOf(u, true)}
 		if n, ok := claimInt(u, "squadNo"); ok && n >= 1 && n <= 4 {
 			sq.squadNo = int32(n)
 		}
 		if n, ok := claimInt(u, "chipEquipGroup"); ok {
-			sq.chip = 0
-			if n >= 1 && n <= 4 {
+			switch {
+			case n <= 0:
+				sq.chip = int32(i + 1)
+			case n <= 4:
 				sq.chip = int32(n)
+			default:
+				sq.chip = 0
 			}
 		}
 		if n, ok := claimInt(u, "soldierType"); ok && n > 0 {
