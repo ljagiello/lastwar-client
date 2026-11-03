@@ -31,6 +31,7 @@ func tdTestTruck(uuid int64, cfgID int32, slot int64, out bool, squad int32) *sf
 type tdTestFake struct {
 	send    func(n int) *sfs.SFSObject
 	station *sfs.SFSObject
+	save    *sfs.SFSObject // formation.save.template reply; nil = success
 }
 
 func tdRun(t *testing.T, in *Init, c tdTestFake) (*rewardFake, error) {
@@ -49,6 +50,9 @@ func tdRun(t *testing.T, in *Init, c tdTestFake) (*rewardFake, error) {
 			r.PutInt("dailySendCount", sends)
 			return r
 		case "formation.save.template":
+			if c.save != nil {
+				return c.save
+			}
 			return sfs.NewSFSObject()
 		case "train.data":
 			if c.station != nil {
@@ -142,6 +146,17 @@ func TestTruckDeployRefusals(t *testing.T) {
 	}
 	if _, squads := tdSends(t, f); !slices.Equal(squads, []int64{1, 2, 3}) {
 		t.Errorf("squads tried %v, want 1 (refused) then 2 for the sleigh, and 3 for the UR truck", squads)
+	}
+	// A refused squad save stops the run before any send.
+	f, err = tdRun(t, plTestInit(func(*sfs.SFSObject) {}, 0, 0, trucks...), tdTestFake{save: rewardErr("E400208")})
+	saves := 0
+	for _, c := range f.cmds() {
+		if c == "formation.save.template" {
+			saves++
+		}
+	}
+	if got, _ := tdSends(t, f); err == nil || len(got) != 0 || saves != 1 {
+		t.Errorf("run = %v, sent %v (%v); want one refused save, no send, and an error", err, got, f.cmds())
 	}
 	// Any other refusal stops the run with an error.
 	stop := func(int) *sfs.SFSObject { return rewardErr("E999999") }
