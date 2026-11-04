@@ -79,6 +79,32 @@ func TestDailyQuestsClaimsTasksThenChests(t *testing.T) {
 	}
 }
 
+// TestDailyQuestsHiddenQuestCountsTowardChests is B20: quest 108 (point 10, show 0) is never
+// claimed, but once the server marks it received its 10 points count toward the chests, as the
+// client's GetCurValue sums every received quest (DailyTaskManager.lua:120-133). 40 + 30 + 10 =
+// 80 reaches chest 2 with chest 1 claimed; without 108 the total is 70 and no chest is sent.
+func TestDailyQuestsHiddenQuestCountsTowardChests(t *testing.T) {
+	list := dailyQuestsList([]dailyQuest{{"119", 2}, {"121", 2}, {"108", 2}}, 1)
+	fake, err := dailyQuestsRun(t, list, rewardOK(), rewardOK())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	want := []string{dailyQuestsListCmd, dailyQuestsChestCmd}
+	if got := fake.cmds(); !slices.Equal(got, want) {
+		t.Errorf("sent %v, want %v", got, want)
+	}
+
+	// 108 in state 1 is still not claimed (show = 0).
+	list = dailyQuestsList([]dailyQuest{{"108", 1}})
+	fake, err = dailyQuestsRun(t, list, rewardOK(), rewardOK())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := fake.cmds(); !slices.Equal(got, []string{dailyQuestsListCmd}) {
+		t.Errorf("sent %v, want only the list read", got)
+	}
+}
+
 func TestDailyQuestsNothingToClaim(t *testing.T) {
 	// 30 points, every reachable chest below that already claimed: only the list read goes out.
 	list := dailyQuestsList([]dailyQuest{{"121", 2}, {"101", 0}})
