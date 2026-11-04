@@ -63,6 +63,7 @@ var knownNonSensitiveSFSKeys = map[string]bool{
 	"action":                true,
 	"api":                   true,
 	"appVersion":            true,
+	"boxType":               true, // zone mobilization donation box type (1 personal, 2 alliance)
 	"c":                     true,
 	"chipEquipGroup":        true,
 	"cl":                    true,
@@ -112,6 +113,7 @@ var knownNonSensitiveSFSKeys = map[string]bool{
 	"squadNo":               true,
 	"squadNoClient":         true,
 	"suggestCountry":        true,
+	"tabType":               true, // zone mobilization info tab selector
 	"teamInfos":             true,
 	"teamNo":                true,
 	"time":                  true,
