@@ -193,7 +193,11 @@ this repo or commit it anywhere).
 # has been validated live. List them with their state, run one once to validate it, then turn
 # it on in the session config's "features" map, e.g. {"features": {"daily-quests": true}}.
 # Features marked OPT-IN change something visible or a player choice (likes, help requests,
-# free pulls, troop conversion, spending items or tickets) and are never turned on by default:
+# free pulls, troop conversion, spending items or tickets) and are never turned on by default.
+# A run goes in three phases, by name within each: claims that free capacity (finished-timers,
+# secret-tasks-claim), then the actions, then the progress claims (daily-quests, arms-race-chests,
+# battle-pass, quests, event-claims), so those also claim what the run's own actions earned.
+# A feature that panics is logged with its stack and counted as failed; the others still run:
 ./lastwar-client -list-features
 ./lastwar-client -run daily-quests
 
@@ -201,6 +205,8 @@ this repo or commit it anywhere).
 # earns; with "hold" it runs only on a day whose duel entry lists one of them (-list-features
 # shows duel:hold / duel:always / duel:-). Override per feature in the session config:
 #   {"features": {"radar-claims": true}, "duelPolicy": {"radar-claims": "always"}}
+# A duelPolicy entry for an unknown feature, or with a value other than "hold" or "always"
+# (e.g. "Hold"), is warned about and ignored, so that feature keeps its default.
 # -run of a held feature on a day that doesn't list its types is refused; -run-anyway runs it.
 ./lastwar-client -run radar-claims -run-anyway
 

@@ -10,8 +10,10 @@ import (
 // printFeatures implements -list-features: every optional feature with its default, whether the
 // session config (cfg, may be nil) turns it on, and its Alliance Duel policy after the config's
 // duelPolicy overrides: "hold" runs only on duel days that score it, "always" every run, "-" for
-// features that score nothing in the duel.
+// features that score nothing in the duel. An override a run would ignore (game.CleanDuelPolicy)
+// is warned about and not shown.
 func printFeatures(w io.Writer, cfg map[string]bool, policy map[string]string) {
+	policy = game.CleanDuelPolicy(policy)
 	for _, f := range game.Features() {
 		state := "off"
 		if game.FeatureEnabled(f, cfg) {

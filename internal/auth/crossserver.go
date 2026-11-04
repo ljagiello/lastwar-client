@@ -283,6 +283,9 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			return nil, fmt.Errorf("CROSS-SERVER LOGIN FAILED: ec=%v full=%s: %w", ec.Val, env.Content.StringRedacted(), session.LoginRejection(env.Content))
 		}
 		slog.Info("login OK")
+		claimed := loginParams.GetString("appVersion")
+		logLoginUpdateGate(env.Content, "cross-server Login", claimed)
+		conn.SetAppVersion(claimed)
 
 		siObj := gsl.FindServerInfo(env.Content)
 		redirectIPVal := ""

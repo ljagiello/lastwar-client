@@ -33,8 +33,47 @@ func TestNoticeClaimable(t *testing.T) {
 		{"versioned without a level", evNotice(1, 0, `{"b":{"reward":{"rewardVersion":"1.0.1"}}}`), 30, false},
 	}
 	for _, c := range cases {
-		if got := noticeClaimable(c.n, c.hq); got != c.want {
+		if got := noticeClaimable(c.n, c.hq, "1.0.364"); got != c.want {
 			t.Errorf("%s: claimable = %v, want %v", c.name, got, c.want)
+		}
+	}
+	// The gate compares with the session's own version (MailSystem.lua:212-234): a notice for
+	// 1.0.350 asks a 1.0.344 client to update first, and pays a 1.0.364 one.
+	n := evNotice(1, 0, `{"b":{"reward":{"rewardVersion":"1.0.350","rewardLevel":1}}}`)
+	if noticeClaimable(n, 30, "1.0.344") {
+		t.Error("a 1.0.350 notice must be held back from a session claiming 1.0.344")
+	}
+	if !noticeClaimable(n, 30, "1.0.364") {
+		t.Error("a 1.0.350 notice must be claimable by a session claiming 1.0.364")
+	}
+}
+
+// TestWorldSmallClaimsUsesTheSessionsAppVersion: the notice gate takes the version the Login
+// claimed (GameConn.AppVersion), and the compiled default only when no Login recorded one.
+func TestWorldSmallClaimsUsesTheSessionsAppVersion(t *testing.T) {
+	for _, c := range []struct {
+		claimed string
+		want    bool
+	}{{"1.0.344", false}, {"1.0.364", true}, {"", true}} {
+		withEvNow(t, evTestNow)
+		conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+			if cmd != noticeListCmd {
+				return evOK()
+			}
+			r := sfs.NewSFSObject()
+			l := sfs.NewSFSArray()
+			l.AddSFSObject(evNotice(902, 0, `{"b":{"reward":{"rewardVersion":"1.0.350","rewardLevel":1}}}`))
+			r.PutSFSArray("noticeList", l)
+			return r
+		})
+		if c.claimed != "" {
+			conn.SetAppVersion(c.claimed)
+		}
+		if err := runWorldSmallClaims(conn, evInit(30)); err != nil {
+			t.Fatal(err)
+		}
+		if got := len(fake.only(noticeRewardCmd)) == 1; got != c.want {
+			t.Errorf("Login claimed %q: claimed the 1.0.350 notice = %v, want %v", c.claimed, got, c.want)
 		}
 	}
 }

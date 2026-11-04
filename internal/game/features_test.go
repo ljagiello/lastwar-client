@@ -2,6 +2,8 @@ package game
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +93,199 @@ func TestRunFeaturesAggregatesErrors(t *testing.T) {
 	err := RunFeatures(nil, &Init{}, FeatureConfig{}, "")
 	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "a: boom") {
 		t.Errorf("RunFeatures error = %v, want it to wrap boom with the feature name", err)
+	}
+}
+
+// TestFeaturePhasesNameRegisteredFeatures checks the run-phase table against the real registry: a
+// renamed feature would otherwise drop silently back to the action phase.
+func TestFeaturePhasesNameRegisteredFeatures(t *testing.T) {
+	for name, phase := range featurePhases {
+		if _, ok := featureRegistry[name]; !ok {
+			t.Errorf("featurePhases names %q, which is not a registered feature", name)
+		}
+		if phase < phaseCapacity || phase > phaseProgress {
+			t.Errorf("featurePhases[%q] = %d, want %d..%d", name, phase, phaseCapacity, phaseProgress)
+		}
+	}
+	for _, name := range []string{"finished-timers", "secret-tasks-claim"} {
+		if featurePhase(name) != phaseCapacity {
+			t.Errorf("%s must run first: it frees capacity the actions use", name)
+		}
+	}
+	for _, name := range []string{"arms-race-chests", "battle-pass", "daily-quests", "event-claims", "quests"} {
+		if featurePhase(name) != phaseProgress {
+			t.Errorf("%s must run last: it claims the progress this run's actions earn", name)
+		}
+	}
+}
+
+// TestFeaturePhasesRunDuelScorersBeforeProgressClaims: every feature that earns duel points is an
+// action, so it runs before the claims of the points it earns.
+func TestFeaturePhasesRunDuelScorersBeforeProgressClaims(t *testing.T) {
+	for _, f := range Features() {
+		if len(f.Duel) > 0 && featurePhase(f.Name) != phaseAction {
+			t.Errorf("%s scores in the duel but runs in phase %d, want the action phase %d", f.Name, featurePhase(f.Name), phaseAction)
+		}
+	}
+}
+
+func TestFeaturesInRunOrderIsDeterministic(t *testing.T) {
+	first := featuresInRunOrder()
+	for i := 1; i < len(first); i++ {
+		a, b := first[i-1], first[i]
+		pa, pb := featurePhase(a.Name), featurePhase(b.Name)
+		if pa > pb || (pa == pb && a.Name >= b.Name) {
+			t.Errorf("run order has %s (phase %d) before %s (phase %d)", a.Name, pa, b.Name, pb)
+		}
+	}
+	for range 20 {
+		again := featuresInRunOrder()
+		if len(again) != len(first) {
+			t.Fatalf("run order length changed: %d, then %d", len(first), len(again))
+		}
+		for i := range again {
+			if again[i].Name != first[i].Name {
+				t.Fatalf("run order changed at %d: %s, then %s", i, first[i].Name, again[i].Name)
+			}
+		}
+	}
+}
+
+func TestRunFeaturesRunsByPhaseThenName(t *testing.T) {
+	ran := withRegistry(t,
+		Feature{Name: "quests", DefaultOn: true},
+		Feature{Name: "zeta", DefaultOn: true},
+		Feature{Name: "secret-tasks-start", DefaultOn: true},
+		Feature{Name: "daily-quests", DefaultOn: true},
+		Feature{Name: "finished-timers", DefaultOn: true},
+		Feature{Name: "alpha", DefaultOn: true},
+		Feature{Name: "secret-tasks-claim", DefaultOn: true},
+	)
+	const want = "finished-timers,secret-tasks-claim,alpha,secret-tasks-start,zeta,daily-quests,quests"
+	for range 5 {
+		*ran = nil
+		if err := RunFeatures(nil, &Init{}, FeatureConfig{}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(*ran, ","); got != want {
+			t.Fatalf("ran %q, want %q", got, want)
+		}
+	}
+	*ran = nil
+	if err := RunFeatures(nil, &Init{}, FeatureConfig{}, "quests"); err != nil || strings.Join(*ran, ",") != "quests" {
+		t.Errorf("-run quests: err=%v ran=%v, want only quests", err, *ran)
+	}
+}
+
+// TestRunFeaturesRereadsActivityRepliesBeforeProgressClaims: the duel reply TodayDuel caches before
+// the features run carries the score from before this run's spends, so the progress claims must
+// fetch it again; a dead-connection failure stays cached.
+func TestRunFeaturesRereadsActivityRepliesBeforeProgressClaims(t *testing.T) {
+	saved := activitySweepCache
+	t.Cleanup(func() { activitySweepCache = saved })
+	const duelKey, deadKey = "hero.event.info.get#24", "get.battlepass.info#7"
+	dead := fmt.Errorf("activity 7: %w", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset")})
+	in := &Init{Raw: sfs.NewSFSObject()}
+	seed := func() {
+		s := Activities(nil, in)
+		s.replies[duelKey] = activityReply{obj: sfs.NewSFSObject()}
+		s.replies[deadKey] = activityReply{err: dead}
+	}
+	var atAction, atProgress []bool
+	cached := func(at *[]bool) func(*session.GameConn, *Init) error {
+		return func(*session.GameConn, *Init) error {
+			s := Activities(nil, in)
+			_, duel := s.replies[duelKey]
+			_, deadKept := s.replies[deadKey]
+			*at = append(*at, duel, deadKept)
+			return nil
+		}
+	}
+	withRegistry(t,
+		Feature{Name: "alpha", DefaultOn: true, Run: cached(&atAction)},
+		Feature{Name: "arms-race-chests", DefaultOn: true, Run: cached(&atProgress)},
+	)
+	seed()
+	if err := RunFeatures(nil, in, FeatureConfig{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(atAction) != "[true true]" || fmt.Sprint(atProgress) != "[false true]" {
+		t.Errorf("cached (duel, dead) seen by the action %v and by the progress claim %v, want [true true] and [false true]", atAction, atProgress)
+	}
+
+	// With no action run first, the cached replies are still current and are kept.
+	atAction, atProgress = nil, nil
+	seed()
+	if err := RunFeatures(nil, in, FeatureConfig{Enabled: map[string]bool{"alpha": false}}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(atProgress) != "[true true]" {
+		t.Errorf("progress claim with no action before it saw cached (duel, dead) %v, want [true true]", atProgress)
+	}
+}
+
+func TestRunFeaturesRecoversFromAPanic(t *testing.T) {
+	logs := captureActivityLog(t)
+	ran := withRegistry(t,
+		Feature{Name: "a", DefaultOn: true, Run: func(*session.GameConn, *Init) error {
+			var o *sfs.SFSObject
+			o.PutInt("x", 1) // a write to a nil object panics
+			return nil
+		}},
+		Feature{Name: "b", DefaultOn: true},
+	)
+	err := RunFeatures(nil, &Init{}, FeatureConfig{}, "")
+	if err == nil || !strings.Contains(err.Error(), "a: panic:") {
+		t.Errorf("RunFeatures error = %v, want a's panic as its error", err)
+	}
+	if got := strings.Join(*ran, ","); got != "a,b" {
+		t.Errorf("ran %q, want a,b: the panic must not end the run", got)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "feature panicked") || !strings.Contains(out, "feature=a") ||
+		!strings.Contains(out, "features_test.go") {
+		t.Errorf("log = %s, want an Error naming feature a with its stack", out)
+	}
+
+	*ran = nil
+	if err := RunFeatures(nil, &Init{}, FeatureConfig{}, "a"); err == nil || !strings.Contains(err.Error(), "panic:") {
+		t.Errorf("-run a error = %v, want the panic as an error", err)
+	}
+}
+
+func TestRunFeaturesCleansDuelPolicy(t *testing.T) {
+	logs := captureActivityLog(t)
+	ran := withRegistry(t,
+		Feature{Name: "spend", DefaultOn: true, Duel: []DuelScore{{Type: DuelScoreSpeedUp}}, Hold: true},
+		Feature{Name: "claim", DefaultOn: true},
+	)
+	in := &Init{} // no init, so no duel day: a held feature stays held
+	run := func(policy map[string]string, only string) (string, error) {
+		*ran = nil
+		err := RunFeatures(nil, in, FeatureConfig{DuelPolicy: policy}, only)
+		return strings.Join(*ran, ","), err
+	}
+
+	typo := map[string]string{"spend": "Hold", "spennd": "always"}
+	if got, err := run(typo, ""); err != nil || got != "claim" {
+		t.Errorf(`policy "Hold": ran %q (err %v), want claim only: a bad value must leave the feature's own hold`, got, err)
+	}
+	if typo["spend"] != "Hold" || typo["spennd"] != "always" {
+		t.Errorf("RunFeatures modified the session config's duelPolicy: %v", typo)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "feature=spennd") || !strings.Contains(out, "value=Hold") {
+		t.Errorf("log = %s, want a Warn for the unknown name and one for the bad value", out)
+	}
+	if _, err := run(typo, "spend"); err == nil || !strings.Contains(err.Error(), "held") {
+		t.Errorf(`-run spend with policy "Hold": err = %v, want it held`, err)
+	}
+	if got, err := run(map[string]string{"spend": "always"}, ""); err != nil || got != "claim,spend" {
+		t.Errorf(`policy "always": ran %q (err %v), want claim,spend`, got, err)
+	}
+	got := CleanDuelPolicy(map[string]string{"spend": "hold", "claim": "always", "x": "hold", "spend2": ""})
+	if fmt.Sprint(got) != "map[claim:always spend:hold]" {
+		t.Errorf("CleanDuelPolicy = %v, want map[claim:always spend:hold]", got)
 	}
 }
 

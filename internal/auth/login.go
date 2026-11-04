@@ -476,6 +476,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		// mirrors the emailLen pattern used elsewhere in this file for the same reason.
 		un := env.Content.GetString("un")
 		slog.Info("login OK", "usernameLen", len(un))
+		claimed := loginParams.GetString("appVersion")
+		logLoginUpdateGate(env.Content, "base-zone Login", claimed)
+		conn.SetAppVersion(claimed)
 		if un != "" && un != ident.Username {
 			if err := ident.SaveUsername(un); err != nil {
 				slog.Warn("failed to persist username", "error", err)

@@ -76,7 +76,9 @@ That's every field the parser handles. A live response carries fewer: the iOS ch
 | `2` | Forced update, blocking. The server no longer accepts this build |
 | `3` | Falls into the `default` branch, so it behaves exactly like `0`. The `Login` response handler also rewrites `3` to `0` |
 
-The `Login` response can carry `updateType` too; with `2`, the client enters its app-update state instead of waiting for `init`. On 2026-10-04 the iOS 1.0.344 app got `updateType=3` from both check-version and `Login`, with the `Login` response naming `new_version` `1.0.350` (observed live). `goclient` now logs a warning when check-version returns `updateType=2`, since `Login`s claiming that build are likely to start failing too.
+The `Login` response can carry `updateType` too; with `2`, the client enters its app-update state instead of waiting for `init`, and a cross-server `Login` fails with error 9 (1.0.367 C#). On 2026-10-04 the iOS 1.0.344 app got `updateType=3` from both check-version and `Login`, with the `Login` response naming `new_version` `1.0.350` (observed live). `goclient` logs a warning when check-version returns `updateType=2`, since `Login`s claiming that build are likely to start failing too.
+
+`goclient` also reads the `Login` response's `updateType` (an SFS Int) and `new_version` (a UtfString) on every `Login`, from the same object that holds `serverInfo`: the response itself, else its `p`. It logs both at Info with the `appVersion` the `Login` claimed. With `updateType=2` it logs a warning that a real client would stop there, but it doesn't enforce that yet: the run carries on. A `new_version` above the claimed build is no warning. The real client uses `new_version` only to refuse creating a new role when the gap is too large (`ShumeiSdkManager.IsForbidCreateRole`, static-analysis-only).
 
 ## resVersion
 
