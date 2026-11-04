@@ -57,7 +57,7 @@ import (
 // k1 = 60 s. The client's wider gap-filler (60-600 s overshoot, then giving items back,
 // :955-1012) is left out, so a call never wastes a minute.
 //
-// Diamond tripwire: the balance starts at init user.gold (PlayerInfo.lua:612-613) and every reply
+// Diamond tripwire: the balance starts at init user.gold (PlayerInfo.lua:630-632) and every reply
 // is checked before anything else happens: remainGold / gold, top level or under queue
 // (BuildManager.lua:403-413; QueueDataManager.lua:483-492; BuildingCampAccelMessage.lua:15-22),
 // must not drop; build and queue replies must carry an itemCostArr listing every item sent (proof

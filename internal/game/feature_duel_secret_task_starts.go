@@ -56,7 +56,7 @@ import (
 // at most secretTaskStartsMaxPerRun start requests per run, and a diamond tripwire. The client
 // takes a gold field from the hero.dispatch.list reply when there is one (UpdateAllSingleTasks,
 // ActDispatchTaskDataManager.lua:382-385) and none from the start reply (DispatchStartMessage.lua:
-// 12-25). So the balance is the list's gold, else init user.gold (PlayerInfo.lua:612-613), and
+// 12-25). So the balance is the list's gold, else init user.gold (PlayerInfo.lua:630-632), and
 // after every start it is compared with any gold the start reply or a fresh list carries; any drop
 // is an ERROR that stops the run and persists the trip (tripwire.go). Live the list has carried no
 // gold (docs/live-validation.mdx:424), and hero.dispatch.start has no cost parameter

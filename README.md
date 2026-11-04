@@ -197,7 +197,8 @@ this repo or commit it anywhere).
 # A run goes in three phases, by name within each: claims that free capacity (finished-timers,
 # secret-tasks-claim), then the actions, then the progress claims (daily-quests, arms-race-chests,
 # battle-pass, quests, event-claims and the opt-in claims such as battle-pass-overflow), so those
-# also claim what the run's own actions earned.
+# that re-read the server also claim what the run's own actions earned (quests and stage-quests
+# read init, so they claim it on the next run).
 # A feature that panics is logged with its stack and counted as failed; the others still run:
 ./lastwar-client -list-features
 ./lastwar-client -run daily-quests
@@ -212,9 +213,10 @@ this repo or commit it anywhere).
 ./lastwar-client -run radar-claims -run-anyway
 
 # A duel or dig spend that sees the diamond balance fall writes <session config>.tripwire.json.
-# While that file exists every duel spend, treasure-digs and every dig-game write refuses to run,
-# in later runs too (a -collect run exits 1). Check the account, then remove the file (for -config,
-# or the default session config) and exit:
+# While that file exists every duel spend, the Treasure Hunt pickaxe digs and treasure-digs' brick
+# opens refuse to run, in later runs too (each run warns at startup; a -collect run exits 1). Free
+# dig claims still run. Check the account, then remove the file (for -config, or the default
+# session config) and exit:
 ./lastwar-client -clear-tripwire
 
 # Stay connected and issue ad-hoc test commands without re-authenticating. NOTE: since

@@ -447,7 +447,7 @@ func (r *duelRecruitRun) survivors(in *Init) error {
 // §7.3). Every spend goes through duelSpendGuard.spend. Unlike session.SendAndWait, it reads every
 // message that arrives while the reply is awaited, because the balances the client updates come
 // in pushes, not in the spend replies.
-//   - Gold (diamonds): the baseline is init user.gold (PlayerInfo.lua:612-613); without it nothing is
+//   - Gold (diamonds): the baseline is init user.gold (PlayerInfo.lua:630-632); without it nothing is
 //     spent. gold and remainGold are read from the spend replies, and from push.resource.info
 //     (PushResourceInfo.lua:6-17), push.update.player.remain.gold and
 //     push.remain.gold.when.errorcode.triggered. hero.dispatch.list {} is read-only, and the client

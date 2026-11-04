@@ -57,13 +57,15 @@ const (
 const (
 	// phaseCapacity claims free what the actions need: a finished-but-unclaimed Secret Task holds
 	// its dispatch slot (ActDispatchTaskDataManager.lua:778-786), and a camp whose output waits to
-	// be collected can't train (BuildBubbleManager.lua:2372-2373).
+	// be collected can't train (BuildBubbleManager.lua:2377-2379).
 	phaseCapacity = 1
 	// phaseAction is every other feature, among them the actions that earn quest, Arms Race,
 	// battle-pass and duel points (training, recruits, speed-ups, radar and dispatch tasks).
 	phaseAction = 2
-	// phaseProgress is the idempotent progress claims: each re-reads its state, so running them
-	// last also claims what this run's actions completed.
+	// phaseProgress is the idempotent progress claims. Those that read a server reply (daily-quests,
+	// arms-race-chests, battle-pass, event-claims, the opt-in claims) re-read it, so running them
+	// last also claims what this run's actions completed. quests and stage-quests read init, so
+	// they see this run's completions only on the next run.
 	phaseProgress = 3
 )
 

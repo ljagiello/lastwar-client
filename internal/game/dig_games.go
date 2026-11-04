@@ -146,7 +146,7 @@ const (
 
 // digsRun is one feature run's sender. Reads (digsReadOnly) go out in a plan too; writes are
 // logged instead. Every reply is checked against the diamond balance: init user.gold
-// (PlayerInfo.lua:612-613), or the first balance a reply carries, must never fall.
+// (PlayerInfo.lua:630-632), or the first balance a reply carries, must never fall.
 type digsRun struct {
 	conn    *session.GameConn
 	feature string
