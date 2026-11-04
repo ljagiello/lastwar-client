@@ -31,18 +31,28 @@ import (
 //   - `receive.week.free.reward {}`, the free weekly package. Gate: init weekFreeReward.lastRewardTime
 //     (ms) is not today (GiftPackManager.lua:152-176, 394-400).
 //   - `receive.week.card.daily.free.reward {}`, the week-card free gift. Gate: the reply to
-//     `get.week.card.info {isLogin: 1}` (sent by the client right after init, InitMessage.lua:663;
-//     GetWeekCardListMessage.lua:4-26) carries dailyFree.lastRewardTime (ms) that is not today
+//     `get.week.card.info {isLogin: 1}` (sent by the client once, right after init,
+//     WeekCardManager.lua:23-25; GetWeekCardListMessage.lua:4-26; shared with card-dailies through
+//     weekCardInfo) carries dailyFree.lastRewardTime (ms) that is not today
 //     (WeekCardManager.lua:65-76). The Lua checks no card ownership; whether the server does is
 //     open (MASTER.md §8.1), so log the first reply.
 //
-// The season week-card free gift (`lw.season.week.card.free.reward`) is season-only (§4 #18) and
-// not handled here. Static-only: none of these has been sent live yet.
+// The weekly package and the week-card free gift are skipped when init dataConfig carries switch
+// free_chest_receive turned off: the subscription panel builds both rows only behind it
+// (UISubscriptionListPanelView.lua:27-59), and so do the chained claims
+// (PayManager.lua:2193-2203, ClaimWeekCardRewardMessage.lua:17-27). The gift-pack tabs' own
+// buttons do not check it (DailyPackage.lua:578-588, WeekCardMain.lua:481-492). The switch is not
+// in the local item table, so an absent key keeps both claims on. The store free reward is built
+// outside the switch (:60-65).
+//
+// The season week-card free gift (`lw.season.week.card.free.reward`) is the opt-in
+// season-week-card feature (feature_season_week_card.go). Static-only: none of these has been
+// sent live yet.
 const (
 	freeChestsStoreCmd    = "free.reward.receive"
 	freeChestsWeeklyCmd   = "receive.week.free.reward"
-	freeChestsWeekInfoCmd = "get.week.card.info"
 	freeChestsWeekCardCmd = "receive.week.card.daily.free.reward"
+	freeChestSwitch       = "free_chest_receive"
 
 	freeChestsStoreType = 1 // FreeRewardType.PackageInStoreFreeReward (EnumType.lua:13301)
 	freeChestsStoreHQ   = 2 // unlock 113 (UISubscriptionListPanelView.lua:56-61)
@@ -111,7 +121,18 @@ func freeChestsStore(conn *session.GameConn, in *Init) error {
 	return nil
 }
 
+// freeChestSwitchOff reports whether init dataConfig carries free_chest_receive set to anything
+// but 1, which DataConfig:CheckSwitch reads as off (DataConfig.lua:76-88). An absent key is not
+// off here: that keeps the claims as they were before the gate.
+func freeChestSwitchOff(in *Init) bool {
+	return in.Object("dataConfig").Has(freeChestSwitch) && !claimSwitchOn(in, freeChestSwitch)
+}
+
 func freeChestsWeekly(conn *session.GameConn, in *Init) error {
+	if freeChestSwitchOff(in) {
+		slog.Info("free-chests: init dataConfig turns " + freeChestSwitch + " off; skipping the free weekly package")
+		return nil
+	}
 	w := in.Object("weekFreeReward")
 	if w == nil {
 		slog.Info("free-chests: init has no weekFreeReward")
@@ -127,9 +148,11 @@ func freeChestsWeekly(conn *session.GameConn, in *Init) error {
 }
 
 func freeChestsWeekCard(conn *session.GameConn, in *Init) error {
-	params := sfs.NewSFSObject()
-	params.PutInt("isLogin", 1)
-	info, err := session.SendAndWait(conn, "week card info", freeChestsWeekInfoCmd, params)
+	if freeChestSwitchOff(in) {
+		slog.Info("free-chests: init dataConfig turns " + freeChestSwitch + " off; skipping the week-card free gift")
+		return nil
+	}
+	info, err := weekCardInfo(conn, in)
 	if err != nil {
 		return err
 	}

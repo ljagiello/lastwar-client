@@ -143,3 +143,48 @@ func TestSeasonDailiesBenignAndFailure(t *testing.T) {
 		t.Errorf("err = %v, want only the E3 failure", err)
 	}
 }
+
+// TestSeasonDailiesMilitaryEndShow: past the show start plus para_1 (49) days activity 1200101 is
+// in end-show, where the client hides the daily (SeasonMilitaryManager.lua:51-57, 120-130).
+func TestSeasonDailiesMilitaryEndShow(t *testing.T) {
+	withEvNow(t, evTestNow)
+	military := func(start, ready time.Time) *sfs.SFSObject {
+		a := evActivity(1200101)
+		a.PutLong("startTime", start.UnixMilli())
+		if !ready.IsZero() {
+			a.PutLong("readyTime", ready.UnixMilli())
+		}
+		return a
+	}
+	day := 24 * time.Hour
+	for name, c := range map[string]struct {
+		act  *sfs.SFSObject
+		want string
+	}{
+		"day 50 of 49: end-show": {military(evTestNow.Add(-50*day), time.Time{}),
+			"lw.season.user.max.force.reward.info"},
+		"last hour of the normal phase": {military(evTestNow.Add(-49*day+time.Hour), time.Time{}),
+			"lw.season.user.max.force.reward.info,military.act.info,military.get.daily.reward"},
+		"readyTime is the show start": {military(evTestNow.Add(-50*day), evTestNow.Add(-10*day)),
+			"lw.season.user.max.force.reward.info,military.act.info,military.get.daily.reward"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				r := sfs.NewSFSObject()
+				if cmd == seasonMilitaryInfoCmd {
+					r.PutInt("dailyRewardNum", 0)
+				}
+				return r
+			})
+			if err := runSeasonDailies(conn, evWithSeason(evInit(30, c.act), 6)); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(fake.cmds(), ","); got != c.want {
+				t.Errorf("sent %s\nwant %s", got, c.want)
+			}
+		})
+	}
+	if seasonMilitaryNormal(Activity{ID: 1, Raw: military(evTestNow, time.Time{})}) {
+		t.Error("an id without para_1 must not count as the normal phase")
+	}
+}
