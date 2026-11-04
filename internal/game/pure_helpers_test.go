@@ -40,7 +40,17 @@ func TestCollectibleBuildings(t *testing.T) {
 	}
 }
 
-func TestGroupUnclaimedByType(t *testing.T) {
+// TestMailGroupsMatchTheTables fails when the data tables are regenerated without the mail groups.
+// genmailgroups needs LASTWAR_LUA as well as LASTWAR_TABLES and keeps its file without both, so a
+// table-only go generate would leave table mail_group's newer types, and their rewards, out.
+func TestMailGroupsMatchTheTables(t *testing.T) {
+	if mailGroupsTableVersion != activityTableVersion {
+		t.Errorf("mail_groups_gen.go is from table %s but the activity table is %s: rerun go generate with LASTWAR_LUA and LASTWAR_LUA_VERSION set too",
+			mailGroupsTableVersion, activityTableVersion)
+	}
+}
+
+func TestGroupUnclaimedByGroup(t *testing.T) {
 	newMail := func(uid string, mailType int32, rewardStatus int32) Mail {
 		o := sfs.NewSFSObject()
 		o.PutUtfString("uid", uid)
@@ -49,20 +59,20 @@ func TestGroupUnclaimedByType(t *testing.T) {
 		return Mail{Raw: o}
 	}
 	mail := []Mail{
-		newMail("a", 3, 0), // unclaimed, type 3
+		newMail("a", 3, 0), // unclaimed, MAIL_SYSTEM_EXTRA: alliance group 3
 		newMail("b", 3, 1), // already claimed
-		newMail("c", 4, 0), // unclaimed, type 4
-		newMail("d", 3, 0), // unclaimed, type 3
+		newMail("c", 2, 0), // unclaimed, MAIL_SYSTEM: activity group 4
+		newMail("d", 3, 0), // unclaimed, alliance group 3
 	}
-	got := groupUnclaimedByType(mail)
+	got := groupUnclaimedByGroup(mail)
 	if len(got) != 2 {
-		t.Fatalf("got %d distinct types, want 2", len(got))
+		t.Fatalf("got %d groups, want 2", len(got))
 	}
 	if len(got[3]) != 2 || got[3][0] != "a" || got[3][1] != "d" {
-		t.Errorf("type 3: got %v, want [a d]", got[3])
+		t.Errorf("group 3: got %v, want [a d]", got[3])
 	}
 	if len(got[4]) != 1 || got[4][0] != "c" {
-		t.Errorf("type 4: got %v, want [c]", got[4])
+		t.Errorf("group 4: got %v, want [c]", got[4])
 	}
 }
 
@@ -72,7 +82,7 @@ func TestGroupUnclaimedByType(t *testing.T) {
 // treated as unclaimed, even though GetInt("rewardStatus") returns the same int32 zero value for
 // "genuinely absent" as it does for a real rewardStatus=0. Reverting the presence check in
 // HasUnclaimedReward (back to a bare `RewardStatus() == 0`) would make this fail, since the
-// no-rewardStatus mail would then be misclassified as unclaimed and swept into byType.
+// no-rewardStatus mail would then be misclassified as unclaimed and swept into byGroup.
 func TestHasUnclaimedRewardMissingFieldIsNotUnclaimed(t *testing.T) {
 	noRewardStatus := sfs.NewSFSObject()
 	noRewardStatus.PutUtfString("uid", "notif-1")
@@ -94,7 +104,7 @@ func TestHasUnclaimedRewardMissingFieldIsNotUnclaimed(t *testing.T) {
 		t.Errorf("HasUnclaimedReward() = false for mail with rewardStatus=0, want true")
 	}
 
-	got := groupUnclaimedByType(mail)
+	got := groupUnclaimedByGroup(mail)
 	if len(got) != 1 {
 		t.Fatalf("got %d distinct types, want 1 (the no-rewardStatus mail must be excluded)", len(got))
 	}
@@ -111,7 +121,7 @@ func TestHasUnclaimedRewardMissingFieldIsNotUnclaimed(t *testing.T) {
 // misclassified it as unclaimed on every call. Reverting the wrong-type check in HasUnclaimedReward
 // (back to the old `v, ok := m.Raw.Get("rewardStatus"); !ok || v.Val == nil` check, with no
 // wrong-type rejection at all) would make this test fail: the wrong-typed mail would then read as
-// unclaimed and get bucketed into groupUnclaimedByType's output, ready to be sent in a real
+// unclaimed and get bucketed into groupUnclaimedByGroup's output, ready to be sent in a real
 // mail.reward.batch request.
 //
 // Also covers HasUnclaimedReward's round-30 fix: a genuinely-absent rewardStatus (the normal case
@@ -167,7 +177,7 @@ func TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified(t *testing.T
 		t.Errorf("HasUnclaimedReward() on a mail with a genuinely-absent rewardStatus logged something -- this is the routine notification-only-mail case and must stay silent; log grew from:\n%s\nto:\n%s", logBeforeAbsentCheck, logged)
 	}
 
-	got := groupUnclaimedByType(mail)
+	got := groupUnclaimedByGroup(mail)
 	if len(got) != 1 {
 		t.Fatalf("got %d distinct types, want 1 (the wrong-typed-rewardStatus and absent-rewardStatus mail must both be excluded)", len(got))
 	}
@@ -176,37 +186,33 @@ func TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified(t *testing.T
 	}
 }
 
-// TestGroupUnclaimedByTypeMissingTypeFieldIsExcluded guards the analogous explicit-presence fix in
-// groupUnclaimedByType for the `type` field: a reward-bearing mail (HasUnclaimedReward() == true)
-// whose `type` key is genuinely absent must be skipped entirely, not defaulted into a `type=0`
-// bucket -- GetInt("type") returns the same int32 zero value for "genuinely absent" as it does for
-// a real type=0, so without the presence guard this mail would be indistinguishable from, and
-// silently merged into, a real type=0 batch. Reverting the requirePresentField guard in
-// groupUnclaimedByType (back to bare `byType[m.Type()] = append(...)`) would make this fail, since
-// the no-type mail would then be swept into byType[0].
-func TestGroupUnclaimedByTypeMissingTypeFieldIsExcluded(t *testing.T) {
+// TestGroupUnclaimedByGroupMissingTypeFieldIsExcluded guards the analogous explicit-presence check
+// in groupUnclaimedByGroup for the `type` field: a reward-bearing mail (HasUnclaimedReward() ==
+// true) whose `type` key is genuinely absent has no group and must be skipped entirely, beside a
+// well-typed mail that is claimed.
+func TestGroupUnclaimedByGroupMissingTypeFieldIsExcluded(t *testing.T) {
 	noType := sfs.NewSFSObject()
 	noType.PutUtfString("uid", "no-type-1")
 	noType.PutInt("rewardStatus", 0)
 	// deliberately no PutInt("type", ...) call -- field genuinely absent, as opposed to an
 	// explicit 0.
 
-	explicitTypeZero := sfs.NewSFSObject()
-	explicitTypeZero.PutUtfString("uid", "type-zero-1")
-	explicitTypeZero.PutInt("type", 0)
-	explicitTypeZero.PutInt("rewardStatus", 0)
+	typed := sfs.NewSFSObject()
+	typed.PutUtfString("uid", "type-3-1")
+	typed.PutInt("type", 3)
+	typed.PutInt("rewardStatus", 0)
 
-	mail := []Mail{{Raw: noType}, {Raw: explicitTypeZero}}
+	mail := []Mail{{Raw: noType}, {Raw: typed}}
 
 	if !mail[0].HasUnclaimedReward() || !mail[1].HasUnclaimedReward() {
 		t.Fatalf("both mail entries must be reward-bearing for this test to be meaningful")
 	}
 
-	got := groupUnclaimedByType(mail)
+	got := groupUnclaimedByGroup(mail)
 	if len(got) != 1 {
-		t.Fatalf("got %d distinct types, want 1 (the no-type mail must be excluded, not bucketed under type=0)", len(got))
+		t.Fatalf("got %d groups, want 1 (the no-type mail must be excluded)", len(got))
 	}
-	if len(got[0]) != 1 || got[0][0] != "type-zero-1" {
-		t.Errorf("type 0: got %v, want [type-zero-1] -- no-type-1 (no type field) must not appear", got[0])
+	if len(got[3]) != 1 || got[3][0] != "type-3-1" {
+		t.Errorf("group 3: got %v, want [type-3-1] -- no-type-1 (no type field) must not appear", got[3])
 	}
 }

@@ -109,7 +109,7 @@ func SFSFieldKindAccepts(kind SFSFieldKind, val any) bool {
 // since both consume ParseInitBuildings/ParseInitVisitors' output directly), buildings.go's own
 // seenBuildingUUIDs/seenVisitorUUIDs in FetchBuildings, mail.go's seenUIDs in ListMail (a
 // PERMANENT reward loss on a wrong-typed uid, since rewardStatus is per-mail), mail.go's
-// groupUnclaimedByType (silently merges into a genuine type=0 batch), and alliance.go's
+// groupUnclaimedByGroup (would merge a wrong-typed type into a real batch), and alliance.go's
 // findRecommendedTech (returns scienceId=0, causing a real donate attempt against the wrong tech).
 //
 // Every call site that keys a dedup map or lookup off a field this codebase reads via GetLong/

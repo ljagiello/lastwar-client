@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -23,11 +24,14 @@ import (
 //     category, not global -- the real client's "Claim All" button sent
 //     one `mail.reward.batch` call per tab, each with only that tab's
 //     mail uids and that tab's `type` value (observed live: 3, 4, and 9
-//     for three different tabs -- the exact type<->tab-name mapping was
-//     not determined, but it doesn't need to be: this just groups by
-//     whatever `type` each mail object already reports). Marking mail as
-//     read (`mail.read.status.betch`) is NOT scoped by type at all, and
-//     is not conditional on having a reward either -- see ClaimAllMail.
+//     for three different tabs). Those are mail group ids, not mail
+//     types: the client sends the tab's internal group as a UtfString
+//     (MailRewardBatchMessage.lua:3-17; MailDataManager.lua:439-462), 3
+//     alliance, 4 activity and 9 season (MailEnum.lua:162-173), and maps
+//     each mail's type to its group with MailTypeToInternalGroup
+//     (mail_groups_gen.go). Marking mail as read
+//     (`mail.read.status.betch`) carries no type, and is not conditional
+//     on having a reward either -- see ClaimAllMail.
 type Mail struct {
 	Raw *sfs.SFSObject
 }
@@ -43,13 +47,16 @@ func (m Mail) RewardStatus() int32 { return m.Raw.GetInt("rewardStatus") }
 // translation-rating mail, a rating reward (MASTER §6): left for the player.
 var mailCantClaimAllTypes = map[int64]bool{112: true, 134: true, 135: true}
 
-// inBulkActions reports whether the client's Read All / Claim All would touch m: its type is not
-// in mailCantClaimAllTypes and it is not saved. Saved mail (saveFlag != 0; MailInfo.lua:90-92 keeps
-// only a non-zero value, so absent is 0) is the favor group, which both skip
-// (MailDBManager.lua:1048-1050, 1065-1067) and whose SQL requires saveFlag = 0 (:449-468). A missing
-// or wrong-typed type is not an excluded type. The client's in-memory fallbacks
-// (MailDataManager.lua:422-425, 449-456), taken only when the SQL finds nothing, can still pick
-// these up; Go follows the main path.
+// inBulkActions reports whether the client's bulk reads would touch m, the read-status filter: its
+// type is not in mailCantClaimAllTypes, it is not saved, and it is in a group (group). Saved mail
+// (saveFlag != 0; MailInfo.lua:90-92 keeps only a non-zero value, so absent is 0) is the favor
+// group, which Read All and Claim All skip (MailDBManager.lua:1048-1050, 1065-1067) and whose SQL
+// requires saveFlag = 0 (:449-468). Mail in no group is in no list the client keeps
+// (MailDataManager.lua:279-287), so nothing reads it. The hide group is read: Read All walks only
+// the tabs, but ReadAllHideMail marks every unread hide-group mail read at each login
+// (MailDataManager.lua:223, 306, 381-409). Claims also need a tab (shownGroup). The client's
+// in-memory fallbacks (MailDataManager.lua:422-425, 449-456), taken only when the SQL finds
+// nothing, can still pick up the excluded types and saved mail; Go follows the main path.
 func (m Mail) inBulkActions() bool {
 	if t, ok := claimInt(m.Raw, "type"); ok && mailCantClaimAllTypes[t] {
 		return false
@@ -57,7 +64,37 @@ func (m Mail) inBulkActions() bool {
 	if f, ok := claimInt(m.Raw, "saveFlag"); ok && f != 0 {
 		return false
 	}
-	return true
+	_, ok := m.group()
+	return ok
+}
+
+//go:generate go run ./genmailgroups -lua=${LASTWAR_LUA} -version=${LASTWAR_LUA_VERSION} -tables=${LASTWAR_TABLES} -table-version=${LASTWAR_TABLE_VERSION} -out mail_groups_gen.go
+
+// group is the mailbox group the client files m under (__mailTypeToGroup,
+// MailDataManager.lua:39-45, 279-283): saved mail (saveFlag 1) is the favor group, and any other
+// mail its type's entry in the client's MailTypeToInternalGroup (mailTypeGroup). ok is false for a
+// missing or wrong-typed type and for a type with no group.
+func (m Mail) group() (group int64, ok bool) {
+	if f, ok := claimInt(m.Raw, "saveFlag"); ok && f == 1 {
+		return mailFavorGroup, true
+	}
+	t, ok := claimInt(m.Raw, "type")
+	if !ok {
+		return 0, false
+	}
+	g, ok := mailTypeGroup[t]
+	return g, ok
+}
+
+// shownGroup is m's group when it is a mailbox tab, one of the groups Claim All walks
+// (mailShowGroups, UILWMailMainCtrl.lua:172-185). ok is false for mail in no group and for the hide
+// group (1: the arena, truck, train and KOF reports), which no tab lists, so no bulk path claims.
+func (m Mail) shownGroup() (group int64, ok bool) {
+	g, ok := m.group()
+	if !ok || !slices.Contains(mailShowGroups, g) {
+		return 0, false
+	}
+	return g, true
 }
 
 // isRead reports whether the list reply marks m read (status 1). The client sends read-status only
@@ -83,7 +120,7 @@ func (m Mail) isRead() bool {
 // Go type isn't in its accepted set (int32/int16/byte/int64) to int32(0), not just a missing field,
 // so a present-but-wrong-typed rewardStatus (e.g. sent as a string or float) passed the old guard,
 // coerced to 0 via GetInt, and the "== 0" comparison DETERMINISTICALLY (every time, not merely a
-// collision risk) misclassified it as unclaimed -- feeding groupUnclaimedByType, which would then
+// collision risk) misclassified it as unclaimed -- feeding groupUnclaimedByGroup, which would then
 // bucket that mail's uid into a real mail.reward.batch request for a reward that may not exist.
 //
 // Fixed (round 30): the round-29 fix above routed this through requireFieldType (buildings.go),
@@ -150,46 +187,30 @@ const mailListRawItemCap = 1000
 // MaxVisitorsUpperBound's own sizing rationale.
 const maxAggregateMailPerFetch = 2000
 
-// maxMailRewardTypesPerRun is a defensive, non-protocol-guessing sanity ceiling on how many
-// distinct mail `type` buckets ClaimAllMail's reward-claim loop below will issue
-// mail.reward.batch requests for in one run -- the same category of ceiling as buildings.go's
-// maxCollectibleBuildingsPerRun and visitors.go's MaxVisitorsUpperBound, applied to this loop's
-// item COUNT for the identical reason: each iteration can cost up to a full defaultCmdTimeout
-// (8s, conn.go) against a peer that simply never responds, so 300 * 8s bounds the worst case at
-// ~40 minutes instead of an unbounded hang, matching those two constants' own value and rationale
-// exactly.
-const maxMailRewardTypesPerRun = 300
-
 // maxMailBatchesPerLoop is a defensive, non-protocol-guessing sanity ceiling on how many
 // mail.read.status.betch/mail.reward.batch round trips ClaimAllMail's two batch loops below will
 // each issue -- round-44 fix, closing a gap on a distinct axis from maxAggregateMailPerFetch (total
-// mail ITEM count) and maxMailRewardTypesPerRun (distinct TYPE count): neither bounds the number of
-// BATCHES batchByCountAndBytes produces. batchByCountAndBytes always admits at least one uid per
+// mail ITEM count), which doesn't bound the number of BATCHES batchByCountAndBytes produces. batchByCountAndBytes always admits at least one uid per
 // batch even if that uid alone exceeds maxUIDsBytes (see its own doc comment), and a mail uid is a
 // server-supplied string bounded only by the wire format's 65535-byte string-length limit -- well
 // over maxUIDsBytes(30000) -- so a peer returning mail entries with maximal-length uids can force
 // every batch down to a single item, turning maxAggregateMailPerFetch(2000) items into up to 2000
 // sequential round trips instead of the ~20 batches (2000/readBatchSize=100) normal pagination
-// produces. Same category of ceiling, and the same value/rationale, as maxMailRewardTypesPerRun
-// above and buildings.go's maxCollectibleBuildingsPerRun/visitors.go's MaxVisitorsUpperBound: each
+// produces. Same category of ceiling, and the same value/rationale, as buildings.go's
+// maxCollectibleBuildingsPerRun/visitors.go's MaxVisitorsUpperBound: each
 // iteration can cost up to a full defaultCmdTimeout (8s, conn.go) against a peer that simply never
 // responds, so 300 * 8s bounds the worst case at ~40 minutes instead of up to ~4.4 hours.
 const maxMailBatchesPerLoop = 300
 
 // maxMailRewardBatchesPerRun bounds the TOTAL number of mail.reward.batch round trips
-// ClaimAllMail's reward-claim loop will issue, SUMMED ACROSS ALL distinct mail types in one run --
-// round-46 fix, closing a gap on a third axis distinct from maxMailRewardTypesPerRun (distinct
-// TYPE count) and maxMailBatchesPerLoop (batches PER TYPE, reset fresh for every type): neither of
-// those two caps bounds the sum across the whole outer loop. A hostile peer can spread up to
-// maxAggregateMailPerFetch(2000) unclaimed-reward mail entries across up to
-// maxMailRewardTypesPerRun(300) distinct types (~6-7 entries per type) each with a uid long
-// enough (up to maxMailUidLen=32767, still over maxUIDsBytes=30000) to force
-// batchByCountAndBytes into one uid per batch -- with only ~6-7 batches per type, no single type
-// ever reaches maxMailBatchesPerLoop's own 300-batch truncation, but the SUM across 300 types
-// still reaches roughly 2000 mail.reward.batch round trips, each able to cost up to a full
-// defaultCmdTimeout (8s, conn.go) against a peer that simply stalls -- ~4.4 hours, exactly the
-// threat maxMailBatchesPerLoop's own doc comment above claims is bounded to "~40 minutes instead
-// of up to ~4.4 hours", a claim that only holds per type. Same value/rationale as its siblings.
+// ClaimAllMail's reward-claim loop will issue, SUMMED ACROSS the mail groups in one run -- round-46
+// fix: maxMailBatchesPerLoop bounds the batches PER GROUP only, reset fresh for every group. A
+// hostile peer can spread up to maxAggregateMailPerFetch(2000) unclaimed-reward mail entries across
+// the mailShowGroups, each with a uid long enough (up to maxMailUidLen=32767, still over
+// maxUIDsBytes=30000) to force batchByCountAndBytes into one uid per batch -- no single group need
+// reach maxMailBatchesPerLoop's own 300-batch truncation, but the SUM still reaches roughly 2000
+// mail.reward.batch round trips, each able to cost up to a full defaultCmdTimeout (8s, conn.go)
+// against a peer that simply stalls. Same value/rationale as its siblings.
 const maxMailRewardBatchesPerRun = 300
 
 // maxMailUidLen bounds how long a single mail entry's `uid` field may be before ListMail's
@@ -247,7 +268,7 @@ func ListMail(conn *session.GameConn) ([]Mail, error) {
 	// values were never independently confirmed against the real client), so if the server's
 	// cursor ever repeats a uid across two pages -- e.g. an off-by-one boundary re-send -- that
 	// duplicate must not flow into the returned slice twice. Left unguarded, ClaimAllMail's
-	// groupUnclaimedByType would bucket the same uid twice under its type and put it twice into a
+	// groupUnclaimedByGroup would bucket the same uid twice under its group and put it twice into a
 	// single mail.reward.batch request's comma-joined uids field for that mail if it has an
 	// unclaimed reward -- unverified server-side behavior for a duplicate uid in one batch
 	// request, and not worth risking when a defensive guard is this cheap.
@@ -473,7 +494,7 @@ func ListMail(conn *session.GameConn) ([]Mail, error) {
 // a decoded (possibly non-benign) errorCode. Without that check, a dead connection burned one full
 // defaultCmdTimeout PER REMAINING BATCH instead of aborting immediately: ListMail's own maxPages
 // cap alone means up to 20 pages' worth of 100-uid read-status batches, plus one reward-claim
-// batch per distinct mail type in byType. Both loops now mirror CollectAll's identical
+// batch per mail group. Both loops now mirror CollectAll's identical
 // errors.As-against-net.Error early-abort (buildings.go) exactly: append the triggering error to
 // errs first (so the caller's aggregated error still reports what happened), then break. The
 // reward-claim loop is additionally skipped in full if the read-status loop's break was a
@@ -589,70 +610,49 @@ func ClaimAllMail(conn *session.GameConn) error {
 		return errors.Join(errs...)
 	}
 
-	byType := groupUnclaimedByType(mail)
-	if len(byType) == 0 {
+	byGroup := groupUnclaimedByGroup(mail)
+	if len(byGroup) == 0 {
 		slog.Info("no unclaimed mail rewards found", "totalMail", len(mail))
 		return errors.Join(errs...)
 	}
-	// mailTypes is collected and sorted before the loop below, mirroring PrintBuildings' identical
-	// byType-key-sorting pattern (buildings.go) for the identical reproducibility reason: Go
-	// deliberately randomizes map iteration order run-to-run, so iterating byType directly (as this
-	// used to) made which alliance-mail types get attempted before a genuine net.Error abort
-	// nondeterministic across identical runs. Sorting first makes two runs over identical unclaimed
-	// mail byte-for-byte identical in which type's reward-claim batch is attempted, and aborted on,
-	// first.
-	mailTypes := make([]int32, 0, len(byType))
-	for mailType := range byType {
-		mailTypes = append(mailTypes, mailType)
-	}
-	slices.Sort(mailTypes)
-	// Round-41 fix: mailTypes was previously unbounded, unlike every sibling sequential
-	// network-call loop in this codebase (buildings.go's CollectAll, capped at
-	// maxCollectibleBuildingsPerRun=300; visitors.go's GreetVisitors, capped at
-	// MaxVisitorsUpperBound=300) -- both explicitly sized so a peer that simply never responds
-	// bounds the loop's worst-case wall-clock to ~40 minutes (300 * defaultCmdTimeout=8s) instead
-	// of hanging indefinitely. groupUnclaimedByType buckets purely by server-controlled `type`
-	// values with no cap of its own, and ListMail's own maxAggregateMailPerFetch=2000 total-entry
-	// ceiling is over 6x this loop's 300-iteration sanity margin -- a hostile peer answering with
-	// up to 2000 unclaimed-reward mail entries, each a distinct type, could previously force up
-	// to ~4.4 hours of sequential mail.reward.batch timeouts from a single crafted response.
-	if len(mailTypes) > maxMailRewardTypesPerRun {
-		slog.Warn("distinct unclaimed mail reward types exceeds sanity ceiling; truncating reward-claim loop",
-			"count", len(mailTypes), "cap", maxMailRewardTypesPerRun)
-		mailTypes = mailTypes[:maxMailRewardTypesPerRun]
-	}
 	// Round-46 fix: totalRewardBatches counts mail.reward.batch round trips SUMMED across every
-	// distinct type in mailTypes, checked before each one is sent -- see
-	// maxMailRewardBatchesPerRun's own doc comment for why maxMailRewardTypesPerRun (type count)
-	// and maxMailBatchesPerLoop (batches per type, reset fresh each iteration) don't bound this on
-	// their own.
+	// group, checked before each one is sent -- see maxMailRewardBatchesPerRun's own doc comment
+	// for why maxMailBatchesPerLoop (batches per group, reset fresh each iteration) doesn't bound
+	// this on its own.
 	totalRewardBatches := 0
 rewardLoop:
-	for _, mailType := range mailTypes {
-		uids := byType[mailType]
-		slog.Info("claiming mail reward", "type", mailType, "count", len(uids))
+	// The groups go in the client's Claim All order (mailShowGroups), which also makes two runs
+	// over identical mail attempt, and abort on, the same group first.
+	for _, group := range mailShowGroups {
+		uids := byGroup[group]
+		if len(uids) == 0 {
+			continue
+		}
+		slog.Info("claiming mail reward", "group", group, "count", len(uids))
 		offset := 0
-		for _, batch := range truncateMailBatches(batchByCountAndBytes(uids, readBatchSize, maxUIDsBytes), fmt.Sprintf("reward-claim type=%d", mailType)) {
+		for _, batch := range truncateMailBatches(batchByCountAndBytes(uids, readBatchSize, maxUIDsBytes), fmt.Sprintf("reward-claim group=%d", group)) {
 			if totalRewardBatches >= maxMailRewardBatchesPerRun {
-				slog.Warn("total mail.reward.batch round trips across all types exceeds sanity ceiling; stopping reward-claim loop",
+				slog.Warn("total mail.reward.batch round trips across all groups exceeds sanity ceiling; stopping reward-claim loop",
 					"totalBatches", totalRewardBatches, "cap", maxMailRewardBatchesPerRun)
 				break rewardLoop
 			}
 			totalRewardBatches++
 			rewardParams := sfs.NewSFSObject()
 			rewardParams.PutUtfString("uids", strings.Join(batch, ","))
-			rewardParams.PutInt("type", mailType)
-			_, err := session.SendAndWait(conn, fmt.Sprintf("mail reward-batch (type %d, batch %d, size %d)", mailType, offset, len(batch)), "mail.reward.batch", rewardParams)
+			// The client's type is the group id as a string (MailRewardBatchMessage.lua:13), and
+			// it sends no types key from Claim All (BatchDoServerMail passes only uids and the group).
+			rewardParams.PutUtfString("type", strconv.FormatInt(group, 10))
+			_, err := session.SendAndWait(conn, fmt.Sprintf("mail reward-batch (group %d, batch %d, size %d)", group, offset, len(batch)), "mail.reward.batch", rewardParams)
 			errs = append(errs, err)
 			offset += len(batch)
 			var netErr net.Error
 			if errors.As(err, &netErr) && !netErr.Timeout() {
-				// A NON-TIMEOUT net.Error means the connection is known-dead: stop this type's
-				// remaining batches AND every other still-unprocessed type in byType, same
-				// reasoning as the read-status loop above and CollectAll's net.Error early-abort
-				// (buildings.go). A labeled break is used (rather than a flag checked at the top
-				// of the outer loop) since this needs to exit both the inner batch loop and the
-				// outer per-type loop in one step. A Timeout()==true net.Error (sendAndWait's
+				// A NON-TIMEOUT net.Error means the connection is known-dead: stop this group's
+				// remaining batches AND every other still-unprocessed group, same reasoning as the
+				// read-status loop above and CollectAll's net.Error early-abort (buildings.go). A
+				// labeled break is used (rather than a flag checked at the top of the outer loop)
+				// since this needs to exit both the inner batch loop and the outer per-group loop
+				// in one step. A Timeout()==true net.Error (sendAndWait's
 				// ordinary "no response within defaultCmdTimeout" outcome) is NOT evidence of a
 				// dead connection and falls through with err already appended to errs above, same
 				// as an ordinary decoded errorCode failure -- see
@@ -666,7 +666,7 @@ rewardLoop:
 
 // truncateMailBatches caps batches at maxMailBatchesPerLoop, warning and dropping the remainder
 // when it's exceeded -- see that constant's own doc comment for the full rationale. label
-// distinguishes the read-status loop from a specific mail type's reward-claim loop in the
+// distinguishes the read-status loop from a specific mail group's reward-claim loop in the
 // resulting Warn, since both of ClaimAllMail's batch loops share this same truncation.
 func truncateMailBatches(batches [][]string, label string) [][]string {
 	if len(batches) > maxMailBatchesPerLoop {
@@ -698,25 +698,22 @@ func batchByCountAndBytes(uids []string, maxCount, maxBytes int) [][]string {
 	return batches
 }
 
-// groupUnclaimedByType buckets mail with an unclaimed reward by its type field -- pulled out of
-// ClaimAllMail as a standalone, network-free function so it can be unit tested without a live
-// connection.
+// groupUnclaimedByGroup buckets mail with an unclaimed reward by its mailbox group (shownGroup),
+// the unit the client's Claim All claims in (__ClaimRewardGroupMail, MailDataManager.lua:439-462)
+// -- pulled out of ClaimAllMail as a standalone, network-free function so it can be unit tested
+// without a live connection.
 //
-// Same GetInt-can't-distinguish-missing-from-zero conflation HasUnclaimedReward guards against for
-// rewardStatus applies here to type: a reward-bearing mail whose `type` field is genuinely absent,
-// explicitly null, or present with the wrong concrete SFS type (e.g. sent as a string) would
-// otherwise fall through m.Type()'s GetInt to the int32 zero value, indistinguishable from a real
-// type=0, and get silently bucketed into (and later sent as) a `mail.reward.batch {type:0, ...}`
-// request the server may not recognize -- merging it into a genuinely-type=0 batch it doesn't
-// belong to. So this checks presence AND type via the shared requireFieldType guard (same one
-// ListMail already uses for uid, and alliance.go/buildings.go use for scienceId/uuid) before
-// trusting m.Type(), and skips -- with a warning -- any reward-bearing mail whose type is missing,
-// explicitly null, or wrong-typed, rather than defaulting it into a type=0 batch.
+// A reward-bearing mail whose `type` field is absent, null, or wrong-typed (e.g. sent as a string)
+// has no group to go in, so it is skipped with a warning via the shared requireFieldType guard
+// (same one ListMail already uses for uid, and alliance.go/buildings.go use for scienceId/uuid).
 //
 // Saved mail and the mailCantClaimAllTypes are left out, as the client's Claim All leaves them out
-// (GetAllCanRewardMailUids, MailDBManager.lua:1061-1075; see Mail.inBulkActions).
-func groupUnclaimedByType(mail []Mail) map[int32][]string {
-	byType := make(map[int32][]string)
+// (GetAllCanRewardMailUids, MailDBManager.lua:1061-1075; see Mail.inBulkActions). So is mail in no
+// group the client's Claim All walks: a type with no MailTypeToInternalGroup entry, or the hide
+// group. Those are logged, since they are rewards left for the player.
+func groupUnclaimedByGroup(mail []Mail) map[int64][]string {
+	byGroup := make(map[int64][]string)
+	var left []int32
 	for _, m := range mail {
 		if !m.HasUnclaimedReward() {
 			continue
@@ -725,9 +722,22 @@ func groupUnclaimedByType(mail []Mail) map[int32][]string {
 			continue
 		}
 		if !m.inBulkActions() {
+			if _, ok := m.group(); !ok {
+				left = append(left, m.Type()) // in no group
+			}
 			continue
 		}
-		byType[m.Type()] = append(byType[m.Type()], m.Uid())
+		g, ok := m.shownGroup()
+		if !ok {
+			left = append(left, m.Type()) // the hide group: read at login, never claimed in bulk
+			continue
+		}
+		byGroup[g] = append(byGroup[g], m.Uid())
 	}
-	return byType
+	if len(left) > 0 {
+		slices.Sort(left)
+		slog.Info("mail rewards outside the mailbox tabs the client's Claim All walks are left unclaimed",
+			"count", len(left), "types", slices.Compact(left))
+	}
+	return byGroup
 }
