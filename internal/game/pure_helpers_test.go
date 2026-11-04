@@ -40,6 +40,16 @@ func TestCollectibleBuildings(t *testing.T) {
 	}
 }
 
+// TestMailGroupsMatchTheTables fails when the data tables are regenerated without the mail groups.
+// genmailgroups needs LASTWAR_LUA as well as LASTWAR_TABLES and keeps its file without both, so a
+// table-only go generate would leave table mail_group's newer types, and their rewards, out.
+func TestMailGroupsMatchTheTables(t *testing.T) {
+	if mailGroupsTableVersion != activityTableVersion {
+		t.Errorf("mail_groups_gen.go is from table %s but the activity table is %s: rerun go generate with LASTWAR_LUA and LASTWAR_LUA_VERSION set too",
+			mailGroupsTableVersion, activityTableVersion)
+	}
+}
+
 func TestGroupUnclaimedByGroup(t *testing.T) {
 	newMail := func(uid string, mailType int32, rewardStatus int32) Mail {
 		o := sfs.NewSFSObject()
