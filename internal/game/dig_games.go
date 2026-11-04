@@ -114,7 +114,7 @@ func digsCheckRequest(cmd string, p *sfs.SFSObject) error {
 
 // digsTrip disables the dig features' writes for the rest of the process once a reply shows the
 // diamond balance falling; the trip is also persisted (tripwire.go), and while that file exists
-// no dig write is sent in later runs either.
+// later runs refuse the spend commands (digsSpendCmds) but still send the free writes.
 var digsTrip struct {
 	sync.Mutex
 	reason string
