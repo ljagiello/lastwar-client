@@ -33,9 +33,10 @@ import (
 //     offseason.dig.activity.info {} (ActivityListDataManager.lua:522-526,
 //     OffSeasonDiggingDataManager.lua:13-16).
 //   - alliance-boss-dig: the plague-boss vault of Alliance Drill, type 202. The client sends
-//     alliance.boss.act.info {serverId: Int} for a listed type-202 activity, with serverId =
-//     init user.serverId (ActivityListDataManager.lua:174-176, AllyDrillDataManager.lua:45-62,
-//     PlayerInfo.lua:490-491, 761-765). A vault exists while the reply's digGameInfo has a uuid
+//     alliance.boss.act.info {serverId: Int} for a listed type-202 activity, with serverId = the
+//     source server: init user.crossFightSrcServerId when it is >= 0, else user.serverId
+//     (ActivityListDataManager.lua:174-176, AllyDrillDataManager.lua:50-58; allianceBossServer).
+//     A vault exists while the reply's digGameInfo has a uuid
 //     and now <= endTime (AllyDrillDataManager.lua:750-759). Its info is
 //     alliance.boss.dig.game.info {}, and the type defaults to alliance
 //     (AllianceBossDigGameInfoMessage.lua:13-17). E100172 is the reply when there is no such
@@ -463,9 +464,9 @@ func runAllianceBossDigs(conn *session.GameConn, in *Init, dry bool) error {
 		return nil
 	}
 	me := ownUID(in)
-	server, ok := claimInt(in.Object("user"), "serverId")
+	server, ok := allianceBossServer(in)
 	if me == "" || !ok || server <= 0 {
-		slog.Info(feature + ": init has no user.uid or user.serverId; skipping")
+		slog.Info(feature + ": init has no user.uid or source server id; skipping")
 		return nil
 	}
 	r := newDigsRun(conn, in, feature, dry)
@@ -492,6 +493,17 @@ func runAllianceBossDigs(conn *session.GameConn, in *Init, dry bool) error {
 	l.start = 0 // HasDigGame checks only the end
 	allianceBossDigGame.process(r, l, me, false)
 	return r.err()
+}
+
+// allianceBossServer is the client's GetSourceServerId: init user.crossFightSrcServerId when it is
+// >= 0 (the account fights on another server), else user.serverId (PlayerInfo.lua:25, 524-526,
+// 794-796). The caller still requires it > 0, so a 0 source server sends nothing.
+func allianceBossServer(in *Init) (int64, bool) {
+	user := in.Object("user")
+	if src, ok := claimInt(user, "crossFightSrcServerId"); ok && src >= 0 {
+		return src, true
+	}
+	return claimInt(user, "serverId")
 }
 
 // process handles one vault: claim what is due, else open the free stone and claim if it hit.

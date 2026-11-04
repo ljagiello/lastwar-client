@@ -309,6 +309,45 @@ func TestAllianceBossDigOpensAndClaims(t *testing.T) {
 	digsAssertSafe(t, fake)
 }
 
+// TestAllianceBossDigSendsSourceServer is the B35 regression test: the client sends
+// alliance.boss.act.info {serverId: GetSourceServerId()} (AllyDrillDataManager.lua:50-58), which is
+// init user.crossFightSrcServerId when it is >= 0, else user.serverId (PlayerInfo.lua:25, 524-526,
+// 794-796). A source server of 0 sends nothing.
+func TestAllianceBossDigSendsSourceServer(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for _, c := range []struct {
+		name string
+		src  int32 // user.crossFightSrcServerId; < -1 leaves it out
+		want int32 // serverId sent; 0 means no request
+	}{
+		{"cross-server fight", 123, 123},
+		{"not cross-server", -1, 777},
+		{"field absent", -2, 777},
+		{"source server 0", 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			conn, fake := startEvFake(t, (&vaultFake{vaults: map[int64]*vaultState{}}).reply)
+			in := digsInit(0, evActivity(94301))
+			if c.src >= -1 {
+				in.Object("user").PutInt("crossFightSrcServerId", c.src)
+			}
+			if err := runAllianceBossDigs(conn, in, false); err != nil {
+				t.Fatal(err)
+			}
+			acts := fake.only(allianceBossActCmd)
+			if c.want == 0 {
+				if len(fake.requests()) != 0 {
+					t.Errorf("sent %v, want nothing", fake.cmds())
+				}
+				return
+			}
+			if len(acts) != 1 || acts[0].Params.GetInt("serverId") != c.want {
+				t.Errorf("alliance.boss.act.info %v, want one with serverId %d", acts, c.want)
+			}
+		})
+	}
+}
+
 func TestAllianceBossDigGates(t *testing.T) {
 	withEvNow(t, evTestNow)
 	conn, fake := startEvFake(t, (&vaultFake{vaults: map[int64]*vaultState{}, noAct: true}).reply)

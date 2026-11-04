@@ -172,3 +172,58 @@ func TestActivityVisitorsCapsClaimsPerRun(t *testing.T) {
 		t.Errorf("server saw %d claims, want the per-run cap %d", len(got), maxActivityVisitorsPerRun)
 	}
 }
+
+// TestActivityVisitorsReclaimsAfterReset is the B41 regression test. The client copies init's
+// rewardState and nextResetTime and resets rewardState to 0 after max(nextResetTime - now, 0) s,
+// at once when the reset has passed (ActivityVisitorData.lua:26-53), so a stale rewardState 1 with
+// a past nextResetTime is claimable again. A future, zero or missing nextResetTime keeps it
+// skipped, and a past eTime still wins.
+func TestActivityVisitorsReclaimsAfterReset(t *testing.T) {
+	buf := captureVisitorLog(t)
+	now := time.Unix(1_800_000_000, 0)
+	future := now.Add(24 * time.Hour)
+	withReset := func(eTime, reset time.Time) *sfs.SFSObject {
+		e := activityVisitorEntry(1, eTime, 4006)
+		e.PutLong("nextResetTime", reset.Unix())
+		return e
+	}
+	zeroReset := activityVisitorEntry(1, future, 4006)
+	zeroReset.PutLong("nextResetTime", 0)
+	noReset := sfs.NewSFSObject()
+	noReset.PutLong("eTime", future.Unix())
+	noReset.PutInt("rewardState", 1)
+	noReset.PutInt("eventId", 4006)
+	entries := map[string]*sfs.SFSObject{
+		"94401": withReset(future, now.Add(-time.Minute)),            // reset passed: claim
+		"94402": withReset(future, now),                              // reset exactly now: claim
+		"94403": withReset(future, now.Add(time.Hour)),               // reset still ahead
+		"94404": zeroReset,                                           // no reset time
+		"94405": noReset,                                             // nextResetTime missing
+		"94406": withReset(now.Add(-time.Hour), now.Add(-time.Hour)), // event over
+	}
+	in := initWithActivityVisitors(entries, "94401", "94402", "94403", "94404", "94405", "94406")
+
+	client, stop := serveVisitorCmds(t, visitorOK)
+	if err := claimActivityVisitors(client, in, now); err != nil {
+		t.Fatalf("claimActivityVisitors() = %v, want nil", err)
+	}
+	var claimed []int32
+	for _, r := range stop() {
+		claimed = append(claimed, r.params.GetInt("activityId"))
+	}
+	if len(claimed) != 2 || claimed[0] != 94401 || claimed[1] != 94402 {
+		t.Fatalf("claimed %v, want [94401 94402]", claimed)
+	}
+	logged := buf.String()
+	for _, want := range []string{
+		`activity visitor's period has reset although init still says rewardState; claiming as the client does" activityId=94401 eventId=4006 rewardState=1 nextResetTime=1799999940`,
+		`msg="activity visitor already claimed this period" activityId=94403`,
+		`msg="activity visitor already claimed this period" activityId=94404 eventId=4006 nextResetTime=0`,
+		`msg="activity visitor already claimed this period" activityId=94405`,
+		`msg="activity visitor's event has ended" activityId=94406`,
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log missing %q:\n%s", want, logged)
+		}
+	}
+}

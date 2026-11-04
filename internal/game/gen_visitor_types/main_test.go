@@ -8,37 +8,45 @@ import (
 )
 
 // fixture mirrors the real table's layout: "index" gives 1-based column positions, and each row
-// is [key, cols]. Here id is column 2 and type column 1, unlike the real table (1 and 5), so a
-// parser that hard-codes positions fails.
-const fixture = `{"name":"lw_base_visitor_event","index":{"type":[1,"number"],"id":[2,"number"],"para":[3,"string"]},
-"rows":[[1001,[1,1001,"200201;1;14;1000"]],[2001,[2,2001,null]],[3115,[3,3115,null]]]}`
+// is [key, cols]. Here id is column 2, type column 1 and choose_treasure column 4, unlike the real
+// table (1, 5 and 25), so a parser that hard-codes positions fails. 20703 carries the real
+// table's choose_treasure value.
+const fixture = `{"name":"lw_base_visitor_event","index":{"type":[1,"number"],"id":[2,"number"],"para":[3,"string"],"choose_treasure":[4,"string"]},
+"rows":[[1001,[1,1001,"200201;1;14;1000",null]],[2001,[2,2001,null,null]],[3115,[3,3115,null,""]],
+[20703,[10,20703,null,"1;601002|2;601001"]],[20840,[10,20840,"1;290101",null]]]}`
 
 func TestParseTableUsesIndexPositions(t *testing.T) {
 	got, err := parseTable(strings.NewReader(fixture))
 	if err != nil {
 		t.Fatalf("parseTable() error = %v", err)
 	}
-	want := map[int32]int32{1001: 1, 2001: 2, 3115: 3}
-	if len(got) != len(want) {
-		t.Fatalf("parseTable() = %v, want %v", got, want)
+	want := map[int32]int32{1001: 1, 2001: 2, 3115: 3, 20703: 10, 20840: 10}
+	if len(got.types) != len(want) {
+		t.Fatalf("parseTable() types = %v, want %v", got.types, want)
 	}
 	for id, typ := range want {
-		if got[id] != typ {
-			t.Errorf("type of %d = %d, want %d", id, got[id], typ)
+		if got.types[id] != typ {
+			t.Errorf("type of %d = %d, want %d", id, got.types[id], typ)
 		}
+	}
+	if len(got.choices) != 1 || !got.choices[20703] {
+		t.Errorf("parseTable() choices = %v, want only 20703 (a null or empty choose_treasure is no choice)", got.choices)
 	}
 }
 
 func TestParseTableRejectsBadInput(t *testing.T) {
+	const idx = `"index":{"id":[1,"number"],"type":[2,"number"],"choose_treasure":[3,"string"]}`
 	cases := map[string]string{
-		"wrong table": `{"name":"other","index":{"id":[1,"number"],"type":[2,"number"]},"rows":[[1,[1,2]]]}`,
-		"no type col": `{"name":"lw_base_visitor_event","index":{"id":[1,"number"]},"rows":[[1,[1,2]]]}`,
-		"key/id skew": `{"name":"lw_base_visitor_event","index":{"id":[1,"number"],"type":[2,"number"]},"rows":[[1,[2,2]]]}`,
-		"null type":   `{"name":"lw_base_visitor_event","index":{"id":[1,"number"],"type":[2,"number"]},"rows":[[1,[1,null]]]}`,
-		"short row":   `{"name":"lw_base_visitor_event","index":{"id":[1,"number"],"type":[5,"number"]},"rows":[[1,[1,2]]]}`,
-		"duplicate":   `{"name":"lw_base_visitor_event","index":{"id":[1,"number"],"type":[2,"number"]},"rows":[[1,[1,2]],[1,[1,3]]]}`,
-		"fractional":  `{"name":"lw_base_visitor_event","index":{"id":[1,"number"],"type":[2,"number"]},"rows":[[1,[1,2.5]]]}`,
-		"no rows":     `{"name":"lw_base_visitor_event","index":{"id":[1,"number"],"type":[2,"number"]},"rows":[]}`,
+		"wrong table":   `{"name":"other",` + idx + `,"rows":[[1,[1,2,null]]]}`,
+		"no type col":   `{"name":"lw_base_visitor_event","index":{"id":[1,"number"],"choose_treasure":[3,"string"]},"rows":[[1,[1,2,null]]]}`,
+		"no choose col": `{"name":"lw_base_visitor_event","index":{"id":[1,"number"],"type":[2,"number"]},"rows":[[1,[1,2]]]}`,
+		"key/id skew":   `{"name":"lw_base_visitor_event",` + idx + `,"rows":[[1,[2,2,null]]]}`,
+		"null type":     `{"name":"lw_base_visitor_event",` + idx + `,"rows":[[1,[1,null,null]]]}`,
+		"number choice": `{"name":"lw_base_visitor_event",` + idx + `,"rows":[[1,[1,2,7]]]}`,
+		"short row":     `{"name":"lw_base_visitor_event",` + idx + `,"rows":[[1,[1,2]]]}`,
+		"duplicate":     `{"name":"lw_base_visitor_event",` + idx + `,"rows":[[1,[1,2,null]],[1,[1,3,null]]]}`,
+		"fractional":    `{"name":"lw_base_visitor_event",` + idx + `,"rows":[[1,[1,2.5,null]]]}`,
+		"no rows":       `{"name":"lw_base_visitor_event",` + idx + `,"rows":[]}`,
 	}
 	for name, in := range cases {
 		if got, err := parseTable(strings.NewReader(in)); err == nil {
@@ -48,32 +56,43 @@ func TestParseTableRejectsBadInput(t *testing.T) {
 }
 
 func TestCheckKnownPairs(t *testing.T) {
-	good := map[int32]int32{}
+	good := visitorTable{types: map[int32]int32{}, choices: map[int32]bool{}}
 	for id, typ := range knownPairs {
-		good[id] = typ
+		good.types[id] = typ
+	}
+	for _, id := range knownChoices {
+		good.choices[id] = true
 	}
 	if err := checkKnownPairs(good); err != nil {
 		t.Errorf("checkKnownPairs(knownPairs) = %v, want nil", err)
 	}
-	good[2001] = 1
-	delete(good, 1002)
+	good.types[2001] = 1
+	delete(good.types, 1002)
+	delete(good.choices, 20703)
 	err := checkKnownPairs(good)
-	if err == nil || !strings.Contains(err.Error(), "eventId 2001 has type 1") || !strings.Contains(err.Error(), "eventId 1002 missing") {
-		t.Errorf("checkKnownPairs(broken) = %v, want both the changed and the missing pair reported", err)
+	if err == nil {
+		t.Fatal("checkKnownPairs(broken) = nil, want an error")
+	}
+	for _, want := range []string{"eventId 2001 has type 1", "eventId 1002 missing", "eventId 20703 has no choose_treasure"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("checkKnownPairs(broken) = %v, want it to report %q", err, want)
+		}
 	}
 }
 
 func TestRenderIsFormattedGo(t *testing.T) {
-	src, err := render(map[int32]int32{2001: 2, 1001: 1}, "39432", "39516")
+	tab := visitorTable{types: map[int32]int32{2001: 2, 1001: 1, 20703: 10}, choices: map[int32]bool{20703: true}}
+	src, err := render(tab, "39879", "40026")
 	if err != nil {
 		t.Fatalf("render() error = %v", err)
 	}
 	s := string(src)
 	for _, want := range []string{
 		"// Code generated by internal/game/gen_visitor_types; DO NOT EDIT.\n",
-		"table version 39432\n// (byte-identical in live table version 39516).",
+		"3 rows, table version 39879\n// (byte-identical in live table version 40026).",
 		"package game\n",
-		"1001: 1,\n\t2001: 2,\n",
+		"1001:  1,\n\t2001:  2,\n\t20703: 10,\n",
+		"var visitorChoiceEvents = map[int32]bool{\n\t20703: true,\n}\n",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("render() output missing %q:\n%s", want, s)
@@ -88,7 +107,7 @@ func TestRunRejectsTableFailingKnownPairs(t *testing.T) {
 	}
 	out := filepath.Join(t.TempDir(), "out.go")
 	if err := run(path, "1", "", out); err == nil {
-		t.Fatal("run() = nil, want the known-pair check to reject a three-row table")
+		t.Fatal("run() = nil, want the known-pair check to reject a five-row table")
 	}
 	if _, err := os.Stat(out); !os.IsNotExist(err) {
 		t.Errorf("run() wrote %s despite failing the known-pair check", out)
