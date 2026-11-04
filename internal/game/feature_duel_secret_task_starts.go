@@ -53,10 +53,15 @@ import (
 //     Global/ConstDefine.lua:260). The main city is init worldMainPoint (BuildManager.lua:167-168).
 //
 // Hard limits: never `hero.dispatch.refresh` (costType 1 is 100 diamonds), never a speed-up item,
-// at most secretTaskStartsMaxPerRun start requests per run, and a diamond tripwire: the balance
-// (hero.dispatch.list's gold, ActDispatchTaskDataManager.lua:363-366, else init user.gold,
-// PlayerInfo.lua:612-613) is compared after every start with the start reply's gold or a fresh
-// list's; any drop is an ERROR that stops the run. Not replicated, static-only: the client also
+// at most secretTaskStartsMaxPerRun start requests per run, and a diamond tripwire. The client
+// takes a gold field from the hero.dispatch.list reply when there is one (UpdateAllSingleTasks,
+// ActDispatchTaskDataManager.lua:382-385) and none from the start reply (DispatchStartMessage.lua:
+// 12-25). So the balance is the list's gold, else init user.gold (PlayerInfo.lua:612-613), and
+// after every start it is compared with any gold the start reply or a fresh list carries; any drop
+// is an ERROR that stops the run and persists the trip (tripwire.go). Live the list has carried no
+// gold (docs/live-validation.mdx:424), and hero.dispatch.start has no cost parameter
+// (DispatchStartMessage.lua:5-10), so when no reply carries gold the start goes unchecked and the
+// run goes on to its per-run cap. Not replicated, static-only: the client also
 // refuses while on a Landlord center server (UIFormationDispatchTaskView.lua:421) or away from
 // home (DispatchTaskItem.lua:477); a headless login is on its home server.
 const (
@@ -449,7 +454,12 @@ func secretTaskStartsRecommend(heroes []secretTaskStartsHero, used map[int64]boo
 				}
 				if _, all := need.matches(p); all {
 					add(p)
-					left = need.left()
+					// Stop once every condition is met (:227-230): with none open, matches
+					// reports every hero as a full match, and the scan would add heroes the
+					// task doesn't need, tying them up or pushing the set past three.
+					if left = need.left(); left == 0 {
+						break
+					}
 				}
 			}
 		}
@@ -534,8 +544,9 @@ func secretTaskStartsPlace(conn *session.GameConn, uuid int64) (int64, error) {
 	return point, nil
 }
 
-// secretTaskStartsGold reads the diamond balance from a hero.dispatch.list reply, else init
-// user.gold (only that field of user is read; user holds PII). src names where it came from.
+// secretTaskStartsGold reads the diamond balance from a hero.dispatch.list reply
+// (ActDispatchTaskDataManager.lua:382-385), else init user.gold (only that field of user is read;
+// user holds PII). src names where it came from.
 func secretTaskStartsGold(list *sfs.SFSObject, in *Init) (gold int64, src string, ok bool) {
 	if g, ok := claimInt(list, "gold"); ok {
 		return g, "hero.dispatch.list", true
@@ -557,6 +568,11 @@ func secretTaskStartsRun(conn *session.GameConn, in *Init, dryRun bool) error {
 	if in == nil || in.Raw == nil {
 		slog.Info(name + ": no init push; skipping")
 		return nil
+	}
+	if !dryRun {
+		if err := tripwireErr(name); err != nil {
+			return err
+		}
 	}
 	if hq := claimHQLevel(in); hq < secretTasksNeedHQ || !claimHasActivity(in, secretTasksActivities...) {
 		slog.Info(name+": DispatchTask activity not open", "hqLevel", hq)
@@ -597,6 +613,7 @@ func secretTaskStartsRun(conn *session.GameConn, in *Init, dryRun bool) error {
 	}
 	var errs []error
 	attempts := 0
+	noGoldLogged := false
 	for _, t := range slices.Clone(tasks) {
 		// Re-check against the latest list: OnStartClick reads the task afresh (:427-428).
 		if i := slices.IndexFunc(tasks, func(x secretTaskStartsTask) bool { return x.uuid == t.uuid }); i < 0 || tasks[i].completion != 0 {
@@ -690,13 +707,21 @@ func secretTaskStartsRun(conn *session.GameConn, in *Init, dryRun bool) error {
 		}
 		if afterOK && after < gold {
 			slog.Error(name+": DIAMOND BALANCE FELL after hero.dispatch.start; stopping", "uuid", t.uuid, "before", gold, "after", after)
+			tripwireTrip(name, secretTaskStartsCmd, fmt.Sprintf("task %d: diamonds fell from %d to %d", t.uuid, gold, after))
 			return errors.Join(append(errs, fmt.Errorf("%s: task %d: %w (%d -> %d)", name, t.uuid, errSecretTaskStartsDiamonds, gold, after))...)
 		}
-		if lerr != nil || !afterOK {
-			slog.Warn(name+": could not re-read the diamond balance after a start; starting nothing more this run", "uuid", t.uuid, "listError", lerr)
+		if lerr != nil {
+			slog.Warn(name+": could not re-read the task list after a start; starting nothing more this run", "uuid", t.uuid, "listError", lerr)
 			return errors.Join(append(errs, lerr)...)
 		}
-		gold = after
+		if afterOK {
+			gold = after
+		} else if !noGoldLogged {
+			// The expected case live: neither reply carries gold (see the doc comment), and
+			// the start has no cost parameter, so the run goes on.
+			noGoldLogged = true
+			slog.Info(name+": no reply after the start carries a diamond balance; nothing to compare, continuing", "uuid", t.uuid)
+		}
 		tasks = secretTaskStartsTasks(relist.Params)
 		running, used = secretTaskStartsBusy(tasks)
 		if err == nil {

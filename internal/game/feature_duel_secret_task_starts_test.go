@@ -315,11 +315,24 @@ func TestSecretTaskStartsBalanceChecks(t *testing.T) {
 	if err != nil || len(stStarts(fake)) != 0 {
 		t.Errorf("no balance: run = %v, sent %v; want no start", err, fake.cmds())
 	}
-	// Init has a balance but no reply carries one: the first start can't be verified, so the run
-	// stops there.
+	// Init has a balance but no reply carries one, as live (docs/live-validation.mdx:424): the
+	// start has no cost parameter, so the run goes on to the per-run cap, re-listing after each.
 	fake, err = stRun(t, stInit(2, 1000, heroes...), &stServer{tasks: tasks(), startGold: -1}, false)
-	if err != nil || len(stStarts(fake)) != 1 {
-		t.Errorf("unverifiable: run = %v, %d starts; want one start and no error", err, len(stStarts(fake)))
+	want := []string{secretTasksListCmd, secretTaskStartsCmd, secretTasksListCmd, secretTaskStartsCmd, secretTasksListCmd}
+	if err != nil || !slices.Equal(fake.cmds(), want) {
+		t.Errorf("unverifiable: run = %v, sent %v; want %v", err, fake.cmds(), want)
+	}
+	// A failed re-list still stops the run: the busy heroes are no longer known.
+	s := &stServer{tasks: tasks(), startGold: -1}
+	conn, fake := startRewardFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == secretTasksListCmd && s.lists > 0 {
+			s.lists++
+			return rewardErr("999999")
+		}
+		return s.reply(cmd, p)
+	})
+	if err := secretTaskStartsRun(conn, stInit(2, 1000, heroes...), false); err == nil || len(stStarts(fake)) != 1 {
+		t.Errorf("failed re-list: run = %v, %d starts; want an error and one start", err, len(stStarts(fake)))
 	}
 	// A rising balance is fine.
 	fake, err = stRun(t, stInit(2, 1000, heroes...), &stServer{tasks: tasks(), listGold: []int64{1000, 1050}, startGold: -1}, false)
@@ -445,6 +458,26 @@ func TestSecretTaskStartsRecommend(t *testing.T) {
 			map[int]secretTaskStartsCond{2: {4, 1}, 3: {6, 1}, 4: {32, 1}}, []int64{2}},
 		"busy hero excluded": {[]secretTaskStartsHero{h(1, 5, 90, 12), h(2, 4, 80, 11), h(3, 5, 90, 12)}, map[int64]bool{1: true}, hard, []int64{2, 3}},
 		"impossible":         {[]secretTaskStartsHero{h(1, 5, 90, 12), h(2, 4, 79, 11)}, nil, hard, nil},
+		// The client stops scanning once every condition is met (FormationDispatchUtil.lua:
+		// 227-230). Hero 3 is the only level-65 hero, so CleanData1 takes it; at offset -1 hero 1
+		// meets the rank condition and closes the set. Hero 4, matching quality alone, must not
+		// be added after that.
+		"stops once met": {[]secretTaskStartsHero{
+			{uuid: 1, quality: 5, rank: 11, level: 10},
+			{uuid: 2, quality: 5, rank: 11, level: 10},
+			{uuid: 3, quality: 5, rank: 5, level: 70},
+			{uuid: 4, quality: 5, rank: 5, level: 10},
+		}, nil, map[int]secretTaskStartsCond{2: {5, 1}, 3: {11, 1}, 4: {65, 1}}, []int64{1, 3}},
+		// CleanData1 takes both level-65 heroes (3 and 5), hero 1 closes the set at offset -1;
+		// an extra hero would make four, which the client never returns, so the task would be
+		// skipped though three heroes start it.
+		"stops before a fourth hero": {[]secretTaskStartsHero{
+			{uuid: 1, quality: 5, rank: 11, level: 10},
+			{uuid: 2, quality: 5, rank: 11, level: 10},
+			{uuid: 3, quality: 5, rank: 5, level: 70},
+			{uuid: 4, quality: 5, rank: 5, level: 10},
+			{uuid: 5, quality: 4, rank: 5, level: 70},
+		}, nil, map[int]secretTaskStartsCond{2: {5, 1}, 3: {11, 1}, 4: {65, 2}}, []int64{1, 3, 5}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := secretTaskStartsRecommend(c.heroes, c.used, c.conds)
