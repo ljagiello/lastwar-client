@@ -78,25 +78,35 @@ func (k *serverClock) now() (time.Time, bool) {
 
 // ServerNow is the server's current time as the client keeps it: synced from the pongs on this
 // connection, running on the host's monotonic clock in between. Before the first pong it is the
-// host clock, and ok is false.
+// host clock, and ok is false; so is a nil connection.
 func (c *GameConn) ServerNow() (now time.Time, ok bool) {
+	if c == nil {
+		return time.Now(), false
+	}
 	return c.clock.now()
 }
 
-// notePong feeds a pong's serverTime and clientTime to the clock. Pings the client sends carry no
-// serverTime, so the fake-server side of a test pair, which reads them, records nothing.
-func (c *GameConn) notePong(env *Envelope) {
+// clockMinServerMs is 2020-01-01 in Unix ms: a pong whose serverTime is earlier is not a server
+// clock reading and is ignored.
+const clockMinServerMs = 1577836800000
+
+// notePong feeds a pong's serverTime and clientTime to the clock, as of recv, when the packet was
+// read off the socket. Pings the client sends carry no serverTime, so the fake-server side of a
+// test pair, which reads them, records nothing.
+func (c *GameConn) notePong(env *Envelope, recv time.Time) {
 	if env.Controller != ControllerSystem || env.Action != ActionPingPong || env.Content == nil {
 		return
 	}
 	serverMs, ok1 := pongMs(env.Content, "serverTime")
 	clientMs, ok2 := pongMs(env.Content, "clientTime")
-	if !ok1 || !ok2 {
+	if !ok1 || !ok2 || serverMs < clockMinServerMs {
 		return
 	}
-	c.clock.sync(time.Now(), serverMs, clientMs)
+	c.clock.sync(recv, serverMs, clientMs)
 }
 
+// pongMs reads a pong's ms field: a Long, as both the client (GetLong, BaseUtils.decompiled.cs:
+// 36406-36407) and Go's ping send it, or an Int.
 func pongMs(o *sfs.SFSObject, key string) (int64, bool) {
 	v, ok := o.Get(key)
 	if !ok {
@@ -111,9 +121,9 @@ func pongMs(o *sfs.SFSObject, key string) (int64, bool) {
 	return 0, false
 }
 
-// logClock logs how far the host clock is from the server's, once, as the connection closes. It
-// changes nothing: the time gates still read the host clock (MASTER B49), and these lines show
-// whether they need the server's.
+// logClock logs how far the host clock is from the server's, once, as the connection closes.
+// rttMs is the round trip of the sample in use, which a later pong under 200 ms replaces even when
+// slower.
 func (c *GameConn) logClock() {
 	k := &c.clock
 	k.mu.Lock()
@@ -123,7 +133,7 @@ func (c *GameConn) logClock() {
 		return // no heartbeat ran on this connection
 	}
 	if !synced {
-		slog.Info("server clock: no pong carried serverTime and clientTime on this connection")
+		slog.Debug("server clock: no pong carried serverTime and clientTime on this connection")
 		return
 	}
 	server, _ := k.now()
