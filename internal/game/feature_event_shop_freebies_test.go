@@ -125,6 +125,8 @@ func TestEvFreeFlagDue(t *testing.T) {
 			switch x := v.(type) {
 			case int:
 				o.PutInt(k, int32(x))
+			case bool:
+				o.PutBool(k, x)
 			case *sfs.SFSArray:
 				o.PutSFSArray(k, x)
 			}
@@ -139,7 +141,11 @@ func TestEvFreeFlagDue(t *testing.T) {
 	}{
 		{"flag 0 with box reward", mk(map[string]any{"free": 0, "boxReward": freebieReward()}), false, true},
 		{"flag 1", mk(map[string]any{"free": 1, "boxReward": freebieReward()}), false, false},
-		{"no flag", mk(map[string]any{"boxReward": freebieReward()}), false, false},
+		// freeRewardState starts at 0 (ActivityFreeRewardData.lua:5) and no key overwrites it.
+		{"no flag, reward list: claimable", mk(map[string]any{"boxReward": freebieReward()}), false, true},
+		{"no flag, no reward list", mk(map[string]any{}), true, false},
+		{"free_reward is the list and no flag follows", mk(map[string]any{"free_reward": freebieReward()}), false, false},
+		{"false flag is skipped like nil", mk(map[string]any{"free": false, "freeReward": 1, "boxReward": freebieReward()}), false, false},
 		{"free_reward is the list, freeReward the flag", mk(map[string]any{"freeReward": 0, "free_reward": freebieReward()}), false, true},
 		{"reward key ignored for gift box", mk(map[string]any{"free": 0, "reward": freebieReward()}), false, false},
 		{"reward key used elsewhere", mk(map[string]any{"free": 0, "reward": freebieReward()}), true, true},
@@ -149,6 +155,40 @@ func TestEvFreeFlagDue(t *testing.T) {
 		if got := evFreeFlagDue(c.o, c.rewardKey); got != c.want {
 			t.Errorf("%s: due = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// A detail reply with a reward list and none of the three flag keys is claimable, as the client's
+// default state 0 is (ActivityFreeRewardData.lua:5, 46-48); free_reward as the list with no flag is not.
+func TestEventShopFreebiesAbsentFlagIsClaimable(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		switch cmd {
+		case "get.activity.gift.box.info":
+			r := sfs.NewSFSObject()
+			r.PutSFSArray("boxReward", freebieReward())
+			return r
+		case "activity.mak.food.info":
+			e := sfs.NewSFSObject()
+			e.PutInt("id", 7)
+			e.PutSFSArray("free_reward", freebieReward())
+			arr := sfs.NewSFSArray()
+			arr.AddSFSObject(e)
+			r := sfs.NewSFSObject()
+			r.PutSFSArray("info", arr)
+			return r
+		}
+		return evOK()
+	})
+	if err := runEventShopFreebies(conn, evInit(30, evActivity(98001), evActivity(99003))); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(fake.cmds(), ",")
+	if want := "get.activity.gift.box.info,gift.box.free.reward,activity.mak.food.info"; got != want {
+		t.Fatalf("sent %s\nwant %s", got, want)
+	}
+	if p := fake.only("gift.box.free.reward")[0].Params; p.GetInt("activityId") != 98001 {
+		t.Errorf("gift box claim = %v, want {activityId:98001}", p)
 	}
 }
 

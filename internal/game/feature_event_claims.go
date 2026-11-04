@@ -37,18 +37,21 @@ import (
 //     activity.score.reward {activityId: Int, index: Int} for each next milestone reached
 //     (ActTaskManager; UI senders in ui-1 chunk "ActTask").
 //   - Peak and gale arenas: arena.info {} -> newArenaInfo/galeArenaInfo {showTime, startTime,
-//     endTime (ms)}; while one is open, new.arena.rank.list / gale.arena.rank.list {} ->
-//     rankData{battleCount, dailyReward[{needCount, rewarded}]}; new.arena.reward / gale.arena.reward
-//     {target: Int 1-based} per reached box (NewPeakArenaManager.lua:218-229,
-//     NewGaleArenaManager.lua:208-221). The client's -1 "all" is not used: its server meaning is
-//     unverified.
+//     endTime (ms)}; while one is open, new.arena.rank.list / gale.arena.rank.list {} -> battleCount
+//     and dailyReward[{needCount, rewarded}] at the reply's top level (the handlers keep the whole
+//     reply as rankData: NewArenaRankListMessage.lua:12, NewPeakArenaManager.lua:142-150,
+//     NewGaleArenaManager.lua:132-140); new.arena.reward / gale.arena.reward {target: Int 1-based}
+//     per box with battleCount >= needCount and rewarded 0 (GetNeedGetRewardList,
+//     NewPeakArenaManager.lua:239-250, NewGaleArenaManager.lua:229-240; NewPeakArenaTipBoxItem.lua:
+//     58-80). The client's -1 "all" is not used: its server meaning is unverified.
 //   - Flower train: flower.train.receive.reward {trainUuid: Long} for the account's own init
 //     flowerTrainArr entries that arrived (arrived 1, or now >= arriveTime)
 //     (BaseSingleFlowerTrainData.lua:60-70, 273-279).
 //
-// Not sent: zone mobilization (the attack/defend thresholds need more tracing), meteorite rewards
-// (reward ids depend on a client-side season mapping), alliance.challenge.new.reward.get (it
-// consumes keys), torch-relay tasks and banquet v2 (only partly traced).
+// Not sent: meteorite rewards (reward ids depend on a client-side season mapping),
+// alliance.challenge.new.reward.get (it consumes keys) and banquet v2 (only partly traced). Zone
+// mobilization and torch-relay tasks are the opt-in zone-mobilization and torch-relay features
+// (feature_zone_mobilization.go, feature_torch_relay.go), off until validated live.
 const (
 	redBossProgressCmd     = "red.boss.get.progress"
 	redBossAchievementCmd  = "red.boss.get.achievement.info"
@@ -381,9 +384,8 @@ func claimArenaBoxes(b *evBatch) {
 		if rank == nil {
 			continue
 		}
-		data := evObject(rank.Params, "rankData")
-		count, _ := evNum(data, "battleCount")
-		for i, box := range evObjects(data, "dailyReward") {
+		count, _ := evNum(rank.Params, "battleCount")
+		for i, box := range evObjects(rank.Params, "dailyReward") {
 			need, ok := evNum(box, "needCount")
 			done, _ := evNum(box, "rewarded")
 			if !ok || count < need || done != 0 || b.dead {
