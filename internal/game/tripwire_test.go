@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 )
 
@@ -180,6 +181,60 @@ func TestTripwireRecordsEachTripSource(t *testing.T) {
 	if rec := readTripwire(t, path); rec.Feature != secretTaskStartsName || rec.Command != secretTaskStartsCmd ||
 		!strings.Contains(rec.Reason, "1000 to 900") {
 		t.Errorf("secret task record %+v", rec)
+	}
+}
+
+// TestTripwireRefusesTreasureDigs: treasure-digs spends hammers outside digsRun, so it checks the
+// file itself. While the file exists the run sends nothing; the plan still reads the boards; once
+// the file is cleared the run claims and digs again.
+func TestTripwireRefusesTreasureDigs(t *testing.T) {
+	path := tripwireTemp(t)
+	tripwireTrip("duel-speedups", duelSpeedupsBuildCmd, "a test trip")
+	tripwireRestart()
+	start := func() (*session.GameConn, *evFake) {
+		board := newDigFakeBoard(12501, map[int32]int{20009: 1, 20001: 3})
+		ruin := digRuinEvent(900, radarStateNotFinish, evTestNow.Add(4*time.Hour), digBoardSFS(9001, 12501, digNotBegin, nil, nil))
+		return startDigFake(t, radarScoringDay(), []*sfs.SFSObject{ruin}, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+			switch cmd {
+			case digRadarHammerCmd:
+				return hammerGrant(digRuinHammer, 16, 16)
+			case digRadarOpenCmd:
+				return board.open(9001, int(p.GetInt("pos")))
+			}
+			return nil
+		})
+	}
+
+	conn, f := start()
+	if err := runTreasureDigs(conn, digTestInit(nil)); !errors.Is(err, errTripwire) || !strings.Contains(err.Error(), path) {
+		t.Errorf("treasure-digs: err = %v, want the tripwire file named", err)
+	}
+	if got := f.cmds(); len(got) != 0 {
+		t.Errorf("treasure-digs sent %v while the tripwire file exists", got)
+	}
+
+	conn, f = start()
+	if err := runTreasureDigsPlan(conn, digTestInit(nil)); err != nil {
+		t.Errorf("treasure-digs-plan: %v", err)
+	}
+	if len(f.cmds()) == 0 {
+		t.Error("treasure-digs-plan read nothing; the plan must still run")
+	}
+	for _, cmd := range []string{digRadarHammerCmd, digRadarOpenCmd, digRadarChestCmd} {
+		if got := f.only(cmd); len(got) != 0 {
+			t.Errorf("treasure-digs-plan sent %s %d times", cmd, len(got))
+		}
+	}
+
+	if removed, err := ClearTripwire(path); !removed || err != nil {
+		t.Fatalf("clear: %v, %v", removed, err)
+	}
+	conn, f = start()
+	if err := runTreasureDigs(conn, digTestInit(nil)); err != nil {
+		t.Fatalf("after the clear: %v", err)
+	}
+	if got := f.only(digRadarHammerCmd); len(got) != 1 {
+		t.Errorf("after the clear: free hammer claims = %v, want one", got)
 	}
 }
 

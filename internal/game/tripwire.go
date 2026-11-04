@@ -22,8 +22,8 @@ import (
 // So every trip is also written to its own file next to the session config, <config>.tripwire.json
 // (never the session config itself), 0600, through a temp file and a rename. While that file
 // exists, every duel spend (duel-speedups, duel-recruit-tickets, duel-troop-training,
-// secret-tasks-start) and every dig write sent through digsRun (treasure-hunt, season-dig,
-// offseason-dig, alliance-boss-dig) refuses to run, with a Warn naming the file. Only the operator
+// secret-tasks-start), every dig write sent through digsRun (treasure-hunt, season-dig,
+// offseason-dig, alliance-boss-dig) and treasure-digs refuses to run, with a Warn naming the file. Only the operator
 // clears it, with -clear-tripwire. An unreadable or malformed file counts as a trip. The read-only
 // -plan twins still run. With no path set (tests, a run without a session config) trips stay in
 // memory only, as before.

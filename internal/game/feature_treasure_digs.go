@@ -461,6 +461,13 @@ func treasureDigs(conn *session.GameConn, in *Init, dry bool) error {
 		slog.Info(name + ": no init push; skipping")
 		return nil
 	}
+	// Like the digsRun games, the hammer spend refuses while the diamond tripwire file exists
+	// (tripwire.go); the read-only plan still runs.
+	if !dry {
+		if err := tripwireErr(name); err != nil {
+			return err
+		}
+	}
 	items := duelInitItemCounts(in)
 	r := &digRun{conn: conn, in: in, dry: dry, name: name, items: items,
 		hammers: map[string]int64{digVaultHammer: items[digVaultHammer], digRuinHammer: items[digRuinHammer]}}
