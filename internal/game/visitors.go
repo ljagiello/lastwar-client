@@ -137,9 +137,9 @@ var greetableVisitorTypes = map[int32]bool{
 }
 
 // visitorArrivalMargin is how long after its startTime GreetVisitors waits before greeting a
-// visitor. init carries no server clock (the login reply's db_utc_timestamp was 0 live), so
-// arrival is judged on the host clock, and the margin absorbs a host clock running slightly ahead
-// of the server's.
+// visitor. Arrival is judged on the game time: the session's server clock, kept from the pongs, or
+// the host clock before the first one (the login reply's db_utc_timestamp was 0 live). The margin
+// absorbs what error that clock has left.
 const visitorArrivalMargin = 5 * time.Second
 
 // visitorArrived reports whether v's startTime is at least visitorArrivalMargin before now. The
@@ -266,7 +266,7 @@ func ParseInitVisitors(initParams *sfs.SFSObject) []Visitor {
 // and is left for the player. Each visitor the server answered without an errorCode is marked
 // greeted in visitors itself, the slice collectCore shares with Init.Visitors, for visitor-fresh.
 func GreetVisitors(conn *session.GameConn, visitors []Visitor) error {
-	return greetVisitors(conn, visitors, time.Now())
+	return greetVisitors(conn, visitors, connNow(conn))
 }
 
 func greetVisitors(conn *session.GameConn, visitors []Visitor, now time.Time) error {

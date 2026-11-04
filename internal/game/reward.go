@@ -214,10 +214,10 @@ func claimAndLog(conn *session.GameConn, label, cmd string, params *sfs.SFSObjec
 	return msg, err
 }
 
-// claimNow is the "now" every claim feature's eligibility gate uses. It is the host clock: Init
-// records no receipt time, so no server-time delta is kept yet, and this is the one place to
-// apply one. "Not yet claimed today" gates use in.ServerDayStart(claimNow(in)).
-func claimNow(*Init) time.Time { return time.Now() }
+// claimNow is the "now" every claim feature's eligibility gate uses: the game time (gameNow), the
+// server clock the session's pongs keep, as the client's gates read it. "Not yet claimed today"
+// gates use in.ServerDayStart(claimNow(in)).
+func claimNow(*Init) time.Time { return gameNow() }
 
 // claimBeforeToday reports whether the ms timestamp lastMs is before the start of the current
 // server day (anchored on init tomorrow, see Init.ServerDayStart): a once-per-day claim last made

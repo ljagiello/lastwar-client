@@ -43,7 +43,7 @@ const maxActivityVisitorsPerRun = 20
 // skipped. Static-only: no live activityVisitor sample and no already-claimed errorCode have been
 // seen.
 func runActivityVisitors(conn *session.GameConn, in *Init) error {
-	return claimActivityVisitors(conn, in, time.Now())
+	return claimActivityVisitors(conn, in, connNow(conn))
 }
 
 func claimActivityVisitors(conn *session.GameConn, in *Init, now time.Time) error {

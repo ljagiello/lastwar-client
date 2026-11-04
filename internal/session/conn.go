@@ -64,6 +64,9 @@ type GameConn struct {
 	// appVersion is the appVersion the Login on this connection claimed (SetAppVersion).
 	appVersion atomic.Pointer[string]
 
+	// clock is the server time the pongs on this connection carry (clock.go, ServerNow).
+	clock serverClock
+
 	stopHeartbeat chan struct{}
 	closeOnce     sync.Once
 	closeErr      error
@@ -141,6 +144,7 @@ func (c *GameConn) AppVersion() string {
 
 func (c *GameConn) Close() error {
 	c.closeOnce.Do(func() {
+		c.logClock()
 		if c.stopHeartbeat != nil {
 			close(c.stopHeartbeat)
 		}
@@ -241,6 +245,7 @@ func (c *GameConn) readEnvelope() (*Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
+	recv := time.Now() // a pong's arrival, before decoding (notePong)
 	obj, err := sfs.DecodeObject(body)
 	if err != nil {
 		return nil, fmt.Errorf("decode envelope: %w", err)
@@ -278,6 +283,7 @@ func (c *GameConn) readEnvelope() (*Envelope, error) {
 	if err := c.endIfTerminalPush(env); err != nil {
 		return nil, err
 	}
+	c.notePong(env, recv)
 	c.logScorePush(env)
 	return env, nil
 }
@@ -695,7 +701,10 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*sfs.SFSObject, error) {
 // this one stays the flat {clientTime} the server has always accepted, and Login is not held back
 // for the pong. If the first ping cannot be sent the connection is closed and no loop starts, so
 // the caller's Login send fails.
+//
+// start is also the basis the pongs' echoed clientTime is read against (serverClock).
 func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
+	c.clock.setStart(start)
 	c.stopHeartbeat = make(chan struct{})
 	stopCh := c.stopHeartbeat // snapshot: avoids racing Close()'s concurrent access to the field
 	if !c.sendHeartbeat(start) {

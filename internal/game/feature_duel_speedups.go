@@ -66,12 +66,11 @@ import (
 // later runs refuse every duel and dig spend until it is cleared (tripwire.go). E100173 (already
 // completed, QueueDataManager.lua:507-508) and 120021 ("Not enough items.") stop just that job.
 // Remaining time is re-read from every reply (buildInfo.uT / finished, queue uT,
-// buildInfo.prodET); a reply without it ends that job. Remaining time is end minus the host clock
-// (evNow, as TodayDuel uses); the client uses server time (UITimeManager:GetServerTime, e.g.
-// AllianceCompeteDataManager.lua:293-296, 567-578), so a host clock skewed by more than the 59 s
-// tolerance would skew the pick. For the same reason no call is sent within
-// duelSpeedupsEndMargin of the duel day's end: past it the next day's theme may already score
-// other queues. The real client has no such margin; it is a choice made here. At most
+// buildInfo.prodET); a reply without it ends that job. Remaining time is end minus the game time
+// (evNow, as TodayDuel uses: the session's server clock, as the client uses server time,
+// UITimeManager:GetServerTime, e.g. AllianceCompeteDataManager.lua:293-296, 567-578). No call is
+// sent within duelSpeedupsEndMargin of the duel day's end: past it the next day's theme may
+// already score other queues, and the clock is only as exact as the pong it was synced from. The real client has no such margin; it is a choice made here. At most
 // duelSpeedupsMaxCalls spend calls per run.
 //
 // duel-speedups-plan runs the same selection with every spend replaced by a log line, the read-only
