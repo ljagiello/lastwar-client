@@ -3,6 +3,7 @@ package game
 import (
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -746,19 +747,29 @@ func TestDuelSpeedupsTripwireOnDiamondDrop(t *testing.T) {
 }
 
 func TestDuelSpeedupsTripwireOnMissingProof(t *testing.T) {
+	// Only an observed drop is persisted: the shape checks halt this process but must not write the
+	// tripwire file, which would stop every later run until the operator clears it.
 	cases := map[string]struct {
-		day   func() *sfs.SFSObject
-		knob  func(f *speedFake)
-		cause string
+		day     func() *sfs.SFSObject
+		knob    func(f *speedFake)
+		cause   string
+		persist bool
 	}{
-		"build without itemCostArr": {speedTue, func(f *speedFake) { f.noItemCost = true }, "no itemCostArr"},
-		"queue without itemCostArr": {speedWed, func(f *speedFake) { f.noItemCost = true }, "no itemCostArr"},
-		"camp without gold":         {speedSat, func(f *speedFake) { f.noCampGold = true }, "no gold balance"},
-		"queue top-level drop":      {speedWed, func(f *speedFake) { f.goldDrop, f.topGoldDrop = 5, true }, "dropped"},
+		"build without itemCostArr": {speedTue, func(f *speedFake) { f.noItemCost = true }, "no itemCostArr", false},
+		"queue without itemCostArr": {speedWed, func(f *speedFake) { f.noItemCost = true }, "no itemCostArr", false},
+		"camp without gold":         {speedSat, func(f *speedFake) { f.noCampGold = true }, "no gold balance", false},
+		"queue top-level drop":      {speedWed, func(f *speedFake) { f.goldDrop, f.topGoldDrop = 5, true }, "dropped", true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			clearSpeedTrip(t)
+			path := tripwireTemp(t)
+			defer func() {
+				_, statErr := os.Stat(path)
+				if persisted := statErr == nil; persisted != tc.persist {
+					t.Errorf("tripwire file written %v, want %v", persisted, tc.persist)
+				}
+			}()
 			c := speedInit{jobs: allJobs(), items: allItems(), gold: 1000}
 			if name == "camp without gold" {
 				c.jobs = []speedJob{{kind: duelSpeedupTraining, uuid: 301, left: time.Hour}}

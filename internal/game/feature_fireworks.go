@@ -33,15 +33,20 @@ import (
 //     (GetFireworksGiftMessage.lua:3-8), type being firework.type for the chest's configId. The
 //     claim is free; the launcher spent the firework.
 //
-// A chest is eligible when it was sent before now, holds fewer claims than its max, belongs to a
-// current alliance member, and, for type 1, sits on a building of this alliance and was sent less
-// than DataConfig fireworks.k2 minutes ago (GetCurAvailableBox, FireworkWorldBuildBubble.lua:
-// 270-299; LWFireworkGift:CheckIsAvailable, LWFireworkGift.lua:85-104). Both apply k2 to type 1
-// only, so a type-0 chest stays eligible however old it is; the server answers firework_tips_1014
-// (benign) for an expired one, and that answer is logged with the chest's age to learn the
-// server's type-0 lifetime. k2 is read from init dataConfig when present, else table 39879's 120.
-// The tile shows no claimers; the client's own "got" list is local, so a chest claimed on another
-// device comes back as firework_tips_1016, which is benign.
+// A chest is eligible when it was sent before now and less than 120 minutes ago (DataConfig
+// fireworks.k2; the tile applies it to type 1 only, but the chat card to every chest, and the
+// server answers firework_tips_1014 for expired chests), holds fewer claims than its max, belongs
+// to a current alliance member, and, for type 1, sits on a building of this alliance
+// (GetCurAvailableBox, FireworkWorldBuildBubble.lua:253-283). The tile shows no claimers; the
+// client's own "got" list is local, so a chest claimed on another device comes back as
+// firework_tips_1016, which is benign.
+//
+// The window stays on type 0 on purpose (1.0.367 review). The client keeps every chest it claimed,
+// or got 1016 for, in a 24 h PlayerPrefs list and skips those (LWFireworkGiftManager.lua:7-11,
+// 41-63; GetFireworksGiftMessage.lua:14-18; FireworkWorldBuildBubble.lua:281). Go keeps no such
+// list, so the window is what stops a 3-hourly run from re-claiming a chest an earlier run already
+// claimed. And 120 is the table's k2, not init's: DataConfig:InitFromNet re-applies table item over
+// init dataConfig for every row the table has, fireworks among them (DataConfig.lua:36-46, 52-74).
 //
 // Not done: the auto-like of the launcher the claim window plays for configs with
 // firework.auto_like (UIFireworkGiftGotShowItemRender.lua:104-120; visible to other players),
@@ -65,7 +70,7 @@ const (
 	fwBlockCount          = fwMapTiles / fwBlockSize // RecalculateBlockArg (A-CS:182711-182716)
 	fwMaxBlocksPerRequest = 160                      // per world.get.block (A-CS:179114-179128)
 
-	fwBoxLifetime     = 120 * time.Minute // DataConfig fireworks.k2 in table item 39879, for type 1
+	fwBoxLifetime     = 120 * time.Minute // DataConfig fireworks.k2
 	fwMaxClaimsPerRun = 20
 	fwDailyCapCode    = "firework_tips_1009" // "You've collected over 100 Fireworks Chests today"
 	fwSlowDownCode    = "firework_tips_1017" // "Slow down, Commander. Please try again in a moment"
@@ -100,16 +105,6 @@ func init() {
 	for code := range fireworksBenignCodes {
 		session.RegisterBenignErrorCode(code, fireworksGiftCmd)
 	}
-}
-
-// fwBoxLifetimeOf is the type-1 chest lifetime, DataConfig fireworks.k2 minutes
-// (TryGetNum("fireworks", "k2", 0), FireworkWorldBuildBubble.lua:276-278, LWFireworkGift.lua:97-99):
-// init dataConfig's value when it is above 0, else fwBoxLifetime.
-func fwBoxLifetimeOf(in *Init) time.Duration {
-	if k2, ok := claimInt(evObject(in.Object("dataConfig"), "fireworks"), "k2"); ok && k2 > 0 {
-		return time.Duration(k2) * time.Minute
-	}
-	return fwBoxLifetime
 }
 
 // fwType is firework.type for configId: 1 for the S0 alliance-boss chests 671001-671005, 0 for
@@ -353,15 +348,6 @@ type fwScan struct {
 	treasures          []worldPoint
 	now                time.Time
 	serverClock        bool
-	boxLifetime        time.Duration // type-1 chests; 0 = fwBoxLifetime
-}
-
-// lifetime is the type-1 chest lifetime the scan applies.
-func (sc *fwScan) lifetime() time.Duration {
-	if sc.boxLifetime > 0 {
-		return sc.boxLifetime
-	}
-	return fwBoxLifetime
 }
 
 // fwAllianceID is init alliance.uid, else user.allianceId; "" (or "0") is no alliance.
@@ -389,7 +375,7 @@ func allianceTileScan(conn *session.GameConn, in *Init, name string, radius int)
 		return nil, nil
 	}
 	sc := &fwScan{name: name, allianceID: fwAllianceID(in), ownUID: ownUID(in), memberHQs: map[string]bool{},
-		pointTypes: map[string]map[int32]int{}, now: evNow(), boxLifetime: fwBoxLifetimeOf(in)}
+		pointTypes: map[string]map[int32]int{}, now: evNow()}
 	if sc.allianceID == "" {
 		slog.Info(name + ": not in an alliance; skipping")
 		return nil, nil
@@ -535,7 +521,7 @@ func (sc *fwScan) eligible(b fwBox, claimed map[int64]bool) (bool, string) {
 		return false, "already answered this run"
 	case b.SendTime <= 0 || !sc.now.After(sent):
 		return false, "not sent yet"
-	case fwType(b.ConfigID) == 1 && sc.pastLifetime(b):
+	case !sc.now.Before(sent.Add(fwBoxLifetime)):
 		return false, "expired"
 	case b.Num >= b.Max:
 		return false, "full"
@@ -573,28 +559,11 @@ func (sc *fwScan) review(claimed map[int64]bool) []fwBox {
 			picks = append(picks, b)
 		}
 	}
-	// Chests inside the lifetime go first, oldest first; type-0 chests past it (which the server may
-	// have expired) go last, newest first, so they never use up the per-run cap ahead of fresh ones.
 	slices.SortStableFunc(picks, func(a, b fwBox) int {
-		sa, sb := sc.pastLifetime(a), sc.pastLifetime(b)
-		switch {
-		case sa != sb:
-			if sa {
-				return 1
-			}
-			return -1
-		case sa:
-			return cmp.Or(cmp.Compare(b.SendTime, a.SendTime), cmp.Compare(a.UUID, b.UUID))
-		}
 		return cmp.Or(cmp.Compare(a.SendTime, b.SendTime), cmp.Compare(a.UUID, b.UUID))
 	})
 	slog.Info("fireworks: chests", "found", len(sc.boxes), "eligible", len(picks))
 	return picks
-}
-
-// pastLifetime reports whether b was sent at least the type-1 lifetime ago.
-func (sc *fwScan) pastLifetime(b fwBox) bool {
-	return !sc.now.Before(evUnix(b.SendTime).Add(sc.lifetime()))
 }
 
 func runFireworksScan(conn *session.GameConn, in *Init) error {
@@ -643,8 +612,7 @@ claims:
 			slog.Info("fireworks: claimed a chest", append(who, "isDouble", evBool(resp, "isDouble"), "reward", fwReward(resp),
 				"replyKeys", resp.Keys())...)
 		case fireworksBenignCodes[code] != "":
-			slog.Info("fireworks: chest not claimable (expected)", append(who, "errorCode", code, "meaning", fireworksBenignCodes[code],
-				"type", fwType(b.ConfigID), "ageMin", int64(sc.now.Sub(evUnix(b.SendTime)).Minutes()))...)
+			slog.Info("fireworks: chest not claimable (expected)", append(who, "errorCode", code, "meaning", fireworksBenignCodes[code])...)
 		case code == fwDailyCapCode:
 			slog.Warn("fireworks: daily chest cap reached; stopping this run", append(who, "errorCode", code)...)
 			break claims

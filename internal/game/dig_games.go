@@ -77,6 +77,15 @@ var digsReadOnly = map[string]bool{
 	allianceBossInfoCmd:   true,
 }
 
+// digsSpendCmds are the writes that spend owned items (Treasure Hunt pickaxes). They alone refuse
+// while the diamond tripwire file exists (tripwire.go); the free vault-stone opens, the grand-prize
+// choice and the reward claims still go out, so their rewards don't expire while the file waits
+// for the operator.
+var digsSpendCmds = map[string]bool{
+	treasureHuntDigCmd:   true,
+	treasureHuntDigV2Cmd: true,
+}
+
 // digsCheckRequest is the last check before a dig request goes on the wire: a known command with
 // exactly its keys, never a buy command and never a gold key.
 func digsCheckRequest(cmd string, p *sfs.SFSObject) error {
@@ -228,10 +237,12 @@ func (r *digsRun) write(label, cmd string, p *sfs.SFSObject) (*sfs.SFSObject, di
 		r.halt = true
 		return nil, digsFailed
 	}
-	if err := tripwireErr(r.feature); err != nil {
-		r.add(err)
-		r.halt = true
-		return nil, digsFailed
+	if digsSpendCmds[cmd] {
+		if err := tripwireErr(r.feature); err != nil {
+			r.add(err)
+			r.halt = true
+			return nil, digsFailed
+		}
 	}
 	msg, err := session.SendAndWait(r.conn, label, cmd, p)
 	if msg == nil {

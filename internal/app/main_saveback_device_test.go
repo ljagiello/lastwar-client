@@ -30,6 +30,37 @@ func TestConfigRefreshToken(t *testing.T) {
 	}
 }
 
+// TestMergeDeviceIDAndRefreshToken is the step Run takes: the refresh token is picked for the
+// merged deviceId. An unset -cs-deviceid (every cron run) must keep the config's token.
+func TestMergeDeviceIDAndRefreshToken(t *testing.T) {
+	cfg := &SessionConfig{DeviceID: "dev-1", RefreshToken: "rt-1", RefreshTokenTime: 42}
+	cases := []struct {
+		name     string
+		cfg      *SessionConfig
+		flag     string
+		explicit bool
+		wantDev  string
+		wantRT   string
+		wantTime int64
+		wantEmpt bool
+	}{
+		{"no flag keeps the config's device and token", cfg, "", false, "dev-1", "rt-1", 42, false},
+		{"the config's own device keeps the token", cfg, "dev-1", true, "dev-1", "rt-1", 42, false},
+		{"another device drops the token", cfg, "dev-2", true, "dev-2", "", 0, false},
+		{"an explicitly empty flag is another device", cfg, "", true, "", "", 0, true},
+		{"a config without a deviceId, run under -cs-deviceid", &SessionConfig{RefreshToken: "rt-1", RefreshTokenTime: 42}, "dev-2", true, "dev-2", "", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dev, empty, rt, rtTime := mergeDeviceIDAndRefreshToken(tc.cfg, tc.flag, tc.explicit)
+			if dev != tc.wantDev || empty != tc.wantEmpt || rt != tc.wantRT || rtTime != tc.wantTime {
+				t.Errorf("got (%q, %v, %q, %d), want (%q, %v, %q, %d)", dev, empty, rt, rtTime,
+					tc.wantDev, tc.wantEmpt, tc.wantRT, tc.wantTime)
+			}
+		})
+	}
+}
+
 // TestRunCrossServerTestSameDeviceSaveBackKeepsConfig: a run whose -cs-deviceid names the config's
 // own device and whose server is looked up saves the new address back with every other field of
 // the config unchanged, the refresh token and its time among them. The opts are built the way Run
@@ -57,8 +88,8 @@ func TestRunCrossServerTestSameDeviceSaveBackKeepsConfig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadSessionConfig: %v", err)
 		}
-		const csDeviceID = "dev-1" // -cs-deviceid, the config's own device
-		rt, rtTime := configRefreshToken(cfg, csDeviceID)
+		// -cs-deviceid naming the config's own device, merged as Run merges it.
+		csDeviceID, _, rt, rtTime := mergeDeviceIDAndRefreshToken(cfg, "dev-1", true)
 		runCrossServerTest(crossServerTestOpts{
 			zone: cfg.Zone, gameUid: cfg.GameUid, deviceID: csDeviceID, shumeiBoxId: cfg.ShumeiBoxId,
 			at: cfg.AccessToken, accessTokTime: cfg.AccessTokenTime, refreshTok: rt, refreshTokTime: rtTime,

@@ -176,12 +176,18 @@ func init() {
 	}
 }
 
-// duelSpeedupsTrip disables duel-speedups for the rest of the process once the tripwire fires;
-// the trip is also persisted (tripwire.go) so later runs refuse too.
+// duelSpeedupsTrip disables duel-speedups for the rest of the process once the tripwire fires.
 var duelSpeedupsTrip struct {
 	sync.Mutex
 	reason string
 }
+
+// errDuelSpeedupsDiamondDrop marks the one tripwire cause that is an observed diamond drop. Only
+// that one is persisted (tripwire.go) so later runs refuse too. The others (a reply without the
+// queue object, gold, or itemCostArr) are shape checks on the queue and camp forms, which have not
+// been sent live and whose fields the client treats as optional (BuildingCampAccelMessage.lua:
+// 22-25, QueueDataManager.lua:504-513), so they halt this process only.
+var errDuelSpeedupsDiamondDrop = errors.New("diamonds dropped")
 
 func duelSpeedupsTripped() string {
 	duelSpeedupsTrip.Lock()
@@ -189,13 +195,15 @@ func duelSpeedupsTripped() string {
 	return duelSpeedupsTrip.reason
 }
 
-func duelSpeedupsSetTrip(cmd, reason string) {
+func duelSpeedupsSetTrip(cmd, reason string, persist bool) {
 	duelSpeedupsTrip.Lock()
 	if duelSpeedupsTrip.reason == "" {
 		duelSpeedupsTrip.reason = reason
 	}
 	duelSpeedupsTrip.Unlock()
-	tripwireTrip("duel-speedups", cmd, reason)
+	if persist {
+		tripwireTrip("duel-speedups", cmd, reason)
+	}
 }
 
 // duelSpeedupsAllowed returns, per job kind, whether today allows its queue items and whether it
@@ -463,7 +471,7 @@ func duelSpeedupsCheckReply(cmd string, reply *sfs.SFSObject, goldBefore int64, 
 				return goldBefore, fmt.Errorf("reply %s is not a number (%v)", key, v.Val)
 			}
 			if g < goldBefore {
-				return goldBefore, fmt.Errorf("diamonds dropped from %d to %d (reply %s)", goldBefore, g, key)
+				return goldBefore, fmt.Errorf("%w from %d to %d (reply %s)", errDuelSpeedupsDiamondDrop, goldBefore, g, key)
 			}
 			if !sawGold || g < goldAfter {
 				goldAfter = g
@@ -676,7 +684,7 @@ func (r *duelSpeedupsRunner) apply(j *duelSpeedupJob, plan []duelSpeedupUse) {
 	gold, err := duelSpeedupsCheckReply(cmd, msg.Params, r.gold, plan)
 	if err != nil {
 		reason := fmt.Sprintf("%s (%s %s): %v", label, cmd, duelSpeedupsItemString(plan), err)
-		duelSpeedupsSetTrip(cmd, reason)
+		duelSpeedupsSetTrip(cmd, reason, errors.Is(err, errDuelSpeedupsDiamondDrop))
 		slog.Error("duel-speedups DIAMOND TRIPWIRE: disabled for this session", "call", cmd, "job", label, "reason", err,
 			"diamondsBefore", r.gold)
 		r.errs = append(r.errs, errors.New("duel-speedups diamond tripwire: "+reason))

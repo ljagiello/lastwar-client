@@ -11,6 +11,42 @@ import (
 	"lastwar-client/internal/game"
 )
 
+// TestRunPointsTheTripwireAtTheSessionConfig runs -list-features with -config in a subprocess: Run
+// must point the tripwire at <config>.tripwire.json (so a trip outlives the process) and warn while
+// that file exists. It fails if Run stops calling SetTripwirePath.
+func TestRunPointsTheTripwireAtTheSessionConfig(t *testing.T) {
+	if cfg := os.Getenv("LASTWAR_TEST_TRIPWIRE_PATH"); cfg != "" {
+		os.Args = []string{"lastwar-client", "-config", cfg, "-list-features"}
+		Run()
+		return
+	}
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "session.json")
+	if err := os.WriteFile(cfg, []byte(`{"ip":"127.0.0.1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func() string {
+		t.Helper()
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRunPointsTheTripwireAtTheSessionConfig$")
+		cmd.Env = append(os.Environ(), "LASTWAR_TEST_TRIPWIRE_PATH="+cfg, "HOME="+dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("-list-features: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+	const warn = "the diamond tripwire file is set"
+	if out := run(); strings.Contains(out, warn) {
+		t.Errorf("warned without a tripwire file:\n%s", out)
+	}
+	if err := os.WriteFile(game.TripwireFile(cfg), []byte(`{"feature":"duel-speedups","command":"build.ccd.m.new","reason":"test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := run(); !strings.Contains(out, warn) || !strings.Contains(out, "duel-speedups") {
+		t.Errorf("no startup Warn naming the trip while the file exists:\n%s", out)
+	}
+}
+
 // TestClearTripwireFlag runs -clear-tripwire in a subprocess: it removes the tripwire file next to
 // the -config session config, leaves the config alone, sends nothing and exits 0, and says so
 // when there is nothing to clear.

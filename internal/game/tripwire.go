@@ -19,14 +19,15 @@ import (
 // Util/UIUtil.lua:3292-3299), so once a headless run has seen the balance fall nothing spends
 // again until a person has looked.
 //
-// So every trip is also written to its own file next to the session config, <config>.tripwire.json
-// (never the session config itself), 0600, through a temp file and a rename. While that file
-// exists, every duel spend (duel-speedups, duel-recruit-tickets, duel-troop-training,
-// secret-tasks-start), every dig write sent through digsRun (treasure-hunt, season-dig,
-// offseason-dig, alliance-boss-dig) and treasure-digs refuses to run, with a Warn naming the file. Only the operator
-// clears it, with -clear-tripwire. An unreadable or malformed file counts as a trip. The read-only
-// -plan twins still run. With no path set (tests, a run without a session config) trips stay in
-// memory only, as before.
+// So every observed diamond drop is also written to its own file next to the session config,
+// <config>.tripwire.json (never the session config itself), 0600, through a temp file and a
+// rename. Reply-shape failures (duel-speedups' missing itemCostArr or gold) halt only the process
+// that saw them. While that file exists, every duel spend (duel-speedups, duel-recruit-tickets,
+// duel-troop-training, secret-tasks-start), Treasure Hunt's pickaxe digs (digsSpendCmds) and
+// treasure-digs' brick opens refuse, with a Warn naming the file. Free claims, the free vault-stone
+// opens and the read-only -plan twins still run. Only the operator clears it, with
+// -clear-tripwire. An unreadable or malformed file counts as a trip. With no path set (tests, a
+// run without a session config) trips stay in memory only, as before.
 
 // TripwireRecord is one persisted trip.
 type TripwireRecord struct {
@@ -139,6 +140,16 @@ func tripwireActive() (rec TripwireRecord, path string, active bool, readErr err
 	return rec, path, true, nil
 }
 
+// tripwireLogArgs are the Warn attributes naming the file, its record and how to clear it.
+func tripwireLogArgs(rec TripwireRecord, path string, readErr error) []any {
+	args := []any{"path", path, "clear", "remove the file or run with " + tripwireClearFlag}
+	if readErr != nil {
+		return append(args, "readError", readErr)
+	}
+	return append(args, "trippedAt", rec.Time.Format(time.RFC3339), "trippedBy", rec.Feature,
+		"command", rec.Command, "reason", rec.Reason)
+}
+
 // tripwireErr returns an error, after a Warn naming the file and how to clear it, while the
 // tripwire file exists; nil otherwise. feature is the one refusing.
 func tripwireErr(feature string) error {
@@ -146,15 +157,19 @@ func tripwireErr(feature string) error {
 	if !active {
 		return nil
 	}
-	args := []any{"feature", feature, "path", path, "clear", "remove the file or run with " + tripwireClearFlag}
-	if readErr != nil {
-		args = append(args, "readError", readErr)
-	} else {
-		args = append(args, "trippedAt", rec.Time.Format(time.RFC3339), "trippedBy", rec.Feature,
-			"command", rec.Command, "reason", rec.Reason)
-	}
-	slog.Warn(feature+": not spending while the diamond tripwire file exists", args...)
+	slog.Warn(feature+": not spending while the diamond tripwire file exists",
+		append([]any{"feature", feature}, tripwireLogArgs(rec, path, readErr)...)...)
 	return fmt.Errorf("%s: %w (%s; remove it or run with %s)", feature, errTripwire, path, tripwireClearFlag)
+}
+
+// WarnIfTripwireSet logs a Warn at startup while the tripwire file exists, so every run's log
+// shows it, not only the days a spend feature runs. internal/app calls it after SetTripwirePath.
+func WarnIfTripwireSet() {
+	rec, path, active, readErr := tripwireActive()
+	if active {
+		slog.Warn("the diamond tripwire file is set: duel and dig spends refuse until it is cleared",
+			tripwireLogArgs(rec, path, readErr)...)
+	}
 }
 
 // ClearTripwire removes the tripwire file at path (-clear-tripwire). It reports whether there

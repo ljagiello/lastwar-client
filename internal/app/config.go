@@ -197,6 +197,16 @@ func configRefreshToken(cfg *SessionConfig, runDeviceID string) (string, int64) 
 	return cfg.RefreshToken, cfg.RefreshTokenTime
 }
 
+// mergeDeviceIDAndRefreshToken merges -cs-deviceid with cfg's deviceId (mergeExplicitOrConfigString)
+// and only then picks the refresh token for the merged device (configRefreshToken). They are one
+// step because the order is the B11 fix: picked before the merge, an unset flag (every cron run)
+// would read as another device and the save-back would write refreshToken "".
+func mergeDeviceIDAndRefreshToken(cfg *SessionConfig, flagVal string, explicit bool) (deviceID string, explicitlyEmpty bool, rt string, rtTime int64) {
+	deviceID, explicitlyEmpty = mergeExplicitOrConfigString(flagVal, explicit, cfg.DeviceID)
+	rt, rtTime = configRefreshToken(cfg, deviceID)
+	return deviceID, explicitlyEmpty, rt, rtTime
+}
+
 // errOtherDeviceID is saveShumeiInstall refusing to store one deviceId's install in a session
 // config made for another, as after a run whose -cs-deviceid overrides the config's.
 var errOtherDeviceID = errors.New("the session config holds a different deviceId")

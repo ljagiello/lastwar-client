@@ -95,7 +95,7 @@ func fwChest(uuid int64, cfg, num, maxClaims int32, age time.Duration, sender st
 }
 
 // fwBlockReply holds, on the tiles: ally A's HQ with one claimable chest (9001) and three that
-// aren't (full, an expired type-1 chest, not sent yet); the player's own HQ with a claimable type-1 chest (9005);
+// aren't (full, expired, not sent yet); the player's own HQ with a claimable type-1 chest (9005);
 // a non-member's HQ with a chest (9006); ally B's building tagged with another alliance carrying a
 // type-1 chest (9007); a resource point; an undecodable blob; and ally A's HQ again in alInfos.
 func fwBlockReply(serverNow time.Time) *sfs.SFSObject {
@@ -103,7 +103,7 @@ func fwBlockReply(serverNow time.Time) *sfs.SFSObject {
 	pts.AddByteArray(pbHQ(347520, fwAllyA, fwAlliance,
 		fwChest(9001, 661501, 3, 10, 10*time.Minute, fwAllyB),
 		fwChest(9002, 661502, 15, 15, 5*time.Minute, fwAllyB),
-		fwChest(9003, 671002, 0, 100, 121*time.Minute, fwAllyB),
+		fwChest(9003, 661503, 0, 15, 121*time.Minute, fwAllyB),
 		fwChest(9004, 661501, 0, 10, -time.Minute, fwAllyB)))
 	pts.AddByteArray(pbHQ(347513, fwSelf, fwAlliance, fwChest(9005, 671003, 50, 100, 30*time.Minute, fwLauncher)))
 	pts.AddByteArray(pbHQ(347515, fwStranger, "al-other", fwChest(9006, 661501, 0, 10, time.Minute, fwStranger)))
@@ -350,11 +350,9 @@ func TestFireworksEligibilityEdges(t *testing.T) {
 	}{
 		{"sent just now", box(fwChest(1, 661501, 0, 10, time.Millisecond, ""), fwAllyA, fwAlliance), nil, ""},
 		{"sent this very ms", box(fwChest(1, 661501, 0, 10, 0, ""), fwAllyA, fwAlliance), nil, "not sent yet"},
-		{"type 1 one ms before 120 min", box(fwChest(1, 671005, 0, 100, fwBoxLifetime-time.Millisecond, ""), fwAllyA, fwAlliance), nil, ""},
-		{"type 1 at exactly 120 min", box(fwChest(1, 671005, 0, 100, fwBoxLifetime, ""), fwAllyA, fwAlliance), nil, "expired"},
-		// FireworkWorldBuildBubble.lua:276-295 and LWFireworkGift.lua:92-104 time out type 1 only.
-		{"type 0 stays eligible past 120 min", box(fwChest(1, 661501, 0, 10, 3*time.Hour, ""), fwAllyA, "al-other"), nil, ""},
-		{"type 0 at exactly 120 min", box(fwChest(1, 661501, 0, 10, fwBoxLifetime, ""), fwAllyA, fwAlliance), nil, ""},
+		{"one ms before 120 min", box(fwChest(1, 661501, 0, 10, fwBoxLifetime-time.Millisecond, ""), fwAllyA, fwAlliance), nil, ""},
+		{"exactly 120 min", box(fwChest(1, 661501, 0, 10, fwBoxLifetime, ""), fwAllyA, fwAlliance), nil, "expired"},
+		{"type 0 expires too", box(fwChest(1, 661501, 0, 10, 3*time.Hour, ""), fwAllyA, "al-other"), nil, "expired"},
 		{"one claim left", box(fwChest(1, 661501, 9, 10, time.Minute, ""), fwAllyA, fwAlliance), nil, ""},
 		{"no max", box(fwChest(1, 661501, 0, 0, time.Minute, ""), fwAllyA, fwAlliance), nil, "full"},
 		{"answered this run", box(fwChest(1, 661501, 0, 10, time.Minute, ""), fwAllyA, fwAlliance), map[int64]bool{1: true}, "already answered this run"},
@@ -416,7 +414,7 @@ func TestFireworksUsesTheServerClock(t *testing.T) {
 	withEvNow(t, evTestNow)
 	withFwPace(t)
 	pts := sfs.NewSFSArray()
-	pts.AddByteArray(pbHQ(347520, fwAllyA, fwAlliance, fwChest(9001, 671001, 0, 100, 119*time.Minute, "")))
+	pts.AddByteArray(pbHQ(347520, fwAllyA, fwAlliance, fwChest(9001, 661501, 0, 10, 119*time.Minute, "")))
 	blk := sfs.NewSFSObject()
 	blk.PutSFSArray("points", pts)
 	blk.PutLong("timeStamp", evTestNow.Add(2*time.Minute).UnixMilli()) // the server is 2 min ahead of the host
@@ -426,110 +424,6 @@ func TestFireworksUsesTheServerClock(t *testing.T) {
 	}
 	if n := len(fake.only(fireworksGiftCmd)); n != 0 {
 		t.Errorf("claimed a chest that is 121 min old by the server's clock")
-	}
-}
-
-// TestFireworksLifetimeFromInit reads DataConfig fireworks.k2 from init dataConfig (minutes,
-// FireworkWorldBuildBubble.lua:276-278) and applies it to type-1 chests only.
-func TestFireworksLifetimeFromInit(t *testing.T) {
-	withK2 := func(k2 any) *Init {
-		in := fwTestInit()
-		fw := sfs.NewSFSObject()
-		switch v := k2.(type) {
-		case string:
-			fw.PutUtfString("k2", v)
-		case int:
-			fw.PutInt("k2", int32(v))
-		}
-		dc := sfs.NewSFSObject()
-		dc.PutSFSObject("fireworks", fw)
-		in.Raw.PutSFSObject("dataConfig", dc)
-		return in
-	}
-	for name, c := range map[string]struct {
-		in   *Init
-		want time.Duration
-	}{
-		"no dataConfig":   {fwTestInit(), 120 * time.Minute},
-		"k2 30 (string)":  {withK2("30"), 30 * time.Minute},
-		"k2 240 (int)":    {withK2(240), 240 * time.Minute},
-		"k2 0":            {withK2(0), 120 * time.Minute},
-		"k2 not a number": {withK2("x"), 120 * time.Minute},
-	} {
-		if got := fwBoxLifetimeOf(c.in); got != c.want {
-			t.Errorf("%s: lifetime %v, want %v", name, got, c.want)
-		}
-	}
-
-	withEvNow(t, evTestNow)
-	withFwPace(t)
-	pts := sfs.NewSFSArray()
-	pts.AddByteArray(pbHQ(347520, fwAllyA, fwAlliance,
-		fwChest(9001, 671001, 0, 100, 31*time.Minute, ""), // type 1, past k2 = 30
-		fwChest(9002, 671001, 0, 100, 29*time.Minute, ""), // type 1, within it
-		fwChest(9003, 661501, 0, 10, 31*time.Minute, ""))) // type 0: k2 doesn't apply
-	blk := sfs.NewSFSObject()
-	blk.PutSFSArray("points", pts)
-	conn, fake := startFwFake(t, blk, nil)
-	if err := runFireworks(conn, withK2("30")); err != nil {
-		t.Fatal(err)
-	}
-	var got []int64
-	for _, c := range fake.only(fireworksGiftCmd) {
-		got = append(got, c.Params.GetLong("uuid"))
-	}
-	if !slices.Equal(got, []int64{9002, 9003}) {
-		t.Errorf("claimed %v, want [9002 9003] (the 31-min type-1 chest expired; the type-0 one past k2 goes last)", got)
-	}
-}
-
-// TestFireworksClaimsFreshChestsBeforeStaleOnes: type-0 chests past the lifetime stay eligible but
-// go after the fresh ones, newest first, so they can't use up the per-run cap.
-func TestFireworksClaimsFreshChestsBeforeStaleOnes(t *testing.T) {
-	withEvNow(t, evTestNow)
-	withFwPace(t)
-	var gifts []fireworkGift
-	for i := range fwMaxClaimsPerRun + 5 {
-		gifts = append(gifts, fwChest(int64(100+i), 661501, 0, 10, 3*time.Hour+time.Duration(i)*time.Minute, ""))
-	}
-	gifts = append(gifts, fwChest(1, 661501, 0, 10, 10*time.Minute, ""), fwChest(2, 661501, 0, 10, 20*time.Minute, ""))
-	pts := sfs.NewSFSArray()
-	pts.AddByteArray(pbHQ(347520, fwAllyA, fwAlliance, gifts...))
-	blk := sfs.NewSFSObject()
-	blk.PutSFSArray("points", pts)
-	conn, fake := startFwFake(t, blk, nil)
-	if err := runFireworks(conn, fwTestInit()); err != nil {
-		t.Fatal(err)
-	}
-	claims := fake.only(fireworksGiftCmd)
-	if len(claims) != fwMaxClaimsPerRun {
-		t.Fatalf("sent %d claims, want %d", len(claims), fwMaxClaimsPerRun)
-	}
-	var first []int64
-	for _, c := range claims[:3] {
-		first = append(first, c.Params.GetLong("uuid"))
-	}
-	if !slices.Equal(first, []int64{2, 1, 100}) {
-		t.Errorf("first claims %v, want [2 1 100]: the fresh chests oldest first, then the newest stale one", first)
-	}
-}
-
-// TestFireworksLogsTheAgeOfAnExpiredAnswer checks the firework_tips_1014 line carries the chest's
-// type and age, the data that tells the server's type-0 lifetime.
-func TestFireworksLogsTheAgeOfAnExpiredAnswer(t *testing.T) {
-	withEvNow(t, evTestNow)
-	withFwPace(t)
-	logs := captureFwLogs(t)
-	pts := sfs.NewSFSArray()
-	pts.AddByteArray(pbHQ(347520, fwAllyA, fwAlliance, fwChest(9001, 661501, 0, 10, 300*time.Minute, "")))
-	blk := sfs.NewSFSObject()
-	blk.PutSFSArray("points", pts)
-	conn, _ := startFwFake(t, blk, func(int, *sfs.SFSObject) *sfs.SFSObject { return evErr("firework_tips_1014") })
-	if err := runFireworks(conn, fwTestInit()); err != nil {
-		t.Fatal(err)
-	}
-	if out := logs.String(); !strings.Contains(out, "errorCode=firework_tips_1014 meaning=expired type=0 ageMin=300") {
-		t.Errorf("the 1014 answer is not logged with type and age:\n%s", out)
 	}
 }
 

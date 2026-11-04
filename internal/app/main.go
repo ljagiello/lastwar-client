@@ -358,11 +358,10 @@ func Run() {
 		if gameUidExplicitlyEmpty {
 			slog.Warn("-cs-gameuid was explicitly given as empty; not falling back to the session config's gameUid (pass a non-empty -cs-gameuid, or omit the flag entirely to use the config's value)")
 		}
-		*csDeviceID, deviceIDExplicitlyEmpty = mergeExplicitOrConfigString(*csDeviceID, csDeviceIDSetExplicitly, cfg.DeviceID)
+		*csDeviceID, deviceIDExplicitlyEmpty, cfgRefreshTok, cfgRefreshTokTime = mergeDeviceIDAndRefreshToken(cfg, *csDeviceID, csDeviceIDSetExplicitly)
 		if deviceIDExplicitlyEmpty {
 			slog.Warn("-cs-deviceid was explicitly given as empty; not falling back to the session config's deviceId (pass a non-empty -cs-deviceid, or omit the flag entirely to use the config's value)")
 		}
-		cfgRefreshTok, cfgRefreshTokTime = configRefreshToken(cfg, *csDeviceID)
 		*csShumei, shumeiExplicitlyEmpty = mergeExplicitOrConfigString(*csShumei, csShumeiSetExplicitly, cfg.ShumeiBoxId)
 		if shumeiExplicitlyEmpty {
 			slog.Warn("-cs-shumei was explicitly given as empty; not falling back to the session config's shumeiBoxId (pass a non-empty -cs-shumei, or omit the flag entirely to use the config's value)")
@@ -376,6 +375,7 @@ func Run() {
 	warnIfExplicitConfigPathNotFound(cfg, *configPath, *noConfig)
 	// Diamond trips persist next to the loaded session config; without one they stay in memory.
 	game.SetTripwirePath(game.TripwireFile(cfgSource))
+	game.WarnIfTripwireSet()
 	if *listFeatures {
 		printFeatures(os.Stdout, cfgFeatures, cfgDuelPolicy)
 		return

@@ -105,16 +105,30 @@ func TestTripwirePersistsAcrossRunsUntilCleared(t *testing.T) {
 	if _, err := runSpeed(t, newSpeedFake(speedTue(), c), c, true); err != nil {
 		t.Errorf("duel-speedups-plan: %v", err)
 	}
+	// A pickaxe dig spends owned items: refused, nothing sent.
 	digConn, digFake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
-	r := newDigsRun(digConn, digsInit(0), "season-dig", false)
+	r := newDigsRun(digConn, digsInit(0), "treasure-hunt", false)
+	dig := sfs.NewSFSObject()
+	dig.PutInt("activityId", 1)
+	dig.PutInt("digIndex", 2)
+	if _, res := r.write("dig", treasureHuntDigCmd, dig); res != digsFailed || !errors.Is(r.err(), errTripwire) || !r.halt {
+		t.Errorf("pickaxe dig: %v, %v; want it refused by the tripwire", res, r.err())
+	}
+	if got := digFake.cmds(); len(got) != 0 {
+		t.Errorf("pickaxe dig sent %v", got)
+	}
+	// A vault reward claim is free: it still goes out, so the reward doesn't expire while the file
+	// waits for the operator.
+	digConn, digFake = startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+	r = newDigsRun(digConn, digsInit(0), "season-dig", false)
 	open := sfs.NewSFSObject()
 	open.PutLong("uuid", 1)
 	open.PutInt("pos", 3)
-	if _, res := r.write("open", seasonDigBlockCmd, open); res != digsFailed || !errors.Is(r.err(), errTripwire) || !r.halt {
-		t.Errorf("dig write: %v, %v; want it refused by the tripwire", res, r.err())
+	if _, res := r.write("claim", seasonDigBlockCmd, open); res != digsDone || r.err() != nil {
+		t.Errorf("vault claim: %v, %v; want it sent while the tripwire file exists", res, r.err())
 	}
-	if got := digFake.cmds(); len(got) != 0 {
-		t.Errorf("dig write sent %v", got)
+	if got := digFake.cmds(); len(got) != 1 || got[0] != seasonDigBlockCmd {
+		t.Errorf("vault claim sent %v, want one %s", got, seasonDigBlockCmd)
 	}
 
 	// The operator clears it: the next run spends again.
@@ -185,8 +199,8 @@ func TestTripwireRecordsEachTripSource(t *testing.T) {
 }
 
 // TestTripwireRefusesTreasureDigs: treasure-digs spends hammers outside digsRun, so it checks the
-// file itself. While the file exists the run sends nothing; the plan still reads the boards; once
-// the file is cleared the run claims and digs again.
+// file itself. While the file exists the run opens no brick but still claims the free hammer; the
+// plan still reads the boards; once the file is cleared the run digs again.
 func TestTripwireRefusesTreasureDigs(t *testing.T) {
 	path := tripwireTemp(t)
 	tripwireTrip("duel-speedups", duelSpeedupsBuildCmd, "a test trip")
@@ -209,8 +223,11 @@ func TestTripwireRefusesTreasureDigs(t *testing.T) {
 	if err := runTreasureDigs(conn, digTestInit(nil)); !errors.Is(err, errTripwire) || !strings.Contains(err.Error(), path) {
 		t.Errorf("treasure-digs: err = %v, want the tripwire file named", err)
 	}
-	if got := f.cmds(); len(got) != 0 {
-		t.Errorf("treasure-digs sent %v while the tripwire file exists", got)
+	if got := f.only(digRadarOpenCmd); len(got) != 0 {
+		t.Errorf("treasure-digs opened %d bricks while the tripwire file exists", len(got))
+	}
+	if got := f.only(digRadarHammerCmd); len(got) != 1 {
+		t.Errorf("treasure-digs free hammer claims = %d while the tripwire file exists, want one", len(got))
 	}
 
 	conn, f = start()
@@ -235,6 +252,9 @@ func TestTripwireRefusesTreasureDigs(t *testing.T) {
 	}
 	if got := f.only(digRadarHammerCmd); len(got) != 1 {
 		t.Errorf("after the clear: free hammer claims = %v, want one", got)
+	}
+	if got := f.only(digRadarOpenCmd); len(got) == 0 {
+		t.Error("after the clear: no brick opened, want the hammers spent")
 	}
 }
 
