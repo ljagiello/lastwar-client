@@ -65,6 +65,7 @@ var knownNonSensitiveSFSKeys = map[string]bool{
 	"appVersion":            true,
 	"boxType":               true, // zone mobilization donation box type (1 personal, 2 alliance)
 	"c":                     true,
+	"card_id":               true, // season week card table id (season_weekcard 10001-10013), LWSeasonWeekCardInfoMessage.lua:4-7
 	"chipEquipGroup":        true,
 	"cl":                    true,
 	"clientTime":            true,
