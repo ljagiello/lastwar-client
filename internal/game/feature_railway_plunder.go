@@ -32,7 +32,8 @@ import (
 //   - the target is travelling and on a matched server, and isn't the account's own or its
 //     alliance's;
 //   - its robTimes is under its cap: train_para 21 (2) for a truck, 1 for the sleigh, and
-//     DataConfig alliance_train k10 (3) for a train, less one when a VIP rides it;
+//     table item alliance_train k10 (3) for a train, less one when a VIP rides it; init
+//     dataConfig's k10 is ignored, as the client's local table overrides it;
 //   - a train is past marchInfo.protectTime;
 //   - a truck whose effect 90107 caps the account's wins on it is skipped once that cap is reached.
 //
@@ -55,7 +56,7 @@ const (
 	railwayPlunderFeature = "railway-plunder"
 	railwayDailyRobs      = 4 // train_para 11
 	railwayTruckRobs      = 2 // train_para 21
-	railwayTrainRobs      = 3 // DataConfig alliance_train k10 default (LWAllyStationDataManager)
+	railwayTrainRobs      = 3 // table item alliance_train k10 (see railwayTrainCap)
 	railwayWinCapEffect   = "90107"
 	railwayTakenCode      = "E400207"
 )
@@ -171,14 +172,15 @@ func railwayPlunderReason(t railwayTarget, homes, matched map[int64]bool, uid, a
 	return ""
 }
 
-// railwayTrainCap is the per-train plunder cap: init dataConfig.alliance_train.k10 when present,
-// else 3. A VIP-boarded train is capped one lower; the client subtracts the alliance-right para1
-// (1) only when the VIP switch and gift level allow, so this can only be stricter.
-func railwayTrainCap(in *Init, vip bool) int64 {
+// railwayTrainCap is the per-train plunder cap: DataConfig alliance_train.k10
+// (LWAllyStationDataManager.lua:46), which is 3 in table item 39879. Init dataConfig cannot change
+// it: DataConfig:InitFromNet keeps the server's copy, then InitFromLocalTable overwrites every row
+// the local item table has, alliance_train among them (DataConfig.lua:36-74). So init's k10 is
+// ignored, as in the client. A VIP-boarded train is capped one lower; the client subtracts the
+// alliance-right para1 (1) only when the VIP switch and gift level allow, so this can only be
+// stricter.
+func railwayTrainCap(vip bool) int64 {
 	c := int64(railwayTrainRobs)
-	if n, ok := claimInt(evObject(in.Object("dataConfig"), "alliance_train"), "k10"); ok && n > 0 {
-		c = n
-	}
 	if vip {
 		c--
 	}
@@ -296,7 +298,7 @@ func runRailwayPlunder(conn *session.GameConn, in *Init) error {
 		if t.typ != typ {
 			return "unknown type"
 		}
-		return railwayPlunderReason(t, homes, matched, uid, alliance, atk, now, railwayTrainCap(in, t.vipOn))
+		return railwayPlunderReason(t, homes, matched, uid, alliance, atk, now, railwayTrainCap(t.vipOn))
 	}
 	targets := func(key string, typ, atk int64) []railwayTarget {
 		skipped := map[string]int{}
