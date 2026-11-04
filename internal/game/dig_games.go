@@ -104,7 +104,8 @@ func digsCheckRequest(cmd string, p *sfs.SFSObject) error {
 }
 
 // digsTrip disables the dig features' writes for the rest of the process once a reply shows the
-// diamond balance falling.
+// diamond balance falling; the trip is also persisted (tripwire.go), and while that file exists
+// no dig write is sent in later runs either.
 var digsTrip struct {
 	sync.Mutex
 	reason string
@@ -116,12 +117,13 @@ func digsTripped() string {
 	return digsTrip.reason
 }
 
-func digsSetTrip(reason string) {
+func digsSetTrip(feature, cmd, reason string) {
 	digsTrip.Lock()
-	defer digsTrip.Unlock()
 	if digsTrip.reason == "" {
 		digsTrip.reason = reason
 	}
+	digsTrip.Unlock()
+	tripwireTrip(feature, cmd, reason)
 }
 
 // digsResult is how a write went.
@@ -226,6 +228,11 @@ func (r *digsRun) write(label, cmd string, p *sfs.SFSObject) (*sfs.SFSObject, di
 		r.halt = true
 		return nil, digsFailed
 	}
+	if err := tripwireErr(r.feature); err != nil {
+		r.add(err)
+		r.halt = true
+		return nil, digsFailed
+	}
 	msg, err := session.SendAndWait(r.conn, label, cmd, p)
 	if msg == nil {
 		r.add(err)
@@ -254,7 +261,7 @@ func (r *digsRun) checkGold(label, cmd string, reply *sfs.SFSObject) {
 			}
 			if r.goldSet && g < r.gold {
 				reason := fmt.Sprintf("%s (%s): diamonds fell from %d to %d", label, cmd, r.gold, g)
-				digsSetTrip(reason)
+				digsSetTrip(r.feature, cmd, reason)
 				slog.Error(r.feature+" DIAMOND TRIPWIRE: dig writes disabled for this session", "call", cmd, "reason", reason)
 				r.add(errors.New(r.feature + " diamond tripwire: " + reason))
 				r.halt = true

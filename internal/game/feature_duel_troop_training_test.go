@@ -3,6 +3,7 @@ package game
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -22,8 +23,16 @@ func duelCampSFS(uuid int64, lv int32, busy bool) *sfs.SFSObject {
 }
 
 // duelTrainInit is an init with the duel activity, user.gold 1000, iron and food, the camps, the
-// T10/T11 science when science is set, and the given effects.
+// T10/T11 science when science is set, and the given effects. The soldier stock is 1,000 T10
+// (resource_items) under a cap of 100,000 (effect 30122) unless effects sets the cap.
 func duelTrainInit(iron, food int64, science bool, effects map[string]float64, camps ...*sfs.SFSObject) *Init {
+	if _, ok := effects[finishedTimersStockEffect]; !ok {
+		effects = maps.Clone(effects)
+		if effects == nil {
+			effects = map[string]float64{}
+		}
+		effects[finishedTimersStockEffect] = 100_000
+	}
 	in := evInit(30, duelActivity())
 	in.Raw.PutSFSObject("user", duelObj("gold", int64(1000)))
 	in.Raw.PutSFSObject("resource", duelObj("metal", iron, "money", food, "oil", int64(5)))
@@ -43,7 +52,16 @@ func duelTrainInit(iron, food int64, science bool, effects map[string]float64, c
 		eff.PutDouble(k, v)
 	}
 	in.Raw.PutSFSObject("effect", eff)
+	duelTrainSoldiers(in, 1000)
 	return in
+}
+
+// duelTrainSoldiers sets init resource_items to n T10 soldiers (3014) and a non-soldier item.
+func duelTrainSoldiers(in *Init, n int64) {
+	items := sfs.NewSFSArray()
+	items.AddSFSObject(duelObj("itemId", 3014, "number", n))
+	items.AddSFSObject(duelObj("itemId", 630011, "number", int64(1_000_000)))
+	in.Raw.PutSFSArray("resource_items", items)
 }
 
 func duelTrainServer(gold int64) func(cmd string, p *sfs.SFSObject) []duelSpendMsg {
@@ -336,4 +354,49 @@ func TestDuelTroopTrainingPushedResourcesLowerTheLedger(t *testing.T) {
 	if got := trainingsOf(t, f); !slices.Equal(got, []string{"1:T10:570", "2:T10:7"}) {
 		t.Errorf("trainings %v, want 570 then 7", got)
 	}
+}
+
+func TestDuelTroopTrainingCapsAtTheSoldierStock(t *testing.T) {
+	// Cap 2,000, 1,000 held and a busy camp's 200-unit batch: room for 800. The first idle camp
+	// trains its 570, the second the 230 left, the third nothing (BuildingUtils.lua:1943-1958).
+	busy := duelCampSFS(9, 30, true)
+	busy.PutInt("prodBase", 200)
+	in := duelTrainInit(100_000_000, 100_000_000, true, map[string]float64{finishedTimersStockEffect: 2000},
+		duelCampSFS(1, 30, false), duelCampSFS(2, 30, false), duelCampSFS(3, 30, false), busy)
+	conn, f := startDuelSpendFake(t, duelTestDay(DuelThemeMobilization, duelTestMobilize), duelTrainServer(1000))
+	if err := runDuelTroopTraining(conn, in); err != nil {
+		t.Fatal(err)
+	}
+	if got := trainingsOf(t, f); !slices.Equal(got, []string{"1:T10:570", "2:T10:230"}) {
+		t.Errorf("trainings %v, want 570 then the 230 the stock has room for", got)
+	}
+
+	// A full stock, or one init doesn't describe, trains nothing and sends nothing past the duel
+	// read.
+	full := duelTrainInit(100_000_000, 100_000_000, true, map[string]float64{finishedTimersStockEffect: 1000},
+		duelCampSFS(1, 30, false))
+	noCap := duelTrainInit(100_000_000, 100_000_000, true, nil, duelCampSFS(1, 30, false))
+	noCap.Raw.PutSFSObject("effect", sfs.NewSFSObject())
+	noSoldiers := duelTrainInit(100_000_000, 100_000_000, true, nil, duelCampSFS(1, 30, false))
+	noSoldiers.Raw = duelWithoutKey(noSoldiers.Raw, "resource_items")
+	for name, in := range map[string]*Init{"full": full, "no effect 30122": noCap, "no resource_items": noSoldiers} {
+		conn, f := startDuelSpendFake(t, duelTestDay(DuelThemeMobilization, duelTestMobilize), duelTrainServer(1000))
+		if err := runDuelTroopTraining(conn, in); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := f.cmds(); !slices.Equal(got, []string{"hero.event.info.get"}) {
+			t.Errorf("%s: sent %v, want only the duel read", name, got)
+		}
+	}
+}
+
+// duelWithoutKey copies o without key.
+func duelWithoutKey(o *sfs.SFSObject, key string) *sfs.SFSObject {
+	out := sfs.NewSFSObject()
+	for _, k := range o.Keys() {
+		if v, _ := o.Get(k); k != key {
+			out.PutValue(k, v)
+		}
+	}
+	return out
 }

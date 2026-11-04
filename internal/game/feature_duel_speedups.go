@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -45,24 +46,33 @@ import (
 // and free-time forms: never sent, and duelSpeedupsCheckParams refuses any key outside these.
 //
 // Items come from init items (InitMessage.lua:70 -> ItemData:ParseItemData; per stack uuid, itemId
-// or goodsId, count/num/itemLeftCnt, ItemInfo.lua:35-64), summed per template and decremented
-// locally after every call, so no request ever asks for more than is owned. The picker is the
-// client's (LWResourceLackUtil.lua:897-990): queue items before universal ones, largest first, as
-// many as fit in remaining + 59 s; then, if time is left, one of the smallest owned item when that
-// overshoots by less than speedup_config k1 = 60 s. The client's wider gap-filler (60-600 s
-// overshoot, then giving items back, :955-1012) is left out, so a call never wastes a minute.
+// or goodsId, count/num/itemLeftCnt, ItemInfo.lua:35-64). A template can come in several stacks
+// (833 keeps a set of uuids per item id, ItemData.lua:22-35), but the speed panel lists one stack
+// per template (GetSpeedItem -> GetItemById, the first uuid of the set, ItemData.lua:38-47,
+// 494-510) and never offers more than its count, so each template counts as its largest stack, as
+// duelInitItemCounts does. The count is decremented locally after every call, so no request ever
+// asks for more than one stack holds. The picker is the client's (LWResourceLackUtil.lua:897-990):
+// queue items before universal ones, largest first, as many as fit in remaining + 59 s; then, if
+// time is left, one of the smallest owned item when that overshoots by less than speedup_config
+// k1 = 60 s. The client's wider gap-filler (60-600 s overshoot, then giving items back,
+// :955-1012) is left out, so a call never wastes a minute.
 //
 // Diamond tripwire: the balance starts at init user.gold (PlayerInfo.lua:612-613) and every reply
 // is checked before anything else happens: remainGold / gold, top level or under queue
 // (BuildManager.lua:403-413; QueueDataManager.lua:483-492; BuildingCampAccelMessage.lua:15-22),
 // must not drop; build and queue replies must carry an itemCostArr listing every item sent (proof
 // the items paid); a camp reply, which has no itemCostArr, must carry gold. Otherwise the feature
-// stops for the rest of the process with an ERROR naming the call. E100173 (already completed,
-// QueueDataManager.lua:507-508) and 120021 ("Not enough items.") stop just that job. Remaining
-// time is re-read from every reply (buildInfo.uT / finished, queue uT, buildInfo.prodET); a
-// reply without it ends that job. Remaining time is end minus the host clock (evNow, as TodayDuel
-// uses); the client uses server time, so a host clock skewed by more than the 59 s tolerance would
-// skew the pick. At most duelSpeedupsMaxCalls spend calls per run.
+// stops for the rest of the process with an ERROR naming the call, and the trip is persisted so
+// later runs refuse every duel and dig spend until it is cleared (tripwire.go). E100173 (already
+// completed, QueueDataManager.lua:507-508) and 120021 ("Not enough items.") stop just that job.
+// Remaining time is re-read from every reply (buildInfo.uT / finished, queue uT,
+// buildInfo.prodET); a reply without it ends that job. Remaining time is end minus the host clock
+// (evNow, as TodayDuel uses); the client uses server time (UITimeManager:GetServerTime, e.g.
+// AllianceCompeteDataManager.lua:293-296, 567-578), so a host clock skewed by more than the 59 s
+// tolerance would skew the pick. For the same reason no call is sent within
+// duelSpeedupsEndMargin of the duel day's end: past it the next day's theme may already score
+// other queues. The real client has no such margin; it is a choice made here. At most
+// duelSpeedupsMaxCalls spend calls per run.
 //
 // duel-speedups-plan runs the same selection with every spend replaced by a log line, the read-only
 // pre-check before a live run. Live 2026-10-06 (Base Expansion): build.ccd.m.new {itemIDs:
@@ -80,6 +90,7 @@ const (
 	duelSpeedupsToleranceMs  = 59_000 // LWResourceLackUtil.lua:922: remaining + 59 s
 	duelSpeedupsGapLimitMs   = 60_000 // DataConfig speedup_config k1
 	duelSpeedupsPointsPerMin = 50     // score 90201/90301/90501/90601, before tech bonuses
+	duelSpeedupsEndMargin    = 2 * time.Minute
 
 	duelBuildingFoldUp   = 2 // BuildingStateType (EnumType.lua:3299-3305)
 	duelBuildingPaused   = 3
@@ -165,7 +176,8 @@ func init() {
 	}
 }
 
-// duelSpeedupsTrip disables duel-speedups for the rest of the process once the tripwire fires.
+// duelSpeedupsTrip disables duel-speedups for the rest of the process once the tripwire fires;
+// the trip is also persisted (tripwire.go) so later runs refuse too.
 var duelSpeedupsTrip struct {
 	sync.Mutex
 	reason string
@@ -177,12 +189,13 @@ func duelSpeedupsTripped() string {
 	return duelSpeedupsTrip.reason
 }
 
-func duelSpeedupsSetTrip(reason string) {
+func duelSpeedupsSetTrip(cmd, reason string) {
 	duelSpeedupsTrip.Lock()
-	defer duelSpeedupsTrip.Unlock()
 	if duelSpeedupsTrip.reason == "" {
 		duelSpeedupsTrip.reason = reason
 	}
+	duelSpeedupsTrip.Unlock()
+	tripwireTrip("duel-speedups", cmd, reason)
 }
 
 // duelSpeedupsAllowed returns, per job kind, whether today allows its queue items and whether it
@@ -269,7 +282,8 @@ func duelSpeedupsJobs(in *Init, nowMs int64) []*duelSpeedupJob {
 	return jobs
 }
 
-// duelSpeedupsInventory sums the owned speed-up items from init items per template id.
+// duelSpeedupsInventory returns the owned speed-up items from init items per template id: the
+// largest stack, the most the speed panel offers in one go (see the doc comment).
 func duelSpeedupsInventory(in *Init) map[int64]int64 {
 	owned := map[int64]int64{}
 	for _, it := range claimObjectsOrMap(in.Raw, "items") {
@@ -278,7 +292,7 @@ func duelSpeedupsInventory(in *Init) map[int64]int64 {
 			continue
 		}
 		if n, ok := claimFirstInt(it, "itemLeftCnt", "num", "count"); ok && n > 0 {
-			owned[id] += n
+			owned[id] = max(owned[id], n)
 		}
 	}
 	return owned
@@ -504,8 +518,9 @@ type duelSpeedupsRunner struct {
 	gold  int64
 	calls int
 	used  map[duelSpeedupKind]int64 // item ms applied per job kind
+	end   time.Time                 // the duel day's end (DuelDay.End)
 	errs  []error
-	halt  bool // stop the run: tripwire, dead connection, no reply, call cap
+	halt  bool // stop the run: tripwire, dead connection, no reply, call cap, the day's end
 }
 
 func runDuelSpeedups(conn *session.GameConn, in *Init) error { return duelSpeedupsRun(conn, in, false) }
@@ -517,6 +532,11 @@ func runDuelSpeedupsPlan(conn *session.GameConn, in *Init) error {
 func duelSpeedupsRun(conn *session.GameConn, in *Init, dry bool) error {
 	if reason := duelSpeedupsTripped(); reason != "" && !dry {
 		return fmt.Errorf("duel-speedups is disabled for this session by the diamond tripwire: %s", reason)
+	}
+	if !dry {
+		if err := tripwireErr("duel-speedups"); err != nil {
+			return err
+		}
 	}
 	if in == nil || in.Raw == nil {
 		slog.Info("duel-speedups: no init push; skipping")
@@ -534,7 +554,8 @@ func duelSpeedupsRun(conn *session.GameConn, in *Init, dry bool) error {
 		slog.Error(err.Error())
 		return err
 	}
-	r := &duelSpeedupsRunner{conn: conn, dry: dry, owned: duelSpeedupsInventory(in), gold: gold, used: map[duelSpeedupKind]int64{}}
+	r := &duelSpeedupsRunner{conn: conn, dry: dry, owned: duelSpeedupsInventory(in), gold: gold,
+		used: map[duelSpeedupKind]int64{}, end: d.End}
 	jobs := duelSpeedupsJobs(in, evNow().UnixMilli())
 	slog.Info("duel-speedups: start", "theme", d.ThemeName(), "dryRun", dry, "runningJobs", len(jobs),
 		"ownedItemMinutes", duelSpeedupsOwnedMinutes(r.owned), "diamonds", gold)
@@ -613,6 +634,12 @@ func (r *duelSpeedupsRunner) apply(j *duelSpeedupJob, plan []duelSpeedupUse) {
 		r.halt = true
 		return
 	}
+	if !evNow().Before(r.end.Add(-duelSpeedupsEndMargin)) {
+		slog.Info("duel-speedups: the duel day ends within the margin; stopping", "dryRun", r.dry, "dayEnd", r.end,
+			"margin", duelSpeedupsEndMargin)
+		r.halt = true
+		return
+	}
 	cmd := j.kind.cmd()
 	params := duelSpeedupsParams(j, plan)
 	if err := duelSpeedupsCheckParams(cmd, params, r.owned); err != nil {
@@ -649,7 +676,7 @@ func (r *duelSpeedupsRunner) apply(j *duelSpeedupJob, plan []duelSpeedupUse) {
 	gold, err := duelSpeedupsCheckReply(cmd, msg.Params, r.gold, plan)
 	if err != nil {
 		reason := fmt.Sprintf("%s (%s %s): %v", label, cmd, duelSpeedupsItemString(plan), err)
-		duelSpeedupsSetTrip(reason)
+		duelSpeedupsSetTrip(cmd, reason)
 		slog.Error("duel-speedups DIAMOND TRIPWIRE: disabled for this session", "call", cmd, "job", label, "reason", err,
 			"diamondsBefore", r.gold)
 		r.errs = append(r.errs, errors.New("duel-speedups diamond tripwire: "+reason))

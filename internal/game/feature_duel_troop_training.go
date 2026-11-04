@@ -46,6 +46,15 @@ import (
 //     and iron cover (the GotoResLack guard, :842-862). Food and iron are init resource.money and
 //     resource.metal (ResourceInfo.lua:163-174). Their ledger goes down by each camp's cost and
 //     by any lower balance pushed, so later camps see what earlier ones spent.
+//   - Stock: a batch is collected only while the soldier total is below LW_SOLDIER_MAX_STOCK and
+//     the batch is no larger than it (CollectSoldier, BuildingUtils.lua:1943-1958, tip 120083),
+//     and the camp panel's instant train refuses a count above cap - total
+//     (UILWMilitaryCampPanelView.lua:113-117). The server fills the stock only part-way from a camp
+//     (finished-timers), so sNum is also capped at cap - total - the batches already in camps,
+//     lowered by each batch sent; the plain Train button doesn't check this (:911-918), but a
+//     batch beyond the room would sit uncollectable in the camp. Cap and total are
+//     finishedTimersStockRoom's (init effect 30122, a lower bound, and resource_items 3005-3015);
+//     without them nothing is trained.
 //   - Every spend goes through the duel spend guard (feature_duel_recruit_tickets.go): the diamond
 //     tripwire and a gold check after each batch.
 //
@@ -113,16 +122,39 @@ type duelCamp struct {
 	lv   int64
 }
 
-// duelIdleCamps returns the idle Military Camps by uuid, logging the busy ones.
-func duelIdleCamps(in *Init) []duelCamp {
+// duelBuildingObjects is init building_new, or the parsed buildings' raw entries without it.
+func duelBuildingObjects(in *Init) []*sfs.SFSObject {
 	objs := in.Objects("building_new")
 	if len(objs) == 0 {
 		for _, b := range in.Buildings {
 			objs = append(objs, b.Raw)
 		}
 	}
+	return objs
+}
+
+// duelCampsPending is what the busy Military Camps add to the soldier stock when collected: the
+// prodBase (BuildingDate.lua:177) of every camp with a batch (prodST > 0), running or finished and
+// waiting for its collect.
+func duelCampsPending(in *Init) int64 {
+	var n int64
+	for _, b := range duelBuildingObjects(in) {
+		if id, _ := evNum(b, "bId"); id != finishedTimersMilitaryCamp {
+			continue
+		}
+		if st, _ := evNum(b, "prodST"); st > 0 {
+			if base, ok := evNum(b, "prodBase"); ok && base > 0 {
+				n += base
+			}
+		}
+	}
+	return n
+}
+
+// duelIdleCamps returns the idle Military Camps by uuid, logging the busy ones.
+func duelIdleCamps(in *Init) []duelCamp {
 	var out []duelCamp
-	for _, b := range objs {
+	for _, b := range duelBuildingObjects(in) {
 		if id, _ := evNum(b, "bId"); id != finishedTimersMilitaryCamp {
 			continue
 		}
@@ -229,6 +261,19 @@ func runDuelTroopTraining(conn *session.GameConn, in *Init) error {
 		slog.Info(feature + ": no idle Military Camp")
 		return nil
 	}
+	soldiers, stockCap, stockKnown := finishedTimersStockRoom(in)
+	if !stockKnown {
+		slog.Info(feature + ": init has no soldier stock cap (effect 30122) or soldier counts (resource_items), " +
+			"so a batch might not be collectable; not training")
+		return nil
+	}
+	pending := duelCampsPending(in)
+	room := stockCap - soldiers - pending
+	if room <= 0 {
+		slog.Info(feature+": the soldier stock has no room for another batch (tip 120083); camps left idle",
+			"soldiers", soldiers, "stockCap", stockCap, "pendingInCamps", pending)
+		return nil
+	}
 	unlocks := duelTrainUnlocksOf(in)
 	limitRate, _ := duelFloat(in.Object("effect"), duelTrainLimitRate)
 	reduceBP := int64(0)
@@ -260,8 +305,13 @@ func runDuelTroopTraining(conn *session.GameConn, in *Init) error {
 		if !ok {
 			continue
 		}
+		if room <= 0 {
+			slog.Info(feature+": the batches sent fill the soldier stock (tip 120083); the other camps are left idle",
+				"uuid", c.uuid, "soldiers", soldiers, "stockCap", stockCap, "pendingInCamps", pending)
+			break
+		}
 		maxCount := max(0, duelCampCapacity[c.lv]*(duelTrainBasisPoint+duelBasisPoints(limitRate))/duelTrainBasisPoint)
-		n := min(maxCount, duelTrainAffordable(g.res[duelTrainResIron], unit.iron, costBP),
+		n := min(maxCount, room, duelTrainAffordable(g.res[duelTrainResIron], unit.iron, costBP),
 			duelTrainAffordable(g.res[duelTrainResFood], unit.food, costBP), math.MaxInt32)
 		costIron, costFood := duelTrainCost(n, unit.iron, costBP), duelTrainCost(n, unit.food, costBP)
 		if n <= 0 || costIron > g.res[duelTrainResIron] || costFood > g.res[duelTrainResFood] {
@@ -277,6 +327,7 @@ func runDuelTroopTraining(conn *session.GameConn, in *Init) error {
 		p.PutInt("sNum", int32(n))
 		g.res[duelTrainResIron] -= costIron
 		g.res[duelTrainResFood] -= costFood
+		room -= n
 		label := fmt.Sprintf("duel train %d T%d in camp %d", n, unit.tier, c.uuid)
 		msg, err := g.spend(label, duelTrainCmd, p)
 		if err == nil {
