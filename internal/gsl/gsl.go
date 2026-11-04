@@ -722,6 +722,22 @@ func FindServerInfo(content *sfs.SFSObject) *sfs.SFSObject {
 	return nil
 }
 
+// FindLoginReplyField returns the object of a game-server Login reply that holds key, looked up
+// where FindServerInfo looks for serverInfo: the reply itself, else its p object; nil when neither
+// has it. The real client reads updateType and new_version off the same message as serverInfo
+// (LoginMessage.CSHandleResponse, Assembly-CSharp.decompiled.cs:82830-82896).
+func FindLoginReplyField(content *sfs.SFSObject, key string) *sfs.SFSObject {
+	if content.Has(key) {
+		return content
+	}
+	if pv, ok := content.Get("p"); ok {
+		if p, ok := pv.Val.(*sfs.SFSObject); ok && p.Has(key) {
+			return p
+		}
+	}
+	return nil
+}
+
 // GSLOpt selects which `opt` value to send, per dossier §02.2 / §05. Opt "" sends no opt field at
 // all, which is what the real client does while it holds a fresh at and an rt (see ChooseOpt).
 type GSLOpt struct {

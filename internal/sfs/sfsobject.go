@@ -105,8 +105,13 @@ func (o *SFSObject) put(key string, v SFSValue) {
 func (o *SFSObject) PutValue(key string, v SFSValue) { o.put(key, v) }
 
 // Keys returns the object's field names in insertion order, for read-only access by other
-// packages. Callers must not mutate the returned slice.
-func (o *SFSObject) Keys() []string { return o.keys }
+// packages. Callers must not mutate the returned slice. A nil receiver returns nil, like Has/Get.
+func (o *SFSObject) Keys() []string {
+	if o == nil {
+		return nil
+	}
+	return o.keys
+}
 
 func (o *SFSObject) PutUtfString(key, val string)      { o.put(key, SFSValue{SFSUtfString, val}) }
 func (o *SFSObject) PutBool(key string, val bool)      { o.put(key, SFSValue{SFSBool, val}) }
@@ -963,8 +968,14 @@ func (a *SFSArray) add(v SFSValue) { a.items = append(a.items, v) }
 func (a *SFSArray) AddValue(v SFSValue) { a.add(v) }
 
 // Items returns the array's elements for read-only access by other packages (which cannot
-// reach the unexported items field directly). Callers must not mutate the returned slice.
-func (a *SFSArray) Items() []SFSValue           { return a.items }
+// reach the unexported items field directly). Callers must not mutate the returned slice. A nil
+// receiver returns nil.
+func (a *SFSArray) Items() []SFSValue {
+	if a == nil {
+		return nil
+	}
+	return a.items
+}
 func (a *SFSArray) AddInt(val int32)            { a.add(SFSValue{SFSInt, val}) }
 func (a *SFSArray) AddSFSObject(val *SFSObject) { a.add(SFSValue{SFSObjectType, val}) }
 

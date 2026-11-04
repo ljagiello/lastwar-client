@@ -184,6 +184,19 @@ func saveRefreshedTokens(path, deviceID string, t auth.Tokens) {
 		"refreshTokenLen", len(t.RefreshTok), "refreshTokenTime", t.RefreshTokTime)
 }
 
+// configRefreshToken returns cfg's refresh token and its time for a run under runDeviceID (the
+// deviceId after the -cs-deviceid merge). The token is bound to the config's device, so a run
+// under another one gets neither. A -cs-deviceid naming the config's own device keeps it: the
+// redirect or lookup save-back writes this value back, and an empty one deleted the device's
+// refresh token. A redirect changes only the server fields in the real client too
+// (SaveGameServerSetting, Assembly-CSharp.decompiled.cs:82843-82853, 7493-7500).
+func configRefreshToken(cfg *SessionConfig, runDeviceID string) (string, int64) {
+	if cfg == nil || runDeviceID != cfg.DeviceID {
+		return "", 0
+	}
+	return cfg.RefreshToken, cfg.RefreshTokenTime
+}
+
 // errOtherDeviceID is saveShumeiInstall refusing to store one deviceId's install in a session
 // config made for another, as after a run whose -cs-deviceid overrides the config's.
 var errOtherDeviceID = errors.New("the session config holds a different deviceId")

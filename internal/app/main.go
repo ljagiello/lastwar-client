@@ -309,12 +309,9 @@ func Run() {
 		cfgAppVersion, cfgVersionCode, cfgFeatures = cfg.AppVersion, cfg.VersionCode, cfg.Features
 		cfgDuelPolicy, cfgShumeiInstall = cfg.DuelPolicy, cfg.ShumeiInstall
 		// The config's token times describe the config's own tokens: at.time means nothing for a
-		// -cs-at token, and the refresh token is bound to the config's device, not a -cs-deviceid one.
+		// -cs-at token. The refresh token is taken after the deviceId merge below.
 		if !csAtSetExplicitly {
 			cfgAccessTokTime = cfg.AccessTokenTime
-		}
-		if !csDeviceIDSetExplicitly {
-			cfgRefreshTok, cfgRefreshTokTime = cfg.RefreshToken, cfg.RefreshTokenTime
 		}
 		slog.Info("loaded session config", "path", cfgSource)
 		// Round 33 fix (originally scoped to -cs-ip/-cs-port/-cs-gameuid only; round 34 extends it
@@ -352,6 +349,7 @@ func Run() {
 		if deviceIDExplicitlyEmpty {
 			slog.Warn("-cs-deviceid was explicitly given as empty; not falling back to the session config's deviceId (pass a non-empty -cs-deviceid, or omit the flag entirely to use the config's value)")
 		}
+		cfgRefreshTok, cfgRefreshTokTime = configRefreshToken(cfg, *csDeviceID)
 		*csShumei, shumeiExplicitlyEmpty = mergeExplicitOrConfigString(*csShumei, csShumeiSetExplicitly, cfg.ShumeiBoxId)
 		if shumeiExplicitlyEmpty {
 			slog.Warn("-cs-shumei was explicitly given as empty; not falling back to the session config's shumeiBoxId (pass a non-empty -cs-shumei, or omit the flag entirely to use the config's value)")

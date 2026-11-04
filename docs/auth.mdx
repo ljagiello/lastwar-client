@@ -221,6 +221,8 @@ A session config with a `refreshToken`, such as one `-own-device-session` writes
 
 The refresh sends the session's device, `zone`, and `gameUid`, and `platform=iOS` under `iosMode`. A config captured from the real app has no refresh token, so its `E011` still needs a fresh capture (see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token)).
 
+The refresh token belongs to the config's `deviceId`. A run whose `-cs-deviceid` names another device doesn't use it. One that names the config's own device does, and when that run saves a redirect or a looked-up address back to the config, the refresh token and its time stay in it. Before, any `-cs-deviceid` dropped the token, and that save-back deleted it from the config.
+
 Confirmed live on 2026-10-13 with the own device's eight-day-old pair:
 
 - **`E011`, then refresh:** a config whose `accessToken` the server never issued got `E011`. The refresh succeeded, and the second `Login` loaded 160 buildings.

@@ -1,6 +1,7 @@
 package game
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -19,8 +20,8 @@ import (
 //   - Announcements and compensation: get.notice.list {} -> noticeList[{uuid, rewardStatus,
 //     content}]; receice.notice.reward {uuid: Long} (the wire name is misspelled) for a notice whose
 //     content JSON has b.reward and rewardStatus 0. A reward with rewardVersion is held back while
-//     any component is above this client's version, and needs HQ >= rewardLevel
-//     (MailSystem.lua:198-224; WorldNoticeDataInfo.lua:24-110).
+//     any component is above the appVersion this session's Login claimed, and needs HQ >=
+//     rewardLevel (MailSystem.lua:212-234; WorldNoticeDataInfo.lua:24-110).
 //   - Server trends: server.trends.info {} -> trendsInfo[]; server.trends.reward {id: UtfString}
 //     for rewardStatus 2 (unreceived) with status 2 or 4 and levelLimit <= HQ
 //     (UIWorldTrendItem.lua:204-258; WorldTrendManager.lua:7-20).
@@ -67,6 +68,7 @@ func runWorldSmallClaims(conn *session.GameConn, in *Init) error {
 	}
 	b := &evBatch{conn: conn}
 	hq := activityHQLevel(in)
+	version := cmp.Or(conn.AppVersion(), gsl.AppVersion)
 	if n, _ := evNum(in.Raw, "whistle_reward"); n > 0 {
 		b.send("whistle box", whistleBoxCmd, sfs.NewSFSObject())
 	}
@@ -74,7 +76,7 @@ func runWorldSmallClaims(conn *session.GameConn, in *Init) error {
 		if msg := b.send("notice list", noticeListCmd, sfs.NewSFSObject()); msg != nil {
 			for _, n := range evObjects(msg.Params, "noticeList") {
 				uuid, ok := evNum(n, "uuid")
-				if !ok || b.dead || !noticeClaimable(n, hq) {
+				if !ok || b.dead || !noticeClaimable(n, hq, version) {
 					continue
 				}
 				p := sfs.NewSFSObject()
@@ -122,9 +124,10 @@ func runWorldSmallClaims(conn *session.GameConn, in *Init) error {
 
 // noticeClaimable applies MailSystem:ShowRewardBtn to a notice: content.b.reward must exist (the
 // client forces rewardStatus 1 without it) and rewardStatus must be 0; a rewardVersion newer than
-// this client in any component holds it back, and with a rewardVersion the HQ must reach
-// rewardLevel.
-func noticeClaimable(n *sfs.SFSObject, hq int32) bool {
+// version in any component holds it back, and with a rewardVersion the HQ must reach rewardLevel.
+// version is the appVersion this session's Login claimed: the client compares with its own,
+// CS.GameEntry.Sdk.Version (MailSystem.lua:212-234), not with the build Go was written against.
+func noticeClaimable(n *sfs.SFSObject, hq int32, version string) bool {
 	if st, ok := evNum(n, "rewardStatus"); !ok || st != 0 {
 		return false
 	}
@@ -140,7 +143,7 @@ func noticeClaimable(n *sfs.SFSObject, hq int32) bool {
 	if !hasVer || ver == nil {
 		return true
 	}
-	local := strings.Split(gsl.AppVersion, ".")
+	local := strings.Split(version, ".")
 	for i, s := range strings.Split(fmt.Sprint(ver), ".") {
 		mail, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil {

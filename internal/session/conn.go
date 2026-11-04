@@ -61,6 +61,9 @@ type GameConn struct {
 	// "the next envelope" as Login keep working now that StartHeartbeat pings before Login.
 	skipClientPings bool
 
+	// appVersion is the appVersion the Login on this connection claimed (SetAppVersion).
+	appVersion atomic.Pointer[string]
+
 	stopHeartbeat chan struct{}
 	closeOnce     sync.Once
 	closeErr      error
@@ -118,6 +121,23 @@ func NewGameConnForTest(c net.Conn) *GameConn {
 // GameConn's unexported field directly.
 func (c *GameConn) RawConn() net.Conn     { return c.conn }
 func (c *GameConn) SetRawConn(n net.Conn) { c.conn = n }
+
+// SetAppVersion records the appVersion the Login on this connection claimed, so game code can
+// compare with the version this session presents, as the real client compares with its own
+// (CS.GameEntry.Sdk.Version). The auth package sets it once the Login is accepted.
+func (c *GameConn) SetAppVersion(v string) { c.appVersion.Store(&v) }
+
+// AppVersion returns what SetAppVersion recorded: "" for a nil connection or one whose Login
+// recorded none.
+func (c *GameConn) AppVersion() string {
+	if c == nil {
+		return ""
+	}
+	if v := c.appVersion.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
 
 func (c *GameConn) Close() error {
 	c.closeOnce.Do(func() {

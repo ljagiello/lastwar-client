@@ -742,4 +742,13 @@ func TestSFSObjectAccessorsOnNilReceiverDoNotPanic(t *testing.T) {
 	if got := o.GetLong("x"); got != 0 {
 		t.Errorf("nil.GetLong(...) = %d, want 0", got)
 	}
+	// Keys and SFSArray.Items panicked on a nil receiver (MASTER B54): game code logs
+	// a.Raw.Keys() for an activity entry, and a panic there used to end the whole run.
+	if got := o.Keys(); got != nil {
+		t.Errorf("nil.Keys() = %v, want nil", got)
+	}
+	var a *SFSArray
+	if got := a.Items(); got != nil {
+		t.Errorf("nil SFSArray.Items() = %v, want nil", got)
+	}
 }
