@@ -1,6 +1,7 @@
 package game
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 func syncedPipe(t *testing.T, offset time.Duration) (client, server *session.GameConn) {
 	t.Helper()
 	client, server = session.NewPipeGameConnPair(t)
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close(); clockConn.Store(nil) })
 	go func() {
 		ping, err := server.ReadEnvelope()
 		if err != nil || ping.Content == nil {
@@ -68,8 +69,80 @@ func TestRunFeaturesUsesTheSessionClock(t *testing.T) {
 	}
 }
 
-// cmdBaseTime is the one game time on the wire: the client sends its server time
-// (UIAllianceHelpCtrl.lua:119-120).
+// The tests below put a fixture time an hour after the host clock and an hour before the server
+// clock (syncedPipe's +2 h), so only a gate that reads the server clock passes it.
+
+// collectCore's own gates and GreetVisitors read the session clock: the Smelter's 30-minute tick
+// and the visitor's arrival are past only on the server clock. It also points the game time at the
+// session, since CollectAll reaches it without Collect.
+func TestCollectCoreReadsTheServerClock(t *testing.T) {
+	t.Cleanup(func() { clockConn.Store(nil) })
+	clockConn.Store(nil)
+	client, server := syncedPipe(t, 2*time.Hour)
+	host := time.Now()
+	raw := obj(
+		"tomorrow", host.Add(3*time.Hour).Unix(),
+		"allianceNewMail", 0,
+		"user", obj("uid", "1001"),
+		"vip", obj("vipInfo", obj("loginScoreState", 1, "everyDayReward", 1, "endTime", host.Add(24*time.Hour).Unix())),
+	)
+	smelter := productionBuilding(12, BuildingSmelter, 5, host.Add(-time.Minute), host.Add(-time.Minute), host.Add(time.Hour))
+	visitor := newTimedTestVisitor(21, 2003, host.Add(time.Hour)) // a GIFT visitor
+	in := &Init{Raw: raw, Buildings: []Building{smelter}, Visitors: []Visitor{visitor}}
+	srv := serveScripted(server, func(msg *session.ExtensionMessage) (string, *sfs.SFSObject) {
+		switch msg.Cmd {
+		case "chat.get.system.mails":
+			return "push.chat.get.system.mails", nil
+		case "building.production.collect":
+			return "", obj("status", 1)
+		}
+		return "", nil
+	})
+	if err := collectCore(client, in); err != nil {
+		t.Fatalf("collectCore() = %v, want nil", err)
+	}
+	if got := srv.requests("building.production.collect"); len(got) != 1 || got[0].Params.GetLong("uuid") != 12 {
+		t.Errorf("collected %v, want the Smelter, whose tick is done on the server clock", got)
+	}
+	if got := srv.requests("visitor.operate"); len(got) != 1 {
+		t.Errorf("greeted %d visitors, want the one that has arrived on the server clock", len(got))
+	}
+	if clockConn.Load() != client {
+		t.Error("collectCore did not point the game time at its session")
+	}
+}
+
+// visitor-fresh waits while a queued visitor is still arriving; the queued one has arrived on the
+// server clock.
+func TestVisitorFreshReadsTheServerClock(t *testing.T) {
+	client, server := syncedPipe(t, 2*time.Hour)
+	in := freshTestInit(5, int32(1), queuedTestVisitor(1, 1001, 0, time.Now().Add(time.Hour)))
+	srv := serveScripted(server, func(*session.ExtensionMessage) (string, *sfs.SFSObject) { return "", nil })
+	if err := runVisitorFresh(client, in); err != nil {
+		t.Fatalf("runVisitorFresh() = %v, want nil", err)
+	}
+	if got := srv.cmds(); !slices.Equal(got, []string{"visitor.fresh"}) {
+		t.Errorf("sent %v, want visitor.fresh", got)
+	}
+}
+
+// activity-visitors claims only while the event runs; it ended an hour ago on the server clock.
+func TestActivityVisitorsReadTheServerClock(t *testing.T) {
+	client, server := syncedPipe(t, 2*time.Hour)
+	in := initWithActivityVisitors(map[string]*sfs.SFSObject{
+		"94309": activityVisitorEntry(0, time.Now().Add(time.Hour), 4006),
+	}, "94309")
+	srv := serveScripted(server, func(*session.ExtensionMessage) (string, *sfs.SFSObject) { return "", nil })
+	if err := runActivityVisitors(client, in); err != nil {
+		t.Fatalf("runActivityVisitors() = %v, want nil", err)
+	}
+	if got := srv.cmds(); len(got) != 0 {
+		t.Errorf("sent %v for an event that has ended on the server clock", got)
+	}
+}
+
+// cmdBaseTime is a game time the server sees (the fireworks scan's timeStamp, from evNow, is the
+// other): the client sends its server time (UIAllianceHelpCtrl.lua:119-120).
 func TestHelpAllianceMembersSendsTheServerTime(t *testing.T) {
 	client, server := syncedPipe(t, 2*time.Hour)
 	got := make(chan int64, 1)

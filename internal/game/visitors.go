@@ -137,9 +137,9 @@ var greetableVisitorTypes = map[int32]bool{
 }
 
 // visitorArrivalMargin is how long after its startTime GreetVisitors waits before greeting a
-// visitor. init carries no server clock (the login reply's db_utc_timestamp was 0 live), so
-// arrival is judged on the host clock, and the margin absorbs a host clock running slightly ahead
-// of the server's.
+// visitor. Arrival is judged on the game time: the session's server clock, kept from the pongs, or
+// the host clock before the first one (the login reply's db_utc_timestamp was 0 live). The margin
+// absorbs what error that clock has left.
 const visitorArrivalMargin = 5 * time.Second
 
 // visitorArrived reports whether v's startTime is at least visitorArrivalMargin before now. The

@@ -899,6 +899,7 @@ func collectCore(conn *session.GameConn, in *Init) error {
 		in = &Init{}
 	}
 	buildings, visitors := in.Buildings, in.Visitors
+	useServerClock(conn) // CollectAll reaches here without Collect
 	now := connNow(conn)
 	var errs []error
 

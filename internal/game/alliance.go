@@ -19,10 +19,10 @@ import (
 // everything else OnCreate takes (helpBtnPos, toPos, isOnlyDisperse,
 // isOnlyShowDiff) is purely local UI-animation state, never sent. The real
 // client sent an absolute Unix-epoch-milliseconds value
-// (`cmdBaseTime=1783114317664`); this sends the equivalent live value via
-// `time.Now().UnixMilli()`. The real client uses its server-synced clock
-// (UITimeManager:GetServerTime, UILWAlHelpCtrl.lua:25-26); this client keeps
-// no server clock, so the host clock stands in for it.
+// (`cmdBaseTime=1783114317664`) from its server-synced clock
+// (UITimeManager:GetServerTime, UILWAlHelpCtrl.lua:25-26); this sends the
+// session's server clock the same way (connNow), the host clock before the
+// first pong.
 //
 // The captured response fell outside the successfully-decoded portion of
 // that capture (the same stream-reassembly artifact seen with the Truck
