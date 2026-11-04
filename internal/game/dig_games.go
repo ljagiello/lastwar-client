@@ -238,9 +238,9 @@ func (r *digsRun) write(label, cmd string, p *sfs.SFSObject) (*sfs.SFSObject, di
 		return nil, digsFailed
 	}
 	if digsSpendCmds[cmd] {
+		// Refused without halting: this run's free choose and claims still go out.
 		if err := tripwireErr(r.feature); err != nil {
 			r.add(err)
-			r.halt = true
 			return nil, digsFailed
 		}
 	}

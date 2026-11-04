@@ -105,22 +105,24 @@ func TestTripwirePersistsAcrossRunsUntilCleared(t *testing.T) {
 	if _, err := runSpeed(t, newSpeedFake(speedTue(), c), c, true); err != nil {
 		t.Errorf("duel-speedups-plan: %v", err)
 	}
-	// A pickaxe dig spends owned items: refused, nothing sent.
-	digConn, digFake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
-	r := newDigsRun(digConn, digsInit(0), "treasure-hunt", false)
-	dig := sfs.NewSFSObject()
-	dig.PutInt("activityId", 1)
-	dig.PutInt("digIndex", 2)
-	if _, res := r.write("dig", treasureHuntDigCmd, dig); res != digsFailed || !errors.Is(r.err(), errTripwire) || !r.halt {
-		t.Errorf("pickaxe dig: %v, %v; want it refused by the tripwire", res, r.err())
-	}
-	if got := digFake.cmds(); len(got) != 0 {
-		t.Errorf("pickaxe dig sent %v", got)
+	// A pickaxe dig (v1 or v2) spends owned items: refused, nothing sent.
+	for _, cmd := range []string{treasureHuntDigCmd, treasureHuntDigV2Cmd} {
+		digConn, digFake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+		r := newDigsRun(digConn, digsInit(0), "treasure-hunt", false)
+		dig := sfs.NewSFSObject()
+		dig.PutInt("activityId", 1)
+		dig.PutInt("digIndex", 2)
+		if _, res := r.write("dig", cmd, dig); res != digsFailed || !errors.Is(r.err(), errTripwire) || r.halt {
+			t.Errorf("%s: %v, %v; want it refused by the tripwire", cmd, res, r.err())
+		}
+		if got := digFake.cmds(); len(got) != 0 {
+			t.Errorf("%s sent %v", cmd, got)
+		}
 	}
 	// A vault reward claim is free: it still goes out, so the reward doesn't expire while the file
 	// waits for the operator.
-	digConn, digFake = startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
-	r = newDigsRun(digConn, digsInit(0), "season-dig", false)
+	digConn, digFake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+	r := newDigsRun(digConn, digsInit(0), "season-dig", false)
 	open := sfs.NewSFSObject()
 	open.PutLong("uuid", 1)
 	open.PutInt("pos", 3)

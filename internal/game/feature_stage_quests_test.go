@@ -197,8 +197,9 @@ func TestStageQuestRangesAreStageQuestsTheQuestsFeatureSkips(t *testing.T) {
 }
 
 // TestStageQuestActivityStageCoversTheActivityTable: every table activity row of the five types has
-// its stage, so the two embedded copies of tables 39879 can't drift apart, and every stage a range
-// names is some activity's.
+// a stage and the map lists no other id, so a table bump that adds or drops rows fails here until
+// the map is updated; every stage a range names is some activity's. The stage values themselves
+// come from tableInfoType, which the generated table doesn't carry, so they are checked by hand.
 func TestStageQuestActivityStageCoversTheActivityTable(t *testing.T) {
 	types := []int32{stageQuestTypeStrongestCommander, stageQuestTypeLockhart, stageQuestTypeTaskActivity,
 		stageQuestTypeTaskActivity2, stageQuestTypeKing}

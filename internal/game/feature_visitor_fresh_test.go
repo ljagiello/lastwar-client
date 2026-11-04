@@ -153,14 +153,14 @@ func TestInitEffect(t *testing.T) {
 	}
 }
 
-// TestVisitorFreshDropsGreetedAndUnknownVisitors is the B43 regression test. The client deletes a
-// visitor from its queue on the visitor.operate reply and re-runs GetNewVisitorInfo
-// (CityVisitorManager.lua:505-520), and never queues an entry whose eventId has no table row
-// (:263-267). Go's visitor-fresh reads the same init list after the core greets, so it must leave
-// out the visitors GreetVisitors greeted (a reply with no errorCode, in the shared slice) and the
-// unknown eventIds. A visitor_err_coming reply (benign, nil error) or a failed greet leaves the
-// visitor in the queue.
-func TestVisitorFreshDropsGreetedAndUnknownVisitors(t *testing.T) {
+// TestVisitorFreshDropsGreetedVisitors is the B43 regression test. The client deletes a visitor
+// from its queue on the visitor.operate reply and re-runs GetNewVisitorInfo
+// (CityVisitorManager.lua:505-520). Go's visitor-fresh reads the same init list after the core
+// greets, so it must leave out the visitors GreetVisitors greeted (a reply with no errorCode, in
+// the shared slice). A visitor_err_coming reply (benign, nil error) or a failed greet leaves the
+// visitor in the queue, and so does an eventId Go's 39879 snapshot lacks: the client drops only
+// ids its own current table lacks (:263-267), and Go doesn't greet them.
+func TestVisitorFreshDropsGreetedVisitors(t *testing.T) {
 	now := time.Now()
 	arrived := now.Add(-time.Hour)
 	greetReply := func(code string) func(visitorRequest) *sfs.SFSObject {

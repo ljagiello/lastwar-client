@@ -950,6 +950,11 @@ func (r *digRun) vault() {
 				slog.Warn(r.name+": "+label+" has a map the table lacks; leaving the vault", "mapConfigId", t.cfg)
 				return
 			case t.state == digNotBegin:
+				if r.spendRefused != nil {
+					// The bricks would be refused, so a started 180 s stage would surely fail.
+					slog.Info(r.name + ": " + label + " not started while the diamond tripwire file exists")
+					return
+				}
 				need, have := int64(t.lvl.w*t.lvl.h-t.lvl.hammers), r.hammers[digVaultHammer]
 				if t.lvl.hammers <= 0 || have < need {
 					slog.Info(r.name+": "+label+" not started: the hammers held plus its grant don't cover every brick, "+
