@@ -9,6 +9,7 @@ import (
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -24,6 +25,10 @@ func newTestMailObj(uid string, mailType, rewardStatus int32) *sfs.SFSObject {
 	o.PutInt("rewardStatus", rewardStatus)
 	return o
 }
+
+// distinctMailType is the i-th of many distinct claimable mail types for the cap tests: it starts
+// past the mailCantClaimAllTypes (112, 134, 135), which ClaimAllMail never claims.
+func distinctMailType(i int) int32 { return int32(1000 + i) }
 
 // TestListMailPaginates checks ListMail's pagination loop end to end: a first page with
 // `more: true` must trigger a second request seeded from the first page's `lastUid`/
@@ -118,8 +123,9 @@ func TestListMailPaginates(t *testing.T) {
 	if len(gotReqs) != 2 {
 		t.Fatalf("fake server saw %d requests, want 2", len(gotReqs))
 	}
-	if !gotReqs[0].hasFirst || gotReqs[0].clientseq != "" || gotReqs[0].time != 0 {
-		t.Errorf("page 1 request = %+v, want firstCmd present, clientseq=\"\", time=0 (cold start)", gotReqs[0])
+	// The client's cold start: lastUid "0", lastTime 0 (MailDataManager.lua:97-98, 158).
+	if !gotReqs[0].hasFirst || gotReqs[0].clientseq != "0" || gotReqs[0].time != 0 {
+		t.Errorf("page 1 request = %+v, want firstCmd present, clientseq=\"0\", time=0 (cold start)", gotReqs[0])
 	}
 	if gotReqs[1].hasFirst {
 		t.Errorf("page 2 request has firstCmd set, want it absent -- only the cold-start request sets it")
@@ -132,9 +138,8 @@ func TestListMailPaginates(t *testing.T) {
 // TestListMailStopsOnMissingLastUid is the regression test for the round-12 fix to ListMail's
 // pagination loop: a response that claims `more: true` but omits `lastUid` must not be treated as
 // a valid cursor to keep paginating on. Before the fix, `msg.Params.GetString("lastUid")` silently
-// fell through to "" -- indistinguishable from the cold-start clientseq -- so ListMail would
-// re-send the exact same first-page request again (and again, up to maxPages times) instead of
-// stopping. The fake server here answers exactly one request and then goes silent, so a reverted
+// fell through to "" -- then also the cold-start clientseq -- so ListMail would re-send the exact
+// same first-page request again (and again, up to maxPages times) instead of stopping. The fake server here answers exactly one request and then goes silent, so a reverted
 // fix would make ListMail try to send a second request that nothing ever answers: SendExtension's
 // 10s write deadline (conn.go's writeTimeout) would eventually error it out, but this test's own
 // 3s bound catches that long before then and fails with a clear message instead of just going
@@ -2313,7 +2318,7 @@ func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
 
 	mails := make([]*sfs.SFSObject, totalTypes)
 	for i := range totalTypes {
-		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), int32(i), 0)
+		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), distinctMailType(i), 0)
 	}
 
 	var rewardBatchCount int
@@ -2424,7 +2429,7 @@ func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
 
 	mails := make([]*sfs.SFSObject, totalTypes)
 	for i := range totalTypes {
-		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), int32(i), 0)
+		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), distinctMailType(i), 0)
 	}
 
 	var rewardBatchCount int
@@ -3374,5 +3379,125 @@ func TestListMailWarnsOnWrongTypedMsgField(t *testing.T) {
 	}
 	if logged := buf.String(); !strings.Contains(logged, "response's msg field is present but not an array") {
 		t.Errorf("expected a warning mentioning the wrong-typed msg field, got log:\n%s", logged)
+	}
+}
+
+// startMailFake answers the mail list with mails in one page and every other request with
+// success, recording each request; it never blocks the client, so a test can assert exactly what
+// was sent, including that nothing was.
+func startMailFake(t *testing.T, mails ...*sfs.SFSObject) (*session.GameConn, *evFake) {
+	t.Helper()
+	client, server := session.NewPipeGameConnPair(t)
+	f := &evFake{}
+	go func() {
+		for {
+			msg, err := session.ReadNextExtension(server)
+			if err != nil {
+				return
+			}
+			f.mu.Lock()
+			f.reqs = append(f.reqs, evReq{msg.Cmd, msg.Params})
+			f.mu.Unlock()
+			cmd, resp := msg.Cmd, sfs.NewSFSObject()
+			if cmd == "chat.get.system.mails" {
+				cmd = "push.chat.get.system.mails"
+				arr := sfs.NewSFSArray()
+				for _, mo := range mails {
+					arr.AddSFSObject(mo)
+				}
+				resp.PutSFSArray("msg", arr)
+				resp.PutBool("more", false)
+			} else {
+				resp.PutBool("success", true)
+			}
+			if err := server.SendExtension(cmd, resp); err != nil {
+				return
+			}
+		}
+	}()
+	return client, f
+}
+
+// mailUIDsSent returns the uids of every request for cmd, in order.
+func mailUIDsSent(f *evFake, cmd string) []string {
+	var out []string
+	for _, r := range f.only(cmd) {
+		out = append(out, strings.Split(r.Params.GetString("uids"), ",")...)
+	}
+	return out
+}
+
+// mailWith sets extra Int fields (status, saveFlag) on a mail fixture.
+func mailWith(o *sfs.SFSObject, fields map[string]int32) *sfs.SFSObject {
+	for k, v := range fields {
+		o.PutInt(k, v)
+	}
+	return o
+}
+
+// TestClaimAllMailSkipsWhatTheClientsBulkActionsSkip is B39: the client's Read All and Claim All
+// leave out CANT_CLAIM_ALL (112) and the translation-rating mail (134, 135) (MailCantClaimAllType,
+// MailEnum.lua:282-286; MailDBManager.lua:1044-1075) and saved mail (saveFlag != 0, the favor
+// group), and Read All sends only mail whose status is not 1 (MailDataManager.lua:411-436). Before
+// the fix every listed mail was marked read and every rewardStatus 0 mail was claimed.
+func TestClaimAllMailSkipsWhatTheClientsBulkActionsSkip(t *testing.T) {
+	client, fake := startMailFake(t,
+		newTestMailObj("plain", 3, 0), // unread, reward: read + claim
+		mailWith(newTestMailObj("read-reward", 3, 0), map[string]int32{"status": 1}),   // read, reward: claim only
+		mailWith(newTestMailObj("unread-report", 9, 1), map[string]int32{"status": 0}), // unread, no reward: read only
+		mailWith(newTestMailObj("read-report", 9, 1), map[string]int32{"status": 1}),   // nothing to do
+		newTestMailObj("cant-claim-all", 112, 0),                                       // CANT_CLAIM_ALL
+		newTestMailObj("rating", 134, 0),                                               // TranslationRating
+		newTestMailObj("auto-rating", 135, 0),                                          // Automatic_TranslationRating
+		mailWith(newTestMailObj("saved", 3, 0), map[string]int32{"saveFlag": 1}),       // favor group
+		mailWith(newTestMailObj("not-saved", 4, 0), map[string]int32{"saveFlag": 0}),   // explicit 0: normal
+	)
+	if err := ClaimAllMail(client); err != nil {
+		t.Fatalf("ClaimAllMail() = %v, want nil", err)
+	}
+	if got, want := mailUIDsSent(fake, "mail.read.status.betch"), []string{"plain", "unread-report", "not-saved"}; !slices.Equal(got, want) {
+		t.Errorf("read-status uids = %v, want %v", got, want)
+	}
+	var claims []string
+	for _, r := range fake.only("mail.reward.batch") {
+		claims = append(claims, fmt.Sprintf("%d:%s", r.Params.GetInt("type"), r.Params.GetString("uids")))
+	}
+	if want := []string{"3:plain,read-reward", "4:not-saved"}; !slices.Equal(claims, want) {
+		t.Errorf("reward claims = %v, want %v", claims, want)
+	}
+}
+
+// TestClaimAllMailSendsNoReadStatusWhenAllRead: an inbox whose mail is all read and claimed gets
+// the list request only, not a read-status batch every run.
+func TestClaimAllMailSendsNoReadStatusWhenAllRead(t *testing.T) {
+	client, fake := startMailFake(t,
+		mailWith(newTestMailObj("a", 3, 1), map[string]int32{"status": 1}),
+		mailWith(newTestMailObj("b", 9, 1), map[string]int32{"status": 1}),
+		newTestMailObj("rating", 134, 1), // unread, but Read All leaves rating mail for the player
+	)
+	if err := ClaimAllMail(client); err != nil {
+		t.Fatalf("ClaimAllMail() = %v, want nil", err)
+	}
+	if got := fake.cmds(); !slices.Equal(got, []string{"chat.get.system.mails"}) {
+		t.Errorf("sent %v, want only the list request", got)
+	}
+}
+
+// TestGroupUnclaimedByTypeSkipsCantClaimAllAndSaved checks the claim filter alone, with a
+// saveFlag sent as a Byte and a neighbouring type (136) that is not excluded.
+func TestGroupUnclaimedByTypeSkipsCantClaimAllAndSaved(t *testing.T) {
+	savedByte := newTestMailObj("saved-byte", 5, 0)
+	savedByte.PutByte("saveFlag", 1)
+	mail := []Mail{
+		{Raw: newTestMailObj("ok", 5, 0)},
+		{Raw: newTestMailObj("t112", 112, 0)},
+		{Raw: newTestMailObj("t134", 134, 0)},
+		{Raw: newTestMailObj("t135", 135, 0)},
+		{Raw: savedByte},
+		{Raw: newTestMailObj("t136", 136, 0)}, // REFUND_COST_GOLD: not in MailCantClaimAllType
+	}
+	got := groupUnclaimedByType(mail)
+	if len(got) != 2 || !slices.Equal(got[5], []string{"ok"}) || !slices.Equal(got[136], []string{"t136"}) {
+		t.Errorf("groupUnclaimedByType = %v, want map[5:[ok] 136:[t136]]", got)
 	}
 }
