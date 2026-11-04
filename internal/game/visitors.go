@@ -6,7 +6,6 @@ import (
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 	"log/slog"
-	"math"
 	"net"
 	"time"
 )
@@ -47,6 +46,11 @@ import (
 // Still open: a genuinely successful greet's reward payload shape.
 type Visitor struct {
 	Raw *sfs.SFSObject
+	// greeted is set by GreetVisitors, in the caller's slice, once the server answered this
+	// visitor's visitor.operate without an errorCode: the client then removes the visitor from
+	// its queue (DeleteVisitor, CityVisitorManager.lua:505-520), and visitor-fresh, which reads
+	// the same init list later in the run, no longer counts it.
+	greeted bool
 }
 
 func (v Visitor) Uid() int64       { return v.Raw.GetLong("uid") }
@@ -62,9 +66,11 @@ func (v Visitor) StartTime() int64 { return v.Raw.GetLong("startTime") }
 // visitorBehaviourType).
 func (v Visitor) QueueType() int32 { return v.Raw.GetInt("type") }
 
+//go:generate go run ./gen_visitor_types -table ${LASTWAR_TABLES}/lw_base_visitor_event.json -version ${LASTWAR_TABLE_VERSION} -out visitor_types_gen.go
+
 // Visitor behaviour types: lw_base_visitor_event.type for the visitor's eventId, which the client
-// picks the visitor's class by (global VisitorType, Global/EnumType.lua:11982-12004; dispatch in
-// Scene/CityVisitor/CityVisitorManager.lua:98-129). visitorTypeNames has the full list.
+// picks the visitor's class by (global VisitorType, Global/EnumType.lua:11985-12007; dispatch in
+// Scene/CityVisitor/CityVisitorManager.lua:108-139). visitorTypeNames has the full list.
 const (
 	visitorTypeGift          int32 = 2
 	visitorTypeRecruitment   int32 = 3
@@ -100,19 +106,25 @@ func visitorBehaviourType(eventId int32) (t int32, ok bool) {
 // whose only accept path in the client grants a reward and spends nothing.
 //
 //   - GIFT, DOMINATOR, SeasonDayGift use VisitorGift, whose OnConfirmClick sends operate:1 with no
-//     cost check (VisitorGift.lua:142-166). Their para is a reward id: GIFT "HQ;rewardId|..."
+//     cost check (VisitorGift.lua:147-171). Their para is a reward id: GIFT "HQ;rewardId|..."
 //     (2001), SeasonDayGift "1;rewardId", DOMINATOR 9001 reward 280000001 (items
-//     800006-800008). GIFT and SeasonDayGift are live-validated; DOMINATOR is static-only.
-//   - RECRUITMENT (VisitorRecruitWorker.lua:57-66, UIWorkerDetailRecruitView.lua:27-38): both
+//     800006-800008). GIFT and SeasonDayGift are live-validated; DOMINATOR is static-only. The
+//     exception is the 11 Season-5 SeasonDayGift "choose a treasure" rows (20703 ... 20746,
+//     visitorChoiceEvents): their para is empty and their choose_treasure set, so the plot ends in
+//     a choice that sends visitor.season.choose {uid, chooseId} and closes the plot without
+//     GF_plot_group_done, and OnConfirmClick never runs (VisitorUnit.lua:271-286, 381-428;
+//     LWPlotManager.lua:120-131, 155-167). Which treasure to take is the player's pick, so
+//     visitorSkipReason leaves them alone.
+//   - RECRUITMENT (VisitorRecruitWorker.lua:62-71, UIWorkerDetailRecruitView.lua:27-38): both
 //     buttons of the recruit window send operate:1 and the worker joins at no cost. Live-validated.
-//   - SystemGift (VisitorSystemGift.lua:53-71, UICityVistorSystemGiftView.lua:111-190): the window
+//   - SystemGift (VisitorSystemGift.lua:56-75, UICityVistorSystemGiftView.lua:111-190): the window
 //     shows one gift item addressed to the player, and its only button sends operate:1.
 //     Static-only.
 //
 // Every other type is skipped and left for the player, never declined with operate:0. Notably:
-// MERCHANT, where operate:1 buys para "item;count;resourceType;price" (VisitorMerchant.lua:34-58);
+// MERCHANT, where operate:1 buys para "item;count;resourceType;price" (VisitorMerchant.lua:36-56);
 // WORKER_LOTTERY, an invitation to the paid worker lottery that the client only dismisses with
-// operate:1 (VisitorWorkerLottery.lua:32-51); SKY_BATTLE and PLANE_FEATURE, VisitorGift too but
+// operate:1 (VisitorWorkerLottery.lua:34-53); SKY_BATTLE and PLANE_FEATURE, VisitorGift too but
 // with no reward in the table, whose plot starts a feature guide (lw_guide_flow 5530); and
 // SURVIVOR_PACK_GiFT, whose visitors have client-made uids and open a pack popup rather than
 // sending visitor.operate (SurvivorPackManager.lua:298-345, 448-457).
@@ -132,84 +144,61 @@ const visitorArrivalMargin = 5 * time.Second
 
 // visitorArrived reports whether v's startTime is at least visitorArrivalMargin before now. The
 // client creates, and so lets the player tap, a visitor only once server time reaches startTime
-// (VisitorUnit.lua:16-31); a missing startTime counts as arrived.
+// (VisitorUnit.lua:18-33); a missing startTime counts as arrived.
 func visitorArrived(v Visitor, now time.Time) bool {
 	return v.StartTime() <= now.Add(-visitorArrivalMargin).UnixMilli()
 }
 
-// visitorSkipReason returns why GreetVisitors leaves v alone, or "" when it greets it, plus v's
-// behaviour type (0 when the eventId is unknown).
-func visitorSkipReason(v Visitor, now time.Time) (behaviour int32, reason string) {
-	t, ok := visitorBehaviourType(v.EventId())
+// visitorEventSkipReason is the part of visitorSkipReason that depends on the eventId alone: ""
+// when GreetVisitors accepts a visitor of eventId once it has arrived.
+func visitorEventSkipReason(eventId int32) (behaviour int32, reason string) {
+	t, ok := visitorBehaviourType(eventId)
 	switch {
 	case !ok:
 		return 0, "eventId not in lw_base_visitor_event"
 	case !greetableVisitorTypes[t]:
 		return t, "behaviour type not on the greet allowlist"
-	case !visitorArrived(v, now):
-		return t, "not arrived yet (startTime in the future)"
+	case visitorChoiceEvents[eventId]:
+		return t, "choice visitor, left for the player"
 	}
 	return t, ""
 }
 
-// maxVisitorsDefensiveCeiling is the fallback cap ParseInitVisitors applies to `visitor.list` when
-// the init push's own sibling `maxNum` field (see the Visitor doc comment above -- the real push
-// carries `visitor={addNum, maxNum, list}`) is absent, unparseable, or nonsensical (<= 0). This
-// closes the same unbounded-hang threat model buildings.go's capDeadline (round 20) closed for wait
-// DURATION, just for item COUNT instead: GreetVisitors issues one sequential `visitor.operate`
-// network call per parsed visitor, and each can cost up to a full defaultCmdTimeout (8s, conn.go)
-// against a peer that simply never responds -- this project's own threat model already treats an
-// arbitrary/hostile -cs-ip peer as in-scope (see capDeadline's own doc comment, round 16's
-// sfs.RedactSFSValue fail-open fix). Set well above the live-confirmed maxNum=5 (see the Visitor doc
-// comment above) as a defensive margin, not hardcoded to exactly 5, since the real live value could
-// legitimately vary a bit across accounts/game versions -- but still small enough to keep
-// GreetVisitors' worst-case sequential wall-clock cost bounded to a couple minutes, not an
-// open-ended hang.
-const maxVisitorsDefensiveCeiling = 25
+// visitorSkipReason returns why GreetVisitors leaves v alone, or "" when it greets it, plus v's
+// behaviour type (0 when the eventId is unknown).
+func visitorSkipReason(v Visitor, now time.Time) (behaviour int32, reason string) {
+	t, reason := visitorEventSkipReason(v.EventId())
+	if reason == "" && !visitorArrived(v, now) {
+		reason = "not arrived yet (startTime in the future)"
+	}
+	return t, reason
+}
 
-// MaxVisitorsUpperBound is a hardcoded, non-server-trusting upper sanity bound on the init push's
-// own `visitor.maxNum` field (see the Visitor doc comment above). Before this existed,
-// ParseInitVisitors trusted maxNum verbatim as long as it was > 0, which let a hostile or
-// misbehaving -cs-ip peer simply set maxNum to an enormous value -- paired with a matching number of
-// visitor.list entries, well within sfsobject.go's sfs.MaxDecodedNodes=300,000 decode budget -- and
-// completely defeat maxVisitorsDefensiveCeiling's own protection. That was the wrong model to begin
-// with: an attacker-controlled field is not itself an enforcement mechanism against that same
-// attacker, precisely the reasoning buildings.go's maxCollectibleBuildingsPerRun doc comment gives
-// for never deferring to a server-sent count at all. This bound closes that gap while still trusting
-// maxNum for its intended purpose: set well above both the live-confirmed maxNum=5 and
-// maxVisitorsDefensiveCeiling=25 -- generously large, in the same spirit as
-// maxCollectibleBuildingsPerRun=300, so a legitimately bigger real maxNum from a future game update
-// wouldn't be needlessly clamped -- while still finite, so GreetVisitors' worst-case sequential
-// runtime against a peer that never responds stays bounded (300 * defaultCmdTimeout (8s, conn.go)
-// caps the worst case at ~40 minutes instead of an open-ended hang).
+// MaxVisitorsUpperBound caps the `visitor.list` entries ParseInitVisitors examines, and the
+// visitors FetchBuildings and login.go's dedupeVisitors accumulate across pushes. The list is
+// server-sent, so nothing in it, maxNum included, can bound it: an attacker-controlled count is no
+// enforcement against that attacker (the reasoning buildings.go's maxCollectibleBuildingsPerRun
+// gives), and this project treats a hostile -cs-ip peer as in scope. GreetVisitors sends one
+// sequential visitor.operate per visitor, each of which can wait out a full defaultCmdTimeout (8s,
+// conn.go) against a peer that never answers, so 300 caps that worst case at ~40 minutes instead
+// of an open-ended hang. A real list is far shorter: maxNum was 5 live, plus the odd Queue2
+// visitor.
 const MaxVisitorsUpperBound = 300
 
 // ParseInitVisitors extracts the current visitor list from the bare `init`
 // bootstrap push's `visitor.list` field -- a sibling of `building_new` in
 // the same payload, see the Visitor doc comment above.
 //
-// The list is capped at the init push's own `maxNum` field when present and sane (> 0), itself
-// clamped to MaxVisitorsUpperBound (see that constant's doc comment -- maxNum is server-supplied and
-// therefore not trustworthy as an enforcement mechanism on its own), falling back to
-// maxVisitorsDefensiveCeiling when maxNum is absent, unparseable, or <= 0. A maxNum exceeding
-// MaxVisitorsUpperBound is itself logged as a Warn before being clamped, and a server-sent list
-// longer than the cap actually applied is separately logged as a Warn too: both are signals worth
-// knowing about (a misbehaving/hostile peer, or this client's live-confirmed maxNum assumption
-// having drifted), not something to silently truncate away.
+// The client keeps every list entry (InitData, CityVisitorManager.lua:341-357). maxNum bounds only
+// Queue1, the timed queue visitor.fresh refills (GetNewVisitorInfo, :187-205); Queue2 holds the
+// queue types 2, 4, 7, 8, 11 and 19 (Const.lua:25-41), a SystemGift (8) for one, so a real list
+// can be longer than maxNum. The list is therefore not cut at maxNum (visitor-fresh applies it to
+// the Queue1 count), and a list longer than maxNum is logged at Info.
 //
-// The cap bounds the number of RAW `visitor.list` items examined (round 26), not merely the number
-// of valid ones appended to the returned slice. Before round 26, the loop below only stopped once
-// len(out) reached limit -- so a malformed entry (not an *sfs.SFSObject, or missing/wrong-typed the
-// required "uid" field via requireFieldType) hit a `continue` that didn't count against the cap at
-// all, since it never reached the append. requireFieldType itself logs a Warn per malformed entry,
-// and the raw `arr.Items()` slice is bounded only by sfsobject.go's much larger
-// sfs.MaxDecodedNodes=300,000 decode budget -- so a hostile peer could pad visitor.list with up to
-// ~300,000 minimal malformed entries (e.g. objects with no "uid" field) and force this function to
-// scan and log-warn on every single one regardless of how small `limit` was configured, even though
-// the returned slice (and therefore GreetVisitors' own worst-case cost, see
-// maxVisitorsDefensiveCeiling's doc comment above) really was still capped. There's no legitimate
-// reason to look at more raw items than the output cap already enforces, so the loop below now stops
-// after examining `limit` items total, valid or not.
+// The scan stops after MaxVisitorsUpperBound RAW items, valid or not (round 26), with a Warn: a
+// malformed entry (not an *sfs.SFSObject, or a missing/wrong-typed uid) logs its own Warn, and
+// sfs.MaxDecodedNodes=300,000 bounds the raw array, so counting only the valid ones would let a
+// hostile peer force ~300,000 scans and warnings.
 //
 // uid is guarded via requireFieldType, not just requirePresentField (round 28): a present-but-
 // wrong-typed uid (e.g. sent as a string) used to pass a presence-only guard and then silently
@@ -233,8 +222,7 @@ func ParseInitVisitors(initParams *sfs.SFSObject) []Visitor {
 	}
 	listV, ok := visitorObj.Get("list")
 	if !ok {
-		// A genuinely-absent list is the normal/expected case here (mirrors maxNum's own
-		// presence-checked-separately-from-type reasoning just below) -- not a wrong-type anomaly,
+		// A genuinely-absent list is the normal/expected case here -- not a wrong-type anomaly,
 		// so this stays silent by design.
 		return out
 	}
@@ -245,62 +233,18 @@ func ParseInitVisitors(initParams *sfs.SFSObject) []Visitor {
 		return out
 	}
 
-	limit := maxVisitorsDefensiveCeiling
-	// maxNum's presence is checked separately from its type (round 29 audit), unlike the sibling
-	// uid guard below (requireFieldType, which conflates the two): maxNum being genuinely ABSENT is
-	// this function's own documented, expected fallback path (see this function's doc comment
-	// above) -- not a malformed-entry signal worth a Warn -- so only a PRESENT-but-wrong-typed
-	// maxNum (e.g. sent as a string) gets a diagnostic Warn here. Before this guard, a wrong-typed
-	// maxNum silently coerced to maxNum=0 via GetInt's own zero-value fallback, which is <= 0 and so
-	// was already indistinguishable from -- and fell back exactly like -- a genuinely-absent field:
-	// fail-safe (the more conservative maxVisitorsDefensiveCeiling always wins over trusting a
-	// wrong-typed value), but with zero diagnostic signal that the field was actually malformed
-	// rather than simply omitted. See TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning.
-	//
-	// Round 33 fix: a present, CORRECTLY-typed maxNum that's <= 0 (most notably negative -- 0
-	// could at least plausibly mean a feature-locked account, but a visitor-capacity field can
-	// never legitimately be negative) used to fall through this whole if/else-if chain with zero
-	// diagnostic, identical treatment to the genuinely-and-expectedly-absent case that's silent by
-	// design -- the exact same "still-uncovered anomaly branch" bug shape flagged repeatedly for
-	// gsl.go's getIntFlexible in rounds 30-32. Still fails safe either way (limit stays at
-	// maxVisitorsDefensiveCeiling), so this is diagnostic-only, but a negative maxNum is a genuine
-	// malformed/hostile-peer signal now worth surfacing like its wrong-typed and too-large
-	// siblings already are.
-	if maxNumV, ok := visitorObj.Get("maxNum"); ok && maxNumV.Val != nil {
-		// Round-35 fix: a present, CORRECTLY-typed int64 Long whose value is out of int32's range
-		// (e.g. maxNum=5000000000) used to pass the sfsFieldKindAccepts type check below (a pure
-		// Go-type check, by design -- see GetInt's own doc comment for why value-range awareness
-		// was deliberately kept out of it), then silently degrade to 0 via GetInt's own int64
-		// range-clamp -- landing in the "not positive" branch below with the real value already
-		// lost, actively MISCHARACTERIZING a huge out-of-range Long as merely non-positive rather
-		// than reporting what it actually was. This is the exact fourth anomaly shape gsl.go's
-		// getIntFlexible was hardened against in round 33 (checking v.Val.(int64) directly against
-		// math.MinInt32/MaxInt32 before ever calling GetInt), backported here. Checked before the
-		// GetInt call below so the real n64 value is still available to log.
-		if n64, isInt64 := maxNumV.Val.(int64); isInt64 && (n64 < math.MinInt32 || n64 > math.MaxInt32) {
-			slog.Warn("visitor.maxNum field is present as an out-of-int32-range Long; falling back to defensive ceiling",
-				"maxNum", n64, "cap", maxVisitorsDefensiveCeiling)
-		} else if !session.SFSFieldKindAccepts(session.SFSFieldKindInt, maxNumV.Val) {
-			slog.Warn("visitor.maxNum field is present but wrong-typed; falling back to defensive ceiling",
-				"raw", visitorObj.StringRedacted(), "goType", fmt.Sprintf("%T", maxNumV.Val), "cap", maxVisitorsDefensiveCeiling)
-		} else if maxNum := visitorObj.GetInt("maxNum"); maxNum > 0 {
-			limit = int(maxNum)
-			if limit > MaxVisitorsUpperBound {
-				slog.Warn("visitor.maxNum exceeds upper sanity bound; clamping",
-					"maxNum", maxNum, "cap", MaxVisitorsUpperBound)
-				limit = MaxVisitorsUpperBound
-			}
-		} else {
-			slog.Warn("visitor.maxNum field is present and correctly-typed but not positive; falling back to defensive ceiling",
-				"maxNum", maxNum, "cap", maxVisitorsDefensiveCeiling)
-		}
+	// GetInt reads a missing or wrong-typed maxNum as 0; refreshVisitors validates it for the
+	// refill rule, so here it only labels the log line.
+	if maxNum := visitorObj.GetInt("maxNum"); maxNum > 0 && len(arr.Items()) > int(maxNum) {
+		slog.Info("visitor.list is longer than maxNum, which bounds only the timed queue; keeping every entry",
+			"listLen", len(arr.Items()), "maxNum", maxNum)
 	}
-	if len(arr.Items()) > limit {
-		slog.Warn("visitor.list longer than cap; truncating", "listLen", len(arr.Items()), "cap", limit)
+	if len(arr.Items()) > MaxVisitorsUpperBound {
+		slog.Warn("visitor.list longer than cap; truncating", "listLen", len(arr.Items()), "cap", MaxVisitorsUpperBound)
 	}
 
 	for i, item := range arr.Items() {
-		if i >= limit {
+		if i >= MaxVisitorsUpperBound {
 			break
 		}
 		vi, ok := item.Val.(*sfs.SFSObject)
@@ -317,9 +261,10 @@ func ParseInitVisitors(initParams *sfs.SFSObject) []Visitor {
 
 // GreetVisitors sends `visitor.operate {uid, operate: 1}`, the real client's per-tap accept (see
 // the Visitor doc comment above), for each visitor whose behaviour type is on
-// greetableVisitorTypes and whose startTime has passed. Every other visitor, including one with
-// an eventId the generated table does not know, gets one Info log line and is left for the
-// player.
+// greetableVisitorTypes, that is not a choice visitor, and whose startTime has passed. Every other
+// visitor, including one with an eventId the generated table does not know, gets one Info log line
+// and is left for the player. Each visitor the server answered without an errorCode is marked
+// greeted in visitors itself, the slice collectCore shares with Init.Visitors, for visitor-fresh.
 func GreetVisitors(conn *session.GameConn, visitors []Visitor) error {
 	return greetVisitors(conn, visitors, time.Now())
 }
@@ -330,20 +275,25 @@ func greetVisitors(conn *session.GameConn, visitors []Visitor, now time.Time) er
 		return nil
 	}
 	var errs []error
-	for _, v := range visitors {
+	for i, v := range visitors {
 		t, skip := visitorSkipReason(v, now)
 		if skip != "" {
 			slog.Info("skipping visitor", "reason", skip, "uid", v.Uid(), "eventId", v.EventId(),
-				"type", t, "typeName", visitorTypeName(t), "visitorId", v.VisitorId(), "startTime", v.StartTime())
+				"type", t, "typeName", visitorTypeName(t), "visitorId", v.VisitorId(), "startTime", v.StartTime(),
+				"queueType", v.QueueType())
 			continue
 		}
 		slog.Info("attempting visitor greet", "uid", v.Uid(), "eventId", v.EventId(), "type", t,
-			"typeName", visitorTypeName(t), "visitorId", v.VisitorId())
+			"typeName", visitorTypeName(t), "visitorId", v.VisitorId(), "queueType", v.QueueType())
 		params := sfs.NewSFSObject()
 		params.PutLong("uid", v.Uid())
 		params.PutInt("operate", 1)
-		_, err := session.SendAndWait(conn, fmt.Sprintf("visitor greet response (uid %d)", v.Uid()), "visitor.operate", params)
+		resp, err := session.SendAndWait(conn, fmt.Sprintf("visitor greet response (uid %d)", v.Uid()), "visitor.operate", params)
 		errs = append(errs, err)
+		// A benign visitor_err_coming also returns a nil error, but the visitor stays.
+		if err == nil && resp != nil && !resp.Params.Has("errorCode") {
+			visitors[i].greeted = true
+		}
 		// A net.Error here means the underlying TCP connection itself is known-dead ONLY when
 		// Timeout()==false -- an ordinary per-visitor sendAndWait timeout (no response within
 		// defaultCmdTimeout) is ITSELF a net.Error with Timeout()==true, on an otherwise perfectly
@@ -354,9 +304,9 @@ func greetVisitors(conn *session.GameConn, visitors []Visitor, now time.Time) er
 		// already doomed to independently burn a full defaultCmdTimeout before failing the exact
 		// same way -- same root cause as CollectAll's own net.Error early-abort (buildings.go),
 		// mirrored here. The blast radius is bounded either way: `visitors` comes from
-		// ParseInitVisitors, which caps `visitor.list` at the init push's own `maxNum` field (seen
-		// live as 5) or maxVisitorsDefensiveCeiling otherwise (see ParseInitVisitors' doc comment),
-		// so this loop's own worst case is bounded, not an open-ended list.
+		// ParseInitVisitors, which examines at most MaxVisitorsUpperBound `visitor.list` entries
+		// (see that constant's doc comment), so this loop's own worst case is bounded, not an
+		// open-ended list.
 		var netErr net.Error
 		if errors.As(err, &netErr) && !netErr.Timeout() {
 			break

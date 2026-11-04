@@ -1,13 +1,14 @@
 // Command gen_visitor_types writes internal/game/visitor_types_gen.go: the eventId -> behaviour
-// type map GreetVisitors keys its allowlist on, generated from the client data table
-// lw_base_visitor_event (TableName.City_Visitor, Global/EnumType.lua:2751).
+// type map GreetVisitors keys its allowlist on, and the set of "choose a treasure" eventIds it
+// skips, generated from the client data table lw_base_visitor_event (TableName.City_Visitor,
+// Global/EnumType.lua:2751).
 //
 // The table is not in this repository. It comes from a decompiled client build's
 // tables/json/lw_base_visitor_event.json, whose rows are positional: rows[i] is [key, cols], and
 // the "index" object gives each named column's 1-based position in cols.
 //
 //	go run ./internal/game/gen_visitor_types -table <dir>/lw_base_visitor_event.json \
-//	    -version 39432 -live 39516 -out internal/game/visitor_types_gen.go
+//	    -version 39879 -out internal/game/visitor_types_gen.go
 package main
 
 import (
@@ -45,15 +46,15 @@ func run(tablePath, version, live, outPath string) error {
 	if err != nil {
 		return err
 	}
-	types, err := parseTable(f)
+	tab, err := parseTable(f)
 	_ = f.Close()
 	if err != nil {
 		return err
 	}
-	if err := checkKnownPairs(types); err != nil {
+	if err := checkKnownPairs(tab); err != nil {
 		return err
 	}
-	src, err := render(types, version, live)
+	src, err := render(tab, version, live)
 	if err != nil {
 		return err
 	}
@@ -70,59 +71,89 @@ type tableJSON struct {
 	Rows  [][]json.RawMessage          `json:"rows"`
 }
 
-// parseTable returns id -> type for every row of the lw_base_visitor_event JSON in r.
-func parseTable(r io.Reader) (map[int32]int32, error) {
+// visitorTable is what the generator reads from lw_base_visitor_event: id -> type for every row,
+// and the ids whose choose_treasure is non-empty.
+type visitorTable struct {
+	types   map[int32]int32
+	choices map[int32]bool
+}
+
+// parseTable reads the lw_base_visitor_event JSON in r.
+func parseTable(r io.Reader) (visitorTable, error) {
 	var t tableJSON
 	if err := json.NewDecoder(r).Decode(&t); err != nil {
-		return nil, fmt.Errorf("decode table: %w", err)
+		return visitorTable{}, fmt.Errorf("decode table: %w", err)
 	}
 	if t.Name != "lw_base_visitor_event" {
-		return nil, fmt.Errorf("table name %q, want lw_base_visitor_event", t.Name)
+		return visitorTable{}, fmt.Errorf("table name %q, want lw_base_visitor_event", t.Name)
 	}
-	idPos, err := columnPos(t.Index, "id")
-	if err != nil {
-		return nil, err
+	pos := map[string]int{}
+	for _, name := range []string{"id", "type", "choose_treasure"} {
+		p, err := columnPos(t.Index, name)
+		if err != nil {
+			return visitorTable{}, err
+		}
+		pos[name] = p
 	}
-	typePos, err := columnPos(t.Index, "type")
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[int32]int32, len(t.Rows))
+	need := max(pos["id"], pos["type"], pos["choose_treasure"])
+	out := visitorTable{types: make(map[int32]int32, len(t.Rows)), choices: map[int32]bool{}}
 	for i, row := range t.Rows {
 		if len(row) != 2 {
-			return nil, fmt.Errorf("row %d: %d elements, want [key, cols]", i, len(row))
+			return visitorTable{}, fmt.Errorf("row %d: %d elements, want [key, cols]", i, len(row))
 		}
 		key, err := intValue(row[0])
 		if err != nil {
-			return nil, fmt.Errorf("row %d key: %w", i, err)
+			return visitorTable{}, fmt.Errorf("row %d key: %w", i, err)
 		}
 		var cols []json.RawMessage
 		if err := json.Unmarshal(row[1], &cols); err != nil {
-			return nil, fmt.Errorf("row %d (%d) cols: %w", i, key, err)
+			return visitorTable{}, fmt.Errorf("row %d (%d) cols: %w", i, key, err)
 		}
-		if len(cols) < max(idPos, typePos) {
-			return nil, fmt.Errorf("row %d (%d): %d columns, want at least %d", i, key, len(cols), max(idPos, typePos))
+		if len(cols) < need {
+			return visitorTable{}, fmt.Errorf("row %d (%d): %d columns, want at least %d", i, key, len(cols), need)
 		}
-		id, err := intValue(cols[idPos-1])
+		id, err := intValue(cols[pos["id"]-1])
 		if err != nil {
-			return nil, fmt.Errorf("row %d (%d) id: %w", i, key, err)
+			return visitorTable{}, fmt.Errorf("row %d (%d) id: %w", i, key, err)
 		}
 		if id != key {
-			return nil, fmt.Errorf("row %d: key %d but id column %d; the column index is off", i, key, id)
+			return visitorTable{}, fmt.Errorf("row %d: key %d but id column %d; the column index is off", i, key, id)
 		}
-		typ, err := intValue(cols[typePos-1])
+		typ, err := intValue(cols[pos["type"]-1])
 		if err != nil {
-			return nil, fmt.Errorf("row %d (%d) type: %w", i, key, err)
+			return visitorTable{}, fmt.Errorf("row %d (%d) type: %w", i, key, err)
 		}
-		if _, dup := out[id]; dup {
-			return nil, fmt.Errorf("row %d: duplicate id %d", i, id)
+		choose, err := stringValue(cols[pos["choose_treasure"]-1])
+		if err != nil {
+			return visitorTable{}, fmt.Errorf("row %d (%d) choose_treasure: %w", i, key, err)
 		}
-		out[id] = typ
+		if _, dup := out.types[id]; dup {
+			return visitorTable{}, fmt.Errorf("row %d: duplicate id %d", i, id)
+		}
+		out.types[id] = typ
+		// VisitorUnit.lua:271-286 builds param.chooseTreasure from any non-empty choose_treasure,
+		// and a visitor with one resolves only through visitor.season.choose (LWPlotManager.lua:
+		// 155-167), never visitor.operate.
+		if choose != "" {
+			out.choices[id] = true
+		}
 	}
-	if len(out) == 0 {
-		return nil, errors.New("table has no rows")
+	if len(out.types) == 0 {
+		return visitorTable{}, errors.New("table has no rows")
 	}
 	return out, nil
+}
+
+// stringValue reads a string cell; null reads as "".
+func stringValue(raw json.RawMessage) (string, error) {
+	var s *string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", fmt.Errorf("%s is not a string", raw)
+	}
+	if s == nil {
+		return "", nil
+	}
+	return *s, nil
 }
 
 // columnPos returns the 1-based position of column name from the table's index ([pos, type]).
@@ -164,10 +195,15 @@ var knownPairs = func() map[int32]int32 {
 	return m
 }()
 
-func checkKnownPairs(types map[int32]int32) error {
+// knownChoices are eventIds whose choose_treasure is set in tables 39432 and 39879: the first and
+// last of the 11 Season-5 SeasonDayGift choice visitors (20703 "1;601002|2;601001"). A wrong
+// choose_treasure column would drop them.
+var knownChoices = []int32{20703, 20746}
+
+func checkKnownPairs(tab visitorTable) error {
 	var errs []error
 	for _, id := range slices.Sorted(maps.Keys(knownPairs)) {
-		got, ok := types[id]
+		got, ok := tab.types[id]
 		switch {
 		case !ok:
 			errs = append(errs, fmt.Errorf("eventId %d missing, want type %d", id, knownPairs[id]))
@@ -175,24 +211,37 @@ func checkKnownPairs(types map[int32]int32) error {
 			errs = append(errs, fmt.Errorf("eventId %d has type %d, want %d", id, got, knownPairs[id]))
 		}
 	}
+	for _, id := range knownChoices {
+		if !tab.choices[id] {
+			errs = append(errs, fmt.Errorf("eventId %d has no choose_treasure, want a choice visitor", id))
+		}
+	}
 	return errors.Join(errs...)
 }
 
-func render(types map[int32]int32, version, live string) ([]byte, error) {
+func render(tab visitorTable, version, live string) ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteString("// Code generated by internal/game/gen_visitor_types; DO NOT EDIT.\n\n")
-	fmt.Fprintf(&b, "// Source: client data table lw_base_visitor_event, %d rows, table version %s", len(types), version)
+	fmt.Fprintf(&b, "// Source: client data table lw_base_visitor_event, %d rows, table version %s", len(tab.types), version)
 	if live != "" {
 		fmt.Fprintf(&b, "\n// (byte-identical in live table version %s)", live)
 	}
 	b.WriteString(".\n\n")
 	b.WriteString("package game\n\n")
 	b.WriteString("// visitorEventTypes maps a visitor's eventId (lw_base_visitor_event.id) to the table's type\n")
-	b.WriteString("// column: the behaviour type (VisitorType, Global/EnumType.lua:11982) the client picks the\n")
-	b.WriteString("// visitor's class by (CityVisitorManager.lua:98-129).\n")
+	b.WriteString("// column: the behaviour type (VisitorType, Global/EnumType.lua:11985) the client picks the\n")
+	b.WriteString("// visitor's class by (CityVisitorManager.lua:108-139).\n")
 	b.WriteString("var visitorEventTypes = map[int32]int32{\n")
-	for _, id := range slices.Sorted(maps.Keys(types)) {
-		fmt.Fprintf(&b, "\t%d: %d,\n", id, types[id])
+	for _, id := range slices.Sorted(maps.Keys(tab.types)) {
+		fmt.Fprintf(&b, "\t%d: %d,\n", id, tab.types[id])
+	}
+	b.WriteString("}\n\n")
+	b.WriteString("// visitorChoiceEvents are the eventIds with a non-empty choose_treasure: the client resolves\n")
+	b.WriteString("// them only with visitor.season.choose, a player's pick between two radar treasures\n")
+	b.WriteString("// (VisitorUnit.lua:271-286, LWPlotManager.lua:155-167).\n")
+	b.WriteString("var visitorChoiceEvents = map[int32]bool{\n")
+	for _, id := range slices.Sorted(maps.Keys(tab.choices)) {
+		fmt.Fprintf(&b, "\t%d: true,\n", id)
 	}
 	b.WriteString("}\n")
 	return format.Source(b.Bytes())
