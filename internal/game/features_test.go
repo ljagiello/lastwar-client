@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -112,10 +113,28 @@ func TestFeaturePhasesNameRegisteredFeatures(t *testing.T) {
 			t.Errorf("%s must run first: it frees capacity the actions use", name)
 		}
 	}
-	for _, name := range []string{"arms-race-chests", "battle-pass", "daily-quests", "event-claims", "quests"} {
+	for _, name := range []string{"arms-race-chests", "battle-pass", "daily-quests", "event-claims", "quests",
+		"alliance-premium-gifts", "battle-pass-overflow", "ghost-recon", "stage-quests", "t11-idle-events",
+		"torch-relay", "tower-up-first-rewards", "zone-mobilization"} {
 		if featurePhase(name) != phaseProgress {
 			t.Errorf("%s must run last: it claims the progress this run's actions earn", name)
 		}
+	}
+}
+
+// TestBattlePassOverflowRunsAfterBattlePass: the overflow boxes are counted from the pass's exp
+// and level, which battle-pass's claims change, so battle-pass-overflow must run after it.
+func TestBattlePassOverflowRunsAfterBattlePass(t *testing.T) {
+	order := featuresInRunOrder()
+	at := func(name string) int {
+		return slices.IndexFunc(order, func(f Feature) bool { return f.Name == name })
+	}
+	bp, over := at("battle-pass"), at("battle-pass-overflow")
+	if bp < 0 || over < 0 {
+		t.Fatalf("battle-pass at %d, battle-pass-overflow at %d; want both registered", bp, over)
+	}
+	if bp > over {
+		t.Errorf("battle-pass runs at %d, after battle-pass-overflow at %d", bp, over)
 	}
 }
 

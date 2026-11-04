@@ -70,6 +70,9 @@ const (
 // featurePhases places a feature in a run phase; a feature not listed runs in phaseAction. The
 // phaseAction entries are the actions named in MASTER B3 (aud-events F2, aud-dailies F3) and every
 // feature with a Duel field; they are listed so the table shows what the progress claims follow.
+// The phaseProgress entries are B3's five claims and the opt-in progress claims added with the
+// 1.0.367 audit. battle-pass-overflow must follow battle-pass, which changes the pass's exp and
+// level; it does, by name within the phase.
 var featurePhases = map[string]int{
 	"finished-timers":    phaseCapacity,
 	"secret-tasks-claim": phaseCapacity,
@@ -89,6 +92,15 @@ var featurePhases = map[string]int{
 	"daily-quests":     phaseProgress,
 	"event-claims":     phaseProgress,
 	"quests":           phaseProgress,
+
+	"alliance-premium-gifts": phaseProgress,
+	"battle-pass-overflow":   phaseProgress,
+	"ghost-recon":            phaseProgress,
+	"stage-quests":           phaseProgress,
+	"t11-idle-events":        phaseProgress,
+	"torch-relay":            phaseProgress,
+	"tower-up-first-rewards": phaseProgress,
+	"zone-mobilization":      phaseProgress,
 }
 
 // featurePhase returns name's run phase.
