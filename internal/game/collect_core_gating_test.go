@@ -112,10 +112,10 @@ func productionBuilding(uuid int64, bId, lv int32, prodST, prodT, prodET time.Ti
 
 // TestCollectCoreWithInitAppliesEveryGate runs the whole core sequence with an init push and
 // checks each gate changes exactly what goes on the wire: al.show.help lists only the player's own
-// request (no al.help.all), allianceNewMail is 0 (no gift requests at all), the VIP flags allow only
-// the login score, the Smelter's 30-minute tick has not completed, and the Season 6 week-card farm
-// is past seasonSettleTime -- so only the Farmland and the Component Factory (stored output) are
-// collected.
+// request (no al.help.all), allianceNewMail is 0 (no gift requests at all), the player is in no
+// alliance (no science.data.refresh), the VIP flags allow only the login score, the Smelter's
+// 30-minute tick has not completed, and the Season 6 week-card farm is past seasonSettleTime -- so
+// only the Farmland and the Component Factory (stored output) are collected.
 func TestCollectCoreWithInitAppliesEveryGate(t *testing.T) {
 	client, server := session.NewPipeGameConnPair(t)
 	now := time.Now()
@@ -153,7 +153,6 @@ func TestCollectCoreWithInitAppliesEveryGate(t *testing.T) {
 		"lw.pve.idle.reward", "lw.pve.idle.reward",
 		"chat.get.system.mails",
 		"al.show.help",
-		"science.data.refresh",
 		"vip.add.login.score",
 		"building.production.collect", "building.production.collect",
 	}
