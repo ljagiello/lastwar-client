@@ -9,7 +9,7 @@ import (
 
 // TestStartHeartbeatPingsBeforeReturning covers MASTER.md 5.1 #20: the first keepalive goes out
 // at once, before StartHeartbeat returns -- so before Login, as on the real client -- rather than
-// one interval later. The payload stays the flat {clientTime} the server has always accepted.
+// one interval later. The payload is the client's {p: {clientTime}} (BaseUtils.decompiled.cs:36497-36500).
 func TestStartHeartbeatPingsBeforeReturning(t *testing.T) {
 	client, server := NewPipeGameConnPair(t)
 	envs := make(chan *Envelope, 4)
@@ -44,10 +44,18 @@ func TestStartHeartbeatPingsBeforeReturning(t *testing.T) {
 	if first.Controller != ControllerSystem || first.Action != ActionPingPong {
 		t.Fatalf("first envelope = c%d a%d, want the PingPong (c%d a%d)", first.Controller, first.Action, ControllerSystem, ActionPingPong)
 	}
-	if keys := first.Content.Keys(); len(keys) != 1 || keys[0] != "clientTime" {
-		t.Errorf("ping payload keys = %v, want the flat [clientTime]", keys)
+	if keys := first.Content.Keys(); len(keys) != 1 || keys[0] != "p" {
+		t.Fatalf("ping payload keys = %v, want [p], the client's nesting", keys)
 	}
-	if v, ok := first.Content.Get("clientTime"); !ok || v.Type != sfs.SFSLong {
+	pv, _ := first.Content.Get("p")
+	inner, ok := pv.Val.(*sfs.SFSObject)
+	if !ok {
+		t.Fatalf("ping p = %+v, want an object", pv)
+	}
+	if keys := inner.Keys(); len(keys) != 1 || keys[0] != "clientTime" {
+		t.Errorf("ping p keys = %v, want [clientTime]", keys)
+	}
+	if v, ok := inner.Get("clientTime"); !ok || v.Type != sfs.SFSLong {
 		t.Errorf("clientTime = %+v, want a Long", v)
 	}
 

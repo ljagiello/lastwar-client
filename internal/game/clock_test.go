@@ -22,7 +22,7 @@ func syncedPipe(t *testing.T, offset time.Duration) (client, server *session.Gam
 		}
 		pong := sfs.NewSFSObject()
 		pong.PutLong("serverTime", time.Now().Add(offset).UnixMilli())
-		pong.PutLong("clientTime", ping.Content.GetLong("clientTime"))
+		pong.PutLong("clientTime", evObject(ping.Content, "p").GetLong("clientTime")) // the ping nests it
 		_ = server.SendEnvelope(session.ControllerSystem, session.ActionPingPong, pong)
 	}()
 	client.StartHeartbeat(time.Hour, time.Now())

@@ -23,13 +23,14 @@ import (
 // Lua's UITimeManager:GetServerTime() reads that clock every frame (UITimeManager.lua:48-55), and
 // the client's time gates and cmdBaseTime come from it.
 type serverClock struct {
-	mu      sync.Mutex
-	start   time.Time // the heartbeat's clientTime basis; zero until StartHeartbeat
-	minRTT  int64     // ms; math.MaxInt64 until the first sample
-	base    int64     // server Unix ms at syncAt
-	syncAt  time.Time // host reading (with its monotonic part) when base was taken
-	synced  bool
-	samples int // pongs seen with both times
+	mu       sync.Mutex
+	start    time.Time // the heartbeat's clientTime basis; zero until StartHeartbeat
+	minRTT   int64     // ms; math.MaxInt64 until the first sample
+	base     int64     // server Unix ms at syncAt
+	syncAt   time.Time // host reading (with its monotonic part) when base was taken
+	synced   bool
+	samples  int  // pongs seen with both times
+	unusable bool // a pong without them was seen (logged once)
 }
 
 // clockReplaceRTT is SyncServerTime's "num < 200": a round trip this short always replaces the
@@ -100,9 +101,22 @@ func (c *GameConn) notePong(env *Envelope, recv time.Time) {
 	serverMs, ok1 := pongMs(env.Content, "serverTime")
 	clientMs, ok2 := pongMs(env.Content, "clientTime")
 	if !ok1 || !ok2 || serverMs < clockMinServerMs {
+		if c.clock.firstUnusable() {
+			slog.Debug("server clock: a pong without a usable serverTime and clientTime", "keys", env.Content.Keys())
+		}
 		return
 	}
 	c.clock.sync(recv, serverMs, clientMs)
+}
+
+// firstUnusable reports whether this is the connection's first pong the clock can't use, so its
+// shape is logged once.
+func (k *serverClock) firstUnusable() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	first := !k.unusable
+	k.unusable = true
+	return first
 }
 
 // pongMs reads a pong's ms field: a Long, as both the client (GetLong, BaseUtils.decompiled.cs:
