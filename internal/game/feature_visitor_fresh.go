@@ -48,7 +48,7 @@ const effectVisitorEventFunctionOpen = "90004"
 // 4,800 s), so it is logged, not greeted; the next run's GreetVisitors applies the allowlist to
 // it. Static-only.
 func runVisitorFresh(conn *session.GameConn, in *Init) error {
-	return refreshVisitors(conn, in, time.Now())
+	return refreshVisitors(conn, in, connNow(conn))
 }
 
 func refreshVisitors(conn *session.GameConn, in *Init, now time.Time) error {

@@ -198,7 +198,9 @@ func runFeature(f Feature, conn *session.GameConn, in *Init) (err error) {
 // is set, so validating a duel-scoring feature can't spend its points on the wrong day. The
 // duelPolicy is cleaned first (CleanDuelPolicy). A panic in a feature becomes that feature's
 // error. Like CollectAll it keeps going after a failure and stops early only on a dead connection.
+// Every time gate reads conn's server clock (useServerClock).
 func RunFeatures(conn *session.GameConn, in *Init, cfg FeatureConfig, only string) error {
+	useServerClock(conn)
 	policy := CleanDuelPolicy(cfg.DuelPolicy)
 	if only != "" {
 		f, ok := featureRegistry[only]
@@ -276,8 +278,9 @@ func forgetActivityReplies(conn *session.GameConn, in *Init) {
 }
 
 // Collect is the full -collect run: the core actions (CollectAll) followed by the enabled
-// features.
+// features, every time gate reading conn's server clock (useServerClock).
 func Collect(conn *session.GameConn, in *Init, cfg FeatureConfig) error {
+	useServerClock(conn)
 	err := collectCore(conn, in)
 	if session.ContainsNonTimeoutNetError(err) {
 		return err
