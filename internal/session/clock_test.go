@@ -136,6 +136,28 @@ func TestServerClockIgnoresImplausiblePongs(t *testing.T) {
 	}
 }
 
+// A pong the clock can't use is logged once per connection at Debug, with its keys, so a log at
+// -log-level debug shows what the server sent instead.
+func TestUnusablePongLoggedOnce(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(orig)
+	client, _ := NewPipeGameConnPair(t)
+	client.clock.setStart(time.Now().Add(-time.Second))
+	p := sfs.NewSFSObject()
+	p.PutLong("serverTime", time.Now().UnixMilli()) // no clientTime echoed
+	for range 2 {
+		client.notePong(&Envelope{Controller: ControllerSystem, Action: ActionPingPong, Content: p}, time.Now())
+	}
+	if n := strings.Count(buf.String(), "a pong without a usable serverTime and clientTime"); n != 1 {
+		t.Errorf("logged the unusable pong %d times, want once:\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), "keys=[serverTime]") {
+		t.Errorf("the line lacks the pong's keys:\n%s", buf.String())
+	}
+}
+
 func TestCloseLogsTheClockOffset(t *testing.T) {
 	var buf bytes.Buffer
 	orig := slog.Default()

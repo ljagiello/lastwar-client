@@ -690,7 +690,7 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*sfs.SFSObject, error) {
 }
 
 // StartHeartbeat launches the PingPongRequest loop (dossier §04: every
-// 4000ms, {clientTime: ms}), required to avoid the ~12s server-perceived
+// 4000ms, {p: {clientTime: ms}}), required to avoid the ~12s server-perceived
 // timeout while we wait on slower steps (e.g. the user fetching an email
 // verification code).
 //
@@ -698,8 +698,7 @@ func (c *GameConn) DoHandshake(timeout time.Duration) (*sfs.SFSObject, error) {
 // the wire as the real client's does: NetRawProxy.OnConnection enables its 4000 ms keepalive timer
 // and calls CheckKeepAlive at once (BaseUtils.decompiled.cs:36011-36035), and Login waits for that
 // first pong. The real client's first probe is a CustomPingPong carrying a decoy login template;
-// this one stays the flat {clientTime} the server has always accepted, and Login is not held back
-// for the pong. If the first ping cannot be sent the connection is closed and no loop starts, so
+// this one is the plain keepalive ping (sendHeartbeat), and Login is not held back for the pong. If the first ping cannot be sent the connection is closed and no loop starts, so
 // the caller's Login send fails.
 //
 // start is also the basis the pongs' echoed clientTime is read against (serverClock).
@@ -728,9 +727,16 @@ func (c *GameConn) StartHeartbeat(interval time.Duration, start time.Time) {
 
 // sendHeartbeat sends one PingPongRequest and reports whether the heartbeat should keep going. A
 // send failure closes the connection.
+//
+// The payload is the client's: clientTime nested one level down, {p: {clientTime}}
+// (PingPongRequest.Execute, BaseUtils.decompiled.cs:36497-36500; seen so in the 2026-10-04
+// capture). The server answers a flat {clientTime} too, but its pong then carries no clientTime to
+// sync the server clock from (serverClock).
 func (c *GameConn) sendHeartbeat(start time.Time) bool {
+	inner := sfs.NewSFSObject()
+	inner.PutLong("clientTime", time.Since(start).Milliseconds())
 	pp := sfs.NewSFSObject()
-	pp.PutLong("clientTime", time.Since(start).Milliseconds())
+	pp.PutSFSObject("p", inner)
 	err := c.SendEnvelope(ControllerSystem, ActionPingPong, pp)
 	if err == nil {
 		return true
