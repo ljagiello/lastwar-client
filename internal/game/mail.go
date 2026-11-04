@@ -92,19 +92,17 @@ func (m Mail) isRead() bool {
 // EXPECTED case for notification-only mail (see this doc comment's second paragraph, and
 // ClaimAllMail's doc comment, which cites a live capture where all 21 visible mail items lacked
 // rewardStatus) -- not an anomaly worth a warning. Routing it through requireFieldType meant every
-// single routine notification-only mail item logged a spurious Warn. Now mirrors visitors.go's
-// ParseInitVisitors maxNum handling: presence/non-nil is checked directly and silently (no warning
-// -- this is the expected case) before falling through to false, and session.WarnIfWrongTypedField
-// (login.go) is used instead of requireFieldType so a Warn fires ONLY for the present-but-wrong-
-// typed case, which remains rejected (not misclassified as unclaimed) exactly as the round-29 fix
-// intended. See TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified (now also covering
-// the absent case logs nothing) for the regression coverage.
+// single routine notification-only mail item logged a spurious Warn. Now presence/non-nil is
+// checked directly and silently (no warning -- this is the expected case) before falling through
+// to false, and session.WarnIfWrongTypedField (login.go) is used instead of requireFieldType so a
+// Warn fires ONLY for the present-but-wrong-typed case, which remains rejected (not misclassified
+// as unclaimed) exactly as the round-29 fix intended. See
+// TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified (now also covering the absent case
+// logs nothing) for the regression coverage.
 func (m Mail) HasUnclaimedReward() bool {
 	v, ok := m.Raw.Get("rewardStatus")
 	if !ok || v.Val == nil {
-		// Genuinely absent: the normal case for notification-only mail. Silent -- no warning --
-		// matching ParseInitVisitors' maxNum handling (visitors.go) for the identical
-		// absent-is-expected reason.
+		// Genuinely absent: the normal case for notification-only mail. Silent -- no warning.
 		return false
 	}
 	session.WarnIfWrongTypedField(m.Raw, "rewardStatus", "mail reward status", session.SFSFieldKindInt)

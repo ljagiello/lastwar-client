@@ -530,7 +530,7 @@ func TestParseInitVisitorsListIgnoresMaxNum(t *testing.T) {
 // test coverage -- each was only ever exercised indirectly, end to end, by happy-path tests that
 // build a valid visitor/list/sfs.SFSArray/sfs.SFSObject chain. ParseInitVisitors parses the bare `init`
 // bootstrap push, which this codebase's own threat-model comments (e.g.
-// maxVisitorsDefensiveCeiling's doc comment) explicitly treat as attacker-influenceable via a
+// MaxVisitorsUpperBound's doc comment) explicitly treat as attacker-influenceable via a
 // hostile/misbehaving -cs-ip peer, so these four malformed shapes are squarely in scope.
 func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
 	t.Run("visitor field present but wrong-typed (not an sfs.SFSObject)", func(t *testing.T) {

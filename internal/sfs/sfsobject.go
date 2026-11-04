@@ -224,9 +224,8 @@ func (o *SFSObject) GetInt(key string) int32 {
 		case int64:
 			if n < math.MinInt32 || n > math.MaxInt32 {
 				// Round-39 fix: this anomaly used to degrade silently, with zero diagnostic --
-				// unlike its two siblings that were specifically hardened against this exact
-				// shape (gsl.go's getIntFlexible, round 33; visitors.go's ParseInitVisitors
-				// maxNum handling, round 35), both of which warn here. A real call site
+				// unlike its sibling that was specifically hardened against this exact shape
+				// (gsl.go's getIntFlexible, round 33), which warns here. A real call site
 				// (alliance.go's findRecommendedTech -> DonateRecommendedAllianceTech) reads a
 				// GetInt("scienceId") result straight into a live al.science.donate network
 				// request with no other signal that the value was corrupted rather than

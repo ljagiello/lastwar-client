@@ -62,7 +62,8 @@ import (
 // On a radar-scoring day the tasks this feature finishes are claimed in the same run, and the run
 // repeats on the tasks those claims draw from stock (the claim reply's newEvent,
 // RadarCenterDataManager.lua:289-327). radar-claims can't do it: RunFeatures runs features in
-// name order, so it runs before radar-execute. Static-only: not sent live yet.
+// (phase, name) order, and both are in the action phase, so it runs before radar-execute.
+// Static-only: not sent live yet.
 
 //go:generate go run ./genradar -events ${LASTWAR_TABLES}/detect_event.json -levels ${LASTWAR_TABLES}/detect_level.json -version ${LASTWAR_TABLE_VERSION} -out radar_tables_gen.go
 

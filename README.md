@@ -196,7 +196,8 @@ this repo or commit it anywhere).
 # free pulls, troop conversion, spending items or tickets) and are never turned on by default.
 # A run goes in three phases, by name within each: claims that free capacity (finished-timers,
 # secret-tasks-claim), then the actions, then the progress claims (daily-quests, arms-race-chests,
-# battle-pass, quests, event-claims), so those also claim what the run's own actions earned.
+# battle-pass, quests, event-claims and the opt-in claims such as battle-pass-overflow), so those
+# also claim what the run's own actions earned.
 # A feature that panics is logged with its stack and counted as failed; the others still run:
 ./lastwar-client -list-features
 ./lastwar-client -run daily-quests
@@ -209,6 +210,12 @@ this repo or commit it anywhere).
 # (e.g. "Hold"), is warned about and ignored, so that feature keeps its default.
 # -run of a held feature on a day that doesn't list its types is refused; -run-anyway runs it.
 ./lastwar-client -run radar-claims -run-anyway
+
+# A duel or dig spend that sees the diamond balance fall writes <session config>.tripwire.json.
+# While that file exists every duel spend, treasure-digs and every dig-game write refuses to run,
+# in later runs too (a -collect run exits 1). Check the account, then remove the file (for -config,
+# or the default session config) and exit:
+./lastwar-client -clear-tripwire
 
 # Stay connected and issue ad-hoc test commands without re-authenticating. NOTE: since
 # -collect isn't passed here, the full building list still prints to stdout once at
