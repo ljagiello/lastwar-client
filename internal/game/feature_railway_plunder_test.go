@@ -565,6 +565,28 @@ func TestRailwayPlunderTrains(t *testing.T) {
 	}
 }
 
+// The client's local item table overrides init dataConfig for alliance_train (DataConfig.lua:36-74),
+// so a larger k10 in init must not raise the per-train cap above the table's 3.
+func TestRailwayPlunderTrainCapIgnoresInitDataConfig(t *testing.T) {
+	in := plTestInit(func(raw *sfs.SFSObject) {
+		train := sfs.NewSFSObject()
+		train.PutInt("k10", 5)
+		dc := sfs.NewSFSObject()
+		dc.PutSFSObject("alliance_train", train)
+		raw.PutSFSObject("dataConfig", dc)
+	}, 0, 0)
+	vip := plTestTarget(26, trainTypeTrain, 152, plTestOther, 9_000_000, 2, "B2")
+	evObject(vip, "marchInfo").PutBool("vipOn", true)
+	trains := []*sfs.SFSObject{
+		plTestTarget(24, trainTypeTrain, 152, plTestOther, 9_000_000, 3, "B2"), // at the table's cap
+		vip, // at the table's cap less one
+		plTestTarget(25, trainTypeTrain, 152, plTestOther, 9_000_000, 2, "B2"), // below it
+	}
+	if got := plAttacked(plOK(t, in, plTestFake{trains: trains})); !slices.Equal(got, []int64{25}) {
+		t.Fatalf("with init k10 = 5, attacked trains %v, want only 25", got)
+	}
+}
+
 func TestRailwayPlunderSharedDailyCap(t *testing.T) {
 	trains := []*sfs.SFSObject{
 		plTestTarget(31, trainTypeTrain, 152, plTestOther, 3_000_000, 0, "B2"),
