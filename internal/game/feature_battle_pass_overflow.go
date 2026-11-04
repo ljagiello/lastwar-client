@@ -28,8 +28,9 @@ import (
 // level from 1 up to it (the tables start at level 0, which ParseStateInfo drops, :48-71). With a
 // gap nothing is sent. The type the client uses is the reply's activityType (ParseOther, :232-234);
 // a reply whose activityType disagrees with table `activity` is skipped. The login passes
-// (showUiType 2, 6, 9, all type 27) count no boxes in GetRedNum (:357-369); Go cannot see
-// showUiType and relies on their extraExp/extraReward instead.
+// (showUiType 2 SevenDayLogin, 6 NewYearSevenDayLogin, 9 ValentineLogin, EnumType.lua:14151-14158)
+// count no boxes in GetRedNum (:357-369) and their views have no unlimited-box widget, so the
+// client never claims one there: battlePassLoginPasses skips them before any request.
 //
 // The ON battle-pass feature runs first (by name) and its claims change exp and level, so the
 // cached info reply is dropped and read again before the first box, and after every box. One box
@@ -43,6 +44,14 @@ const (
 	battlePassV2ExtraCmd        = "receive.bpv2.extra.reward"
 	battlePassOverflowMaxClaims = 20
 )
+
+// battlePassLoginPasses are the type-27 rows of table activity 39879 with showUiType 2, 6 or 9
+// (no type-142 row has those); Go's activity table carries no showUiType.
+var battlePassLoginPasses = map[int32]bool{
+	13: true, 2101: true, 5001: true, 14004: true, 99164: true, // 2 SevenDayLogin
+	99022: true,                                        // 6 NewYearSevenDayLogin
+	99044: true, 99093: true, 99107: true, 99114: true, // 9 ValentineLogin
+}
 
 func init() {
 	registerFeature(Feature{
@@ -62,6 +71,10 @@ func runBattlePassOverflow(conn *session.GameConn, in *Init) error {
 	for _, a := range s.Open(actTypeBattlePass, actTypeBattlePassNew) {
 		if b.dead {
 			break
+		}
+		if battlePassLoginPasses[a.ID] {
+			slog.Info(battlePassOverflowFeature+": login pass, which has no overflow box; skipping", "activity", a.ID)
+			continue
 		}
 		claimBattlePassOverflow(s, b, a)
 	}

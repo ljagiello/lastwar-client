@@ -72,7 +72,10 @@ func TestStageQuestsClaimsOnlyFreeStageQuests(t *testing.T) {
 		questTask("2201006", 1), // gap between stage runs: not a stage quest
 		questTask("1001", 1),    // a main quest: the quests feature's
 	}
-	in := stageQuestsInit(30, tasks, evActivity(11), evActivity(3007), evActivity(3008), evActivity(7002), evActivity(85000))
+	// One running activity per listed stage: the client's panel lists only its own stage.
+	in := stageQuestsInit(30, tasks, evActivity(11), evActivity(94022), evActivity(1000085), evActivity(85000),
+		evActivity(3008), evActivity(98002), evActivity(98003), evActivity(7002), evActivity(98501), evActivity(98505),
+		evActivity(98509))
 	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
 	if err := runStageQuests(conn, in); err != nil {
 		t.Fatal(err)
@@ -86,9 +89,11 @@ func TestStageQuestsClaimsOnlyFreeStageQuests(t *testing.T) {
 	}
 }
 
-// TestStageQuestsWaitForTheirActivity: an id is claimed only while an activity of its type is
-// valid (GetValidType): HQ at needMainCityLevel, now inside readyTime/startTime ..
-// endViewTime/rewardTime/endTime.
+// TestStageQuestsWaitForTheirActivity: an id is claimed only while an activity whose stage lists
+// it is valid (GetValidType): HQ at needMainCityLevel, now inside readyTime/startTime ..
+// endViewTime/rewardTime/endTime. A valid activity of the same type but another stage is not
+// enough: 94022 (Strongest Commander stage 101) doesn't make stage 1's 2201001 claimable, and
+// Lockhart 3007 (stage 2) doesn't make stage 94011's 2400001 claimable.
 func TestStageQuestsWaitForTheirActivity(t *testing.T) {
 	withEvNow(t, evTestNow)
 	lockhart := evActivity(3007) // past endTime, still inside endViewTime: valid
@@ -106,15 +111,15 @@ func TestStageQuestsWaitForTheirActivity(t *testing.T) {
 	king := evActivity(85000) // needMainCityLevel 12, HQ 10
 
 	tasks := []*sfs.SFSObject{
-		questTask("2201001", 1), questTask("2400000", 1), questTask("2500001", 1),
-		questTask("8010011", 1), questTask("9010201", 1),
+		questTask("2201001", 1), questTask("2301001", 1), questTask("2400000", 1), questTask("2400001", 1),
+		questTask("2500001", 1), questTask("8010011", 1), questTask("9010201", 1),
 	}
 	in := stageQuestsInit(10, tasks, lockhart, ended, early, rewardWindow, king)
 	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
 	if err := runStageQuests(conn, in); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := stageQuestIDsSent(t, fake), []string{"2201001", "2400000"}; !slices.Equal(got, want) {
+	if got, want := stageQuestIDsSent(t, fake), []string{"2301001", "2400000"}; !slices.Equal(got, want) {
 		t.Errorf("claimed %v, want %v", got, want)
 	}
 }
@@ -136,8 +141,8 @@ func TestStageQuestsFailuresAndNoInit(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "E42") || strings.Contains(err.Error(), evAlreadyExecuted) {
 		t.Errorf("err = %v, want only the E42 failure", err)
 	}
-	if n := len(fake.requests()); n != 3 {
-		t.Errorf("sent %d claims, want 3 (a failed claim does not stop the others)", n)
+	if n := len(fake.requests()); n != 2 {
+		t.Errorf("sent %d claims, want 2 (the benign 120289 goes on, the E42 refusal stops the run)", n)
 	}
 
 	conn, fake = startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
@@ -184,8 +189,39 @@ func TestStageQuestRangesAreStageQuestsTheQuestsFeatureSkips(t *testing.T) {
 	}
 	for _, r := range [][2]int64{{8000001, 8000010}, {8000101, 8000112}, {8010101, 8010108}, {8010201, 8010208}, {8010301, 8010344}, {8010018, 8010018}} {
 		for id := r[0]; id <= r[1]; id++ {
-			if _, ok := stageQuestType(strconv.FormatInt(id, 10)); ok {
+			if _, ok := stageQuestStages(strconv.FormatInt(id, 10)); ok {
 				t.Errorf("%d (Growth Foundation, Hero Trial or stage 200 only) is claimable", id)
+			}
+		}
+	}
+}
+
+// TestStageQuestActivityStageCoversTheActivityTable: every table activity row of the five types has
+// its stage, so the two embedded copies of tables 39879 can't drift apart, and every stage a range
+// names is some activity's.
+func TestStageQuestActivityStageCoversTheActivityTable(t *testing.T) {
+	types := []int32{stageQuestTypeStrongestCommander, stageQuestTypeLockhart, stageQuestTypeTaskActivity,
+		stageQuestTypeTaskActivity2, stageQuestTypeKing}
+	stages := map[int64]bool{}
+	for id, row := range activityTable {
+		if !slices.Contains(types, row.typ) {
+			continue
+		}
+		stage, ok := stageQuestActivityStage[id]
+		if !ok {
+			t.Errorf("activity %d (type %d) has no stage", id, row.typ)
+		}
+		stages[stage] = true
+	}
+	for id := range stageQuestActivityStage {
+		if row, ok := activityTable[id]; !ok || !slices.Contains(types, row.typ) {
+			t.Errorf("stage map lists %d, which is no activity of the five types", id)
+		}
+	}
+	for _, r := range stageQuestRanges {
+		for _, st := range r.stages {
+			if !stages[st] {
+				t.Errorf("range %d-%d names stage %d, which no activity lists", r.lo, r.hi, st)
 			}
 		}
 	}

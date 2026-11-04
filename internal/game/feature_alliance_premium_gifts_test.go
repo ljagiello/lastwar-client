@@ -212,18 +212,26 @@ func TestAlliancePremiumGiftsStopsOnTheFirstErrorCode(t *testing.T) {
 	}
 }
 
-func TestAlliancePremiumGiftsContinuesPastANotClaimedResult(t *testing.T) {
-	withPremiumPace(t)
-	now := time.Now()
-	list := premiumGiftList(3, 2, premiumGiftEntry("a", 0, now.Add(2*time.Hour)), premiumGiftEntry("b", 0, now.Add(time.Hour)))
-	fake, err := runPremiumGifts(t, premiumGiftsInit(), list, func(n int, p *sfs.SFSObject) *sfs.SFSObject {
-		return obj("receiveResult", n-1, "type", 1) // 0 for the first, 1 for the second
-	})
-	if err != nil {
-		t.Fatalf("run = %v", err)
+// TestAlliancePremiumGiftsStopsOnANotClaimedResult: the client acts only on receiveResult 1
+// (AllianceGiftGetRewardMessage.lua:16-19). Another value, or none, stops the run after that gift.
+func TestAlliancePremiumGiftsStopsOnANotClaimedResult(t *testing.T) {
+	cases := map[string]func(n int) *sfs.SFSObject{
+		"receiveResult 0":       func(n int) *sfs.SFSObject { return obj("receiveResult", n-1, "type", 1) }, // 0 first, then 1
+		"receiveResult missing": func(n int) *sfs.SFSObject { return obj("type", 1) },
 	}
-	if got := claimedUUIDs(fake); !slices.Equal(got, []string{"a", "b"}) {
-		t.Errorf("claimed %v, want both tried", got)
+	for name, reply := range cases {
+		t.Run(name, func(t *testing.T) {
+			withPremiumPace(t)
+			now := time.Now()
+			list := premiumGiftList(3, 2, premiumGiftEntry("a", 0, now.Add(2*time.Hour)), premiumGiftEntry("b", 0, now.Add(time.Hour)))
+			fake, err := runPremiumGifts(t, premiumGiftsInit(), list, func(n int, p *sfs.SFSObject) *sfs.SFSObject { return reply(n) })
+			if err == nil || !strings.Contains(err.Error(), "receiveResult") {
+				t.Errorf("run = %v, want a stop naming receiveResult", err)
+			}
+			if got := claimedUUIDs(fake); !slices.Equal(got, []string{"a"}) {
+				t.Errorf("claimed %v, want only [a] and a stop", got)
+			}
+		})
 	}
 }
 

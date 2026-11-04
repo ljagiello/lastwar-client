@@ -29,9 +29,9 @@ import (
 // receiveState ~= 1 and now < expirationTime (LWAllianceGiftItem.lua:136-141; GetGiftInfoList drops
 // the expired ones, AllianceGiftDataManager.lua:142-157) and its type, 1 when absent, is the tab's.
 // The window lists at most alliance_gift.k4 gifts, latest expiry first (UpdateGiftList,
-// UILWAllianceGiftView.lua:247-283), so a run claims at most that many in that order. The window's
-// extra AllianceGiftGroup-table type filter (UILWAllianceGiftCtrl.lua:31-33) is not applied: Go has
-// no such table, and list1 is the type-1 list already.
+// UILWAllianceGiftView.lua:247-283), so a run claims in that order, at most premiumGiftsMaxPerRun
+// (50). The window's extra alliance_gift_group type filter (UILWAllianceGiftCtrl.lua:31-33) is not
+// applied: list1 is the type-1 list already.
 //
 // Eligibility: init shows an alliance and allianceNewMail is not 0, as for the core claim; the gift
 // level is known and below 15; redPoint1 > 0 (the window's count, 0 when absent,
@@ -40,8 +40,10 @@ import (
 const (
 	premiumGiftsListCmd    = "alliance.reward.list"
 	premiumGiftsReceiveCmd = "alliance.reward.receive"
-	// premiumGiftsMaxPerRun is DataConfig alliance_gift.k4 in table item 39879 (200).
-	premiumGiftsMaxPerRun = 200
+	// premiumGiftsMaxPerRun bounds one run's claims (at the pace below, under half a minute). The
+	// window lists up to DataConfig alliance_gift.k4 gifts (200, table item 39879); a backlog past
+	// 50 waits for the next run.
+	premiumGiftsMaxPerRun = 50
 )
 
 // premiumGiftsPace is the gap between claims, above the client's 0.4 s button lock.
@@ -140,9 +142,14 @@ func runAlliancePremiumGifts(conn *session.GameConn, in *Init) error {
 			slog.Error(name+": gift claim refused; stopping", "uuid", g.uuid, "errorCode", code, "claimed", claimed)
 			return fmt.Errorf("%s: %s uuid %s: errorCode=%s", name, premiumGiftsReceiveCmd, g.uuid, code)
 		}
-		if result != 1 {
-			slog.Warn(name+": gift not claimed", "uuid", g.uuid, "receiveResult", result)
-			continue
+		// The client acts only on receiveResult 1 (AllianceGiftGetRewardMessage.lua:16-19). Any other
+		// or a missing one is a reply this static-only claim doesn't know: stop, so a refusal without
+		// an errorCode can't turn into a claim per gift on every run.
+		if hasResult := resp.Has("receiveResult"); !hasResult || result != 1 {
+			slog.Warn(name+": gift not claimed; stopping", "uuid", g.uuid, "receiveResult", result,
+				"hasReceiveResult", hasResult, "claimed", claimed)
+			return fmt.Errorf("%s: %s uuid %s: receiveResult %d (present %v), want 1", name, premiumGiftsReceiveCmd,
+				g.uuid, result, hasResult)
 		}
 		claimed++
 		slog.Info(name+": claimed a Premium gift", "uuid", g.uuid, "rewardEntries", len(claimObjects(resp, "info")))

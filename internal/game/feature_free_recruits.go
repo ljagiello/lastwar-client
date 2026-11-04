@@ -31,10 +31,10 @@ import (
 // Worker: `worker.lottery.info {officerId: Int}` returns nextFreeTime (ms), and
 // `lottery.worker.card {useFree: 1, isTen: 0, officerId: Int}` draws when now >= nextFreeTime
 // (WorkerLotteryInfoMessage.lua:4-7; LotteryWorkerCardMessage.lua:4-9; WorkerLotteryInfo.lua:31-35;
-// CenterWorkerNewContentContainer.lua:447-457). The client builds that state from the info reply
-// alone, starting at nextFreeTime 0 and keeping 0 when the reply omits it
-// (WorkerLotteryDataManager.lua:12-17; WorkerLotteryInfo.lua:3-6, 13-20), so an absent or 0 timer
-// is free.
+// CenterWorkerNewContentContainer.lua:447-457). The client's state starts at nextFreeTime 0 and
+// takes init workers.workerLottery, then the info reply, each only when it carries nextFreeTime
+// (WorkerDataManager.lua:71, 93-96; WorkerLotteryDataManager.lua:12-17; WorkerLotteryInfo.lua:3-6,
+// 13-20), so a timer absent from both, or 0, is free.
 // officerId is the first of init workerOfficerIds (LotteryDataManager.lua:122-137, 215-218).
 // Static-only: not sent live yet.
 const (
@@ -141,7 +141,10 @@ func freeRecruitsWorker(conn *session.GameConn, in *Init) error {
 	if err != nil {
 		return err
 	}
-	next := int64(0) // absent: the client keeps its default 0
+	// The client's WorkerLotteryInfo starts at 0, takes init workers.workerLottery, then the reply,
+	// each only when it carries nextFreeTime (WorkerDataManager.lua:71, 93-96; UpdateInfo,
+	// WorkerLotteryInfo.lua:13-20).
+	next, _ := claimInt(evObject(evObject(in.Raw, "workers"), "workerLottery"), "nextFreeTime")
 	if v, present := info.Params.Get("nextFreeTime"); present && v.Val != nil {
 		n, ok := claimIntValue(v.Val)
 		if !ok {

@@ -123,7 +123,7 @@ func TestBattlePassOverflowV1IgnoresInfiniteNum(t *testing.T) {
 	o.level, o.top, o.exp, o.extra, o.inf = 2, 2, 2500, 1000, 7 // type 27: 2500 / 1000 = 2 boxes
 	o.claim = func(p *overflowPass) { p.exp -= 1000 }
 	conn, fake := startEvFake(t, o.reply)
-	if err := runBattlePassOverflow(conn, evInit(30, evActivity(13))); err != nil {
+	if err := runBattlePassOverflow(conn, evInit(30, evActivity(2001))); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(fake.only(battlePassExtraCmd)); got != 2 {
@@ -134,6 +134,28 @@ func TestBattlePassOverflowV1IgnoresInfiniteNum(t *testing.T) {
 	}
 	if v, _ := fake.only(battlePassInfoCmd)[0].Params.Get("activityId"); v.Type != sfs.SFSInt {
 		t.Errorf("info activityId type %d, want Int", v.Type)
+	}
+}
+
+// TestBattlePassOverflowSkipsLoginPasses: the seven-day login passes (activity showUiType 2, 6, 9)
+// show no overflow box (ActBattlePassInfo.lua:357-369), so nothing is sent for them even when the
+// info would count boxes; a normal type-27 pass next to them still claims.
+func TestBattlePassOverflowSkipsLoginPasses(t *testing.T) {
+	withEvNow(t, evTestNow)
+	o := v1OverflowPass()
+	o.level, o.top, o.exp, o.extra = 2, 2, 2500, 1000
+	o.claim = func(p *overflowPass) { p.exp -= 1000 }
+	conn, fake := startEvFake(t, o.reply)
+	if err := runBattlePassOverflow(conn, evInit(30, evActivity(13), evActivity(99022), evActivity(99044), evActivity(2001))); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range fake.requests() {
+		if id := r.Params.GetInt("activityId"); id != 2001 {
+			t.Errorf("sent %s for login pass %d", r.Cmd, id)
+		}
+	}
+	if got := len(fake.only(battlePassExtraCmd)); got != 2 {
+		t.Errorf("sent %d box claims for pass 2001, want 2", got)
 	}
 }
 
@@ -198,7 +220,7 @@ func TestBattlePassOverflowStopsAtTheBound(t *testing.T) {
 	o.level, o.top, o.exp, o.extra = 1, 1, 1000*(battlePassOverflowMaxClaims+5), 1000
 	o.claim = func(p *overflowPass) { p.exp -= 1000 }
 	conn, fake := startEvFake(t, o.reply)
-	if err := runBattlePassOverflow(conn, evInit(30, evActivity(13))); err != nil {
+	if err := runBattlePassOverflow(conn, evInit(30, evActivity(2001))); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(fake.only(battlePassExtraCmd)); got != battlePassOverflowMaxClaims {
@@ -211,13 +233,13 @@ func TestBattlePassOverflowErrorStopsThatPass(t *testing.T) {
 	o := v1OverflowPass()
 	o.level, o.top, o.exp, o.extra, o.claimErr = 1, 1, 5000, 1000, evAlreadyExecuted
 	conn, fake := startEvFake(t, o.reply)
-	err := runBattlePassOverflow(conn, evInit(30, evActivity(13), evActivity(19)))
+	err := runBattlePassOverflow(conn, evInit(30, evActivity(2001), evActivity(19)))
 	if err == nil || !strings.Contains(err.Error(), evAlreadyExecuted) {
 		t.Errorf("err = %v, want the %s reply reported (no benign codes for this feature)", err, evAlreadyExecuted)
 	}
 	claims := fake.only(battlePassExtraCmd)
-	if len(claims) != 2 || claims[0].Params.GetInt("activityId") != 13 || claims[1].Params.GetInt("activityId") != 19 {
-		t.Errorf("sent %v, want one claim per pass (13, 19) and no retry", fake.cmds())
+	if len(claims) != 2 || claims[0].Params.GetInt("activityId") != 19 || claims[1].Params.GetInt("activityId") != 2001 {
+		t.Errorf("sent %v, want one claim per pass (19, 2001) and no retry", fake.cmds())
 	}
 }
 

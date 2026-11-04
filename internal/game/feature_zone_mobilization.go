@@ -16,7 +16,8 @@ import (
 // 543-545; GetZoneMobilizationInfoMessage.lua:4-7) and treats the event as running only while the
 // reply's endTime (ms) is not past (InitZoneMobilizationInfoData, LWZoneMobilizationManager.lua:
 // 103-113). Its entrance shows from HQ level zone_mobilization.k24, 6 in table item 39879
-// (ActZoneMobilizationItem.lua:65-70); below that nothing is sent.
+// (ActZoneMobilizationItem.lua:65-70). The client sends the info request at any HQ level; Go sends
+// nothing below k24, where the entrance and its claims are hidden.
 //
 // From that one reply, parsed as LWZoneMobilizationManager.lua:114-149 does:
 //
@@ -117,7 +118,7 @@ func runZoneMobilization(conn *session.GameConn, in *Init) error {
 		c.PutInt("index", 0)
 		b.send("zone mobilization challenge rewards", zoneMobChallengeCmd, c)
 	}
-	for _, i := range zoneMobDefendDue(defend) {
+	for _, i := range zoneMobDefendDue(defend, evNow().UnixMilli()) {
 		if b.dead {
 			return b.err()
 		}
@@ -176,10 +177,19 @@ func zoneMobChallengeDue(attack *sfs.SFSObject) bool {
 // zoneMobDefendDue returns the 1-based defence boxes the defend panel lets the player open
 // (LWUIZoneMobilizationDefendSubView.lua:329-347; LWUIZoneMobilizationBoxRewardItemRender.lua:97-102).
 // The percent is computed in float64 as the Lua does. A boss id the embedded table lacks (or 0)
-// sends nothing: the client's division has no HP to divide by either.
-func zoneMobDefendDue(defend *sfs.SFSObject) []int32 {
+// sends nothing: the client's division has no HP to divide by either. Nor does a boss in transfer
+// (now inside [transferBeginTime, transferEndTime], both > 0, ms): the panel then shows the move,
+// not the boxes (LWZoneMobilizationDefendInfo:IsTransfer, LWZoneMobilizationDefendInfo.lua:65-73;
+// LWUIZoneMobilizationDefendSubView.lua:182-191, 221).
+func zoneMobDefendDue(defend *sfs.SFSObject, nowMs int64) []int32 {
 	rewards := evObjects(defend, "rewardList")
 	if len(rewards) == 0 {
+		return nil
+	}
+	begin, _ := evNum(defend, "transferBeginTime")
+	end, _ := evNum(defend, "transferEndTime")
+	if begin > 0 && end > 0 && nowMs >= begin && nowMs <= end {
+		slog.Info(zoneMobFeature+": enemy boss in transfer; no defence boxes", "transferBeginTime", begin, "transferEndTime", end)
 		return nil
 	}
 	bossID, _ := evNum(defend, "bossId")

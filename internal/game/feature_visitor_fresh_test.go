@@ -188,8 +188,9 @@ func TestVisitorFreshDropsGreetedAndUnknownVisitors(t *testing.T) {
 		{"greet refused", "E_FAKE_GREET", []Visitor{queuedTestVisitor(1, 2001, 0, arrived), queuedTestVisitor(2, 3115, 1, arrived)}, false},
 		// A merchant and a choice visitor are not greeted and keep their slots.
 		{"skipped visitors stay", "", []Visitor{queuedTestVisitor(1, 1001, 0, arrived), queuedTestVisitor(2, 20703, 0, arrived)}, false},
-		// Two eventIds the table lacks: the client never queues them.
-		{"unknown eventIds", "", []Visitor{queuedTestVisitor(1, 999998, 0, arrived), queuedTestVisitor(2, 999999, 0, arrived)}, true},
+		// Two eventIds Go's table snapshot lacks: the live client's newer table likely has them, so
+		// they keep their slots and the full queue is not refilled.
+		{"unknown eventIds", "", []Visitor{queuedTestVisitor(1, 999998, 0, arrived), queuedTestVisitor(2, 999999, 0, arrived)}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -203,10 +203,22 @@ func TestZoneMobilizationDefendDue(t *testing.T) {
 		{"float percent as the Lua computes it: 7/100*100 > 7", mk(51, 777, 70, 7, 8), []int32{2}},
 		{"boss id 0", mk(0, 777, 0, 50), nil},
 	}
+	now := evTestNow.UnixMilli()
 	for _, c := range cases {
-		if got := zoneMobDefendDue(c.d); !slices.Equal(got, c.want) {
+		if got := zoneMobDefendDue(c.d, now); !slices.Equal(got, c.want) {
 			t.Errorf("%s: due = %v, want %v", c.name, got, c.want)
 		}
+	}
+
+	// The boss in transfer: no boxes, though curHp 0 would make every box due.
+	moving := mk(12, 777, 0, 0, 30, 70)
+	moving.PutLong("transferBeginTime", now-60_000)
+	moving.PutLong("transferEndTime", now+60_000)
+	if got := zoneMobDefendDue(moving, now); got != nil {
+		t.Errorf("boss in transfer: due = %v, want none", got)
+	}
+	if got := zoneMobDefendDue(moving, now+120_000); !slices.Equal(got, []int32{1, 2, 3}) {
+		t.Errorf("after the transfer: due = %v, want [1 2 3]", got)
 	}
 }
 

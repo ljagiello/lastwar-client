@@ -37,11 +37,12 @@ const effectVisitorEventFunctionOpen = "90004"
 // does not carry (EffectData.lua:196-217). So a value in init.effect below 1 skips, but a missing
 // entry is logged and the other three conditions decide.
 //
-// in.Visitors is the init list. The Queue1 count leaves out what the client's queue no longer or
-// never holds: the visitors the core actions greeted earlier in the same -collect run (marked by
-// GreetVisitors; the client deletes each one on the reply), and entries whose eventId has no
-// lw_base_visitor_event row, which the client never queues (AddVisitor returns without a table
-// line, CityVisitorManager.lua:263-267). Under -run nothing was greeted and the list is current.
+// in.Visitors is the init list. The Queue1 count leaves out the visitors the core actions greeted
+// earlier in the same -collect run (marked by GreetVisitors; the client deletes each one on the
+// reply). An entry whose eventId has no row in Go's lw_base_visitor_event snapshot still counts:
+// the client drops only ids its own, current table lacks (AddVisitor returns without a table line,
+// CityVisitorManager.lua:263-267), and a stale snapshot must not make every run refill a queue the
+// client sees as full. Under -run nothing was greeted and the list is current.
 //
 // The reply's addVisitor arrives at its own startTime (lw_base_visitor_config slots are 300 to
 // 4,800 s), so it is logged, not greeted; the next run's GreetVisitors applies the allowlist to
@@ -69,8 +70,10 @@ func refreshVisitors(conn *session.GameConn, in *Init, now time.Time) error {
 			continue
 		}
 		if _, ok := visitorBehaviourType(v.EventId()); !ok {
+			// Counted as queued: the live client's table, which the server keeps current, very
+			// likely has the row Go's 39879 snapshot lacks (new season visitors), and Go doesn't
+			// greet them, so they hold their slot.
 			unknown++
-			continue
 		}
 		if v.greeted {
 			greeted++

@@ -129,6 +129,41 @@ func TestFreeRecruitsWorkerTimerAbsentOrZeroIsFree(t *testing.T) {
 	}
 }
 
+// TestFreeRecruitsWorkerTimerFromInit: the client also seeds WorkerLotteryInfo from init
+// workers.workerLottery (WorkerDataManager.lua:71, 93-96), and a reply without nextFreeTime keeps
+// that value (WorkerLotteryInfo.lua:13-20). A running init timer is not free; a reply's own value
+// overrides it.
+func TestFreeRecruitsWorkerTimerFromInit(t *testing.T) {
+	now := time.Now()
+	withInitTimer := func(nextMs int64) *Init {
+		in := freeRecruitsInit([]int32{401100})
+		lottery := sfs.NewSFSObject()
+		lottery.PutLong("nextFreeTime", nextMs)
+		workers := sfs.NewSFSObject()
+		workers.PutSFSObject("workerLottery", lottery)
+		in.Raw.PutSFSObject("workers", workers)
+		return in
+	}
+	for name, c := range map[string]struct {
+		initMs, replyMs int64
+		want            []string
+	}{
+		"init timer running, reply silent": {now.Add(time.Hour).UnixMilli(), -1, []string{freeRecruitsWorkerInfoCmd}},
+		"init timer passed, reply silent":  {now.Add(-time.Hour).UnixMilli(), -1, []string{freeRecruitsWorkerInfoCmd, freeRecruitsWorkerCmd}},
+		"reply overrides the init timer":   {now.Add(time.Hour).UnixMilli(), 0, []string{freeRecruitsWorkerInfoCmd, freeRecruitsWorkerCmd}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, err := runFreeRecruitsFake(t, withInitTimer(c.initMs), c.replyMs, rewardOK())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := fake.cmds(); !slices.Equal(got, c.want) {
+				t.Errorf("sent %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // TestFreeRecruitsWorkerNonNumericTimerIsNotFree: a nextFreeTime that is present but not a number
 // is not read as 0.
 func TestFreeRecruitsWorkerNonNumericTimerIsNotFree(t *testing.T) {
