@@ -53,10 +53,22 @@ func TestReadLoginUpdateGate(t *testing.T) {
 			t.Errorf("%s: got %+v, want %+v", c.name, got, c.want)
 		}
 	}
+	logs := captureAuthLog(t)
 	zero := sfs.NewSFSObject()
 	zero.PutInt("updateType", 0)
 	if got := readLoginUpdateGate(zero, "test"); !got.hasUpdateType || got.updateType != 0 {
 		t.Errorf("updateType 0: got %+v, want it present", got)
+	}
+	if strings.Contains(logs.String(), "level=WARN") {
+		t.Errorf("updateType 0 (proceed) warned: %s", logs.String())
+	}
+	str := sfs.NewSFSObject()
+	str.PutUtfString("updateType", "2")
+	if got := readLoginUpdateGate(str, "test"); got.hasUpdateType {
+		t.Errorf("a UtfString updateType: got %+v, want it treated as absent (the client reads it with GetInt)", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "updateType present but not an integer") {
+		t.Errorf("a UtfString updateType: log %q, want a Warn", out)
 	}
 }
 

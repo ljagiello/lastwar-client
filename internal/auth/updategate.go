@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"log/slog"
 
 	"lastwar-client/internal/gsl"
@@ -21,11 +22,17 @@ type loginUpdateGate struct {
 // readLoginUpdateGate reads a Login reply's updateType (SFS Int) and new_version (UtfString), from
 // the object that holds each (gsl.FindLoginReplyField: the reply, else its p). The real client
 // stores updateType from every Login reply and hands new_version to the ShuMei SDK
-// (LoginMessage.CSHandleResponse, Assembly-CSharp.decompiled.cs:82878-82896).
+// (LoginMessage.CSHandleResponse, Assembly-CSharp.decompiled.cs:82878-82896). Its GetInt can't
+// read a non-integer updateType, so one is warned about and treated as absent.
 func readLoginUpdateGate(content *sfs.SFSObject, context string) loginUpdateGate {
 	var g loginUpdateGate
 	if o := gsl.FindLoginReplyField(content, "updateType"); o != nil {
-		g.updateType, g.hasUpdateType = getIntFlexible(o, "updateType"), true
+		if v, _ := o.Get("updateType"); session.SFSFieldKindAccepts(session.SFSFieldKindInt, v.Val) {
+			g.updateType, g.hasUpdateType = o.GetInt("updateType"), true
+		} else {
+			slog.Warn("login reply: updateType present but not an integer; ignoring it", "context", context,
+				"goType", fmt.Sprintf("%T", v.Val))
+		}
 	}
 	if o := gsl.FindLoginReplyField(content, "new_version"); o != nil {
 		session.WarnIfWrongTypedField(o, "new_version", context, session.SFSFieldKindString)
