@@ -245,6 +245,7 @@ func (c *GameConn) readEnvelope() (*Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
+	recv := time.Now() // a pong's arrival, before decoding (notePong)
 	obj, err := sfs.DecodeObject(body)
 	if err != nil {
 		return nil, fmt.Errorf("decode envelope: %w", err)
@@ -282,7 +283,7 @@ func (c *GameConn) readEnvelope() (*Envelope, error) {
 	if err := c.endIfTerminalPush(env); err != nil {
 		return nil, err
 	}
-	c.notePong(env)
+	c.notePong(env, recv)
 	c.logScorePush(env)
 	return env, nil
 }
