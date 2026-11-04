@@ -61,8 +61,8 @@ const (
 	activityOpenToleranceMs   int64 = 1000     // CheckIsSend's timeDevintion
 )
 
-// evNow is the clock the event features read; tests replace it.
-var evNow = time.Now
+// evNow is the clock the event features read: the game time (gameNow). Tests replace it.
+var evNow = gameNow
 
 // Activity is one running event from the init push's `activity` map (ActivityListDataManager:
 // InitActivityListData, ActivityListDataManager.lua:100-124). Each entry carries the id and its

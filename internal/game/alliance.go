@@ -7,7 +7,6 @@ import (
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
-	"time"
 )
 
 // HelpAllianceMembers sends `al.help.all` ("help all") -- confirmed live
@@ -36,7 +35,7 @@ import (
 func HelpAllianceMembers(conn *session.GameConn) error {
 	const cmd = "al.help.all"
 	params := sfs.NewSFSObject()
-	params.PutLong("cmdBaseTime", time.Now().UnixMilli())
+	params.PutLong("cmdBaseTime", connNow(conn).UnixMilli()) // the client sends GetServerTime() (UIAllianceHelpCtrl.lua:119-120)
 	_, err := session.SendAndWait(conn, "alliance help-all response", cmd, params)
 	return err
 }

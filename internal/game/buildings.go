@@ -899,7 +899,7 @@ func collectCore(conn *session.GameConn, in *Init) error {
 		in = &Init{}
 	}
 	buildings, visitors := in.Buildings, in.Visitors
-	now := time.Now()
+	now := connNow(conn)
 	var errs []error
 
 	// The fixed sub-actions plus one closure per collectible building below are each

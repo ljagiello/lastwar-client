@@ -266,7 +266,7 @@ func ParseInitVisitors(initParams *sfs.SFSObject) []Visitor {
 // and is left for the player. Each visitor the server answered without an errorCode is marked
 // greeted in visitors itself, the slice collectCore shares with Init.Visitors, for visitor-fresh.
 func GreetVisitors(conn *session.GameConn, visitors []Visitor) error {
-	return greetVisitors(conn, visitors, time.Now())
+	return greetVisitors(conn, visitors, connNow(conn))
 }
 
 func greetVisitors(conn *session.GameConn, visitors []Visitor, now time.Time) error {
