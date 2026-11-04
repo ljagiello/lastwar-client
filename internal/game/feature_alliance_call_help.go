@@ -13,12 +13,18 @@ import (
 // is visible to every alliance member, so this never runs unless enabled.
 //
 // `al.call.help {uuid: Long, type: Int, qType: Int, itemId: UtfString}` (AllianceCallHelpMessage.lua:
-// 4-10) is free and is what the city help bubbles send (BuildBubbleManager.lua:1313-1350,
-// 3029-3039, 3428-3431, 3826-3840). AllianceHelpType is 0 building, 1 queue, 2 repair
+// 4-10) is free and is what the city help bubbles send (BuildBubbleManager.lua:1327-1365,
+// 3033-3041, 3434-3442, 3854-3861). AllianceHelpType is 0 building, 1 queue, 2 repair
 // (EnumType.lua:5265-5270); a building's help field is a bitfield, 1 upgrade helped, 2 repair
-// helped (:9742-9747). Requests, each sent once per timer (the server then sets help/isHelped):
-//   - upgrade: {building uuid, 0, 0, ""} while lv > 0 && now < uT && help ∈ {0, 2};
-//   - repair: {building uuid, 2, 0, ""} while lv > 0 && now < dEndT && help ∈ {0, 1};
+// helped (:9745-9750). A building's bubbles run only while it is not folded (state != 2,
+// BuildingStateType, EnumType.lua:3299-3305): the upgrade bubble while dStT <= 0 and the repair
+// bubble while dStT > 0 (BuildBubbleManager.lua:935, 3417; WorldBuildBubbleManager.lua:121, 237).
+// Requests, each sent once per timer (the server then sets help/isHelped):
+//   - upgrade: {building uuid, 0, 0, ""} while lv > 0 && dStT <= 0 && now < uT && help ∈ {0, 2}
+//     (:1327-1335);
+//   - repair: {building uuid, 2, 0, ""} while lv > 0 && dStT > 0 && now < dEndT && help ∈ {0, 1}
+//     and the upgrade has not finished, !(uT > 0 && now >= uT) (IsUpgradeFinish, :3434-3442,
+//     BuildingDate.lua:453-456);
 //   - research: {queue uuid, 1, 6, queue itemObj.itemId} while the type-6 queue runs and
 //     isHelped == 0;
 //   - healing: {queue uuid, 1, 3 or 117, itemId} while the hospital or rebirth queue runs and
@@ -26,7 +32,10 @@ import (
 //     day, which is 9999 in the item table, so isHelped is the effective gate.
 //
 // Static-only: not sent live yet.
-const callHelpCmd = "al.call.help"
+const (
+	callHelpCmd    = "al.call.help"
+	callHelpFoldUp = 2 // BuildingStateType.FoldUp; init building_new state, missing = 0 (BuildingDate.lua:71-75)
+)
 
 func init() {
 	registerFeature(Feature{
@@ -59,11 +68,17 @@ func runAllianceCallHelp(conn *session.GameConn, in *Init) error {
 		if !ok || uuid == 0 || lv <= 0 {
 			continue
 		}
-		help, _ := claimInt(b, "help")
-		if uT, _ := claimInt(b, "uT"); uT > 0 && now < uT && (help == 0 || help == 2) {
-			reqs = append(reqs, callHelpRequest{uuid, 0, 0, "", "upgrade"})
+		if state, _ := claimInt(b, "state"); state == callHelpFoldUp {
+			continue
 		}
-		if dEndT, _ := claimInt(b, "dEndT"); now < dEndT && (help == 0 || help == 1) {
+		help, _ := claimInt(b, "help")
+		uT, _ := claimInt(b, "uT")
+		upgradeDone := uT > 0 && now >= uT
+		if dStT, _ := claimInt(b, "dStT"); dStT <= 0 {
+			if uT > 0 && !upgradeDone && (help == 0 || help == 2) {
+				reqs = append(reqs, callHelpRequest{uuid, 0, 0, "", "upgrade"})
+			}
+		} else if dEndT, _ := claimInt(b, "dEndT"); now < dEndT && !upgradeDone && (help == 0 || help == 1) {
 			reqs = append(reqs, callHelpRequest{uuid, 2, 0, "", "repair"})
 		}
 	}

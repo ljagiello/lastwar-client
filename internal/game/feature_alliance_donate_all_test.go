@@ -81,7 +81,7 @@ func TestDonateAllAllianceTech(t *testing.T) {
 				return "", nil
 			})
 
-			err := donateAllAllianceTech(client)
+			err := donateAllAllianceTech(client, nil)
 			if (err != nil) != c.wantError {
 				t.Errorf("donateAllAllianceTech() error = %v, want error %v", err, c.wantError)
 			}

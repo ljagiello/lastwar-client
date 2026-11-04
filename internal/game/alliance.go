@@ -118,14 +118,19 @@ const allianceGiftPremiumMinLevel = 15
 //   - Regular (type 2) when redPoint2 > 0.
 //
 // A missing redPoint counts as waiting. If the list fails, only Regular is claimed, since Premium
-// needs the level, which init does not carry. Without init (in.Raw nil) both types are claimed
-// blind, as before this gating existed. This never sends alliance.reward.remove/allremove. Below
-// level 15 the real client claims Premium gifts one at a time (alliance.reward.receive); that is
-// not done here. Static: the server's reply to a Premium claim-all below level 15 has not been
-// observed.
+// needs the level, which init does not carry. Nothing is sent outside an alliance: the gift window
+// opens only from the alliance panel. Without init (in.Raw nil) both types are claimed blind, as
+// before this gating existed. This never sends alliance.reward.remove/allremove. Below level 15
+// the real client claims Premium gifts one at a time (alliance.reward.receive); the opt-in feature
+// alliance-premium-gifts does that. Static: the server's reply to a Premium claim-all below level
+// 15 has not been observed.
 func claimAllianceGifts(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil {
 		return ClaimAllianceGifts(conn)
+	}
+	if !claimInAlliance(in) {
+		slog.Info("not in an alliance; skipping alliance gift claims")
+		return nil
 	}
 	if n, ok := numberField(in.Raw, "allianceNewMail"); ok && n == 0 {
 		slog.Info("no alliance gifts waiting (init allianceNewMail=0); skipping gift claims")
@@ -290,35 +295,224 @@ func ClaimAllianceGifts(conn *session.GameConn) error {
 // premium currency per use. When no tech is recommended the real UI
 // suggests the highest-progress open one (FindCanRecommendScience); this
 // donates only to an explicitly recommended tech.
+//
+// The recommended tech is skipped when the real UI offers no donate button for it (see
+// allianceTech.blocked): full, being researched or at max level. A full tech keeps state == 1
+// until an R4/R5 starts the research (AlScienceDonateInfo.lua:339-342 hides the recommend
+// buttons at pro >= 1). This blind form has no init, so the alliance, switch and resource gates of
+// donateRecommendedAllianceTech do not apply.
 func DonateRecommendedAllianceTech(conn *session.GameConn) error {
-	const refreshCmd = "science.data.refresh"
-	msg, err := session.SendAndWait(conn, "alliance tech tree fetch", refreshCmd, sfs.NewSFSObject())
-	if err != nil {
+	return donateRecommendedAllianceTech(conn, nil)
+}
+
+// allianceScienceRefreshCmd, allianceDonateCmd and the two per-tech pushes (MsgDefines.lua:405-415).
+const (
+	allianceScienceRefreshCmd    = "science.data.refresh"
+	allianceDonateCmd            = "al.science.donate"
+	allianceSciencePushCmd       = "push.al.science"
+	allianceSciencePushUpdateCmd = "push.al.science.update"
+	allianceChargesUsedUpCode    = "120471"
+	allianceScienceEntrance      = "alliancescience_entrance"
+)
+
+//go:generate go run ./genalscience -tab ${LASTWAR_TABLES}/lw_alliance_science_tab.json -detail ${LASTWAR_TABLES}/lw_alliance_science_detail.json -version ${LASTWAR_TABLE_VERSION} -out alliance_science_gen.go
+
+// donateRecommendedAllianceTech is collectCore's donation: DonateRecommendedAllianceTech with the
+// init gates. With init (in.Raw set) nothing is sent outside an alliance, or when init dataConfig
+// carries switch alliancescience_entrance and it is off: the client sends science.data.refresh
+// only in an alliance with that switch on (AllianceBaseDataManager.lua:195-200, 212-217; the
+// AllianceScience unlock it also checks is always true, :513-514). The switch is not in the local
+// item table, so it comes from init alone; an init without it is not gated, since which switches
+// the live init carries is unknown. The donation is also skipped when init resource shows too few
+// of the tech's lowRes for its lowNum (UIAllianceScienceInfoCtrl.lua:138-145, tip 120020).
+func donateRecommendedAllianceTech(conn *session.GameConn, in *Init) error {
+	if !allianceScienceAllowed(in) {
+		return nil
+	}
+	tech, found, err := fetchRecommendedTech(conn)
+	if err != nil || !found {
 		return err
+	}
+	if why := tech.blocked(claimNow(in).UnixMilli(), newAllianceLedger(in)); why != "" {
+		slog.Info("not donating to the recommended alliance tech", append([]any{"reason", why}, tech.logAttrs()...)...)
+		return nil
+	}
+	slog.Info("donating to recommended alliance tech", "scienceId", tech.id)
+	params := sfs.NewSFSObject()
+	params.PutInt("scienceId", tech.id)
+	params.PutInt("option", 1)
+	_, err = session.SendAndWait(conn, fmt.Sprintf("alliance tech donate response (scienceId %d)", tech.id), allianceDonateCmd, params)
+	return err
+}
+
+// allianceScienceAllowed applies the init gates on science.data.refresh (see
+// donateRecommendedAllianceTech); without init (nil or in.Raw nil) it allows everything.
+func allianceScienceAllowed(in *Init) bool {
+	if in == nil || in.Raw == nil {
+		return true
+	}
+	if !claimInAlliance(in) {
+		slog.Info("not in an alliance; skipping the alliance tech donation")
+		return false
+	}
+	// DataConfig:CheckSwitch is tonumber(value) == 1 (DataConfig.lua:76-88).
+	if _, present := in.Object("dataConfig").Get(allianceScienceEntrance); present {
+		if n, ok := claimInt(in.Object("dataConfig"), allianceScienceEntrance); !ok || n != 1 {
+			slog.Info("init dataConfig turns off " + allianceScienceEntrance + "; skipping the alliance tech donation")
+			return false
+		}
+	}
+	return true
+}
+
+// fetchRecommendedTech sends science.data.refresh and returns the recommended (state == 1) tech.
+func fetchRecommendedTech(conn *session.GameConn) (*allianceTech, bool, error) {
+	msg, err := session.SendAndWait(conn, "alliance tech tree fetch", allianceScienceRefreshCmd, sfs.NewSFSObject())
+	if err != nil {
+		return nil, false, err
 	}
 	v, ok := msg.Params.Get("allianceScience")
 	if !ok {
 		slog.Info("no alliance tech tree data returned")
-		return nil
+		return nil, false, nil
 	}
 	arr, ok := v.Val.(*sfs.SFSArray)
 	if !ok {
 		slog.Warn("alliance tech tree: allianceScience field is present but not an array, skipping donation", "type", fmt.Sprintf("%T", v.Val))
-		return nil
+		return nil, false, nil
 	}
-	recommendedID, found := findRecommendedTech(arr)
+	entry, found := findRecommendedTechEntry(arr)
 	if !found {
 		slog.Info("no alliance tech is currently recommended")
-		return nil
+		return nil, false, nil
 	}
+	tech := &allianceTech{id: entry.GetInt("scienceId")}
+	tech.update(entry)
+	slog.Info("recommended alliance tech", tech.logAttrs()...)
+	return tech, true, nil
+}
 
-	const donateCmd = "al.science.donate"
-	slog.Info("donating to recommended alliance tech", "scienceId", recommendedID)
-	params := sfs.NewSFSObject()
-	params.PutInt("scienceId", recommendedID)
-	params.PutInt("option", 1)
-	_, err = session.SendAndWait(conn, fmt.Sprintf("alliance tech donate response (scienceId %d)", recommendedID), donateCmd, params)
-	return err
+// allianceTech is the client's record of one tech (AllianceScienceData.lua:3-31, 62-153), for the
+// fields the donate button depends on. Like ParseData, update sets a field only when a message
+// carries it, so a reply without progress fields (the live al.science.donate reply has none,
+// docs/live-validation.mdx:422) leaves the last known values in place. A field never seen is
+// unknown and gates nothing.
+type allianceTech struct {
+	id                                     int32
+	currentPro, needPro, level             int64
+	finishTime, lowRes, lowNum             int64
+	hasCurrentPro, hasLevel, hasFinishTime bool
+	hasLowRes, hasLowNum                   bool
+}
+
+// update applies one message's fields: the science.data.refresh entry, a donate reply or a
+// push.al.science(.update) (both pushes and the donate reply run UpdateOneAllianceScience,
+// AllianceScienceDataManager.lua:141-149). lowNum and lowRes are the per-donation cost and its
+// resource type (ParseData stores them as resNum and res). needPro needs no flag: 0 and missing
+// both fall back to the template (see target).
+func (t *allianceTech) update(o *sfs.SFSObject) {
+	set := func(key string, dst *int64, has *bool) {
+		if n, ok := claimInt(o, key); ok {
+			*dst = n
+			if has != nil {
+				*has = true
+			}
+		}
+	}
+	set("currentPro", &t.currentPro, &t.hasCurrentPro)
+	set("needPro", &t.needPro, nil)
+	set("level", &t.level, &t.hasLevel)
+	set("finishTime", &t.finishTime, &t.hasFinishTime)
+	set("lowRes", &t.lowRes, &t.hasLowRes)
+	set("lowNum", &t.lowNum, &t.hasLowNum)
+}
+
+// target is the donation target: needPro when above 0, else the template maxProNum at id
+// scienceId + level, as ParseData falls back (AllianceScienceData.lua:144-152). ok is false when
+// neither is known (no needPro and no level, or no template row): the client's own last resort,
+// 10,000,000, is a logged error path, so an unknown target gates nothing here.
+func (t *allianceTech) target() (int64, bool) {
+	if t.needPro > 0 {
+		return t.needPro, true
+	}
+	if !t.hasLevel {
+		return 0, false
+	}
+	v, ok := allianceScienceMaxPro[t.id+int32(t.level)]
+	return v, ok
+}
+
+// blocked returns why the client offers no donation for t at nowMs, or "" when it does:
+//   - max level: level >= max_lv (AlScienceDonateInfo.lua:266, 352-359; FindCanRecommendScienceByTab,
+//     AllianceScienceDataManager.lua:197);
+//   - full: currentPro >= the target (the donate buttons show only while pro < 1,
+//     AlScienceDonateInfo.lua:277-304, and the long press stops at currentPro >= needPro, :397);
+//   - being researched: now < finishTime (AlScienceIconInfo.lua:219-224 hides the donate block);
+//   - too few resources: lowNum above the ledger's lowRes balance (UIAllianceScienceInfoCtrl.lua:138-145).
+//
+// Each gate needs its fields: a missing one never blocks, or one donate reply without them would
+// stop alliance-donate-all after a single donation. The lock and tab-3 season checks need
+// science_condition and AlScienceTab, which Go does not have; the client never recommends a locked
+// tech (FindCanRecommendScienceByTab skips it).
+func (t *allianceTech) blocked(nowMs int64, ledger allianceLedger) string {
+	if maxLv, ok := allianceScienceMaxLevel[t.id]; ok && t.hasLevel && t.level >= int64(maxLv) {
+		return "max level"
+	}
+	if need, ok := t.target(); ok && t.hasCurrentPro && t.currentPro >= need {
+		return "fully donated"
+	}
+	if t.hasFinishTime && nowMs < t.finishTime {
+		return "being researched"
+	}
+	if t.hasLowRes && t.hasLowNum {
+		if have, ok := ledger.balance(t.lowRes); ok && t.lowNum > have {
+			return "too few resources"
+		}
+	}
+	return ""
+}
+
+func (t *allianceTech) logAttrs() []any {
+	need, needKnown := t.target()
+	_, inTable := allianceScienceMaxLevel[t.id]
+	return []any{"scienceId", t.id, "currentPro", t.currentPro, "target", need, "targetKnown", needKnown,
+		"level", t.level, "levelKnown", t.hasLevel, "maxLevel", allianceScienceMaxLevel[t.id], "inTable", inTable,
+		"tableVersion", allianceScienceTableVersion, "finishTime", t.finishTime, "lowRes", t.lowRes, "lowNum", t.lowNum}
+}
+
+// allianceResourceKeys maps a ResourceType (Global/EnumType.lua:47-69) to its init resource{} key
+// for the plain cases of ResourceInfo:GetCntByResType (ResourceInfo.lua:177-202). FLINT's count
+// there subtracts a reduce value, so its raw balance only over-states the client's: the gate stays
+// permissive. Every tech in table 39879 costs wood (2) or flint (13).
+var allianceResourceKeys = map[int64]string{
+	0: "oil", 1: "metal", 2: "wood", 4: "people", 10: "obsidian", 11: "water", 12: "electricity",
+	13: "flint", 14: "money", 23: "petroleum",
+}
+
+// allianceLedger is the player's resource balances by ResourceType, from init resource{} and then
+// from what the donations spend; a type it doesn't know gates nothing.
+type allianceLedger map[int64]int64
+
+func newAllianceLedger(in *Init) allianceLedger {
+	l := allianceLedger{}
+	if in != nil {
+		l.set(in.Object("resource"))
+	}
+	return l
+}
+
+// set takes every balance a resource{} object carries (ResourceInfo:UpdateResourceCurrentValue).
+func (l allianceLedger) set(res *sfs.SFSObject) {
+	for typ, key := range allianceResourceKeys {
+		if n, ok := claimInt(res, key); ok {
+			l[typ] = n
+		}
+	}
+}
+
+func (l allianceLedger) balance(typ int64) (int64, bool) {
+	n, ok := l[typ]
+	return n, ok
 }
 
 // allianceScienceRawItemCap bounds how many RAW entries in an allianceScience array
@@ -352,6 +546,16 @@ const allianceScienceRawItemCap = 1000
 // DonateRecommendedAllianceTech send a real al.science.donate request against the wrong tech. See
 // TestFindRecommendedTechWrongTypedScienceIdIsRejected (alliance_test.go).
 func findRecommendedTech(arr *sfs.SFSArray) (scienceId int32, found bool) {
+	tech, found := findRecommendedTechEntry(arr)
+	if !found {
+		return 0, false
+	}
+	return tech.GetInt("scienceId"), true
+}
+
+// findRecommendedTechEntry is findRecommendedTech returning the whole entry, whose progress
+// fields the donation gate reads.
+func findRecommendedTechEntry(arr *sfs.SFSArray) (*sfs.SFSObject, bool) {
 	if len(arr.Items()) > allianceScienceRawItemCap {
 		slog.Warn("alliance tech tree: allianceScience array longer than raw-item scan cap; truncating scan", "arrayLen", len(arr.Items()), "cap", allianceScienceRawItemCap)
 	}
@@ -378,7 +582,7 @@ func findRecommendedTech(arr *sfs.SFSArray) (scienceId int32, found bool) {
 		if !session.RequireFieldType(tech, "scienceId", "allianceScience", session.SFSFieldKindInt) {
 			continue
 		}
-		return tech.GetInt("scienceId"), true
+		return tech, true
 	}
-	return 0, false
+	return nil, false
 }

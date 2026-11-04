@@ -947,7 +947,7 @@ func collectCore(conn *session.GameConn, in *Init) error {
 		func() error { return ClaimAllMail(conn) },
 		func() error { return helpAllianceMembers(conn, in) },
 		func() error { return claimAllianceGifts(conn, in) },
-		func() error { return DonateRecommendedAllianceTech(conn) },
+		func() error { return donateRecommendedAllianceTech(conn, in) },
 		func() error { return claimVIPDailies(conn, in, now) },
 	}
 

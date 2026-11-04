@@ -24,6 +24,21 @@ func callHelpInit(c timerInit, inAlliance bool) *Init {
 	return in
 }
 
+// withBuildingFields sets more building_new fields (dStT, state: the timerInit fixture has neither)
+// on the entry with uuid.
+func withBuildingFields(in *Init, uuid int64, kv ...any) *Init {
+	src := obj(kv...)
+	for _, b := range in.Objects("building_new") {
+		if id, _ := claimInt(b, "uuid"); id == uuid {
+			for _, k := range src.Keys() {
+				v, _ := src.Get(k)
+				b.PutValue(k, v)
+			}
+		}
+	}
+	return in
+}
+
 func runCallHelp(t *testing.T, in *Init, reply *sfs.SFSObject) ([]helpSent, error) {
 	t.Helper()
 	conn, fake := startRewardFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return reply })
@@ -45,12 +60,17 @@ func TestAllianceCallHelpAsksOnRunningTimersOnly(t *testing.T) {
 	future, past := now.Add(time.Hour), now.Add(-time.Minute)
 	c := timerInit{
 		buildings: []timerBuilding{
-			{uuid: 1, bID: 10202000, lv: 5, uT: future, help: 0},    // ask: upgrade
-			{uuid: 2, bID: 10202000, lv: 5, uT: future, help: 1},    // upgrade already helped
-			{uuid: 3, bID: 10202000, lv: 5, uT: future, help: 2},    // ask: only the repair was helped
-			{uuid: 4, bID: 10202000, lv: 5, uT: past},               // finished, nothing to ask
-			{uuid: 5, bID: 10107000, lv: 5, dEndT: future, help: 0}, // ask: repair
-			{uuid: 6, bID: 10107000, lv: 5, dEndT: future, help: 2}, // repair already helped
+			{uuid: 1, bID: 10202000, lv: 5, uT: future, help: 0},                 // ask: upgrade
+			{uuid: 2, bID: 10202000, lv: 5, uT: future, help: 1},                 // upgrade already helped
+			{uuid: 3, bID: 10202000, lv: 5, uT: future, help: 2},                 // ask: only the repair was helped
+			{uuid: 4, bID: 10202000, lv: 5, uT: past},                            // finished, nothing to ask
+			{uuid: 5, bID: 10107000, lv: 5, dEndT: future, help: 0},              // ask: repair
+			{uuid: 6, bID: 10107000, lv: 5, dEndT: future, help: 2},              // repair already helped
+			{uuid: 7, bID: 10202000, lv: 5, uT: future, help: 0},                 // folded: no bubbles
+			{uuid: 8, bID: 10202000, lv: 5, uT: future, help: 0},                 // under repair: no upgrade bubble
+			{uuid: 9, bID: 10107000, lv: 5, dEndT: future, help: 0},              // no dStT: no repair bubble
+			{uuid: 10, bID: 10107000, lv: 5, uT: past, dEndT: future, help: 0},   // upgrade finished: no repair help
+			{uuid: 11, bID: 10107000, lv: 5, uT: future, dEndT: future, help: 0}, // ask: repair, upgrade still running
 		},
 		queues: []timerQueue{
 			{uuid: 21, qType: 6, start: now.Add(-time.Hour), end: future, itemID: "1101001"}, // ask: research
@@ -61,11 +81,18 @@ func TestAllianceCallHelpAsksOnRunningTimersOnly(t *testing.T) {
 		},
 		soldiers: -1,
 	}
-	sent, err := runCallHelp(t, callHelpInit(c, true), rewardOK())
+	in := callHelpInit(c, true)
+	started := past.UnixMilli()
+	for _, uuid := range []int64{5, 6, 8, 10, 11} {
+		withBuildingFields(in, uuid, "dStT", started)
+	}
+	withBuildingFields(in, 7, "state", 2)
+	withBuildingFields(in, 1, "state", 1) // upgrading is not folded
+	sent, err := runCallHelp(t, in, rewardOK())
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	want := []helpSent{{1, 0, 0, ""}, {3, 0, 0, ""}, {5, 2, 0, ""}, {21, 1, 6, "1101001"}, {23, 1, 3, ""}}
+	want := []helpSent{{1, 0, 0, ""}, {3, 0, 0, ""}, {5, 2, 0, ""}, {11, 2, 0, ""}, {21, 1, 6, "1101001"}, {23, 1, 3, ""}}
 	if !slices.Equal(sent, want) {
 		t.Errorf("sent %v\nwant %v", sent, want)
 	}

@@ -89,7 +89,8 @@ func TestHelpAllianceMembersGating(t *testing.T) {
 }
 
 func TestClaimAllianceGiftsGating(t *testing.T) {
-	gifts := &Init{Raw: obj("allianceNewMail", 3)}
+	inAlliance := func(kv ...any) *Init { return &Init{Raw: obj(append([]any{"alliance", obj("uid", "al-1")}, kv...)...)} }
+	gifts := inAlliance("allianceNewMail", 3)
 	list := func(kv ...any) *sfs.SFSObject { return obj(kv...) }
 	const (
 		ls  = "alliance.reward.list"
@@ -104,7 +105,11 @@ func TestClaimAllianceGiftsGating(t *testing.T) {
 		wantError bool
 	}{
 		{"no init: both types blind", &Init{}, nil, []string{all, all}, []int32{1, 2}, false},
-		{"no gifts waiting", &Init{Raw: obj("allianceNewMail", 0)}, nil, nil, nil, false},
+		{"no gifts waiting", inAlliance("allianceNewMail", 0), nil, nil, nil, false},
+		// B38: the gift window opens only from the alliance panel.
+		{"not in an alliance", &Init{Raw: obj("allianceNewMail", 3, "user", obj("allianceId", "0"))}, nil, nil, nil, false},
+		{"in an alliance by user.allianceId", &Init{Raw: obj("allianceNewMail", 3, "user", obj("allianceId", "al-1"))},
+			list("onLevel", 20, "info", obj("redPoint1", 0, "redPoint2", 1)), []string{ls, all}, []int32{2}, false},
 		{"gift level 20, both waiting", gifts, list("onLevel", 20, "info", obj("redPoint1", 2, "redPoint2", 1)),
 			[]string{ls, all, all}, []int32{1, 2}, false},
 		{"gift level exactly 15", gifts, list("onLevel", 15, "info", obj("redPoint1", 1, "redPoint2", 1)),
@@ -119,7 +124,7 @@ func TestClaimAllianceGiftsGating(t *testing.T) {
 			[]string{ls}, nil, false},
 		{"no counts in the list: both claimed", gifts, list("onLevel", 20),
 			[]string{ls, all, all}, []int32{1, 2}, false},
-		{"no allianceNewMail in init: list anyway", &Init{Raw: sfs.NewSFSObject()}, list("onLevel", 3),
+		{"no allianceNewMail in init: list anyway", inAlliance(), list("onLevel", 3),
 			[]string{ls, all}, []int32{2}, false},
 		{"list fails: Regular only", gifts, list("errorCode", "E1"), []string{ls, all}, []int32{2}, true},
 	}
