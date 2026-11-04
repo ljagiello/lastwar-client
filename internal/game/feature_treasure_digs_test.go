@@ -1,6 +1,7 @@
 package game
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -743,6 +744,30 @@ func TestTreasureDigsVaultTimedStage(t *testing.T) {
 				t.Error("give.up must never be sent")
 			}
 		})
+	}
+}
+
+// TestTreasureDigsVaultTimedStageNotStartedUnderTheTripwire: while the tripwire file exists the
+// bricks are refused, so a started 180 s stage would fail; it is not started.
+func TestTreasureDigsVaultTimedStageNotStartedUnderTheTripwire(t *testing.T) {
+	tripwireTemp(t)
+	tripwireTrip("duel-speedups", duelSpeedupsBuildCmd, "a test trip")
+	stage := digBoardSFS(501, 11001, digCanNotGet, nil, nil)
+	timed := digBoardSFS(601, 12001, digNotBegin, nil, nil)
+	timed.PutLong("endTime", 0)
+	conn, f := startDigFake(t, radarScoringDay(), nil, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == digVaultInfoCmd {
+			return vaultInfo(stage, timed, nil)
+		}
+		return nil
+	})
+	if err := runTreasureDigs(conn, digTestInit(map[string]int32{digVaultHammer: 11}, evActivity(2200021))); !errors.Is(err, errTripwire) {
+		t.Errorf("err = %v, want the tripwire", err)
+	}
+	for _, cmd := range []string{digVaultTimedStartCmd, digVaultOpenCmd} {
+		if n := len(f.only(cmd)); n != 0 {
+			t.Errorf("sent %s %d times while the tripwire file exists", cmd, n)
+		}
 	}
 }
 

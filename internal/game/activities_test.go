@@ -1,7 +1,9 @@
 package game
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -157,6 +159,187 @@ func TestParseActivitiesResolvesTypeAndWindow(t *testing.T) {
 	}
 	if got := s.Open(actTypeSlotMachine); len(got) != 1 || got[0].ID != 99047 {
 		t.Errorf("Open(slot) = %+v", got)
+	}
+}
+
+// captureActivityLog routes slog to a buffer, Debug and up, for one test.
+func captureActivityLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	return &buf
+}
+
+func TestParseActivitiesLogsIDsMissingFromTable(t *testing.T) {
+	withEvNow(t, evTestNow)
+	logs := captureActivityLog(t)
+	unknown := evActivity(424242)
+	dragon := evActivity(40038) // ActDragon, type 201: in the table, asked for by no feature
+	acts := parseActivities(evInit(30, unknown, dragon, evActivity(99011)))
+
+	if len(acts) != 2 || acts[0].ID != 40038 || acts[0].Type != 201 || acts[0].NeedHQ != 15 || acts[1].ID != 99011 {
+		t.Fatalf("activities = %+v, want 40038 (type 201, HQ 15) and 99011; the id missing from the table skipped", acts)
+	}
+	var info []string
+	for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(l, "level=INFO") {
+			info = append(info, l)
+		}
+	}
+	if len(info) != 1 {
+		t.Fatalf("INFO lines = %q, want one, for 424242 only (a known id of an unhandled type stays quiet)", info)
+	}
+	for _, want := range []string{
+		"id=424242",
+		"startTime=" + strconv.FormatInt(unknown.GetLong("startTime"), 10),
+		"endTime=" + strconv.FormatInt(unknown.GetLong("endTime"), 10),
+		"tableVersion=" + activityTableVersion,
+	} {
+		if !strings.Contains(info[0], want) {
+			t.Errorf("INFO line %q lacks %q", info[0], want)
+		}
+	}
+	if !strings.Contains(logs.String(), "level=DEBUG msg=\"activity sweep\" parsed=2 notInTable=1") {
+		t.Errorf("missing the Debug summary:\n%s", logs)
+	}
+}
+
+func TestParseActivitiesLogsLastTimeAsEnd(t *testing.T) {
+	withEvNow(t, evTestNow)
+	logs := captureActivityLog(t)
+	a := evActivity(424243)
+	end := evTestNow.Add(time.Hour).UnixMilli()
+	a.PutLong("lastTime", end) // overrides endTime, as ActivityInfoData.lua:148-150
+	if got := parseActivities(evInit(30, a)); len(got) != 0 {
+		t.Fatalf("parsed %+v, want the id missing from the table skipped", got)
+	}
+	if !strings.Contains(logs.String(), "endTime="+strconv.FormatInt(end, 10)) {
+		t.Errorf("INFO must log the lastTime end:\n%s", logs)
+	}
+}
+
+func TestParseActivitiesKnownIDsStayQuiet(t *testing.T) {
+	withEvNow(t, evTestNow)
+	logs := captureActivityLog(t)
+	if got := parseActivities(evInit(30, evActivity(5401), evActivity(40038))); len(got) != 2 {
+		t.Fatalf("parsed %+v, want both", got)
+	}
+	if strings.Contains(logs.String(), "level=INFO") {
+		t.Errorf("known ids must not log at INFO:\n%s", logs)
+	}
+}
+
+// handMapTypeCounts are the per-type id counts of the hand-copied activityIDsByType this table
+// replaced (table 39432, the 33 types the event features handled), and handMapSamples one of its
+// ids per type. Every later table must keep them: a table that drops or retypes one of these ids
+// changes what an ON feature sees.
+var (
+	handMapTypeCounts = map[int32]int{
+		14: 1, 27: 61, 34: 8, 124: 44, 125: 6, 130: 14, 132: 28, 134: 1, 139: 15, 142: 155, 150: 1, 151: 8,
+		153: 7, 154: 6, 155: 5, 156: 35, 158: 9, 159: 11, 173: 9, 174: 10, 202: 5, 218: 1, 239: 1, 241: 1,
+		248: 6, 260: 6, 309: 4, 350: 19, 373: 1, 380: 1, 389: 1, 392: 1, 412: 1,
+	}
+	handMapSamples = map[int32]int32{
+		55000: 14, 13: 27, 99164: 27, 3013: 34, 14: 124, 1051006: 124, 17: 125, 29: 125, 3009: 130, 98001: 132,
+		7001: 134, 1000289: 139, 5038: 142, 10202181: 142, 99003: 150, 99004: 151, 99011: 153, 99010: 154,
+		99020: 155, 5301: 156, 5401: 158, 99194: 158, 99047: 159, 98629: 173, 95101: 174, 94301: 202,
+		40039: 218, 1000058: 239, 1000070: 241, 1000079: 248, 80052: 260, 99086: 309, 98800: 350,
+		10205041: 350, 1210000: 373, 98801: 380, 1200101: 389, 1200104: 392, 80152: 412,
+	}
+	// handMapNeedHQ is the hand-copied activityNeedHQ, verbatim: every nonzero needMainCityLevel
+	// among those ids. The rest of them had none.
+	handMapNeedHQ = map[int32]int32{
+		20: 5, 24: 7, 26: 7, 27: 7, 29: 7, 3013: 4, 40039: 10, 50341: 4,
+		50342: 4, 55000: 10, 94001: 4, 95001: 4, 95002: 4, 95003: 4, 95005: 4, 95101: 4,
+		95102: 4, 95103: 4, 98672: 4, 98673: 4, 98674: 4, 98675: 4, 98676: 4, 98677: 4,
+		99024: 4, 99116: 4, 1210000: 4,
+	}
+)
+
+func TestActivityTableKeepsTheHandMap(t *testing.T) {
+	counts := map[int32]int{}
+	hqByType := map[int32]map[int32]int32{}
+	for id, r := range activityTable {
+		counts[r.typ]++
+		if r.needHQ != 0 {
+			if hqByType[r.typ] == nil {
+				hqByType[r.typ] = map[int32]int32{}
+			}
+			hqByType[r.typ][id] = r.needHQ
+		}
+	}
+	for typ, n := range handMapTypeCounts {
+		if counts[typ] < n {
+			t.Errorf("type %d: %d ids in the table, the hand map had %d", typ, counts[typ], n)
+		}
+	}
+	for id, typ := range handMapSamples {
+		if got, ok := activityTypeOf(id); !ok || got != typ {
+			t.Errorf("activityTypeOf(%d) = %d, %v; the hand map had type %d", id, got, ok, typ)
+		}
+	}
+	for id, lv := range handMapNeedHQ {
+		if got := activityNeedHQ(id); got != lv {
+			t.Errorf("activityNeedHQ(%d) = %d, the hand map had %d", id, got, lv)
+		}
+	}
+	// No other id of the handled types gained an HQ gate (39879 added none).
+	for typ := range handMapTypeCounts {
+		for id, lv := range hqByType[typ] {
+			if handMapNeedHQ[id] != lv {
+				t.Errorf("activity %d (type %d): needHQ %d, the hand map had %d", id, typ, lv, handMapNeedHQ[id])
+			}
+		}
+	}
+	if r, ok := activityTable[99202]; !ok || r != (activityRow{typ: actTypeSignIn}) {
+		t.Errorf("99202 = %+v, %v; want the 2026 Halloween sign-in, type 158 with no HQ gate (new in 39879)", r, ok)
+	}
+	if activityNeedHQ(424242) != 0 {
+		t.Error("an id the table lacks must have no HQ gate")
+	}
+}
+
+func TestActivityTypesOtherFeaturesUseAreInTheTable(t *testing.T) {
+	for _, typ := range []int32{actTypeSeasonPeriodicCard, actTypeGhostRecon} {
+		n := 0
+		for _, r := range activityTable {
+			if r.typ == typ {
+				n++
+			}
+		}
+		if n == 0 {
+			t.Errorf("type %d has no activity rows", typ)
+		}
+	}
+}
+
+func TestEvNumKeepsLongStringsExact(t *testing.T) {
+	o := sfs.NewSFSObject()
+	o.PutUtfString("uuid", "9007199254740993") // 2^53 + 1: float64 rounds it to 2^53
+	o.PutUtfString("neg", "-9007199254740993")
+	o.PutUtfString("float", "12.0")
+	o.PutUtfString("frac", "12.9")
+	o.PutUtfString("word", "abc")
+	o.PutLong("long", 9007199254740993)
+	cases := []struct {
+		key  string
+		want int64
+		ok   bool
+	}{
+		{"uuid", 9007199254740993, true},
+		{"neg", -9007199254740993, true},
+		{"float", 12, true},
+		{"frac", 12, true},
+		{"word", 0, false},
+		{"long", 9007199254740993, true},
+		{"absent", 0, false},
+	}
+	for _, c := range cases {
+		if got, ok := evNum(o, c.key); got != c.want || ok != c.ok {
+			t.Errorf("evNum(%s) = %d, %v; want %d, %v", c.key, got, ok, c.want, c.ok)
+		}
 	}
 }
 

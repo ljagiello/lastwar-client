@@ -49,7 +49,7 @@ func freeChestsInit(hq int32, store, weekly time.Time) *Init {
 func freeChestsServer(t *testing.T, weekCard time.Time, claimReply func(cmd string) *sfs.SFSObject) (*rewardFake, func(*Init) error) {
 	t.Helper()
 	conn, fake := startRewardFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
-		if cmd == freeChestsWeekInfoCmd {
+		if cmd == weekCardInfoCmd {
 			resp := sfs.NewSFSObject()
 			free := sfs.NewSFSObject()
 			free.PutLong("lastRewardTime", weekCard.UnixMilli())
@@ -67,7 +67,7 @@ func TestFreeChestsClaimsAllThreeWhenDue(t *testing.T) {
 	if err := run(freeChestsInit(5, yesterday, yesterday)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	want := []string{freeChestsStoreCmd, freeChestsWeeklyCmd, freeChestsWeekInfoCmd, freeChestsWeekCardCmd}
+	want := []string{freeChestsStoreCmd, freeChestsWeeklyCmd, weekCardInfoCmd, freeChestsWeekCardCmd}
 	if got := fake.cmds(); !slices.Equal(got, want) {
 		t.Fatalf("sent %v, want %v", got, want)
 	}
@@ -93,7 +93,7 @@ func TestFreeChestsSkipsWhatWasClaimedToday(t *testing.T) {
 	if err := run(freeChestsInit(5, earlier, earlier)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got := fake.cmds(); !slices.Equal(got, []string{freeChestsWeekInfoCmd}) {
+	if got := fake.cmds(); !slices.Equal(got, []string{weekCardInfoCmd}) {
 		t.Errorf("sent %v, want only the week card info read", got)
 	}
 }
@@ -109,9 +109,9 @@ func TestFreeChestsGates(t *testing.T) {
 			raw.PutSFSObject("weekFreeReward", sfs.NewSFSObject())
 		}), nil},
 		"HQ below the store unlock": {freeChestsInit(1, yesterday, yesterday),
-			[]string{freeChestsWeeklyCmd, freeChestsWeekInfoCmd, freeChestsWeekCardCmd}},
+			[]string{freeChestsWeeklyCmd, weekCardInfoCmd, freeChestsWeekCardCmd}},
 		"no store entry or weekly package in init": {rewardInitWithDay(5, func(*sfs.SFSObject) {}),
-			[]string{freeChestsWeekInfoCmd, freeChestsWeekCardCmd}},
+			[]string{weekCardInfoCmd, freeChestsWeekCardCmd}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fake, run := freeChestsServer(t, yesterday, func(string) *sfs.SFSObject { return rewardOK() })
@@ -143,5 +143,44 @@ func TestFreeChestsBenignAndFailure(t *testing.T) {
 	}
 	if n := len(fake.cmds()); n != 4 {
 		t.Errorf("sent %d requests, want all 4: one failure must not stop the other claims", n)
+	}
+}
+
+// TestFreeChestsSwitchGate: init dataConfig free_chest_receive set to anything but 1 drops the
+// weekly package and the week-card free gift, which the client builds only behind it
+// (UISubscriptionListPanelView.lua:27-59); the store free reward is outside it, and an absent
+// switch keeps every claim.
+func TestFreeChestsSwitchGate(t *testing.T) {
+	yesterday := rewardDayStart(time.Now()).Add(-time.Hour)
+	withSwitch := func(v *sfs.SFSValue) *Init {
+		in := freeChestsInit(5, yesterday, yesterday)
+		if v != nil {
+			dc := sfs.NewSFSObject()
+			dc.PutValue(freeChestSwitch, *v)
+			in.Raw.PutSFSObject("dataConfig", dc)
+		}
+		return in
+	}
+	all := []string{freeChestsStoreCmd, freeChestsWeeklyCmd, weekCardInfoCmd, freeChestsWeekCardCmd}
+	for name, c := range map[string]struct {
+		v    *sfs.SFSValue
+		want []string
+	}{
+		"absent":        {nil, all},
+		"on (Int 1)":    {&sfs.SFSValue{Type: sfs.SFSInt, Val: int32(1)}, all},
+		"on (\"1\")":    {&sfs.SFSValue{Type: sfs.SFSUtfString, Val: "1"}, all},
+		"off (Int 0)":   {&sfs.SFSValue{Type: sfs.SFSInt, Val: int32(0)}, []string{freeChestsStoreCmd}},
+		"off (\"0\")":   {&sfs.SFSValue{Type: sfs.SFSUtfString, Val: "0"}, []string{freeChestsStoreCmd}},
+		"off (garbage)": {&sfs.SFSValue{Type: sfs.SFSUtfString, Val: "x"}, []string{freeChestsStoreCmd}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, run := freeChestsServer(t, yesterday, func(string) *sfs.SFSObject { return rewardOK() })
+			if err := run(withSwitch(c.v)); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := fake.cmds(); !slices.Equal(got, c.want) {
+				t.Errorf("sent %v, want %v", got, c.want)
+			}
+		})
 	}
 }

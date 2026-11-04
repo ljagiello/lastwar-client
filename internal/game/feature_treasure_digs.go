@@ -446,6 +446,8 @@ type digRun struct {
 	claims  int
 	errs    []error
 	dead    bool
+	// spendRefused is the tripwire error while the tripwire file exists: no brick is opened.
+	spendRefused error
 }
 
 func runTreasureDigs(conn *session.GameConn, in *Init) error { return treasureDigs(conn, in, false) }
@@ -464,6 +466,11 @@ func treasureDigs(conn *session.GameConn, in *Init, dry bool) error {
 	items := duelInitItemCounts(in)
 	r := &digRun{conn: conn, in: in, dry: dry, name: name, items: items,
 		hammers: map[string]int64{digVaultHammer: items[digVaultHammer], digRuinHammer: items[digRuinHammer]}}
+	// Like the digsRun games, the hammer spend (the brick opens) refuses while the diamond tripwire
+	// file exists (tripwire.go); the free hammer and chest claims and the read-only plan still run.
+	if !dry {
+		r.spendRefused = tripwireErr(name)
+	}
 	slog.Info(name+": start", "digHammers", r.hammers[digVaultHammer], "explorerHammers", r.hammers[digRuinHammer])
 	// Radar ruins expire with their event, so they go first; they grant their own hammers.
 	r.radarRuins()
@@ -478,7 +485,7 @@ func treasureDigs(conn *session.GameConn, in *Init, dry bool) error {
 	}
 	slog.Info(name+": done", "bricksOpened", r.opens, "claims", r.claims, "digHammersLeft", r.hammers[digVaultHammer],
 		"explorerHammersLeft", r.hammers[digRuinHammer])
-	return errors.Join(r.errs...)
+	return errors.Join(append(r.errs, r.spendRefused)...)
 }
 
 func (r *digRun) fail(err error) {
@@ -577,6 +584,10 @@ func digIDParams(key string, id int64) *sfs.SFSObject {
 // checkOpenAll, which the caller handles. In the plan it logs the bricks it would open.
 func (r *digRun) dig(b digBoard, m *digMap) (last *sfs.SFSObject, failed bool) {
 	if m.state != digCanNotGet {
+		return nil, false
+	}
+	if r.spendRefused != nil {
+		slog.Info(r.name+": not opening "+b.label+" bricks while the diamond tripwire file exists", "board", m.summary())
 		return nil, false
 	}
 	slog.Info(r.name+": "+b.label, "board", m.summary(), "hammers", r.hammers[b.hammer])
@@ -939,6 +950,11 @@ func (r *digRun) vault() {
 				slog.Warn(r.name+": "+label+" has a map the table lacks; leaving the vault", "mapConfigId", t.cfg)
 				return
 			case t.state == digNotBegin:
+				if r.spendRefused != nil {
+					// The bricks would be refused, so a started 180 s stage would surely fail.
+					slog.Info(r.name + ": " + label + " not started while the diamond tripwire file exists")
+					return
+				}
 				need, have := int64(t.lvl.w*t.lvl.h-t.lvl.hammers), r.hammers[digVaultHammer]
 				if t.lvl.hammers <= 0 || have < need {
 					slog.Info(r.name+": "+label+" not started: the hammers held plus its grant don't cover every brick, "+

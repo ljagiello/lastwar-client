@@ -98,6 +98,7 @@ func Run() {
 	version := fs.Bool("version", false, "print build info and exit")
 	runFeature := fs.String("run", "", "after login, run only this optional feature (see -list-features) once, even if the session config doesn't enable it, log its responses, and exit -- the live validation step before enabling a feature in the session config")
 	runAnyway := fs.Bool("run-anyway", false, "with -run, run the feature even when today's Alliance Duel holds it (it scores duel points only on other days)")
+	clearTripwire := fs.Bool("clear-tripwire", false, "remove the diamond tripwire file next to the session config (<config>.tripwire.json, for -config or the default config), and exit. A duel or dig spend writes it when it sees the diamond balance fall, and while it exists every duel and dig spend refuses to run")
 	listFeatures := fs.Bool("list-features", false, "list the optional features (name, default, whether the session config enables it) and exit")
 	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: trade this client's own device's loginKey (state under $LASTWAR_STATE_DIR, else the home directory) for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit; run that config like any other with -config. With -email, first binds the device by email verification in the same run")
 	server := fs.String("server", "", "with -email, bind the account's role on this server (its number, e.g. 783, or its zone, APS783) instead of the one the account login names; the account's roles are logged after verification. Picking a role other than that one is EXPERIMENTAL (never tried live)")
@@ -175,6 +176,18 @@ func Run() {
 	}
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(*logLevel)})))
+
+	if *clearTripwire {
+		cfgPath := *configPath
+		if cfgPath == "" {
+			cfgPath = defaultSessionConfigPath()
+		}
+		if _, err := game.ClearTripwire(game.TripwireFile(cfgPath)); err != nil {
+			slog.Error("could not remove the diamond tripwire file", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *server != "" && *email == "" {
 		slog.Warn("ignoring -server because -email is not set (it picks the role an email verification binds)")
@@ -309,12 +322,9 @@ func Run() {
 		cfgAppVersion, cfgVersionCode, cfgFeatures = cfg.AppVersion, cfg.VersionCode, cfg.Features
 		cfgDuelPolicy, cfgShumeiInstall = cfg.DuelPolicy, cfg.ShumeiInstall
 		// The config's token times describe the config's own tokens: at.time means nothing for a
-		// -cs-at token, and the refresh token is bound to the config's device, not a -cs-deviceid one.
+		// -cs-at token. The refresh token is taken after the deviceId merge below.
 		if !csAtSetExplicitly {
 			cfgAccessTokTime = cfg.AccessTokenTime
-		}
-		if !csDeviceIDSetExplicitly {
-			cfgRefreshTok, cfgRefreshTokTime = cfg.RefreshToken, cfg.RefreshTokenTime
 		}
 		slog.Info("loaded session config", "path", cfgSource)
 		// Round 33 fix (originally scoped to -cs-ip/-cs-port/-cs-gameuid only; round 34 extends it
@@ -348,7 +358,7 @@ func Run() {
 		if gameUidExplicitlyEmpty {
 			slog.Warn("-cs-gameuid was explicitly given as empty; not falling back to the session config's gameUid (pass a non-empty -cs-gameuid, or omit the flag entirely to use the config's value)")
 		}
-		*csDeviceID, deviceIDExplicitlyEmpty = mergeExplicitOrConfigString(*csDeviceID, csDeviceIDSetExplicitly, cfg.DeviceID)
+		*csDeviceID, deviceIDExplicitlyEmpty, cfgRefreshTok, cfgRefreshTokTime = mergeDeviceIDAndRefreshToken(cfg, *csDeviceID, csDeviceIDSetExplicitly)
 		if deviceIDExplicitlyEmpty {
 			slog.Warn("-cs-deviceid was explicitly given as empty; not falling back to the session config's deviceId (pass a non-empty -cs-deviceid, or omit the flag entirely to use the config's value)")
 		}
@@ -363,6 +373,9 @@ func Run() {
 		*csIOS = mergeExplicitOrConfigBool(*csIOS, csIOSSetExplicitly, cfg.IOSMode)
 	}
 	warnIfExplicitConfigPathNotFound(cfg, *configPath, *noConfig)
+	// Diamond trips persist next to the loaded session config; without one they stay in memory.
+	game.SetTripwirePath(game.TripwireFile(cfgSource))
+	game.WarnIfTripwireSet()
 	if *listFeatures {
 		printFeatures(os.Stdout, cfgFeatures, cfgDuelPolicy)
 		return

@@ -152,3 +152,93 @@ func TestInitEffect(t *testing.T) {
 		t.Error("initEffect(bool entry) ok = true, want false")
 	}
 }
+
+// TestVisitorFreshDropsGreetedVisitors is the B43 regression test. The client deletes a visitor
+// from its queue on the visitor.operate reply and re-runs GetNewVisitorInfo
+// (CityVisitorManager.lua:505-520). Go's visitor-fresh reads the same init list after the core
+// greets, so it must leave out the visitors GreetVisitors greeted (a reply with no errorCode, in
+// the shared slice). A visitor_err_coming reply (benign, nil error) or a failed greet leaves the
+// visitor in the queue, and so does an eventId Go's 39879 snapshot lacks: the client drops only
+// ids its own current table lacks (:263-267), and Go doesn't greet them.
+func TestVisitorFreshDropsGreetedVisitors(t *testing.T) {
+	now := time.Now()
+	arrived := now.Add(-time.Hour)
+	greetReply := func(code string) func(visitorRequest) *sfs.SFSObject {
+		return func(req visitorRequest) *sfs.SFSObject {
+			if req.cmd == "visitor.fresh" {
+				return freshReply(req)
+			}
+			resp := sfs.NewSFSObject()
+			if code != "" {
+				resp.PutUtfString("errorCode", code)
+			}
+			return resp
+		}
+	}
+	cases := []struct {
+		name      string
+		code      string // errorCode the greet replies with
+		visitors  []Visitor
+		wantFresh bool
+	}{
+		// maxNum 2, both timed visitors greeted: the queue the client sees is empty.
+		{"greeted queue refills", "", []Visitor{queuedTestVisitor(1, 2001, 0, arrived), queuedTestVisitor(2, 3115, 1, arrived)}, true},
+		{"not yet arrived on the server", "visitor_err_coming",
+			[]Visitor{queuedTestVisitor(1, 2001, 0, arrived), queuedTestVisitor(2, 3115, 1, arrived)}, false},
+		{"greet refused", "E_FAKE_GREET", []Visitor{queuedTestVisitor(1, 2001, 0, arrived), queuedTestVisitor(2, 3115, 1, arrived)}, false},
+		// A merchant and a choice visitor are not greeted and keep their slots.
+		{"skipped visitors stay", "", []Visitor{queuedTestVisitor(1, 1001, 0, arrived), queuedTestVisitor(2, 20703, 0, arrived)}, false},
+		// Two eventIds Go's table snapshot lacks: the live client's newer table likely has them, so
+		// they keep their slots and the full queue is not refilled.
+		{"unknown eventIds", "", []Visitor{queuedTestVisitor(1, 999998, 0, arrived), queuedTestVisitor(2, 999999, 0, arrived)}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			captureVisitorLog(t)
+			in := freshTestInit(2, int32(1), c.visitors...)
+			client, stop := serveVisitorCmds(t, greetReply(c.code))
+			_ = greetVisitors(client, in.Visitors, now)
+			if err := refreshVisitors(client, in, now); err != nil {
+				t.Fatalf("refreshVisitors() = %v, want nil", err)
+			}
+			fresh := 0
+			for _, r := range stop() {
+				if r.cmd == "visitor.fresh" {
+					fresh++
+				}
+			}
+			if got := fresh == 1; got != c.wantFresh {
+				t.Errorf("visitor.fresh sent %d times, want it sent = %v", fresh, c.wantFresh)
+			}
+		})
+	}
+}
+
+// TestVisitorFreshSeesCollectCoreGreets pins the path production takes: collectCore greets
+// in.Visitors through GreetVisitors, and visitor-fresh, run later on the same Init, sees the marks.
+// With maxNum 2 and both visitors greeted, the refill goes out in the same run.
+func TestVisitorFreshSeesCollectCoreGreets(t *testing.T) {
+	captureVisitorLog(t)
+	now := time.Now()
+	arrived := now.Add(-time.Hour)
+	in := freshTestInit(2, int32(1), queuedTestVisitor(1, 2001, 0, arrived), queuedTestVisitor(2, 2002, 0, arrived))
+	client, server := session.NewPipeGameConnPair(t)
+	srv := serveScripted(server, func(msg *session.ExtensionMessage) (string, *sfs.SFSObject) {
+		if msg.Cmd == "chat.get.system.mails" {
+			return "push.chat.get.system.mails", nil
+		}
+		return "", nil
+	})
+	if err := collectCore(client, in); err != nil {
+		t.Fatalf("collectCore() = %v, want nil", err)
+	}
+	if err := refreshVisitors(client, in, now); err != nil {
+		t.Fatalf("refreshVisitors() = %v, want nil", err)
+	}
+	if got := len(srv.requests("visitor.operate")); got != 2 {
+		t.Fatalf("collectCore sent %d visitor.operate, want 2", got)
+	}
+	if got := len(srv.requests("visitor.fresh")); got != 1 {
+		t.Errorf("visitor-fresh sent %d visitor.fresh after collectCore greeted the full queue, want 1 (requests %v)", got, srv.cmds())
+	}
+}

@@ -89,15 +89,36 @@ func TestVisitorEventTypesMatchKnownPairs(t *testing.T) {
 }
 
 // TestGreetAllowlistCoversOnlyRewardTypes walks the whole generated table: an eventId is greeted
-// exactly when its behaviour type is GIFT, RECRUITMENT, DOMINATOR, SeasonDayGift or SystemGift.
+// exactly when its behaviour type is GIFT, RECRUITMENT, DOMINATOR, SeasonDayGift or SystemGift and
+// it is not a "choose a treasure" visitor, which the client resolves only with
+// visitor.season.choose (VisitorUnit.lua:271-286, LWPlotManager.lua:155-167).
 func TestGreetAllowlistCoversOnlyRewardTypes(t *testing.T) {
 	accept := map[int32]bool{2: true, 3: true, 9: true, 10: true, 30: true}
 	past := time.Unix(1_700_000_000, 0)
 	now := past.Add(time.Hour)
 	for id, typ := range visitorEventTypes {
+		want := accept[typ] && !visitorChoiceEvents[id]
 		_, reason := visitorSkipReason(newTimedTestVisitor(1, id, past), now)
-		if greeted := reason == ""; greeted != accept[typ] {
-			t.Errorf("eventId %d (type %d %s): greeted = %v, want %v", id, typ, visitorTypeName(typ), greeted, accept[typ])
+		if greeted := reason == ""; greeted != want {
+			t.Errorf("eventId %d (type %d %s): greeted = %v, want %v (reason %q)", id, typ, visitorTypeName(typ), greeted, want, reason)
+		}
+	}
+}
+
+// TestVisitorChoiceEventsAreTheSeason5Rows pins the generated choice set to tables 39879: the 11
+// Season-5 SeasonDayGift rows with a choose_treasure (and an empty para), so a regeneration
+// cannot silently shrink it.
+func TestVisitorChoiceEventsAreTheSeason5Rows(t *testing.T) {
+	want := []int32{20703, 20706, 20709, 20712, 20717, 20720, 20725, 20728, 20733, 20739, 20746}
+	if len(visitorChoiceEvents) != len(want) {
+		t.Errorf("visitorChoiceEvents has %d ids, want %d: %v", len(visitorChoiceEvents), len(want), visitorChoiceEvents)
+	}
+	for _, id := range want {
+		if !visitorChoiceEvents[id] {
+			t.Errorf("visitorChoiceEvents lacks %d", id)
+		}
+		if typ := visitorEventTypes[id]; typ != visitorTypeSeasonDayGift {
+			t.Errorf("choice visitor %d has type %d, want SeasonDayGift (10)", id, typ)
 		}
 	}
 }
@@ -114,6 +135,8 @@ func TestVisitorSkipReason(t *testing.T) {
 		{"gift arrived", 2001, now.Add(-time.Minute), "", 2},
 		{"recruit arrived", 3115, now.Add(-time.Minute), "", 3},
 		{"season gift arrived", 20840, now.Add(-time.Minute), "", 10},
+		{"season choice visitor", 20703, now.Add(-time.Minute), "choice visitor, left for the player", 10},
+		{"season choice still arriving", 20746, now.Add(time.Minute), "choice visitor, left for the player", 10},
 		{"dominator arrived", 9001, now.Add(-time.Minute), "", 9},
 		{"system gift arrived", 21001, now.Add(-time.Minute), "", 30},
 		{"merchant", 1001, now.Add(-time.Minute), "behaviour type not on the greet allowlist", 1},
@@ -138,8 +161,9 @@ func TestVisitorSkipReason(t *testing.T) {
 }
 
 // TestGreetVisitorsNeverOperatesOnSkippedVisitors is the safety property of the allowlist: a
-// merchant (whose operate:1 buys an item), an unknown eventId, and an allowlisted visitor that
-// has not arrived get no request at all -- not operate:1 and not a declining operate:0.
+// merchant (whose operate:1 buys an item), an unknown eventId, an allowlisted visitor that has not
+// arrived, and a Season-5 choice visitor (whose only resolution is the player's
+// visitor.season.choose) get no request at all -- not operate:1 and not a declining operate:0.
 func TestGreetVisitorsNeverOperatesOnSkippedVisitors(t *testing.T) {
 	buf := captureVisitorLog(t)
 	now := time.Now()
@@ -151,6 +175,7 @@ func TestGreetVisitorsNeverOperatesOnSkippedVisitors(t *testing.T) {
 		newTimedTestVisitor(105, 2001, now.Add(time.Hour)),    // GIFT, still arriving
 		newTimedTestVisitor(106, 2002, now.Add(-time.Hour)),   // GIFT
 		newTimedTestVisitor(107, 3115, now.Add(-time.Hour)),   // RECRUITMENT
+		newTimedTestVisitor(108, 20703, now.Add(-time.Hour)),  // SeasonDayGift with choose_treasure
 	}
 	client, stop := serveVisitorCmds(t, visitorOK)
 
@@ -175,6 +200,7 @@ func TestGreetVisitorsNeverOperatesOnSkippedVisitors(t *testing.T) {
 		`msg="skipping visitor" reason="eventId not in lw_base_visitor_event" uid=103 eventId=999999 type=0 typeName=unknown`,
 		`uid=104 eventId=5001 type=5 typeName=WORKER_LOTTERY`,
 		`msg="skipping visitor" reason="not arrived yet (startTime in the future)" uid=105 eventId=2001`,
+		`msg="skipping visitor" reason="choice visitor, left for the player" uid=108 eventId=20703 type=10 typeName=SeasonDayGift`,
 	} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("log missing %q:\n%s", want, logged)

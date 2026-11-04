@@ -26,8 +26,8 @@ var visitorQueue1Types = map[int32]bool{0: true, 1: true, 5: true, 6: true, 12: 
 const effectVisitorEventFunctionOpen = "90004"
 
 // runVisitorFresh sends `visitor.fresh {}`, which asks the server to schedule the next timed
-// visitor, under the client's own rule (GetNewVisitorInfo, CityVisitorManager.lua:172-190, run
-// on entering the game and after every visitor leaves):
+// visitor, under the client's own rule (GetNewVisitorInfo, CityVisitorManager.lua:187-205, run
+// on entering the game and after every visitor leaves, DeleteVisitor :505-520):
 //   - init.visitor.maxNum is present;
 //   - fewer than maxNum visitors are in Queue1;
 //   - the newest Queue1 visitor's startTime has passed (an empty queue passes);
@@ -37,10 +37,12 @@ const effectVisitorEventFunctionOpen = "90004"
 // does not carry (EffectData.lua:196-217). So a value in init.effect below 1 skips, but a missing
 // entry is logged and the other three conditions decide.
 //
-// in.Visitors is the init list, which predates the greets the core actions send in the same
-// -collect run. The queue looks fuller and its newest startTime no older than it is, so this can
-// only skip a refill the client would send, never send one it would not; the next run catches
-// up. Under -run nothing was greeted and the list is current.
+// in.Visitors is the init list. The Queue1 count leaves out the visitors the core actions greeted
+// earlier in the same -collect run (marked by GreetVisitors; the client deletes each one on the
+// reply). An entry whose eventId has no row in Go's lw_base_visitor_event snapshot still counts:
+// the client drops only ids its own, current table lacks (AddVisitor returns without a table line,
+// CityVisitorManager.lua:263-267), and a stale snapshot must not make every run refill a queue the
+// client sees as full. Under -run nothing was greeted and the list is current.
 //
 // The reply's addVisitor arrives at its own startTime (lw_base_visitor_config slots are 300 to
 // 4,800 s), so it is logged, not greeted; the next run's GreetVisitors applies the allowlist to
@@ -61,16 +63,28 @@ func refreshVisitors(conn *session.GameConn, in *Init, now time.Time) error {
 		return nil
 	}
 	maxNum := int(visitor.GetInt("maxNum"))
-	queued := 0
+	queued, greeted, unknown := 0, 0, 0
 	var newest int64
 	for _, v := range in.Visitors {
-		if visitorQueue1Types[v.QueueType()] {
-			queued++
-			newest = max(newest, v.StartTime())
+		if !visitorQueue1Types[v.QueueType()] {
+			continue
 		}
+		if _, ok := visitorBehaviourType(v.EventId()); !ok {
+			// Counted as queued: the live client's table, which the server keeps current, very
+			// likely has the row Go's 39879 snapshot lacks (new season visitors), and Go doesn't
+			// greet them, so they hold their slot.
+			unknown++
+		}
+		if v.greeted {
+			greeted++
+			continue
+		}
+		queued++
+		newest = max(newest, v.StartTime())
 	}
 	if queued >= maxNum {
-		slog.Info("visitor-fresh: visitor queue is full; skipping", "queued", queued, "maxNum", maxNum)
+		slog.Info("visitor-fresh: visitor queue is full; skipping", "queued", queued, "maxNum", maxNum,
+			"greetedThisRun", greeted, "unknownEventIds", unknown)
 		return nil
 	}
 	if queued > 0 && newest > now.Add(-visitorArrivalMargin).UnixMilli() {
@@ -91,9 +105,9 @@ func refreshVisitors(conn *session.GameConn, in *Init, now time.Time) error {
 	if v, ok := resp.Params.Get("addVisitor"); ok {
 		if o, ok := v.Val.(*sfs.SFSObject); ok {
 			nv := Visitor{Raw: o}
-			t, known := visitorBehaviourType(nv.EventId())
+			t, why := visitorEventSkipReason(nv.EventId())
 			slog.Info("visitor-fresh: next visitor scheduled", "uid", nv.Uid(), "eventId", nv.EventId(), "type", t,
-				"typeName", visitorTypeName(t), "greetable", known && greetableVisitorTypes[t], "startTime", nv.StartTime())
+				"typeName", visitorTypeName(t), "greetable", why == "", "startTime", nv.StartTime())
 		}
 	}
 	return nil

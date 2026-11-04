@@ -3,6 +3,7 @@ package game
 import (
 	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -654,6 +655,61 @@ func TestDuelSpeedupsNeverMoreThanOwnedAcrossJobs(t *testing.T) {
 	wantSent(t, sent, "build.ccd.m.new 101 200213;2", "build.ccd.m.new 102 200213;1")
 }
 
+func TestDuelSpeedupsOneStackPerTemplate(t *testing.T) {
+	clearSpeedTrip(t)
+	// Two init stacks of the 1h construction item, 3 and 2: the speed panel offers one stack
+	// (ItemData.lua:38-47, 494-510), so at most 3 go in a run, never the 5 of both.
+	c := speedInit{jobs: []speedJob{{kind: duelSpeedupBuild, uuid: 101, left: 10 * time.Hour}},
+		items: map[int64]int64{build1h: 3}, gold: 1000,
+		extraRaw: func(raw *sfs.SFSObject) {
+			v, _ := raw.Get("items")
+			v.Val.(*sfs.SFSArray).AddSFSObject(duelObj("uuid", int64(9001), "itemId", "200213", "count", 2))
+		}}
+	f := newSpeedFake(speedTue(), c)
+	f.items[build1h] = 5 // the server holds both stacks
+	sent, err := runSpeed(t, f, c, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSent(t, sent, "build.ccd.m.new 101 200213;3")
+	if got := duelSpeedupsInventory(c.build())[build1h]; got != 3 {
+		t.Errorf("inventory = %d, want the largest stack, 3", got)
+	}
+}
+
+func TestDuelSpeedupsStopsNearTheDayEnd(t *testing.T) {
+	c := speedInit{jobs: []speedJob{{kind: duelSpeedupBuild, uuid: 101, left: 2 * time.Hour}},
+		items: map[int64]int64{build1h: 1}, gold: 1000}
+	tue := "90201|90202|90203|90204|90000|100910|110301|110302"
+	for name, tc := range map[string]struct {
+		end  time.Duration // the duel day's end after evTestNow
+		want []string
+	}{
+		"3 minutes left":       {3 * time.Minute, []string{"build.ccd.m.new 101 200213;1"}},
+		"inside the 2 minutes": {119 * time.Second, nil},
+		"at the margin":        {duelSpeedupsEndMargin, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearSpeedTrip(t)
+			day := duelEntry(DuelThemeBase, tue, evTestNow.Add(-time.Hour), evTestNow.Add(tc.end))
+			sent, err := runSpeed(t, newSpeedFake(day, c), c, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantSent(t, sent, tc.want...)
+		})
+	}
+	// apply itself refuses, so neither loop sends once the clock reaches the margin mid-run.
+	withEvNow(t, evTestNow)
+	r := &duelSpeedupsRunner{dry: true, owned: map[int64]int64{build1h: 1}, used: map[duelSpeedupKind]int64{},
+		end: evTestNow.Add(time.Minute)}
+	r.apply(&duelSpeedupJob{kind: duelSpeedupBuild, uuid: 101, endMs: evTestNow.Add(time.Hour).UnixMilli()},
+		[]duelSpeedupUse{{build1h, 1}})
+	if !r.halt || r.calls != 0 {
+		t.Errorf("apply a minute before the day's end: halt %v, calls %d; want halted, none", r.halt, r.calls)
+	}
+}
+
 func TestDuelSpeedupsTripwireOnDiamondDrop(t *testing.T) {
 	cases := map[string]struct {
 		day func() *sfs.SFSObject
@@ -691,19 +747,29 @@ func TestDuelSpeedupsTripwireOnDiamondDrop(t *testing.T) {
 }
 
 func TestDuelSpeedupsTripwireOnMissingProof(t *testing.T) {
+	// Only an observed drop is persisted: the shape checks halt this process but must not write the
+	// tripwire file, which would stop every later run until the operator clears it.
 	cases := map[string]struct {
-		day   func() *sfs.SFSObject
-		knob  func(f *speedFake)
-		cause string
+		day     func() *sfs.SFSObject
+		knob    func(f *speedFake)
+		cause   string
+		persist bool
 	}{
-		"build without itemCostArr": {speedTue, func(f *speedFake) { f.noItemCost = true }, "no itemCostArr"},
-		"queue without itemCostArr": {speedWed, func(f *speedFake) { f.noItemCost = true }, "no itemCostArr"},
-		"camp without gold":         {speedSat, func(f *speedFake) { f.noCampGold = true }, "no gold balance"},
-		"queue top-level drop":      {speedWed, func(f *speedFake) { f.goldDrop, f.topGoldDrop = 5, true }, "dropped"},
+		"build without itemCostArr": {speedTue, func(f *speedFake) { f.noItemCost = true }, "no itemCostArr", false},
+		"queue without itemCostArr": {speedWed, func(f *speedFake) { f.noItemCost = true }, "no itemCostArr", false},
+		"camp without gold":         {speedSat, func(f *speedFake) { f.noCampGold = true }, "no gold balance", false},
+		"queue top-level drop":      {speedWed, func(f *speedFake) { f.goldDrop, f.topGoldDrop = 5, true }, "dropped", true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			clearSpeedTrip(t)
+			path := tripwireTemp(t)
+			defer func() {
+				_, statErr := os.Stat(path)
+				if persisted := statErr == nil; persisted != tc.persist {
+					t.Errorf("tripwire file written %v, want %v", persisted, tc.persist)
+				}
+			}()
 			c := speedInit{jobs: allJobs(), items: allItems(), gold: 1000}
 			if name == "camp without gold" {
 				c.jobs = []speedJob{{kind: duelSpeedupTraining, uuid: 301, left: time.Hour}}

@@ -30,7 +30,9 @@ import (
 // (LotteryInfo.lua:244-252). The rest are taken in the client's tab order, order descending
 // (UIHeroRecruitCtrl.lua:21-42), with ties broken by id. For each ticket item held, the first pool
 // whose single cost (item "itemId;num|itemId;num", LotteryInfo.lua:152-162) is that ticket is the
-// one pulled. That is the pool the recruit view sends for its current tab.
+// one pulled. That is the pool the recruit view sends for its current tab. When that pool is a
+// wish pool with no wish hero chosen, the client asks before any pull, so its ticket is kept
+// (duelRecruitWishUnset).
 //
 // A single pull is `lottery.hero.card {id, isTen: 0, useFree: 0, aiPushStatus, itemId}`. The
 // client sends it only when the held count >= the single cost (UIHeroRecruitView.lua:963-975). A
@@ -85,11 +87,43 @@ type duelRecruitCost struct {
 
 // duelRecruitPool is one hero pool that can be pulled with tickets.
 type duelRecruitPool struct {
-	id      string
-	order   int64
-	single  duelRecruitCost
-	ten     duelRecruitCost // num 0 when the pool has no ten pull
-	freeDue bool            // the free pull is due now, or its timer is unknown
+	id        string
+	order     int64
+	single    duelRecruitCost
+	ten       duelRecruitCost // num 0 when the pool has no ten pull
+	freeDue   bool            // the free pull is due now, or its timer is unknown
+	wishUnset bool            // a wish pool with no wish hero chosen (duelRecruitWishUnset)
+}
+
+// duelRecruitWishLists is officer_recruit (tables 39879, all 27 rows) id -> whether its wish_list
+// is non-empty. LotteryInfo takes the wish list from the table row, not from the message
+// (LotteryInfo.lua:273-280).
+var duelRecruitWishLists = map[string]bool{
+	"221500": false, "221501": true, "221600": false, "221601": false, "221602": true, "221700": false,
+	"221701": false, "221702": true, "221703": true, "221704": true, "221705": true, "221706": true,
+	"221707": true, "221708": true, "301100": false, "301101": false, "301102": false, "301103": false,
+	"301104": false, "301105": false, "301106": false, "301107": false, "301108": false, "301109": false,
+	"301110": false, "301111": false, "401100": false,
+}
+
+// duelRecruitWishUnset is the recruit view's showEmptyWishConfirm: IsShowWish (wishSwitch set,
+// wishPityReceiveNum > 0 and a non-empty wish list, LotteryInfo.lua:468-478) and no wish hero
+// chosen (GetCurSelectWishHeroId, :480-484). The client then asks herorecruit_alert1 before
+// every pull, single or ten (UIHeroRecruitView.lua:993-1003, 1026-1036, 1072-1083), so a
+// headless run must not pull. wishSwitch is tested the Lua way (any value but false). A pool id
+// newer than tables 39879 counts as having a wish list, so it is skipped too.
+func duelRecruitWishUnset(p *sfs.SFSObject) bool {
+	v, ok := p.Get("wishSwitch")
+	if !ok || v.Val == nil || v.Val == false {
+		return false
+	}
+	if n, _ := evNum(p, "wishPityReceiveNum"); n <= 0 {
+		return false
+	}
+	if hasList, known := duelRecruitWishLists[evString(p, "id")]; known && !hasList {
+		return false
+	}
+	return evString(p, "wishHero") == ""
 }
 
 // duelRecruitCosts parses a pool's item string, "itemId;num|itemId;num". ok is false unless the
@@ -144,7 +178,7 @@ func duelRecruitHeroPools(in *Init) []duelRecruitPool {
 		limit, _ := evNum(p, "dailyFreeLimit")
 		next, hasNext := evNum(p, "dailyFreeNextFreshTime")
 		pool := duelRecruitPool{id: id, single: single, ten: ten,
-			freeDue: limit > 0 && (!hasNext || next <= 0 || now >= next)}
+			freeDue: limit > 0 && (!hasNext || next <= 0 || now >= next), wishUnset: duelRecruitWishUnset(p)}
 		pool.order, _ = evNum(p, "order")
 		out = append(out, pool)
 	}
@@ -288,6 +322,12 @@ func (r *duelRecruitRun) heroes(pools []duelRecruitPool) []error {
 			continue
 		}
 		done[ticket] = true
+		if pool.wishUnset {
+			// The ticket stays unspent rather than going to a later tab the player didn't pick.
+			slog.Info("duel-recruit-tickets: the pool's wish hero is not chosen, which the client confirms before any pull; tickets kept",
+				"pool", pool.id, "ticket", ticket, "held", r.g.items[ticket])
+			continue
+		}
 		recruited := int64(0)
 		for r.canPull() {
 			have := r.g.items[ticket]
@@ -407,14 +447,18 @@ func (r *duelRecruitRun) survivors(in *Init) error {
 // §7.3). Every spend goes through duelSpendGuard.spend. Unlike session.SendAndWait, it reads every
 // message that arrives while the reply is awaited, because the balances the client updates come
 // in pushes, not in the spend replies.
-//   - Gold (diamonds): the baseline is init user.gold (PlayerInfo.lua:612-613); without it nothing is
-//     spent. hero.dispatch.list {} is read-only and returns the live balance as gold
-//     (ActDispatchTaskDataManager.lua:364-366). It is read before the first spend and after each
-//     one, when it carried gold the first time. gold and remainGold are also read from the spend
-//     replies, and from push.resource.info (PushResourceInfo.lua:6-17),
-//     push.update.player.remain.gold and push.remain.gold.when.errorcode.triggered. A higher
-//     reading raises the baseline (rewards). Any lower reading halts every duel spend for the rest
-//     of the process, logs an ERROR and fails the feature.
+//   - Gold (diamonds): the baseline is init user.gold (PlayerInfo.lua:630-632); without it nothing is
+//     spent. gold and remainGold are read from the spend replies, and from push.resource.info
+//     (PushResourceInfo.lua:6-17), push.update.player.remain.gold and
+//     push.remain.gold.when.errorcode.triggered. hero.dispatch.list {} is read-only, and the client
+//     takes a gold field from its reply when there is one (UpdateAllSingleTasks,
+//     ActDispatchTaskDataManager.lua:382-385, which also handles the paid refresh's reply), so it
+//     is read once before the first spend as a gold check, and after each spend when it carried
+//     gold that first time. Live its reply has carried no gold (docs/live-validation.mdx:424), so
+//     in practice the check is the one read and the tripwire rests on init gold, the replies and
+//     the pushes. A higher reading raises the baseline (rewards). Any lower reading halts every
+//     duel spend for the rest of the process, logs an ERROR, fails the feature and persists the
+//     trip (tripwire.go), so later runs refuse too until it is cleared.
 //   - Ledgers (ticket counts, food and iron): set by the feature from init and lowered, never
 //     raised, by the counts pushes and replies carry.
 const (
@@ -435,20 +479,21 @@ var duelSpendHalted atomic.Bool
 // errDuelSpendHalted is what a duel spend feature returns once the tripwire has fired.
 var errDuelSpendHalted = errors.New("duel spending is halted for this session: the diamond balance fell during a duel spend")
 
-// duelSpendHaltedErr returns errDuelSpendHalted, logged at ERROR, once the tripwire has fired.
+// duelSpendHaltedErr returns errDuelSpendHalted, logged at ERROR, once the tripwire has fired in
+// this process, and the persisted tripwire's error while its file exists (tripwire.go).
 func duelSpendHaltedErr(feature string) error {
-	if !duelSpendHalted.Load() {
-		return nil
+	if duelSpendHalted.Load() {
+		slog.Error(feature + ": not spending: the diamond tripwire fired earlier this session")
+		return errDuelSpendHalted
 	}
-	slog.Error(feature + ": not spending: the diamond tripwire fired earlier this session")
-	return errDuelSpendHalted
+	return tripwireErr(feature)
 }
 
 // duelSpendStop reports whether errs holds a reason to stop every further spend: the tripwire, or
 // a dead connection.
 func duelSpendStop(errs []error) bool {
 	for _, err := range errs {
-		if errors.Is(err, errDuelSpendHalted) || session.ContainsNonTimeoutNetError(err) {
+		if errors.Is(err, errDuelSpendHalted) || errors.Is(err, errTripwire) || session.ContainsNonTimeoutNetError(err) {
 			return true
 		}
 	}
@@ -487,7 +532,8 @@ func newDuelSpendGuard(conn *session.GameConn, in *Init, feature string) (*duelS
 	case err == nil && !msg.Params.Has("errorCode") && msg.Params.Has("gold"):
 		g.probe = true
 	default:
-		slog.Warn(feature+": the gold check returned no balance; the tripwire reads init gold, the replies and pushed balances only",
+		// The expected case live (docs/live-validation.mdx:424), so Info, not Warn.
+		slog.Info(feature+": the gold check returned no balance; the tripwire reads init gold, the replies and pushed balances only",
 			"cmd", duelGoldProbeCmd, "error", err)
 	}
 	return g, nil
@@ -605,6 +651,7 @@ func (g *duelSpendGuard) seeGold(src string, n int64) {
 		g.tripped = fmt.Errorf("%s: %w (%d -> %d, seen in %s)", g.feature, errDuelSpendHalted, g.gold, n, src)
 		slog.Error("DIAMOND TRIPWIRE: the diamond balance fell during a duel spend; halting every duel spend for this session",
 			"feature", g.feature, "before", g.gold, "after", n, "cmd", src)
+		tripwireTrip(g.feature, src, fmt.Sprintf("diamonds fell from %d to %d (seen in %s)", g.gold, n, src))
 	}
 }
 

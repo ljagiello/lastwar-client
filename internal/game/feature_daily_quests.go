@@ -19,7 +19,7 @@ import (
 // `daily.task.reward {taskId: UtfString}`, the id sent back unchanged
 // (AllianceDailyTaskRewardMessage.lua:6). A chest is claimable when its index is not in curReward
 // and the points of Received quests (table daily_quest `point`) reach rewardList[i].point
-// (DailyTaskManager.lua:109-122, 150-165); the client then sends `daily.quest.reward {stage: -1}`
+// (DailyTaskManager.lua:120-133, 164-179); the client then sends `daily.quest.reward {stage: -1}`
 // whichever chest was tapped (UILWDailyTaskGoalItem.lua:28-52), and the reply lists the chests
 // granted in stageArr. That -1 means "every reached chest" is inferred from stageArr being a list.
 // Static-only: not sent live yet.
@@ -32,13 +32,23 @@ const (
 	dailyQuestsAllChests = -1
 )
 
-// dailyQuestsPoints is daily_quest.point per quest id (tables 1.0.364, identical in live 39516).
-// Quest 108 has show = 0, so the client never lists or claims it (DailyTaskManager.lua:197-210);
-// it is left out here for the same reason.
+// dailyQuestsPoints is daily_quest.point for all 23 rows (tables 39879). The chest total sums the
+// point of every Received quest that has a row, show not checked (GetCurValue,
+// DailyTaskManager.lua:120-133), so 108 counts too.
 var dailyQuestsPoints = map[string]int64{
-	"101": 10, "102": 10, "103": 10, "104": 10, "105": 10, "106": 10, "107": 10, "109": 10,
-	"110": 10, "111": 10, "112": 10, "113": 10, "114": 10, "115": 10, "116": 10, "117": 10,
-	"118": 20, "119": 40, "120": 50, "121": 30, "122": 30, "123": 10,
+	"101": 10, "102": 10, "103": 10, "104": 10, "105": 10, "106": 10, "107": 10, "108": 10,
+	"109": 10, "110": 10, "111": 10, "112": 10, "113": 10, "114": 10, "115": 10, "116": 10,
+	"117": 10, "118": 20, "119": 40, "120": 50, "121": 30, "122": 30, "123": 10,
+}
+
+// dailyQuestsHidden are the daily_quest rows with show = 0 (only 108 in 39879): the client never
+// lists them, so never claims them (GetAllDailyTask, DailyTaskManager.lua:214-227).
+var dailyQuestsHidden = map[string]bool{"108": true}
+
+// dailyQuestsClaimable is the claim filter: a quest with a daily_quest row and show = 1.
+func dailyQuestsClaimable(id string) bool {
+	_, listed := dailyQuestsPoints[id]
+	return listed && !dailyQuestsHidden[id]
 }
 
 func init() {
@@ -76,7 +86,7 @@ func runDailyQuests(conn *session.GameConn, in *Init) error {
 		case dailyQuestsReceived:
 			received[id] = true
 		case dailyQuestsCanClaim:
-			if _, listed := dailyQuestsPoints[id]; listed {
+			if dailyQuestsClaimable(id) {
 				claimable = append(claimable, id)
 			}
 		}

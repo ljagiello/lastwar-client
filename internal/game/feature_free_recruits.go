@@ -17,10 +17,11 @@ import (
 // Hero: init lotteryFreeInfo[] {id, type?, dailyFreeLimit, dailyFreeNextFreshTime (seconds),
 // startTime/endTime (seconds), item "itemId;num|..."} (LotteryDataManager.lua:102-121;
 // LotteryInfo.lua:117-200). The UI offers the free pull when dailyFreeLimit > 0 and
-// now_s >= dailyFreeNextFreshTime (IsSupportFreeRecruit / CanFreeRecruit, LotteryInfo.lua:345-352;
-// UIHeroRecruitView.lua:931-937) on an open pool (IsOpen, :323-329); pools of type 2 or 3 are not
-// listed (LotteryDataManager.lua:118-120). Here dailyFreeNextFreshTime must also be present and
-// positive, so a missing timer never reads as "free now". The pull is
+// now_s >= dailyFreeNextFreshTime (IsSupportFreeRecruit / CanFreeRecruit, LotteryInfo.lua:357-365;
+// UIHeroRecruitView.lua:931-937) on an open pool (IsOpen, :329-335); pools of type 2 or 3 are not
+// listed (LotteryDataManager.lua:118-120). A timer of 0 is free: it is the client's default too
+// (LotteryInfo.lua:24). Here dailyFreeNextFreshTime must also be present, a Go-side guard the
+// client lacks (its default 0 would pass), so a missing timer never reads as "free now". The pull is
 // `lottery.hero.card {id: UtfString, isTen: 0, useFree: 1, aiPushStatus: SFSObject, itemId}` with
 // itemId the pool's first cost item, as the UI sends it (LotteryHeroCardMessage.lua:4-17;
 // UIHeroRecruitView.lua:931-943), and aiPushStatus the client's default AI-chat push switches
@@ -29,7 +30,11 @@ import (
 //
 // Worker: `worker.lottery.info {officerId: Int}` returns nextFreeTime (ms), and
 // `lottery.worker.card {useFree: 1, isTen: 0, officerId: Int}` draws when now >= nextFreeTime
-// (WorkerLotteryInfoMessage.lua:4-7; LotteryWorkerCardMessage.lua:4-9; WorkerLotteryInfo.lua:26-30).
+// (WorkerLotteryInfoMessage.lua:4-7; LotteryWorkerCardMessage.lua:4-9; WorkerLotteryInfo.lua:31-35;
+// CenterWorkerNewContentContainer.lua:447-457). The client's state starts at nextFreeTime 0 and
+// takes init workers.workerLottery, then the info reply, each only when it carries nextFreeTime
+// (WorkerDataManager.lua:71, 93-96; WorkerLotteryDataManager.lua:12-17; WorkerLotteryInfo.lua:3-6,
+// 13-20), so a timer absent from both, or 0, is free.
 // officerId is the first of init workerOfficerIds (LotteryDataManager.lua:122-137, 215-218).
 // Static-only: not sent live yet.
 const (
@@ -76,7 +81,7 @@ func freeRecruitsHeroDue(in *Init) []*sfs.SFSObject {
 		}
 		limit, _ := claimInt(pool, "dailyFreeLimit")
 		next, ok := claimInt(pool, "dailyFreeNextFreshTime")
-		if limit <= 0 || !ok || next <= 0 || now.Unix() < next {
+		if limit <= 0 || !ok || now.Unix() < next {
 			continue
 		}
 		start, _ := claimInt(pool, "startTime")
@@ -136,8 +141,19 @@ func freeRecruitsWorker(conn *session.GameConn, in *Init) error {
 	if err != nil {
 		return err
 	}
-	next, ok := claimInt(info.Params, "nextFreeTime")
-	if !ok || next <= 0 || claimNow(in).UnixMilli() < next {
+	// The client's WorkerLotteryInfo starts at 0, takes init workers.workerLottery, then the reply,
+	// each only when it carries nextFreeTime (WorkerDataManager.lua:71, 93-96; UpdateInfo,
+	// WorkerLotteryInfo.lua:13-20).
+	next, _ := claimInt(evObject(evObject(in.Raw, "workers"), "workerLottery"), "nextFreeTime")
+	if v, present := info.Params.Get("nextFreeTime"); present && v.Val != nil {
+		n, ok := claimIntValue(v.Val)
+		if !ok {
+			slog.Info("free-recruits: survivor recruit info has a non-numeric nextFreeTime; not drawing", "nextFreeTime", v.Val)
+			return nil
+		}
+		next = n
+	}
+	if claimNow(in).UnixMilli() < next {
 		slog.Info("free-recruits: free survivor draw not available", "nextFreeTime", next)
 		return nil
 	}

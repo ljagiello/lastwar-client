@@ -36,6 +36,38 @@ func (m Mail) Uid() string         { return m.Raw.GetString("uid") }
 func (m Mail) Type() int32         { return m.Raw.GetInt("type") }
 func (m Mail) RewardStatus() int32 { return m.Raw.GetInt("rewardStatus") }
 
+// mailCantClaimAllTypes is MailCantClaimAllType (MailEnum.lua:282-286): CANT_CLAIM_ALL 112,
+// TranslationRating 134 and Automatic_TranslationRating 135 (MailEnum.lua:53, 75-76). The client's
+// Read All and Claim All build their type lists without them (__getGroupCondSQL with this exclude
+// table, MailDBManager.lua:395-403, 1044-1075; the red dot, UILWMailMainCtrl.lua:151). 134/135 are
+// translation-rating mail, a rating reward (MASTER §6): left for the player.
+var mailCantClaimAllTypes = map[int64]bool{112: true, 134: true, 135: true}
+
+// inBulkActions reports whether the client's Read All / Claim All would touch m: its type is not
+// in mailCantClaimAllTypes and it is not saved. Saved mail (saveFlag != 0; MailInfo.lua:90-92 keeps
+// only a non-zero value, so absent is 0) is the favor group, which both skip
+// (MailDBManager.lua:1048-1050, 1065-1067) and whose SQL requires saveFlag = 0 (:449-468). A missing
+// or wrong-typed type is not an excluded type. The client's in-memory fallbacks
+// (MailDataManager.lua:422-425, 449-456), taken only when the SQL finds nothing, can still pick
+// these up; Go follows the main path.
+func (m Mail) inBulkActions() bool {
+	if t, ok := claimInt(m.Raw, "type"); ok && mailCantClaimAllTypes[t] {
+		return false
+	}
+	if f, ok := claimInt(m.Raw, "saveFlag"); ok && f != 0 {
+		return false
+	}
+	return true
+}
+
+// isRead reports whether the list reply marks m read (status 1). The client sends read-status only
+// for mail with status ~= 1 (MailDataManager.lua:411-436; SQL `status` = 0, MailDBManager.lua:461-468),
+// so an absent status still counts as unread.
+func (m Mail) isRead() bool {
+	s, ok := claimInt(m.Raw, "status")
+	return ok && s == 1
+}
+
 // HasUnclaimedReward reports whether this mail has a reward still waiting to be claimed.
 // `rewardStatus == 0` is the confirmed "unclaimed" value (docs/live-validation.mdx's Mail
 // section), but GetInt can't distinguish a real 0 from a genuinely-absent OR wrong-typed field --
@@ -60,19 +92,17 @@ func (m Mail) RewardStatus() int32 { return m.Raw.GetInt("rewardStatus") }
 // EXPECTED case for notification-only mail (see this doc comment's second paragraph, and
 // ClaimAllMail's doc comment, which cites a live capture where all 21 visible mail items lacked
 // rewardStatus) -- not an anomaly worth a warning. Routing it through requireFieldType meant every
-// single routine notification-only mail item logged a spurious Warn. Now mirrors visitors.go's
-// ParseInitVisitors maxNum handling: presence/non-nil is checked directly and silently (no warning
-// -- this is the expected case) before falling through to false, and session.WarnIfWrongTypedField
-// (login.go) is used instead of requireFieldType so a Warn fires ONLY for the present-but-wrong-
-// typed case, which remains rejected (not misclassified as unclaimed) exactly as the round-29 fix
-// intended. See TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified (now also covering
-// the absent case logs nothing) for the regression coverage.
+// single routine notification-only mail item logged a spurious Warn. Now presence/non-nil is
+// checked directly and silently (no warning -- this is the expected case) before falling through
+// to false, and session.WarnIfWrongTypedField (login.go) is used instead of requireFieldType so a
+// Warn fires ONLY for the present-but-wrong-typed case, which remains rejected (not misclassified
+// as unclaimed) exactly as the round-29 fix intended. See
+// TestHasUnclaimedRewardWrongTypedRewardStatusIsNotMisclassified (now also covering the absent case
+// logs nothing) for the regression coverage.
 func (m Mail) HasUnclaimedReward() bool {
 	v, ok := m.Raw.Get("rewardStatus")
 	if !ok || v.Val == nil {
-		// Genuinely absent: the normal case for notification-only mail. Silent -- no warning --
-		// matching ParseInitVisitors' maxNum handling (visitors.go) for the identical
-		// absent-is-expected reason.
+		// Genuinely absent: the normal case for notification-only mail. Silent -- no warning.
 		return false
 	}
 	session.WarnIfWrongTypedField(m.Raw, "rewardStatus", "mail reward status", session.SFSFieldKindInt)
@@ -193,22 +223,22 @@ const maxMailUidLen = sfs.MaxUtfStringBytes
 // the response's `more`/`lastUid`/`lastMailTime` fields until the server
 // reports no more pages or a safety cap is hit.
 //
-// One real gap: the captured request already had a non-empty `clientseq`/
-// `time` matching a specific already-known mail uid, because the real
-// client was mid-session with a warm local mail cache built up over a
-// long history of `push.mail` notifications -- the exact cold-start
-// values (fresh `clientseq`/`time`) were never directly observed. This
-// sends `time: 0`, `clientseq: ""` on the first call, matching
-// `firstCmd: "YES"` (isFirst) exactly as captured, on the theory that's
-// the correct "give me everything" cold-start shape -- confirmed working
-// insofar as it returns real mail (see CollectAll's live test), but
-// whether it truly returns the account's FULL history or just a recent
-// window has not been independently verified against the real client.
+// The captured request had a non-empty `clientseq`/`time` because the
+// real client had a warm local mail cache. With no cache the client starts
+// from `lastUid = "0"`, `lastTime = 0` (MailDataManager.lua:97-98, 151-160),
+// so the first call sends `clientseq: "0"`, `time: 0` and
+// `firstCmd: "YES"`. Later pages differ from the client on purpose: its
+// ContinuePull re-sends `"0", 0` on every page (:163-165), while this
+// forwards the reply's lastUid/lastMailTime, which pages a full 350-mail
+// inbox live (docs/live-validation.mdx). The page size stays 100 (the
+// client asks for REQUEST_COUNT 20, :14): at 20, maxPages would cap a
+// fetch at 400 mail.
 func ListMail(conn *session.GameConn) ([]Mail, error) {
 	const reqCmd = "chat.get.system.mails"
 	const pushCmd = "push.chat.get.system.mails"
 	const maxPages = 20
 	const mailListPageSize = 100
+	const coldStartClientSeq = "0" // MailDataManager.lua:97
 
 	var all []Mail
 	// seenUIDs dedupes mail uids across pages, mirroring FetchBuildings' seenBuildingUUIDs/
@@ -222,7 +252,7 @@ func ListMail(conn *session.GameConn) ([]Mail, error) {
 	// unclaimed reward -- unverified server-side behavior for a duplicate uid in one batch
 	// request, and not worth risking when a defensive guard is this cheap.
 	seenUIDs := make(map[string]bool)
-	clientseq := ""
+	clientseq := coldStartClientSeq
 	reqTime := int64(0)
 	first := true
 	// truncated tracks whether the loop is currently mid-pagination (the most recent response
@@ -320,10 +350,9 @@ func ListMail(conn *session.GameConn) ([]Mail, error) {
 		}
 		// A response claiming more=true must also carry a genuine lastUid to seed the next
 		// page's clientseq -- without this check, a missing/wrong-typed lastUid falls through
-		// GetString's zero value ("") identical to the cold-start clientseq, which would send
-		// the exact same request again and loop on a stale cursor (up to maxPages times) instead
-		// of making forward progress. Treat that as a server-shape anomaly worth stopping for,
-		// not silently retrying.
+		// GetString's zero value ("") and the next page would carry no cursor at all, looping on
+		// a stale cursor (up to maxPages times) instead of making forward progress. Treat that as
+		// a server-shape anomaly worth stopping for, not silently retrying.
 		lastUid := msg.Params.GetString("lastUid")
 		if lastUid == "" {
 			slog.Warn("list mail: response reported more=true but lastUid is missing/empty, stopping pagination instead of looping on a stale cursor", "page", page, "collectedSoFar", len(all))
@@ -401,9 +430,12 @@ func ListMail(conn *session.GameConn) ([]Mail, error) {
 	return all, nil
 }
 
-// ClaimAllMail lists the account's mail (see ListMail), marks every mail
-// found as read, and separately claims rewards for whichever mail still
+// ClaimAllMail lists the account's mail (see ListMail), marks the unread
+// mail as read, and separately claims rewards for whichever mail still
 // has one -- confirmed live as two genuinely independent actions, not one.
+// Both skip what the client's Read All / Claim All skip: saved mail and
+// the mailCantClaimAllTypes (see Mail.inBulkActions); read-status goes
+// only to mail whose status is not 1 (MailDataManager.lua:411-436).
 //
 // Bug fixed here: an earlier version only marked-as-read the subset of
 // mail with `HasUnclaimedReward() == true`, silently skipping every
@@ -414,11 +446,11 @@ func ListMail(conn *session.GameConn) ([]Mail, error) {
 // (all battle reports, no gift icons in the UI) showed exactly this
 // asymmetry: it sent `mail.read.status.betch` for all 21 visible mail
 // uids, but no matching `mail.reward.batch` call at all -- confirming
-// mark-as-read is unconditional, independent of whether a mail has a
-// reward, while `Net.Msgs.Mail.MailReadStatusBatchMessage`'s own
-// OnCreate confirms the wire request needs only `uids`, no `type` -- so
-// every discovered mail can be marked read in one pass regardless of
-// category, unlike the reward claim below.
+// mark-as-read is independent of whether a mail has a reward, while
+// `Net.Msgs.Mail.MailReadStatusBatchMessage`'s own OnCreate confirms the
+// wire request needs only `uids`, no `type` -- so the unread mail can be
+// marked read in one pass regardless of category, unlike the reward
+// claim below.
 //
 // Bug fixed here (round 16): ListMail deliberately returns whatever mail
 // it already collected before a mid-pagination sendAndWait failure (see
@@ -490,9 +522,11 @@ func ClaimAllMail(conn *session.GameConn) error {
 		return errors.Join(errs...)
 	}
 
-	allUIDs := make([]string, len(mail))
-	for i, m := range mail {
-		allUIDs[i] = m.Uid()
+	var unreadUIDs []string
+	for _, m := range mail {
+		if m.inBulkActions() && !m.isRead() {
+			unreadUIDs = append(unreadUIDs, m.Uid())
+		}
 	}
 	// readBatchSize caps how many mail uids go into a single "mail.read.status.betch" or
 	// "mail.reward.batch" request. maxUIDsBytes additionally caps the byte length of each
@@ -521,7 +555,7 @@ func ClaimAllMail(conn *session.GameConn) error {
 	// it against an already-dead connection would just burn one more defaultCmdTimeout per
 	// remaining batch for no benefit.
 	readAbortedByNetErr := false
-	for _, batch := range truncateMailBatches(batchByCountAndBytes(allUIDs, readBatchSize, maxUIDsBytes), "read-status") {
+	for _, batch := range truncateMailBatches(batchByCountAndBytes(unreadUIDs, readBatchSize, maxUIDsBytes), "read-status") {
 		readParams := sfs.NewSFSObject()
 		readParams.PutUtfString("uids", strings.Join(batch, ","))
 		_, err := session.SendAndWait(conn, fmt.Sprintf("mail read-status (batch %d, size %d)", offset, len(batch)), "mail.read.status.betch", readParams)
@@ -540,13 +574,16 @@ func ClaimAllMail(conn *session.GameConn) error {
 	// failure still surfaces via this function's final errors.Join regardless, but this line
 	// specifically must not overstate what happened. If any batch failed, log the attempt (not a
 	// completed fact) instead, using offset (uids actually submitted in an attempted batch, which
-	// still includes the batch that failed) rather than len(allUIDs) -- a net.Error abort above
-	// means offset can now be less than the full identified count, and len(allUIDs) would overstate
-	// how much was actually attempted in that case.
-	if readFailed {
+	// still includes the batch that failed) rather than len(unreadUIDs) -- a net.Error abort above
+	// means offset can now be less than the full identified count, and len(unreadUIDs) would
+	// overstate how much was actually attempted in that case.
+	switch {
+	case readFailed:
 		slog.Warn("mark mail as read had failures", "attempted", offset)
-	} else {
-		slog.Info("marked mail as read", "count", len(allUIDs))
+	case len(unreadUIDs) == 0:
+		slog.Info("no unread mail to mark as read", "totalMail", len(mail))
+	default:
+		slog.Info("marked mail as read", "count", len(unreadUIDs), "totalMail", len(mail))
 	}
 	if readAbortedByNetErr {
 		return errors.Join(errs...)
@@ -675,6 +712,9 @@ func batchByCountAndBytes(uids []string, maxCount, maxBytes int) [][]string {
 // ListMail already uses for uid, and alliance.go/buildings.go use for scienceId/uuid) before
 // trusting m.Type(), and skips -- with a warning -- any reward-bearing mail whose type is missing,
 // explicitly null, or wrong-typed, rather than defaulting it into a type=0 batch.
+//
+// Saved mail and the mailCantClaimAllTypes are left out, as the client's Claim All leaves them out
+// (GetAllCanRewardMailUids, MailDBManager.lua:1061-1075; see Mail.inBulkActions).
 func groupUnclaimedByType(mail []Mail) map[int32][]string {
 	byType := make(map[int32][]string)
 	for _, m := range mail {
@@ -682,6 +722,9 @@ func groupUnclaimedByType(mail []Mail) map[int32][]string {
 			continue
 		}
 		if !session.RequireFieldType(m.Raw, "type", "mail reward", session.SFSFieldKindInt) {
+			continue
+		}
+		if !m.inBulkActions() {
 			continue
 		}
 		byType[m.Type()] = append(byType[m.Type()], m.Uid())

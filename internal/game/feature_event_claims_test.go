@@ -166,8 +166,10 @@ func TestEventClaimsArenaAndFlowerTrain(t *testing.T) {
 			closed.PutLong("showTime", 0)
 			r.PutSFSObject("galeArenaInfo", closed)
 		case "new.arena.rank.list":
-			data := sfs.NewSFSObject()
-			data.PutInt("battleCount", 5)
+			// The handler keeps the whole reply as rankData (NewPeakArenaManager.lua:142-150), so
+			// battleCount and dailyReward sit at the top level.
+			r.PutInt("battleCount", 5)
+			r.PutInt("curRank", 40)
 			boxes := sfs.NewSFSArray()
 			for _, bx := range [][2]int32{{1, 1}, {3, 0}, {10, 0}} {
 				o := sfs.NewSFSObject()
@@ -175,8 +177,7 @@ func TestEventClaimsArenaAndFlowerTrain(t *testing.T) {
 				o.PutInt("rewarded", bx[1])
 				boxes.AddSFSObject(o)
 			}
-			data.PutSFSArray("dailyReward", boxes)
-			r.PutSFSObject("rankData", data)
+			r.PutSFSArray("dailyReward", boxes)
 		default:
 			return evOK()
 		}
@@ -213,6 +214,48 @@ func TestEventClaimsArenaAndFlowerTrain(t *testing.T) {
 	trainsSent := fake.only(flowerTrainCmd)
 	if trainsSent[0].Params.GetLong("trainUuid") != 71 || trainsSent[1].Params.GetLong("trainUuid") != 74 {
 		t.Errorf("trains = %v, %v; want 71 and 74", trainsSent[0].Params, trainsSent[1].Params)
+	}
+}
+
+func TestEventClaimsGaleArenaBoxesReadTopLevel(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		r := sfs.NewSFSObject()
+		switch cmd {
+		case arenaInfoCmd:
+			open := sfs.NewSFSObject()
+			open.PutLong("showTime", 1)
+			open.PutLong("startTime", evTestNow.Add(-time.Hour).UnixMilli())
+			open.PutLong("endTime", evTestNow.Add(time.Hour).UnixMilli())
+			r.PutSFSObject("galeArenaInfo", open)
+		case "gale.arena.rank.list":
+			// NewGaleArenaManager.lua:132-140 keeps the whole reply as rankData.
+			r.PutInt("battleCount", 3)
+			boxes := sfs.NewSFSArray()
+			for _, need := range []int32{1, 3, 5} {
+				o := sfs.NewSFSObject()
+				o.PutInt("needCount", need)
+				o.PutInt("rewarded", 0)
+				boxes.AddSFSObject(o)
+			}
+			r.PutSFSArray("dailyReward", boxes)
+		default:
+			return evOK()
+		}
+		return r
+	})
+	if err := runEventClaims(conn, evInit(30)); err != nil {
+		t.Fatal(err)
+	}
+	got := fake.only("gale.arena.reward")
+	if len(got) != 2 || got[0].Params.GetInt("target") != 1 || got[1].Params.GetInt("target") != 2 {
+		t.Fatalf("gale boxes = %v, want targets 1 and 2 (box 3 needs 5 battles)", got)
+	}
+	if v, _ := got[0].Params.Get("target"); v.Type != sfs.SFSInt {
+		t.Errorf("target type %d, want Int", v.Type)
+	}
+	if n := len(fake.only("new.arena.rank.list")); n != 0 {
+		t.Errorf("peak rank list sent %d times while the peak arena is closed", n)
 	}
 }
 

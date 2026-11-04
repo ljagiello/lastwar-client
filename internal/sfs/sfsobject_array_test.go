@@ -521,8 +521,8 @@ func TestGetIntRejectsOutOfInt32RangeLong(t *testing.T) {
 
 // TestGetIntWarnsOnOutOfRangeLong is the round-39 regression test for the MAJOR finding that
 // GetInt's out-of-int32-range Long fallback (added round 29) degraded silently, with zero
-// diagnostic -- unlike its two siblings specifically hardened against this exact anomaly shape
-// (gsl.go's getIntFlexible, round 33; visitors.go's ParseInitVisitors maxNum handling, round 35).
+// diagnostic -- unlike its sibling specifically hardened against this exact anomaly shape
+// (gsl.go's getIntFlexible, round 33).
 // A real call site (alliance.go's findRecommendedTech -> DonateRecommendedAllianceTech) reads a
 // corrupted scienceId this way straight into a live al.science.donate network request with no
 // other signal the value was wrong rather than genuinely 0. Also proves the logged value is
@@ -741,5 +741,14 @@ func TestSFSObjectAccessorsOnNilReceiverDoNotPanic(t *testing.T) {
 	}
 	if got := o.GetLong("x"); got != 0 {
 		t.Errorf("nil.GetLong(...) = %d, want 0", got)
+	}
+	// Keys and SFSArray.Items panicked on a nil receiver (MASTER B54): game code logs
+	// a.Raw.Keys() for an activity entry, and a panic there used to end the whole run.
+	if got := o.Keys(); got != nil {
+		t.Errorf("nil.Keys() = %v, want nil", got)
+	}
+	var a *SFSArray
+	if got := a.Items(); got != nil {
+		t.Errorf("nil SFSArray.Items() = %v, want nil", got)
 	}
 }

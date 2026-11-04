@@ -41,6 +41,13 @@ import (
 // client's own "got" list is local, so a chest claimed on another device comes back as
 // firework_tips_1016, which is benign.
 //
+// The window stays on type 0 on purpose (1.0.367 review). The client keeps every chest it claimed,
+// or got 1016 for, in a 24 h PlayerPrefs list and skips those (LWFireworkGiftManager.lua:7-11,
+// 41-63; GetFireworksGiftMessage.lua:14-18; FireworkWorldBuildBubble.lua:281). Go keeps no such
+// list, so the window is what stops a 3-hourly run from re-claiming a chest an earlier run already
+// claimed. And 120 is the table's k2, not init's: DataConfig:InitFromNet re-applies table item over
+// init dataConfig for every row the table has, fireworks among them (DataConfig.lua:36-46, 52-74).
+//
 // Not done: the auto-like of the launcher the claim window plays for configs with
 // firework.auto_like (UIFireworkGiftGotShowItemRender.lua:104-120; visible to other players),
 // setting off fireworks, find.fireworks.gift.world.point (camera only), and the season big map

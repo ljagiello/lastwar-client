@@ -105,8 +105,13 @@ func (o *SFSObject) put(key string, v SFSValue) {
 func (o *SFSObject) PutValue(key string, v SFSValue) { o.put(key, v) }
 
 // Keys returns the object's field names in insertion order, for read-only access by other
-// packages. Callers must not mutate the returned slice.
-func (o *SFSObject) Keys() []string { return o.keys }
+// packages. Callers must not mutate the returned slice. A nil receiver returns nil, like Has/Get.
+func (o *SFSObject) Keys() []string {
+	if o == nil {
+		return nil
+	}
+	return o.keys
+}
 
 func (o *SFSObject) PutUtfString(key, val string)      { o.put(key, SFSValue{SFSUtfString, val}) }
 func (o *SFSObject) PutBool(key string, val bool)      { o.put(key, SFSValue{SFSBool, val}) }
@@ -219,9 +224,8 @@ func (o *SFSObject) GetInt(key string) int32 {
 		case int64:
 			if n < math.MinInt32 || n > math.MaxInt32 {
 				// Round-39 fix: this anomaly used to degrade silently, with zero diagnostic --
-				// unlike its two siblings that were specifically hardened against this exact
-				// shape (gsl.go's getIntFlexible, round 33; visitors.go's ParseInitVisitors
-				// maxNum handling, round 35), both of which warn here. A real call site
+				// unlike its sibling that was specifically hardened against this exact shape
+				// (gsl.go's getIntFlexible, round 33), which warns here. A real call site
 				// (alliance.go's findRecommendedTech -> DonateRecommendedAllianceTech) reads a
 				// GetInt("scienceId") result straight into a live al.science.donate network
 				// request with no other signal that the value was corrupted rather than
@@ -963,8 +967,14 @@ func (a *SFSArray) add(v SFSValue) { a.items = append(a.items, v) }
 func (a *SFSArray) AddValue(v SFSValue) { a.add(v) }
 
 // Items returns the array's elements for read-only access by other packages (which cannot
-// reach the unexported items field directly). Callers must not mutate the returned slice.
-func (a *SFSArray) Items() []SFSValue           { return a.items }
+// reach the unexported items field directly). Callers must not mutate the returned slice. A nil
+// receiver returns nil.
+func (a *SFSArray) Items() []SFSValue {
+	if a == nil {
+		return nil
+	}
+	return a.items
+}
 func (a *SFSArray) AddInt(val int32)            { a.add(SFSValue{SFSInt, val}) }
 func (a *SFSArray) AddSFSObject(val *SFSObject) { a.add(SFSValue{SFSObjectType, val}) }
 

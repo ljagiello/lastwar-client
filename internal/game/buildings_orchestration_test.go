@@ -819,8 +819,8 @@ func TestFetchBuildingsAggregateVisitorCeilingAcrossManyPushes(t *testing.T) {
 // regression test for the MAJOR finding that FetchBuildings' aggregate visitor ceiling could be
 // overshot by up to ~2x across just TWO pushes, because the old loop-top-only check was
 // re-consulted once per outer-loop iteration (i.e. once per push), while a single `init` push can
-// carry up to maxVisitorsUpperBound (300) visitors on its own via ParseInitVisitors' own
-// maxNum-clamping (visitors.go) -- mirroring buildings.go's appendBuilding/appendVisitor twin gap
+// carry up to MaxVisitorsUpperBound (300) visitors on its own, ParseInitVisitors' raw-scan cap
+// (visitors.go) -- mirroring buildings.go's appendBuilding/appendVisitor twin gap
 // TestFetchBuildingsSinglePushNearRawItemCapDoesNotOvershootAggregateCeiling already covers for
 // buildings. Sends two consecutive near-cap pushes (299 then 300 distinct uids) and proves the
 // accumulated count stops at maxVisitorsUpperBound, not ~599.
@@ -841,7 +841,7 @@ func TestFetchBuildingsSinglePushNearCapVisitorsDoesNotOvershootAggregateCeiling
 				visitorList.AddSFSObject(v)
 			}
 			visitor := sfs.NewSFSObject()
-			visitor.PutInt("maxNum", 99999) // clamped to maxVisitorsUpperBound by ParseInitVisitors
+			visitor.PutInt("maxNum", 99999) // ignored for the list: ParseInitVisitors caps at MaxVisitorsUpperBound
 			visitor.PutSFSArray("list", visitorList)
 			params.PutSFSObject("visitor", visitor)
 			return server.SendExtension("init", params)
@@ -1169,13 +1169,12 @@ func TestCollectAllAggregatesErrorsWithoutShortCircuiting(t *testing.T) {
 }
 
 // TestCollectAllCapsCollectibleBuildingsAndLogsWarning is the round-24 regression test for
-// CollectAll's maxCollectibleBuildingsPerRun sanity cap (buildings.go): unlike GreetVisitors
-// (visitors.go), which now enforces the init push's own server-sent `maxNum` field, there is no
-// server-sent "expected building count" anywhere in this protocol, so CollectAll's per-building
-// collect loop needed a purely defensive, client-side ceiling instead -- closing the same
-// unbounded-hang threat model (an arbitrary/hostile -cs-ip peer that simply never responds, each
-// collect call costing up to a full defaultCmdTimeout) as buildings.go's own capDeadline (round 20)
-// and ParseInitVisitors' maxVisitorsDefensiveCeiling (visitors.go), just for a different loop.
+// CollectAll's maxCollectibleBuildingsPerRun sanity cap (buildings.go): there is no server-sent
+// "expected building count" anywhere in this protocol, so CollectAll's per-building collect loop
+// needed a purely defensive, client-side ceiling instead -- closing the same unbounded-hang threat
+// model (an arbitrary/hostile -cs-ip peer that simply never responds, each collect call costing up
+// to a full defaultCmdTimeout) as buildings.go's own capDeadline (round 20) and ParseInitVisitors'
+// MaxVisitorsUpperBound (visitors.go), just for a different loop.
 //
 // The fake account here owns maxCollectibleBuildingsPerRun+50 collectible buildings (all
 // BuildingFarmland, distinct uuids assigned in ascending order) -- comfortably over the cap. The

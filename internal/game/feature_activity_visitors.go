@@ -29,12 +29,19 @@ const maxActivityVisitorsPerRun = 20
 // to {sTime, eTime, rewardState, lpTime, eventId, nextResetTime} (InitMessage.lua:471,
 // ActivityVisitorData.lua:23-32), and push.activity.visitor refreshes it.
 //
-// The client shows the visitor while rewardState == 0 and server time (s) < eTime
-// (ActivityVisitorData.lua:64-70), and tapping it sends visitor.receive.reward {activityId:Int}
-// (VisitorActivity.lua:40-52). The reply sets rewardState = 1 until nextResetTime, when the
-// visitor comes back (ActivityVisitorData.lua:33-53). The client only gets there through the VisitorActivity class, so an entry
-// whose eventId's behaviour type is not VisitorActivity (11) is skipped. Static-only: no live
-// activityVisitor sample and no already-claimed errorCode have been seen.
+// The client shows the visitor while rewardState is not 1 and server time (s) < eTime
+// (IsExpired, ActivityVisitorData.lua:71-77; Go asks for 0, the only other value the client
+// sets), and tapping it sends visitor.receive.reward
+// {activityId:Int} (VisitorActivity.lua:43-55). The reply sets rewardState = 1 until
+// nextResetTime, when the visitor comes back (ActivityVisitorData.lua:37-53). The client trusts
+// nextResetTime over the stored flag: UpdateData copies init's rewardState and nextResetTime and
+// restarts the timer, which sets rewardState = 0 after max(nextResetTime - now, 0) s, at once when
+// the reset has passed (:26-53). So an entry still at rewardState 1 whose nextResetTime (s) has
+// passed is claimed too, and logged, since whether init can carry such a stale flag is unobserved;
+// a missing or zero nextResetTime keeps it skipped. The client only gets there through the
+// VisitorActivity class, so an entry whose eventId's behaviour type is not VisitorActivity (11) is
+// skipped. Static-only: no live activityVisitor sample and no already-claimed errorCode have been
+// seen.
 func runActivityVisitors(conn *session.GameConn, in *Init) error {
 	return claimActivityVisitors(conn, in, time.Now())
 }
@@ -69,10 +76,12 @@ func claimActivityVisitors(conn *session.GameConn, in *Init, now time.Time) erro
 		}
 		eventId := entry.GetInt("eventId")
 		t, known := visitorBehaviourType(eventId)
+		state, reset := entry.GetInt("rewardState"), entry.GetLong("nextResetTime")
+		resetPassed := reset > 0 && now.Unix() >= reset
 		switch {
-		case entry.GetInt("rewardState") != 0:
+		case state != 0 && !resetPassed:
 			slog.Info("activity visitor already claimed this period", "activityId", activityId, "eventId", eventId,
-				"nextResetTime", entry.GetLong("nextResetTime"))
+				"nextResetTime", reset)
 			continue
 		case now.Unix() >= entry.GetLong("eTime"):
 			slog.Info("activity visitor's event has ended", "activityId", activityId, "eventId", eventId, "eTime", entry.GetLong("eTime"))
@@ -87,6 +96,10 @@ func claimActivityVisitors(conn *session.GameConn, in *Init, now time.Time) erro
 			break
 		}
 		sent++
+		if state != 0 {
+			slog.Info("activity visitor's period has reset although init still says rewardState; claiming as the client does",
+				"activityId", activityId, "eventId", eventId, "rewardState", state, "nextResetTime", reset, "now", now.Unix())
+		}
 		params := sfs.NewSFSObject()
 		params.PutInt("activityId", int32(activityId))
 		_, err = session.SendAndWait(conn, fmt.Sprintf("activity visitor reward (activityId %d)", activityId), "visitor.receive.reward", params)

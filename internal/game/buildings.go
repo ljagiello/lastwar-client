@@ -836,10 +836,10 @@ func CollectIdleReward(conn *session.GameConn) error {
 }
 
 // maxCollectibleBuildingsPerRun is a defensive, non-protocol-guessing sanity ceiling on how many
-// buildings CollectAll will issue building.production.collect requests for in one run. Unlike
-// visitors.go's GreetVisitors -- whose visitor.list carries a server-sent `maxNum` sibling field
-// ParseInitVisitors now enforces directly -- there is no equivalent "expected building count" field
-// documented anywhere in this codebase's protocol notes, so this can't be a real protocol limit,
+// buildings CollectAll will issue building.production.collect requests for in one run. There is no
+// "expected building count" field documented anywhere in this codebase's protocol notes (and
+// visitor.list's `maxNum` bounds only the timed visitor queue, not the list, so ParseInitVisitors
+// can't use it either), so this can't be a real protocol limit,
 // only defense-in-depth: the same category of deliberately generous, non-protocol-guessing safety
 // margin as sfsobject.go's sfs.MaxDecodedNodes/sfs.MaxFrameSize/sfs.MaxNestDepth.
 //
@@ -848,7 +848,7 @@ func CollectIdleReward(conn *session.GameConn) error {
 // never responds to something reasonable: each collect call can cost up to a full defaultCmdTimeout
 // (8s, conn.go), so 300 * 8s caps the worst case at ~40 minutes instead of an unbounded hang. This
 // closes the same threat model as buildings.go's own capDeadline (round 20) and
-// maxVisitorsDefensiveCeiling (visitors.go), just for this loop's item COUNT instead of wait
+// MaxVisitorsUpperBound (visitors.go), just for this loop's item COUNT instead of wait
 // DURATION.
 const maxCollectibleBuildingsPerRun = 300
 
@@ -947,7 +947,7 @@ func collectCore(conn *session.GameConn, in *Init) error {
 		func() error { return ClaimAllMail(conn) },
 		func() error { return helpAllianceMembers(conn, in) },
 		func() error { return claimAllianceGifts(conn, in) },
-		func() error { return DonateRecommendedAllianceTech(conn) },
+		func() error { return donateRecommendedAllianceTech(conn, in) },
 		func() error { return claimVIPDailies(conn, in, now) },
 	}
 

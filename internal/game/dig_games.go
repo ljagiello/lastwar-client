@@ -77,6 +77,15 @@ var digsReadOnly = map[string]bool{
 	allianceBossInfoCmd:   true,
 }
 
+// digsSpendCmds are the writes that spend owned items (Treasure Hunt pickaxes). They alone refuse
+// while the diamond tripwire file exists (tripwire.go); the free vault-stone opens, the grand-prize
+// choice and the reward claims still go out, so their rewards don't expire while the file waits
+// for the operator.
+var digsSpendCmds = map[string]bool{
+	treasureHuntDigCmd:   true,
+	treasureHuntDigV2Cmd: true,
+}
+
 // digsCheckRequest is the last check before a dig request goes on the wire: a known command with
 // exactly its keys, never a buy command and never a gold key.
 func digsCheckRequest(cmd string, p *sfs.SFSObject) error {
@@ -104,7 +113,8 @@ func digsCheckRequest(cmd string, p *sfs.SFSObject) error {
 }
 
 // digsTrip disables the dig features' writes for the rest of the process once a reply shows the
-// diamond balance falling.
+// diamond balance falling; the trip is also persisted (tripwire.go), and while that file exists
+// later runs refuse the spend commands (digsSpendCmds) but still send the free writes.
 var digsTrip struct {
 	sync.Mutex
 	reason string
@@ -116,12 +126,13 @@ func digsTripped() string {
 	return digsTrip.reason
 }
 
-func digsSetTrip(reason string) {
+func digsSetTrip(feature, cmd, reason string) {
 	digsTrip.Lock()
-	defer digsTrip.Unlock()
 	if digsTrip.reason == "" {
 		digsTrip.reason = reason
 	}
+	digsTrip.Unlock()
+	tripwireTrip(feature, cmd, reason)
 }
 
 // digsResult is how a write went.
@@ -135,7 +146,7 @@ const (
 
 // digsRun is one feature run's sender. Reads (digsReadOnly) go out in a plan too; writes are
 // logged instead. Every reply is checked against the diamond balance: init user.gold
-// (PlayerInfo.lua:612-613), or the first balance a reply carries, must never fall.
+// (PlayerInfo.lua:630-632), or the first balance a reply carries, must never fall.
 type digsRun struct {
 	conn    *session.GameConn
 	feature string
@@ -226,6 +237,13 @@ func (r *digsRun) write(label, cmd string, p *sfs.SFSObject) (*sfs.SFSObject, di
 		r.halt = true
 		return nil, digsFailed
 	}
+	if digsSpendCmds[cmd] {
+		// Refused without halting: this run's free choose and claims still go out.
+		if err := tripwireErr(r.feature); err != nil {
+			r.add(err)
+			return nil, digsFailed
+		}
+	}
 	msg, err := session.SendAndWait(r.conn, label, cmd, p)
 	if msg == nil {
 		r.add(err)
@@ -254,7 +272,7 @@ func (r *digsRun) checkGold(label, cmd string, reply *sfs.SFSObject) {
 			}
 			if r.goldSet && g < r.gold {
 				reason := fmt.Sprintf("%s (%s): diamonds fell from %d to %d", label, cmd, r.gold, g)
-				digsSetTrip(reason)
+				digsSetTrip(r.feature, cmd, reason)
 				slog.Error(r.feature+" DIAMOND TRIPWIRE: dig writes disabled for this session", "call", cmd, "reason", reason)
 				r.add(errors.New(r.feature + " diamond tripwire: " + reason))
 				r.halt = true

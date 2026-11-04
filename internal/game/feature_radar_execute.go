@@ -24,11 +24,13 @@ import (
 // their endTime while it hides an unstarted one past it (RadarCenterDataManager.lua:55-79). That
 // the server keeps returning a FINISHED task past its endTime is unverified (DUEL.md §8 1a).
 //
-// The flow is the client's Quick Execute (DetectEventCompleteOneClickBtnView.lua:93-217,
+// The flow is the client's Quick Execute (DetectEventCompleteOneClickBtnView.lua:104-231,
 // RadarFakeUIMarchManager.lua:52-77), which runs every march-free task at once:
-//   - a task in state 3 (NOT_IN_WORLD) is first placed on the map with
-//     `detect.event.batch.put.point.in.world {uuidList: "uuid|uuid"}`; the reply's `array` holds
-//     the placed tasks, now in state 0 (DetectEventBatchPutPointInWorldMessage.lua:4-29);
+//   - a PickGarbage, HELPER, DOMINATOR_CURE or SEASON_VISITOR task in state 3 (NOT_IN_WORLD) is
+//     first placed on the map with `detect.event.batch.put.point.in.world {uuidList:
+//     "uuid|uuid"}` (OnBtnDoClick, DetectEventCompleteOneClickBtnView.lua:104-131); the reply's
+//     `array` holds the placed tasks, now in state 0 (DetectEventBatchPutPointInWorldMessage.lua:
+//     4-29);
 //   - PickGarbage (6) and DOMINATOR_CURE (26): `start.pick.garbage {uuid}`, then after the fake
 //     march `finish.sampling {uuid}` (RadarFakeUIMarchData_CollectGarbage.lua:12-17); SEASON_VISITOR
 //     (44) also sends `finish.visitor {uuid}` (RadarFakeUIMarchData_SeasonVisitor.lua:7-13);
@@ -37,14 +39,18 @@ import (
 //     RadarCenterDataManager.lua:767-769) unless the task has cost == 1
 //     (DetectEventCompleteOneClickBtnView.lua:139-152, 194-216), and is skipped below a reserve;
 //   - PLOT (14, Rescue the Survivor): `start.detect.event.talk {uuid}`, then
-//     `end.detect.event.talk {uuid}` once the plot has played (UIDetectEventView.lua:1082-1099). The
+//     `end.detect.event.talk {uuid}` once the plot has played (UIDetectEventView.lua:1147-1165). A
+//     tap starts it in any state and the client never places it (DetectEventItem.lua:150-159). The
 //     end reply carries the reward, so a talk finishes and claims in one step and can't be banked:
 //     it runs only on a radar-scoring day.
 //
 // The fake march lasts min(3000 ms, distance x 1000 / detect_quick_finish_config.k2)
 // (RadarFakeUIMarchData_Base.lua:35-59), so every end is sent radarFakeMarchWait after the last
-// start. That is the Quick Execute timing only, so nothing runs unless init dataConfig turns on
-// radarQuickSwitch, as the client requires (RadarFakeUIMarchManager.lua:105-111).
+// start. That is the Quick Execute timing only, so nothing runs unless the client's Quick Execute
+// is open: init dataConfig turns on radarQuickSwitch and the account is in season 2 or later
+// (IsFuncOpen, RadarFakeUIMarchManager.lua:117-123), and the radar is at level radarQuickMinLevel
+// or above, below which the one-click button is hidden or greyed
+// (DetectEventCompleteOneClickBtnView.lua:41-62). See radarQuickExecuteOpen.
 // Everything else is left alone, by an allowlist: every march, rally, battle and mini-game
 // type (2, 8, 16, 17, 20, 40, 46, the PvE types 7/10/12/15 whose result the client simulates, ...).
 // RESCUE (11) is left alone too although its fake march is the same pair (FakeRescueMarchData.lua:
@@ -56,7 +62,8 @@ import (
 // On a radar-scoring day the tasks this feature finishes are claimed in the same run, and the run
 // repeats on the tasks those claims draw from stock (the claim reply's newEvent,
 // RadarCenterDataManager.lua:289-327). radar-claims can't do it: RunFeatures runs features in
-// name order, so it runs before radar-execute. Static-only: not sent live yet.
+// (phase, name) order, and both are in the action phase, so it runs before radar-execute.
+// Static-only: not sent live yet.
 
 //go:generate go run ./genradar -events ${LASTWAR_TABLES}/detect_event.json -levels ${LASTWAR_TABLES}/detect_level.json -version ${LASTWAR_TABLE_VERSION} -out radar_tables_gen.go
 
@@ -92,12 +99,20 @@ const (
 	radarStaminaRegen   = 300 * time.Second
 
 	// radarFakeMarchWait is the client's longest Quick Execute fake march (3 s) plus a margin for
-	// rounding. The client uses it only while radarQuickSwitch is on (RadarFakeUIMarchManager.lua:
-	// 105-111; absent from the item table, so off unless init dataConfig sets it); otherwise it
+	// rounding. The client uses it only while Quick Execute is open (radarQuickExecuteOpen; the
+	// switch is absent from the item table, so off unless init dataConfig sets it); otherwise it
 	// sends the end after a march at armyspeed.k2 plus detect_event.para seconds of collecting
 	// (FakeCollectGarbageMarchData.lua:60-73, 109-130), which needs the map distance.
 	radarFakeMarchWait = 3500 * time.Millisecond
 	radarQuickSwitch   = "radar_quick_operation_switch"
+	// radarQuickMinSeason is lw_function_season row 106 (RadarQuickFinish, FunctionSeasonUtil.lua:7):
+	// type 1, season 2, season_type 2, season_day 1, which CheckSeasonDay (:27-68) reduces to
+	// GetSeasonId(true) >= 2 (tables 39879, static).
+	radarQuickMinSeason = 2
+	// radarQuickMinLevel is detect_config.k100, and detect_config_new.k100 under monopoly_ab
+	// (GetOpenLevel, DetectEventCompleteOneClickBtnView.lua:233-241): 6 in both (tables 39879,
+	// static).
+	radarQuickMinLevel = 6
 	// radarExecuteMaxEvents caps the tasks started per run; radarExecuteMaxRounds caps the
 	// execute-claim rounds on a radar-scoring day.
 	radarExecuteMaxEvents = 30
@@ -331,23 +346,60 @@ func radarExecPlan(ev detectEvent, radarDay bool, nowMs int64) (radarAction, str
 	return radarSkip, "not march-free (march, rally, battle or mini-game)"
 }
 
+// radarSeason is the account's season number for the Quick Execute gate: init
+// playerServerSeasonInfo.seasonId, the season index SeasonInfoTemplate reads (:16, compared with 5
+// at :72), with no open-season check. The client's GetSeasonId(true) is lw_season[seasonConfigId]
+// .season, or lw_season[nextSeasonConfigId].season in the next season's preview
+// (SeasonInfoTemplate.lua:727-735); Go has no lw_season table, so during that preview this can read
+// one season low, which only keeps the gate closed. ok is false without the field.
+func radarSeason(in *Init) (int64, bool) {
+	return evNum(in.Object("playerServerSeasonInfo"), "seasonId")
+}
+
+// radarQuickExecuteOpen reports whether the client's Quick Execute is open, and why not:
+// radarQuickSwitch on, season >= radarQuickMinSeason (IsFuncOpen, RadarFakeUIMarchManager.lua:
+// 117-123), and, when snap is given, radar level >= radarQuickMinLevel, which the one-click button
+// needs (DetectEventCompleteOneClickBtnView.lua:41-62; GetDetectInfoLevel reads a missing level as
+// 1, RadarCenterDataManager.lua:157-162). Below these the client runs radar tasks only by its long
+// fake march (distance and collect time) and never sends the 3 s Quick Execute timing.
+func radarQuickExecuteOpen(in *Init, snap *detectSnapshot) (bool, string) {
+	if !claimSwitchOn(in, radarQuickSwitch) {
+		return false, "init dataConfig doesn't turn on " + radarQuickSwitch
+	}
+	if season, ok := radarSeason(in); !ok || season < radarQuickMinSeason {
+		return false, fmt.Sprintf("Quick Execute opens in season %d (lw_function_season 106); init playerServerSeasonInfo.seasonId is %d (present %v)",
+			radarQuickMinSeason, season, ok)
+	}
+	if snap != nil && (!snap.hasLevel || snap.level < radarQuickMinLevel) {
+		return false, fmt.Sprintf("Quick Execute needs radar level %d (detect_config.k100); detectInfo.level is %d (present %v)",
+			radarQuickMinLevel, snap.level, snap.hasLevel)
+	}
+	return true, ""
+}
+
 func runRadarExecute(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil {
 		slog.Info("radar-execute: no init push; skipping")
 		return nil
 	}
-	if !claimSwitchOn(in, radarQuickSwitch) {
-		slog.Warn("radar-execute: init dataConfig doesn't turn on " + radarQuickSwitch + ", so the client runs radar tasks " +
-			"by its long fake march (distance and collect time), not the 3 s Quick Execute this reproduces; doing nothing")
+	closed := func(why string) error {
+		slog.Warn("radar-execute: the client's Quick Execute is closed, so it never sends the 3 s timing this reproduces; doing nothing",
+			"reason", why)
 		return nil
 	}
-	radarDay := TodayDuel(conn, in).Scores(DuelScoreRadarTask, "")
-	st := radarStamina{inAlliance: claimInAlliance(in)}
-	st.have, st.known = radarStaminaFloor(in, claimNow(in))
+	if open, why := radarQuickExecuteOpen(in, nil); !open {
+		return closed(why)
+	}
 	snap, err := readDetect(conn)
 	if err != nil {
 		return err
 	}
+	if open, why := radarQuickExecuteOpen(in, snap); !open {
+		return closed(why)
+	}
+	radarDay := TodayDuel(conn, in).Scores(DuelScoreRadarTask, "")
+	st := radarStamina{inAlliance: claimInAlliance(in)}
+	st.have, st.known = radarStaminaFloor(in, claimNow(in))
 	rounds := 1
 	if radarDay {
 		rounds = radarExecuteMaxRounds
@@ -498,13 +550,16 @@ func radarExecute(conn *session.GameConn, todo []radarDecision) (map[int64]bool,
 	return done, errs
 }
 
-// radarPlace returns the tasks of todo that are on the map: those already in state 0, and those in
-// state 3 that the batch placement reply lists in state 0.
+// radarPlace returns the tasks of todo that can start: those already in state 0, talks in any
+// state, and the others in state 3 that the batch placement reply lists in state 0. The client's
+// placement takes only PickGarbage, HELPER, DOMINATOR_CURE and SEASON_VISITOR tasks
+// (DetectEventCompleteOneClickBtnView.lua:104-131); a PLOT task starts on a tap whatever its state
+// (DetectEventItem.lua:150-159), so a talk is never placed.
 func radarPlace(conn *session.GameConn, todo []radarDecision) ([]radarDecision, error) {
 	var ready, place []radarDecision
 	var uuids []string
 	for _, d := range todo {
-		if d.ev.state == radarStateNotInWorld {
+		if d.ev.state == radarStateNotInWorld && d.action != radarTalk {
 			place = append(place, d)
 			uuids = append(uuids, strconv.FormatInt(d.ev.uuid, 10))
 		} else {
@@ -578,17 +633,19 @@ func runRadarInventory(conn *session.GameConn, in *Init) error {
 	if err != nil {
 		return err
 	}
+	quickOpen, why := radarQuickExecuteOpen(in, snap)
+	season, _ := radarSeason(in)
 	slog.Info("radar-inventory", "theme", day.ThemeName(), "radarDay", radarDay, "level", snap.level, "eventNum", snap.eventNum,
 		"slotsUsed", len(snap.events), "nextRefresh", time.UnixMilli(snap.nextRefresh).UTC().Format(time.RFC3339),
 		"staminaFloor", st.have, "staminaKnown", st.known, "inAlliance", st.inAlliance,
-		"quickExecuteOn", claimSwitchOn(in, radarQuickSwitch))
+		"quickExecuteOn", claimSwitchOn(in, radarQuickSwitch), "seasonId", season, "quickExecuteOpen", quickOpen)
 
 	if row, ok := radarLevels[snap.level]; ok {
 		slog.Info("radar-inventory: bank", "showSlots", row.show, "stockCap", row.max, "refreshN", row.refreshN,
 			"refreshMin", row.refreshMin, "freeSlots", max(row.show-int64(len(snap.events)), 0))
 	}
-	if !claimSwitchOn(in, radarQuickSwitch) {
-		slog.Info("radar-inventory: radar-execute would do nothing: init dataConfig doesn't turn on " + radarQuickSwitch)
+	if !quickOpen {
+		slog.Info("radar-inventory: radar-execute would do nothing: " + why)
 	}
 	for _, d := range radarExecuteDecide(snap.events, radarDay, &st, radarExecuteMaxEvents, now.UnixMilli()) {
 		execute := d.action.String()

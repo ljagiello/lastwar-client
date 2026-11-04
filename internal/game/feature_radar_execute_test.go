@@ -60,13 +60,16 @@ func placedReply(p *sfs.SFSObject, skip ...int64) *sfs.SFSObject {
 	return r
 }
 
-// radarTestInit is an init with an open duel, Quick Execute on, an alliance and stamina
-// (lastStaminaTime now, so no regeneration); stamina < 0 leaves playerInfo out.
+// radarTestInit is an init with an open duel, Quick Execute on in season 6, an alliance and
+// stamina (lastStaminaTime now, so no regeneration); stamina < 0 leaves playerInfo out.
 func radarTestInit(stamina int64, inAlliance bool) *Init {
 	in := evInit(30, duelActivity())
 	dc := sfs.NewSFSObject()
 	dc.PutUtfString(radarQuickSwitch, "1")
 	in.Raw.PutSFSObject("dataConfig", dc)
+	season := sfs.NewSFSObject()
+	season.PutInt("seasonId", 6)
+	in.Raw.PutSFSObject("playerServerSeasonInfo", season)
 	if stamina >= 0 {
 		p := sfs.NewSFSObject()
 		p.PutInt("stamina", int32(stamina))
@@ -367,6 +370,98 @@ func TestRadarExecuteNeedsQuickExecute(t *testing.T) {
 	if err := runRadarExecute(conn, in); err != nil || len(fake.cmds()) != 0 {
 		t.Errorf("Quick Execute off: err %v, sent %v; want nothing", err, fake.cmds())
 	}
+}
+
+// TestRadarExecuteQuickExecuteGates is the B8 regression test: the client's Quick Execute also
+// needs season >= 2 (IsFuncOpen, RadarFakeUIMarchManager.lua:117-123; lw_function_season 106) and
+// radar level >= detect_config.k100 = 6 (DetectEventCompleteOneClickBtnView.lua:41-62). Below
+// either gate radar-execute sends nothing beyond get.detect.info; the season gate, read from init
+// playerServerSeasonInfo.seasonId with no open-season check, is decided before any request.
+func TestRadarExecuteQuickExecuteGates(t *testing.T) {
+	withSeason := func(set func(*sfs.SFSObject)) *Init {
+		in := radarTestInit(110, true)
+		s := sfs.NewSFSObject()
+		set(s)
+		in.Raw.PutSFSObject("playerServerSeasonInfo", s)
+		return in
+	}
+	seasonID := func(id int32) func(*sfs.SFSObject) { return func(s *sfs.SFSObject) { s.PutInt("seasonId", id) } }
+	ev := detectEv(1, 100, 0)
+	cases := []struct {
+		name     string
+		in       *Init
+		level    int64 // detectInfo.level; < 0 leaves it out
+		wantCmds []string
+		wantLog  string
+	}{
+		{"season 1", withSeason(seasonID(1)), 16, nil, "seasonId is 1 (present true)"},
+		{"season 0", withSeason(seasonID(0)), 16, nil, "seasonId is 0 (present true)"},
+		{"no seasonId", withSeason(func(*sfs.SFSObject) {}), 16, nil, "seasonId is 0 (present false)"},
+		{"radar level 5", radarTestInit(110, true), 5, []string{radarInfoCmd}, "detectInfo.level is 5 (present true)"},
+		{"no radar level", radarTestInit(110, true), -1, []string{radarInfoCmd}, "detectInfo.level is 0 (present false)"},
+		// Season 2 with the season closed (off-season or preview): the client still counts season 2,
+		// and level 6 is the first open level.
+		{"season 2 closed", withSeason(func(s *sfs.SFSObject) { s.PutInt("seasonId", 2); s.PutBool("open", false) }), 6,
+			[]string{radarInfoCmd, "hero.event.info.get", radarPickStartCmd, radarSamplingEndCmd}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			buf := captureVisitorLog(t)
+			info := detectReply(c.level, 10, ev)
+			if c.level < 0 {
+				d := sfs.NewSFSObject()
+				d.PutInt("eventNum", 10)
+				info.PutSFSObject("detectInfo", d)
+			}
+			var f *evFake
+			withRadarSleep(t, &f)
+			conn, fake := startRadarFake(t, radarOffDay(), []*sfs.SFSObject{info}, nil)
+			f = fake
+			if err := runRadarExecute(conn, c.in); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := fake.cmds(); !slices.Equal(got, c.wantCmds) {
+				t.Errorf("sent %v, want %v", got, c.wantCmds)
+			}
+			if c.wantLog != "" && !strings.Contains(buf.String(), c.wantLog) {
+				t.Errorf("log missing %q:\n%s", c.wantLog, buf.String())
+			}
+		})
+	}
+}
+
+// TestRadarExecuteStartsTalksWithoutPlacing is the B34 regression test: the client's batch
+// placement takes only PickGarbage, HELPER, DOMINATOR_CURE and SEASON_VISITOR tasks
+// (DetectEventCompleteOneClickBtnView.lua:104-131), and a PLOT task starts on a tap in any state
+// (DetectEventItem.lua:150-159), so a state-3 talk is started directly, never placed.
+func TestRadarExecuteStartsTalksWithoutPlacing(t *testing.T) {
+	info := detectReply(16, 10,
+		detectEv(4, 20000, radarStateNotInWorld), // talk, not on the map
+		detectEv(1, 100, radarStateNotInWorld),   // sampling, placed
+	)
+	var f *evFake
+	withRadarSleep(t, &f)
+	conn, fake := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{info}, nil)
+	f = fake
+	if err := runRadarExecute(conn, radarTestInit(110, true)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var placed []string
+	for _, r := range fake.requests() {
+		if r.Cmd == radarPlaceCmd {
+			placed = append(placed, r.Params.GetString("uuidList"))
+		}
+	}
+	if !slices.Equal(placed, []string{"1"}) {
+		t.Errorf("placed %q, want only the sampling task [1]", placed)
+	}
+	if got := radarUUIDs(fake, radarTalkStartCmd); !slices.Equal(got, []int64{4}) {
+		t.Errorf("talk starts %v, want [4]", got)
+	}
+	if got := radarUUIDs(fake, radarTalkEndCmd); !slices.Equal(got, []int64{4}) {
+		t.Errorf("talk ends %v, want [4]", got)
+	}
+	checkRadarSent(t, fake, radarDayAllowed)
 }
 
 func TestRadarExecuteClaimsWhatItFinishesOnRadarDays(t *testing.T) {

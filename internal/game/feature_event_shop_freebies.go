@@ -195,23 +195,26 @@ func evDayRewardDue(in *Init, info *sfs.SFSObject) bool {
 	return evNonEmpty(info, "dayReward") && evNotToday(in, info, "lastReceiveFreeTime")
 }
 
-// evFreeFlagDue is ActivityFreeRewardData's rule (ActivityFreeRewardData.lua:18-84), used by Gift
-// Box, Lucky Shop, Cooking and Banquet. The server sends no claim time, only a state flag read from
-// free_reward, then freeReward, then free (the last present wins; 0 claimable, 1 claimed), and the
-// pack's reward list from boxReward, reward (not for Gift Box), box_reward or free_reward.
-// free_reward can be either, so only numeric values count as the flag. Unlike the client, an
-// absent flag is not claimable here: which key each type sends needs a live capture.
+// evFreeFlagDue is ActivityFreeRewardData's rule (ActivityFreeRewardData.lua:3-10, 21-84), used by
+// Gift Box, Lucky Shop, Cooking and Banquet. The server sends no claim time, only a state flag. The
+// state starts at 0, claimable (:5), and ParseData overwrites it with free_reward, then freeReward,
+// then free, each when present (the last present wins; 0 claimable, 1 claimed, :36-51), so a reply
+// with none of the three keys stays claimable. The pack's reward list comes from boxReward, reward
+// (not for Gift Box), box_reward or free_reward. free_reward can be the list instead of the flag;
+// when the last present key is not a number the state is not 0 and CanGetFreePack (:21-25) says
+// no, so that case stays unclaimed.
 func evFreeFlagDue(o *sfs.SFSObject, rewardKey bool) bool {
 	if o == nil {
 		return false
 	}
-	state, hasState := int64(-1), false
+	state, isNum := int64(0), true
 	for _, k := range []string{"free_reward", "freeReward", "free"} {
-		if n, ok := evNum(o, k); ok {
-			state, hasState = n, true
+		if v, ok := o.Get(k); !ok || v.Val == nil || v.Val == false {
+			continue // `if param.k then` skips nil and false
 		}
+		state, isNum = evNum(o, k)
 	}
-	if !hasState || state != 0 {
+	if !isNum || state != 0 {
 		return false
 	}
 	keys := []string{"boxReward", "box_reward", "free_reward"}

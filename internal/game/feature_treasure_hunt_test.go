@@ -1,6 +1,7 @@
 package game
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -330,6 +331,29 @@ func TestTreasureHuntDiamondTripwire(t *testing.T) {
 	}
 	if n := len(fake.only(treasureHuntDigCmd)); n != 1 {
 		t.Errorf("tripped session sent another dig (%d total)", n)
+	}
+}
+
+// TestTreasureHuntTripwireFileKeepsTheFreeClaims: while the tripwire file exists the pickaxe digs
+// are refused, but the refusal doesn't halt the run, so the free tier and stored-reward claims
+// still go out.
+func TestTreasureHuntTripwireFileKeepsTheFreeClaims(t *testing.T) {
+	withEvNow(t, evTestNow)
+	tripwireTemp(t)
+	tripwireTrip("duel-speedups", duelSpeedupsBuildCmd, "a test trip")
+	f := &thFake{v2: true, id: 1000289, level: 4, big: 1, grandAt: 3, prize: "5;510026;2000|10;510026;4000", stored: 2}
+	conn, fake := startEvFake(t, f.reply)
+	if err := runTreasureHunt(conn, digsInit(4, evActivity(1000289))); !errors.Is(err, errTripwire) {
+		t.Errorf("err = %v, want the tripwire", err)
+	}
+	if n := len(fake.only(treasureHuntDigV2Cmd)); n != 0 {
+		t.Errorf("sent %d pickaxe digs while the tripwire file exists", n)
+	}
+	if n := len(fake.only(treasureHuntTierCmd)); n != 1 {
+		t.Errorf("sent %d tier claims, want 1", n)
+	}
+	if n := len(fake.only(treasureHuntStoredCmd)); n != 1 {
+		t.Errorf("sent %d stored-reward claims, want 1 (%v)", n, fake.cmds())
 	}
 }
 

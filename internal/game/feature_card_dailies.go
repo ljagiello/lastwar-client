@@ -2,6 +2,7 @@ package game
 
 import (
 	"fmt"
+	"sync"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -12,11 +13,13 @@ import (
 // golloes.active are never sent.
 //
 //   - Month card: month.card.reward {itemId: UtfString} while init golloesMonthCard.endTime (ms) is
-//     in the future and its time (ms, last claim) is not today (MonthCardNewInfo.lua:29-99).
+//     in the future and its time (ms, last claim) is not today (MonthCardNewInfo.lua:29-99). The
+//     client seeds itemId from the recharge row of type WelfareTagType.MonthCard (2) and lets init
+//     itemId override it (MonthCardNewManager.lua:33-44, MonthCardNewInfo.lua:41-44).
 //   - Week cards: get.week.card.info {isLogin: Int 1} lists them (week cards are not in init); a
 //     Collectable card (type_function 2) still running whose lastReceiveTime is not today is claimable,
 //     and receive.all.week.card.reward {} claims them all (WeekCardData.lua:124-150,
-//     WeekCardMain.lua:124-152).
+//     WeekCardMain.lua:124-152). The info read is shared with free-chests (weekCardInfo).
 //   - Hero month cards: get.hero.month.card.info {} -> cards[]; a bought card (buy 1) inside its
 //     window pays each reached rewardArr day still in state 0 with receive.hero.month.card.reward
 //     {activityId: Int, day: Long}; missed days stay claimable (HeroMonthCardManager.lua:108-127).
@@ -27,10 +30,11 @@ import (
 //     runs and init truckMonthCardPrivilege has freeReward, or vipReward with a running month card
 //     (UITruckRewardInsuranceView.lua:589-598).
 //
-// Not here: lw.season.week.card.daily.reward and the free chests (the week.month.card.reward.all
-// family, MASTER.md §4 #3); week.card.special.reward (whether one call claims every accrued day needs
-// a live capture); receive.golloes.daily.free.reward, gated on the Grocery Store (724000), which has
-// no rows in the 1.0.364 building tables.
+// Not here: the season week card's daily (lw.season.week.card.daily.reward, the opt-in
+// season-week-card feature, feature_season_week_card.go); the free chests (free-chests; the
+// week.month.card.reward.all claim-all is not sent, MASTER.md §4 #3); week.card.special.reward
+// (whether one call claims every accrued day needs a live capture); receive.golloes.daily.free.reward,
+// gated on the Grocery Store (724000), which has no rows in the 1.0.364 building tables.
 const (
 	monthCardRewardCmd     = "month.card.reward"
 	weekCardInfoCmd        = "get.week.card.info"
@@ -41,7 +45,38 @@ const (
 	truckPrivilegeCmd      = "truck.monthcard.privilege.click.reward"
 	golloesCampBuildingID  = 10145000 // LW_BUILD_PARKINGLOT_FOUR (EnumType.lua:3639)
 	weekCardCollectable    = 2        // WeekCardFucntionType.Collectable
+	// monthCardItemID is para1 of recharge row 1140000, the only row of type
+	// WelfareTagType.MonthCard (2, WelfareTagType.lua:4) in tables 39879.
+	monthCardItemID = "800001"
 )
+
+// weekCardInfoCache holds the one get.week.card.info reply of a login, keyed by (conn, init) like
+// ActivitySweep: the client sends it once, at login (WeekCardManager.lua:23-25), and both
+// card-dailies and free-chests read it.
+var (
+	weekCardInfoMu    sync.Mutex
+	weekCardInfoCache struct {
+		conn *session.GameConn
+		in   *Init
+		msg  *session.ExtensionMessage
+		err  error
+	}
+)
+
+// weekCardInfo returns the reply to get.week.card.info {isLogin: Int 1}, sending it on the first
+// call for (conn, in) only; the reply or the failure is returned as session.SendAndWait gave it.
+func weekCardInfo(conn *session.GameConn, in *Init) (*session.ExtensionMessage, error) {
+	weekCardInfoMu.Lock()
+	defer weekCardInfoMu.Unlock()
+	if c := &weekCardInfoCache; c.conn != nil && c.conn == conn && c.in == in {
+		return c.msg, c.err
+	}
+	p := sfs.NewSFSObject()
+	p.PutInt("isLogin", 1)
+	msg, err := session.SendAndWait(conn, "week card info", weekCardInfoCmd, p)
+	weekCardInfoCache.conn, weekCardInfoCache.in, weekCardInfoCache.msg, weekCardInfoCache.err = conn, in, msg, err
+	return msg, err
+}
 
 func init() {
 	registerFeature(Feature{
@@ -66,7 +101,11 @@ func runCardDailies(conn *session.GameConn, in *Init) error {
 	monthCardOwned := false
 	if end, ok := evNum(monthCard, "endTime"); ok && end > now {
 		monthCardOwned = true
-		if itemID := evString(monthCard, "itemId"); itemID != "" && evNotToday(in, monthCard, "time") {
+		itemID := evString(monthCard, "itemId")
+		if itemID == "" {
+			itemID = monthCardItemID
+		}
+		if evNotToday(in, monthCard, "time") {
 			p := sfs.NewSFSObject()
 			p.PutUtfString("itemId", itemID)
 			b.send("month card daily", monthCardRewardCmd, p)
@@ -102,10 +141,12 @@ func runCardDailies(conn *session.GameConn, in *Init) error {
 }
 
 func claimWeekCards(b *evBatch, in *Init, now int64) {
-	p := sfs.NewSFSObject()
-	p.PutInt("isLogin", 1)
-	msg := b.send("week card info", weekCardInfoCmd, p)
-	if msg == nil || msg.Params.Has("errorCode") {
+	if b.dead {
+		return
+	}
+	msg, err := weekCardInfo(b.conn, in)
+	b.add(err)
+	if err != nil || msg == nil || msg.Params.Has("errorCode") {
 		return
 	}
 	for _, c := range evObjects(msg.Params, "weekCards") {

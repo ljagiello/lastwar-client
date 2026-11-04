@@ -348,6 +348,50 @@ func TestDuelRecruitPicksTheClientsPoolPerTicket(t *testing.T) {
 	}
 }
 
+func TestDuelRecruitKeepsTicketsForAWishPoolWithNoWishHero(t *testing.T) {
+	// The init lotteryFreeInfo wish fields (LotteryInfo.lua:284-295); 221708 has a wish list in
+	// officer_recruit 39879, 221700 has none.
+	wish := func(id string, order int, on bool, receive int, hero string) *sfs.SFSObject {
+		p := duelPool(id, order, "230006;1|230006;10")
+		p.PutBool("wishSwitch", on)
+		p.PutInt("wishPityReceiveNum", int32(receive))
+		p.PutUtfString("wishHero", hero)
+		return p
+	}
+	for name, c := range map[string]struct {
+		pools []*sfs.SFSObject
+		want  []string
+	}{
+		"no wish hero":           {[]*sfs.SFSObject{wish("221708", 2, true, 200, "")}, nil},
+		"wish hero chosen":       {[]*sfs.SFSObject{wish("221708", 2, true, 200, "50006")}, []string{"221708:1"}},
+		"no wish list":           {[]*sfs.SFSObject{wish("221700", 2, true, 200, "")}, []string{"221700:1"}},
+		"pool newer than 39879":  {[]*sfs.SFSObject{wish("221709", 2, true, 200, "")}, nil},
+		"wish switched off":      {[]*sfs.SFSObject{wish("221708", 2, false, 200, "")}, []string{"221708:1"}},
+		"no wish pity to aim at": {[]*sfs.SFSObject{wish("221708", 2, true, 0, "")}, []string{"221708:1"}},
+		// The ticket is kept, not spent on a later tab the player didn't pick.
+		"later tab, same ticket": {[]*sfs.SFSObject{wish("221708", 5, true, 200, ""), duelPool("221700", 2, "230006;1|230006;10")}, nil},
+	} {
+		in := duelRecruitInit(1000, map[string]int{"230006": 10}, c.pools...)
+		conn, f := startDuelSpendFake(t, duelTestDay(DuelThemeHeroes, duelTestHeroes), duelRecruitServer(1000, 0))
+		if err := runDuelRecruitTickets(conn, in); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := pullsOf(t, f); !slices.Equal(got, c.want) {
+			t.Errorf("%s: pulls %v, want %v", name, got, c.want)
+		}
+	}
+	// The table copy matches officer_recruit 39879: the nine wish pools, and 27 rows in all.
+	n := 0
+	for _, has := range duelRecruitWishLists {
+		if has {
+			n++
+		}
+	}
+	if len(duelRecruitWishLists) != 27 || n != 9 || !duelRecruitWishLists["221708"] {
+		t.Errorf("duelRecruitWishLists: %d rows, %d with a wish list; want 27 and 9, 221708 among them", len(duelRecruitWishLists), n)
+	}
+}
+
 func TestDuelRecruitLeavesSinglesWhileTheFreePullIsDue(t *testing.T) {
 	pool := duelPool("221700", 2, "230006;1|230006;10")
 	pool.PutInt("dailyFreeLimit", 1)

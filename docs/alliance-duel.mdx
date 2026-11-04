@@ -137,7 +137,7 @@ A chest is claimable when `userScore.score` has reached its target, its flag isn
 
 Every optional feature in `goclient` can declare the duel score types it earns (`Feature.Duel`, a list of `{Type, Value}`; an empty `Value` matches any). A feature with `Hold` set runs only on a day whose entry lists one of those types. With no current entry (Sunday, not in an alliance, the read failed) a held feature stays held. `-list-features` shows each feature's policy as `duel:hold`, `duel:always`, or `duel:-`.
 
-- **`duelPolicy`** in the session config overrides a feature's default: `{"duelPolicy": {"radar-claims": "always"}}`. Valid values are `hold` and `always`.
+- **`duelPolicy`** in the session config overrides a feature's default: `{"duelPolicy": {"radar-claims": "always"}}`. Valid values are `hold` and `always`. An entry for an unknown feature, or with any other value (the match is exact, so `Hold` is ignored too), is warned about and ignored, so that feature keeps its default.
 - **`-run <feature>`** of a held feature is refused with the reason; **`-run-anyway`** runs it regardless. A spend feature still checks today's scoring list inside its run, so `-run-anyway` on a non-scoring day sends nothing.
 - **Status line:** with any feature enabled, every run logs one `alliance duel` line: theme, score, next chest, and day end.
 
@@ -169,6 +169,7 @@ building.camp.accel {uuid: Long, itemId: "tmpl;n|..."}                          
 - **The diamond forms** are a `useGold` key (`BuildCcdMNewMessage.lua:12-16`, `QueueCcdMNewMessage.lua:10-12`, `BuildingCampAccelMessage.lua:9-11`) and, for `queue.ccd.m.new`, an empty `itemIDs`, which is the client's own instant finish (`ArmyManager.lua:199-203`). `golloesSpeedTime` spends a different free-time pool.
 - **No `isGold` on the wire.** The UI passes `isGold` to `queue.ccd.m.new`, but the message class never puts it on the wire (`QueueCcdMNewMessage.lua:3-17`).
 - **`goclient`'s guard.** `duel-speedups` refuses any key outside the three items-only sets above, an empty or malformed item string, and a count above the owned count from init `items`. It also stops for the rest of the process if a reply shows the diamond balance falling or lacks `itemCostArr` for the items sent.
+- **The tripwire outlives the run.** When `duel-speedups`, `duel-recruit-tickets`, `duel-troop-training`, `secret-tasks-start` or a dig game trips, the first observed diamond drop is also written to `<session config>.tripwire.json` (time, feature, command, reason). A `duel-speedups` reply that only lacks a field it checks (`itemCostArr`, the camp's `gold`) halts that run but writes no file. While the file exists, every duel spend, the Treasure Hunt pickaxe digs and `treasure-digs`' brick opens refuse to run, in later runs too, with a warning naming the file; every run also warns at startup, and a `-collect` run exits 1. Free dig claims (vault stones, hammers, chests) and the read-only `-plan` features still run. An unreadable file counts as a trip. After checking the account, remove the file, or run `lastwar-client -clear-tripwire` (with `-config` when the session config isn't the default one).
 
 Speed-up goods (`goods` table, static-analysis-only): `type2` is the menu, `para3` the seconds.
 
@@ -182,7 +183,13 @@ Speed-up goods (`goods` table, static-analysis-only): `type2` is the menu, `para
 
 ### Radar tasks
 
-`radar-execute` runs the client's Quick Execute flows for the march-free task types `{6, 18, 26, 44}`, only while init `dataConfig` turns on `radar_quick_operation_switch` (`RadarFakeUIMarchManager.lua:105-111`):
+`radar-execute` runs the client's Quick Execute flows for the march-free task types `{6, 18, 26, 44}` and talks (type 14), only while the client's Quick Execute is open. That takes three gates, each logged when closed:
+
+- init `dataConfig` turns on `radar_quick_operation_switch`;
+- the account is in season 2 or later, from init `playerServerSeasonInfo.seasonId` (`IsFuncOpen`, `RadarFakeUIMarchManager.lua:117-123`; `lw_function_season` row 106, `FunctionSeasonUtil.lua:1-68`), checked before any request;
+- the radar is at level 6 or above (`detect_config.k100`; `DetectEventCompleteOneClickBtnView.lua:41-62`), from the `get.detect.info` reply's `level`. A missing level counts as closed.
+
+Only types 6, 18, 26 and 44 are placed on the map; a talk starts without placing (`DetectEventCompleteOneClickBtnView.lua:104-131`, `DetectEventItem.lua:150-159`):
 
 ```text
 detect.event.batch.put.point.in.world {uuidList: "uuid|uuid"}       // state 3 → 0

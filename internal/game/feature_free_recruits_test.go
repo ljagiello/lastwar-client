@@ -79,6 +79,7 @@ func TestFreeRecruitsPullsOnlyFreePools(t *testing.T) {
 	now := time.Now()
 	in := freeRecruitsInit([]int32{401100},
 		heroPool{id: "221500", limit: 1, next: now.Add(-time.Minute).Unix(), item: "230006;1|230006;10"},                        // free now
+		heroPool{id: "221501", limit: 1, next: 0},                                                                               // timer 0: free (LotteryInfo.lua:361-365)
 		heroPool{id: "221600", limit: 1, next: now.Add(time.Hour).Unix()},                                                       // timer running
 		heroPool{id: "221700", limit: 0, next: now.Add(-time.Hour).Unix()},                                                      // no free pulls
 		heroPool{id: "221701", limit: 1, next: -1},                                                                              // timer missing
@@ -90,7 +91,7 @@ func TestFreeRecruitsPullsOnlyFreePools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	want := []string{freeRecruitsHeroCmd, freeRecruitsWorkerInfoCmd, freeRecruitsWorkerCmd}
+	want := []string{freeRecruitsHeroCmd, freeRecruitsHeroCmd, freeRecruitsWorkerInfoCmd, freeRecruitsWorkerCmd}
 	if got := fake.cmds(); !slices.Equal(got, want) {
 		t.Fatalf("sent %v, want %v", got, want)
 	}
@@ -102,8 +103,80 @@ func TestFreeRecruitsPullsOnlyFreePools(t *testing.T) {
 	if v, ok := hero.Get("aiPushStatus"); !ok || len(v.Val.(*sfs.SFSObject).Keys()) != 5 {
 		t.Errorf("aiPushStatus = %v, want the five default switches", v)
 	}
-	if reqs[1].Params.GetInt("officerId") != 401100 || reqs[2].Params.GetInt("officerId") != 401100 {
-		t.Errorf("worker requests carried officerId %d / %d, want 401100", reqs[1].Params.GetInt("officerId"), reqs[2].Params.GetInt("officerId"))
+	if id := reqs[1].Params.GetString("id"); id != "221501" {
+		t.Errorf("second hero pull id = %q, want 221501 (timer 0)", id)
+	}
+	if reqs[2].Params.GetInt("officerId") != 401100 || reqs[3].Params.GetInt("officerId") != 401100 {
+		t.Errorf("worker requests carried officerId %d / %d, want 401100", reqs[2].Params.GetInt("officerId"), reqs[3].Params.GetInt("officerId"))
+	}
+}
+
+// TestFreeRecruitsWorkerTimerAbsentOrZeroIsFree is B21 for the survivor draw: the client's
+// WorkerLotteryInfo starts at nextFreeTime 0 and keeps it when the info reply omits the field, and
+// CanFreeRecruit is now >= nextFreeTime/1000 (WorkerLotteryInfo.lua:3-6, 13-20, 31-35), so both
+// draw (useFree 1, isTen 0 only, checked by runFreeRecruitsFake).
+func TestFreeRecruitsWorkerTimerAbsentOrZeroIsFree(t *testing.T) {
+	for name, nextMs := range map[string]int64{"absent": -1, "zero": 0} {
+		t.Run(name, func(t *testing.T) {
+			fake, err := runFreeRecruitsFake(t, freeRecruitsInit([]int32{401100}), nextMs, rewardOK())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got, want := fake.cmds(), []string{freeRecruitsWorkerInfoCmd, freeRecruitsWorkerCmd}; !slices.Equal(got, want) {
+				t.Errorf("sent %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestFreeRecruitsWorkerTimerFromInit: the client also seeds WorkerLotteryInfo from init
+// workers.workerLottery (WorkerDataManager.lua:71, 93-96), and a reply without nextFreeTime keeps
+// that value (WorkerLotteryInfo.lua:13-20). A running init timer is not free; a reply's own value
+// overrides it.
+func TestFreeRecruitsWorkerTimerFromInit(t *testing.T) {
+	now := time.Now()
+	withInitTimer := func(nextMs int64) *Init {
+		in := freeRecruitsInit([]int32{401100})
+		lottery := sfs.NewSFSObject()
+		lottery.PutLong("nextFreeTime", nextMs)
+		workers := sfs.NewSFSObject()
+		workers.PutSFSObject("workerLottery", lottery)
+		in.Raw.PutSFSObject("workers", workers)
+		return in
+	}
+	for name, c := range map[string]struct {
+		initMs, replyMs int64
+		want            []string
+	}{
+		"init timer running, reply silent": {now.Add(time.Hour).UnixMilli(), -1, []string{freeRecruitsWorkerInfoCmd}},
+		"init timer passed, reply silent":  {now.Add(-time.Hour).UnixMilli(), -1, []string{freeRecruitsWorkerInfoCmd, freeRecruitsWorkerCmd}},
+		"reply overrides the init timer":   {now.Add(time.Hour).UnixMilli(), 0, []string{freeRecruitsWorkerInfoCmd, freeRecruitsWorkerCmd}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, err := runFreeRecruitsFake(t, withInitTimer(c.initMs), c.replyMs, rewardOK())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := fake.cmds(); !slices.Equal(got, c.want) {
+				t.Errorf("sent %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestFreeRecruitsWorkerNonNumericTimerIsNotFree: a nextFreeTime that is present but not a number
+// is not read as 0.
+func TestFreeRecruitsWorkerNonNumericTimerIsNotFree(t *testing.T) {
+	conn, fake := startRewardFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
+		resp := sfs.NewSFSObject()
+		resp.PutBool("nextFreeTime", true)
+		return resp
+	})
+	if err := runFreeRecruits(conn, freeRecruitsInit([]int32{401100})); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := fake.cmds(); !slices.Equal(got, []string{freeRecruitsWorkerInfoCmd}) {
+		t.Errorf("sent %v, want only the info read", got)
 	}
 }
 
@@ -117,7 +190,6 @@ func TestFreeRecruitsSkipsWhenNotFree(t *testing.T) {
 		"no init":              {&Init{}, 0, nil},
 		"no officer ids":       {freeRecruitsInit(nil), 0, nil},
 		"worker timer running": {freeRecruitsInit([]int32{401100}), now.Add(time.Hour).UnixMilli(), []string{freeRecruitsWorkerInfoCmd}},
-		"worker timer missing": {freeRecruitsInit([]int32{401100}), -1, []string{freeRecruitsWorkerInfoCmd}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fake, err := runFreeRecruitsFake(t, c.in, c.nextMs, rewardOK())

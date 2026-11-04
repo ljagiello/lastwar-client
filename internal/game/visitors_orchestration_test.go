@@ -253,46 +253,38 @@ func TestGreetVisitorsDoesNotAbortOnTimeoutNetError(t *testing.T) {
 	}
 }
 
-// TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation is the round-24 regression test for
-// ParseInitVisitors' maxNum enforcement (visitors.go): the init push's own `visitor.maxNum` sibling
-// field (see the Visitor doc comment) is now read and used to cap `visitor.list` before GreetVisitors
-// ever sees the parsed slice -- closing the unbounded-hang threat model the round-24 audit reopened:
-// a hostile or misbehaving peer could otherwise pad visitor.list arbitrarily, and each greet costs up
-// to a full defaultCmdTimeout (conn.go) against a peer that never responds.
+// TestFetchBuildingsKeepsVisitorsBeyondMaxNum is the B42 regression test: ParseInitVisitors used to
+// cut visitor.list at maxNum, but the client keeps every entry (InitData,
+// CityVisitorManager.lua:341-357) and maxNum bounds only Queue1 (GetNewVisitorInfo, :187-205).
+// Queue2 holds queue types 2, 4, 7, 8, 11 and 19 (Const.lua:25-41), so a full timed queue of five
+// plus a SystemGift (queue type 8) is a legitimate six-entry list with maxNum 5.
 //
-// This covers the full real-world path in two stages. First, a fake server sends a single `init`
-// push whose visitor.list carries wantVisitors entries (well over a deliberately small maxNum=3)
-// through FetchBuildings (buildings.go) -- the sole call site ParseInitVisitors is actually reached
-// from -- and asserts the returned slice has exactly maxNum entries plus the truncation warning was
-// logged. Second, GreetVisitors is run on that already-capped slice against its own fake server that
-// only answers maxNum requests before returning: if GreetVisitors (or ParseInitVisitors before it)
-// ever regressed to processing the full wantVisitors list, GreetVisitors' 4th request would hang with
-// nobody left to answer it, and this test's own done-channel wait would time out.
-//
-// Mutation check: reverting ParseInitVisitors' cap loop in visitors.go back to appending every
-// visitor.list entry unconditionally makes this test fail at the FetchBuildings stage already (len
-// (visitors) == wantVisitors instead of maxNum, no truncation warning logged) -- the second stage
-// would then also time out waiting for a 4th request nobody in the greet-server loop is there to
-// answer.
-func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T) {
-	const (
-		maxNum       = 3
-		wantVisitors = 8 // well over maxNum
-	)
+// It drives the real path: a fake server sends one `init` push through FetchBuildings, the sole
+// call site ParseInitVisitors is reached from, and GreetVisitors then greets all six against a
+// server that answers exactly six requests. Before the fix FetchBuildings returned five and the
+// SystemGift visitor was never greeted.
+func TestFetchBuildingsKeepsVisitorsBeyondMaxNum(t *testing.T) {
+	const maxNum = 5
 
 	initClient, initServer := session.NewPipeGameConnPair(t)
-
 	initDone := make(chan struct{})
 	go func() {
 		defer close(initDone)
 		list := sfs.NewSFSArray()
-		for i := range wantVisitors {
+		for i := range maxNum {
 			v := sfs.NewSFSObject()
 			v.PutLong("uid", int64(5000+i))
-			v.PutInt("eventId", 2001+int32(i)) // 2001-2008: GIFT visitors, on the greet allowlist
+			v.PutInt("eventId", 2001+int32(i)) // GIFT visitors in the timed queue
+			v.PutInt("type", 0)                // GEN_BY_TIME, Queue1
 			v.PutInt("visitorId", 6)
 			list.AddSFSObject(v)
 		}
+		gift := sfs.NewSFSObject()
+		gift.PutLong("uid", 5005)
+		gift.PutInt("eventId", 21001) // SystemGift
+		gift.PutInt("type", 8)        // SystemGift queue type, Queue2
+		gift.PutInt("visitorId", 6)
+		list.AddSFSObject(gift)
 		visitor := sfs.NewSFSObject()
 		visitor.PutInt("maxNum", maxNum)
 		visitor.PutSFSArray("list", list)
@@ -304,84 +296,49 @@ func TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation(t *testing.T
 		_ = initServer.RawConn().Close() // see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment (buildings_orchestration_test.go): ends the test fast instead of waiting out the post-init 3s window
 	}()
 
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-
+	buf := captureVisitorLog(t)
 	_, visitors, err := FetchBuildings(initClient, 2*time.Second)
-	slog.SetDefault(orig)
 
 	select {
 	case <-initDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("fake init-push server goroutine never finished")
 	}
-
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("FetchBuildings() error = %v, want an error wrapping io.EOF (expected fake-server-hangup artifact, see TestFetchBuildingsInitPushParsesBuildingsAndVisitors' doc comment)", err)
 	}
-	if len(visitors) != maxNum {
-		t.Fatalf("FetchBuildings parsed %d visitors, want exactly %d (the init push's own maxNum=%d field, not the full %d-entry visitor.list)", len(visitors), maxNum, maxNum, wantVisitors)
+	if len(visitors) != maxNum+1 {
+		t.Fatalf("FetchBuildings parsed %d visitors, want all %d (maxNum %d bounds only the timed queue)", len(visitors), maxNum+1, maxNum)
 	}
 	for i, v := range visitors {
 		if want := int64(5000 + i); v.Uid() != want {
-			t.Errorf("visitors[%d].Uid() = %d, want %d (the first %d visitors, in order)", i, v.Uid(), want, maxNum)
+			t.Errorf("visitors[%d].Uid() = %d, want %d (list order)", i, v.Uid(), want)
 		}
 	}
-
-	if logged := buf.String(); !strings.Contains(logged, "visitor.list longer than cap") {
-		t.Errorf("expected a truncation warning log from ParseInitVisitors, got:\n%s", logged)
+	logged := buf.String()
+	if !strings.Contains(logged, `msg="visitor.list is longer than maxNum, which bounds only the timed queue; keeping every entry" listLen=6 maxNum=5`) {
+		t.Errorf("expected the listLen/maxNum Info line, got:\n%s", logged)
+	}
+	if strings.Contains(logged, "truncating") {
+		t.Errorf("a six-entry list must not be truncated, got:\n%s", logged)
 	}
 
-	// Second stage: prove GreetVisitors itself only ever attempts a greet for the already-capped
-	// slice FetchBuildings returned, not the original wantVisitors-sized list -- a fake server that
-	// answers only maxNum requests before its goroutine returns.
-	greetClient, greetServer := session.NewPipeGameConnPair(t)
-
-	var gotUids []int64
-	greetDone := make(chan struct{})
-	go func() {
-		defer close(greetDone)
-		for range maxNum {
-			env, err := greetServer.ReadEnvelope()
-			if err != nil {
-				return
-			}
-			msg, ok := env.AsExtension()
-			if !ok {
-				return
-			}
-			gotUids = append(gotUids, msg.Params.GetLong("uid"))
-			resp := sfs.NewSFSObject()
-			resp.PutBool("success", true)
-			_ = greetServer.SendExtension(msg.Cmd, resp)
-		}
-	}()
-
+	greetClient, stop := serveVisitorCmds(t, visitorOK)
 	if err := GreetVisitors(greetClient, visitors); err != nil {
 		t.Fatalf("GreetVisitors() = %v, want nil", err)
 	}
-
-	select {
-	case <-greetDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("fake greet server never finished reading the expected requests (a broken cap would leave GreetVisitors sending more requests than the fake server answers, or a broken slice would send fewer)")
+	got := stop()
+	if len(got) != maxNum+1 {
+		t.Fatalf("server saw %d greets, want %d", len(got), maxNum+1)
 	}
-
-	if len(gotUids) != maxNum {
-		t.Fatalf("fake greet server received %d requests, want exactly %d", len(gotUids), maxNum)
-	}
-	for i, uid := range gotUids {
-		if want := int64(5000 + i); uid != want {
-			t.Errorf("gotUids[%d] = %d, want %d (the first %d visitors, in order)", i, uid, want, maxNum)
-		}
+	if uid := got[maxNum].params.GetLong("uid"); uid != 5005 {
+		t.Errorf("last greet uid = %d, want the SystemGift visitor 5005", uid)
 	}
 }
 
 // newVisitorInitParams builds a bare `init` push's top-level params carrying just the
 // `visitor={maxNum, list}` sibling field ParseInitVisitors reads (see the Visitor doc comment in
-// visitors.go). maxNum is omitted entirely when hasMaxNum is false, exercising the
-// maxVisitorsDefensiveCeiling fallback path exactly like a real push that never sends the field.
+// visitors.go). maxNum is omitted entirely when hasMaxNum is false.
 func newVisitorInitParams(hasMaxNum bool, maxNum int32, listLen int) *sfs.SFSObject {
 	list := sfs.NewSFSArray()
 	for i := range listLen {
@@ -401,143 +358,58 @@ func newVisitorInitParams(hasMaxNum bool, maxNum int32, listLen int) *sfs.SFSObj
 	return params
 }
 
-// TestParseInitVisitorsFallbackCeilingTruncatesWithoutMaxNum is the round-25 regression test proving
-// maxVisitorsDefensiveCeiling's own FALLBACK branch (visitors.go) -- used when the init push's
-// `visitor.maxNum` field is absent, unparseable, or <= 0 -- actually truncates. Every other test in
-// this file that drives ParseInitVisitors through a real push (see
-// TestGreetVisitorsOnlyGreetsUpToInitPushMaxNumAndLogsTruncation above) always supplies an explicit
-// positive maxNum well under 25, so the fallback ceiling itself had never actually been exercised: a
-// regression breaking the fallback branch (e.g. defaulting `limit` to 0, or to an unbounded value)
-// could have shipped undetected.
-//
-// The init push here omits `maxNum` entirely and supplies a visitor.list well over
-// maxVisitorsDefensiveCeiling (25) entries -- asserting ParseInitVisitors truncates to exactly 25, in
-// list order, and logs the truncation warning.
-//
-// Mutation check: reverting the `limit := maxVisitorsDefensiveCeiling` fallback initializer in
-// visitors.go's ParseInitVisitors to `limit := len(arr.items)` (i.e. no cap at all when maxNum is
-// absent) makes this test fail with len(out) == wantListLen instead of
-// maxVisitorsDefensiveCeiling, and no truncation warning logged.
-func TestParseInitVisitorsFallbackCeilingTruncatesWithoutMaxNum(t *testing.T) {
-	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
-
-	params := newVisitorInitParams(false, 0, wantListLen)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	out := ParseInitVisitors(params)
-	slog.SetDefault(orig)
-
-	if len(out) != maxVisitorsDefensiveCeiling {
-		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (the fallback ceiling -- no maxNum field was present)", len(out), maxVisitorsDefensiveCeiling)
-	}
-	for i, v := range out {
-		if want := int64(9000 + i); v.Uid() != want {
-			t.Errorf("out[%d].Uid() = %d, want %d (the first %d visitors, in order)", i, v.Uid(), want, maxVisitorsDefensiveCeiling)
+// TestParseInitVisitorsCapsAtUpperBound: the list is server-sent, so MaxVisitorsUpperBound, not
+// maxNum, bounds it -- a hostile maxNum=50000 with 50000 entries, or no maxNum at all, still parses
+// exactly the first 300, in order, with a truncation Warn. GreetVisitors trusts the slice it gets,
+// so this is what bounds its sequential worst case.
+func TestParseInitVisitorsCapsAtUpperBound(t *testing.T) {
+	const listLen = 50000
+	for _, hasMaxNum := range []bool{true, false} {
+		buf := captureVisitorLog(t)
+		out := ParseInitVisitors(newVisitorInitParams(hasMaxNum, listLen, listLen))
+		if len(out) != MaxVisitorsUpperBound {
+			t.Fatalf("hasMaxNum=%v: parsed %d visitors, want exactly %d", hasMaxNum, len(out), MaxVisitorsUpperBound)
 		}
-	}
-	if logged := buf.String(); !strings.Contains(logged, "visitor.list longer than cap") {
-		t.Errorf("expected a truncation warning log from ParseInitVisitors' fallback ceiling, got:\n%s", logged)
+		for i, v := range out {
+			if want := int64(9000 + i); v.Uid() != want {
+				t.Errorf("hasMaxNum=%v: out[%d].Uid() = %d, want %d (the first %d visitors, in order)", hasMaxNum, i, v.Uid(), want, MaxVisitorsUpperBound)
+			}
+		}
+		if logged := buf.String(); !strings.Contains(logged, "visitor.list longer than cap; truncating") {
+			t.Errorf("hasMaxNum=%v: expected a truncation warning, got:\n%s", hasMaxNum, logged)
+		}
 	}
 }
 
-// TestParseInitVisitorsClampsInflatedMaxNumToUpperBound is the round-25 regression test for the fix
-// closing the finding that ParseInitVisitors' cap was fully bypassable: it used to defer entirely to
-// the server-supplied `maxNum` field with only a `> 0` sanity check and no upper bound, so a hostile
-// or misbehaving -cs-ip peer could set maxNum to an enormous value (paired with a matching number of
-// visitor.list entries, well within sfsobject.go's sfs.MaxDecodedNodes=300,000 decode budget) and
-// completely defeat maxVisitorsDefensiveCeiling's own protection -- GreetVisitors trusts whatever
-// slice ParseInitVisitors hands it entirely, so this directly reopened the unbounded sequential
-// wall-clock cost maxVisitorsDefensiveCeiling (round 24) was introduced to bound.
-//
-// The init push here sets an obviously-hostile maxNum=50000 alongside a matching 50000-entry
-// visitor.list -- proving ParseInitVisitors now clamps to maxVisitorsUpperBound (300), not to the
-// attacker-supplied maxNum, and logs the clamp-triggered warning.
-//
-// Mutation check: reverting ParseInitVisitors' `if maxNum := ...; maxNum > 0 { limit =
-// int(maxNum) }` in visitors.go back to omitting the maxVisitorsUpperBound clamp entirely makes this
-// test fail with len(out) == maxVisitorsUpperBound-worth-exceeding count (up to the full 50000-entry
-// list) instead of 300, and no clamp warning logged.
-func TestParseInitVisitorsClampsInflatedMaxNumToUpperBound(t *testing.T) {
-	const hostileMaxNum = 50000
-
-	params := newVisitorInitParams(true, hostileMaxNum, hostileMaxNum)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	out := ParseInitVisitors(params)
-	slog.SetDefault(orig)
-
-	if len(out) != MaxVisitorsUpperBound {
-		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (the hardcoded upper bound -- the server-supplied maxNum=%d must not be trusted verbatim)", len(out), MaxVisitorsUpperBound, hostileMaxNum)
-	}
-	for i, v := range out {
-		if want := int64(9000 + i); v.Uid() != want {
-			t.Errorf("out[%d].Uid() = %d, want %d (the first %d visitors, in order)", i, v.Uid(), want, MaxVisitorsUpperBound)
+// TestParseInitVisitorsUpperBoundBoundary drives both sides of the cap with well-formed entries,
+// so an off-by-one in either the truncation warning or the loop shows in len(out) itself.
+func TestParseInitVisitorsUpperBoundBoundary(t *testing.T) {
+	for _, c := range []struct {
+		listLen  int
+		wantWarn bool
+	}{{MaxVisitorsUpperBound, false}, {MaxVisitorsUpperBound + 1, true}} {
+		buf := captureVisitorLog(t)
+		out := ParseInitVisitors(newVisitorInitParams(true, 5, c.listLen))
+		if len(out) != MaxVisitorsUpperBound {
+			t.Errorf("listLen %d: parsed %d visitors, want %d", c.listLen, len(out), MaxVisitorsUpperBound)
 		}
-	}
-	if logged := buf.String(); !strings.Contains(logged, "visitor.maxNum exceeds upper sanity bound; clamping") {
-		t.Errorf("expected a clamp warning log from ParseInitVisitors, got:\n%s", logged)
-	}
-}
-
-// TestParseInitVisitorsMaxNumExactlyAtUpperBoundDoesNotClamp is the round-42 regression test for
-// the MINOR finding that TestParseInitVisitorsClampsInflatedMaxNumToUpperBound above only proves
-// the clamp fires at maxNum=50000, far above the 300 boundary -- it never exercises the boundary
-// itself, so a regression tightening visitors.go's `limit > maxVisitorsUpperBound` to an off-by-one
-// `>=` would incorrectly clamp (and warn on) a maxNum that is exactly, legitimately
-// maxVisitorsUpperBound, with zero test signal. Confirmed via mutation testing: that exact `>=`
-// tightening passed TestParseInitVisitorsClampsInflatedMaxNumToUpperBound unchanged. Sends
-// maxNum == maxVisitorsUpperBound (the boundary value itself, not inflated) and proves ParseInitVisitors
-// returns exactly maxVisitorsUpperBound visitors with NO clamp warning -- distinguishing "this is
-// the legitimate boundary" from "this needed clamping."
-func TestParseInitVisitorsMaxNumExactlyAtUpperBoundDoesNotClamp(t *testing.T) {
-	params := newVisitorInitParams(true, MaxVisitorsUpperBound, MaxVisitorsUpperBound)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	out := ParseInitVisitors(params)
-	slog.SetDefault(orig)
-
-	if len(out) != MaxVisitorsUpperBound {
-		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (the boundary value, none of which should be dropped)", len(out), MaxVisitorsUpperBound)
-	}
-	if logged := buf.String(); strings.Contains(logged, "visitor.maxNum exceeds upper sanity bound; clamping") {
-		t.Errorf("expected NO clamp warning for maxNum exactly at the upper bound, got:\n%s", logged)
+		if warned := strings.Contains(buf.String(), "visitor.list longer than cap; truncating"); warned != c.wantWarn {
+			t.Errorf("listLen %d: truncation warning = %v, want %v:\n%s", c.listLen, warned, c.wantWarn, buf.String())
+		}
 	}
 }
 
 // TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput is the round-26 regression test for
-// ParseInitVisitors' iteration-count fix (visitors.go): the round-24/25 cap (maxVisitorsDefensiveCeiling
-// / maxVisitorsUpperBound) only ever bounded the number of VALID entries appended to the returned
-// slice -- the loop's break condition was `len(out) >= limit`, checked only after a successful
-// requirePresentField pass. A malformed entry (missing the required "uid" field) hit a `continue`
-// that didn't advance len(out) at all, so it never counted against the cap, even though
-// requirePresentField itself logs a Warn for every single one of them. Since the raw `visitor.list`
-// array is bounded only by sfsobject.go's much larger sfs.MaxDecodedNodes=300,000 decode budget, a
-// hostile peer could pad visitor.list with malformed entries and force ParseInitVisitors to scan (and
-// log-warn on) all of them regardless of how small the configured cap was.
+// ParseInitVisitors' iteration-count fix: the cap must bound the RAW visitor.list items examined,
+// not just the valid ones appended. A malformed entry (no "uid") logs its own Warn and never
+// reaches the append, so a loop that stopped at `len(out) >= cap` would scan, and warn on, every
+// entry of a list padded with malformed ones (sfs.MaxDecodedNodes=300,000 is the only other bound).
+// Counting the "missing uid" warnings, not len(out) (0 either way), is what catches it.
 //
-// The init push here supplies a small maxNum well under maxVisitorsDefensiveCeiling, and a
-// visitor.list made entirely of malformed entries (no "uid" field) numbering far more than that cap.
-// Since every entry is malformed, len(out) stays 0 throughout the whole scan -- so the old
-// `len(out) >= limit` break condition would never fire, and the loop would examine (and
-// requirePresentField would log a warning for) every one of the wantMalformed entries instead of
-// stopping at maxNum. Counting the "skipping visitor.list entry with no uid field" warnings actually
-// logged, rather than just asserting len(out), is what makes this test capable of catching the
-// unbounded-scan regression at all: len(out) would be 0 either way, fixed or broken.
-//
-// Mutation check: reverting the loop's `for i, item := range arr.items { if i >= limit { break }
-// ...}` in visitors.go back to `for _, item := range arr.items { if len(out) >= limit { break } ...}`
-// makes this test fail with a logged-warning count of wantMalformed instead of maxNum.
+// Mutation check: changing the loop's `if i >= MaxVisitorsUpperBound { break }` to
+// `if len(out) >= MaxVisitorsUpperBound { break }` makes this fail with wantMalformed warnings.
 func TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput(t *testing.T) {
-	const (
-		maxNum        = 3
-		wantMalformed = maxNum * 50 // far more malformed entries than the cap
-	)
+	const wantMalformed = MaxVisitorsUpperBound * 3
 
 	list := sfs.NewSFSArray()
 	for i := range wantMalformed {
@@ -547,71 +419,21 @@ func TestParseInitVisitorsCapsRawItemsExaminedNotJustValidOutput(t *testing.T) {
 		list.AddSFSObject(v)
 	}
 	visitor := sfs.NewSFSObject()
-	visitor.PutInt("maxNum", maxNum)
+	visitor.PutInt("maxNum", 3)
 	visitor.PutSFSArray("list", list)
 	params := sfs.NewSFSObject()
 	params.PutSFSObject("visitor", visitor)
 
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	buf := captureVisitorLog(t)
 	out := ParseInitVisitors(params)
-	slog.SetDefault(orig)
 
 	if len(out) != 0 {
 		t.Fatalf("ParseInitVisitors parsed %d visitors, want 0 (every entry in this test is malformed -- missing uid)", len(out))
 	}
-
-	gotWarnings := strings.Count(buf.String(), "skipping visitor.list entry with no uid field")
-	if gotWarnings != maxNum {
-		t.Errorf("ParseInitVisitors logged %d \"missing uid\" warnings, want exactly %d (the cap on RAW items examined, not just valid ones appended) -- input had %d malformed entries; the loop must stop scanning after the first %d regardless of how many turned out valid", gotWarnings, maxNum, wantMalformed, maxNum)
+	if got := strings.Count(buf.String(), "skipping visitor.list entry with no uid field"); got != MaxVisitorsUpperBound {
+		t.Errorf("ParseInitVisitors logged %d \"missing uid\" warnings, want exactly %d (the cap on RAW items examined) -- input had %d malformed entries",
+			got, MaxVisitorsUpperBound, wantMalformed)
 	}
-}
-
-// TestParseInitVisitorsFallbackCeilingBoundary is the round-28 boundary-condition regression test
-// for maxVisitorsDefensiveCeiling's fallback cap (used when the init push's own `maxNum` field is
-// absent, unparseable, or <= 0 -- see ParseInitVisitors' doc comment):
-// TestParseInitVisitorsFallbackCeilingTruncatesWithoutMaxNum above overshoots the ceiling by 5
-// items, so it would not catch a production ">"-to-">=" regression in the truncation-warning
-// condition (`len(arr.items) > limit`) -- an off-by-one there would either warn one item too early,
-// or worse, silently drop the last legitimate visitor of an exactly-at-ceiling push without ever
-// logging why. This drives both sides of that boundary directly with well-formed entries, so
-// len(out) itself -- not just a logged-warning count -- proves whether the cap fired at the right
-// point.
-func TestParseInitVisitorsFallbackCeilingBoundary(t *testing.T) {
-	t.Run("exactly ceiling items: all parsed, no truncation warning", func(t *testing.T) {
-		params := newVisitorInitParams(false, 0, maxVisitorsDefensiveCeiling)
-
-		var buf bytes.Buffer
-		orig := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-		out := ParseInitVisitors(params)
-		slog.SetDefault(orig)
-
-		if len(out) != maxVisitorsDefensiveCeiling {
-			t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (the ceiling, all well-formed)", len(out), maxVisitorsDefensiveCeiling)
-		}
-		if strings.Contains(buf.String(), "visitor.list longer than cap") {
-			t.Errorf("unexpected truncation warning at exactly-ceiling boundary:\n%s", buf.String())
-		}
-	})
-
-	t.Run("ceiling+1 items: truncation warning fires, only ceiling parsed", func(t *testing.T) {
-		params := newVisitorInitParams(false, 0, maxVisitorsDefensiveCeiling+1)
-
-		var buf bytes.Buffer
-		orig := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-		out := ParseInitVisitors(params)
-		slog.SetDefault(orig)
-
-		if len(out) != maxVisitorsDefensiveCeiling {
-			t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (ceiling+1 input must still truncate)", len(out), maxVisitorsDefensiveCeiling)
-		}
-		if !strings.Contains(buf.String(), "visitor.list longer than cap; truncating") {
-			t.Errorf("expected a truncation warning at ceiling+1, got:\n%s", buf.String())
-		}
-	})
 }
 
 // TestParseInitVisitorsWrongTypedUIDIsRejected is the round-28 regression test for requireFieldType
@@ -669,150 +491,36 @@ func TestParseInitVisitorsWrongTypedUIDIsRejected(t *testing.T) {
 	}
 }
 
-// TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning is the round-29 regression test for the
-// diagnostic guard added around ParseInitVisitors' `visitorObj.GetInt("maxNum")` read (visitors.go):
-// before this round's fix, a present-but-wrong-typed maxNum (e.g. sent as a string) silently coerced
-// to maxNum=0 via GetInt's own zero-value fallback -- indistinguishable from, and falling back
-// exactly like, a genuinely-absent maxNum field (both are <= 0, so both take the
-// maxVisitorsDefensiveCeiling fallback path) -- fail-safe (the fallback is the MORE conservative of
-// the two possible ceilings), but with zero diagnostic signal that the field was actually malformed
-// rather than simply omitted.
-//
-// Unlike the sibling uid guard above, this must NOT skip/drop anything -- maxNum has no "entry" to
-// reject, only a value to distrust -- so this test asserts the visitor LIST is still parsed in full
-// (up to the fallback ceiling), the wrong-typed-maxNum warning fires, and critically that no
-// genuinely-absent-field warning is logged instead (proving presence and type are checked
-// separately, not conflated via a requireFieldType-style presence-first guard that would misreport
-// a present-but-wrong-typed field as merely "missing").
-//
-// Mutation check: reverting visitors.go's `if maxNumV, ok := visitorObj.Get("maxNum"); ok &&
-// maxNumV.Val != nil { if !sfsFieldKindAccepts(...) { ... } ... }` guard back to the bare `if maxNum
-// := visitorObj.GetInt("maxNum"); maxNum > 0 { ... }` makes this test fail on the warning
-// assertion -- len(out) would still correctly land on maxVisitorsDefensiveCeiling either way, since
-// a coerced maxNum=0 also takes the same fallback path, so only the log output distinguishes the
-// fixed behavior from the pre-fix one.
-func TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning(t *testing.T) {
-	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
-
-	list := sfs.NewSFSArray()
-	for i := range wantListLen {
-		v := sfs.NewSFSObject()
-		v.PutLong("uid", int64(9000+i))
-		v.PutInt("eventId", 3000+int32(i))
-		list.AddSFSObject(v)
+// TestParseInitVisitorsListIgnoresMaxNum: since B42 maxNum never shapes the parsed list. Whatever
+// maxNum is (absent, wrong-typed, negative, an out-of-int32-range Long, or smaller than the list),
+// a 30-entry list parses in full, and only a usable maxNum below the list length logs the Info line.
+// refreshVisitors is what validates maxNum, for its refill rule.
+func TestParseInitVisitorsListIgnoresMaxNum(t *testing.T) {
+	const listLen = 30
+	cases := map[string]struct {
+		set     func(*sfs.SFSObject)
+		wantLog bool
+	}{
+		"absent":       {func(*sfs.SFSObject) {}, false},
+		"wrong-typed":  {func(o *sfs.SFSObject) { o.PutUtfString("maxNum", "not-an-int") }, false},
+		"negative":     {func(o *sfs.SFSObject) { o.PutInt("maxNum", -5) }, false},
+		"out of range": {func(o *sfs.SFSObject) { o.PutLong("maxNum", int64(math.MaxInt32)+5000000000) }, false},
+		"below list":   {func(o *sfs.SFSObject) { o.PutInt("maxNum", 5) }, true},
+		"above list":   {func(o *sfs.SFSObject) { o.PutInt("maxNum", 50) }, false},
 	}
-	visitor := sfs.NewSFSObject()
-	visitor.PutUtfString("maxNum", "not-an-int") // wrong SFS type: maxNum must be an Int
-	visitor.PutSFSArray("list", list)
-	params := sfs.NewSFSObject()
-	params.PutSFSObject("visitor", visitor)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := ParseInitVisitors(params)
-	slog.SetDefault(orig)
-
-	if len(got) != maxVisitorsDefensiveCeiling {
-		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (wrong-typed maxNum must fall back to the defensive ceiling, not be treated as 0 visitors or unbounded)", len(got), maxVisitorsDefensiveCeiling)
-	}
-
-	logged := buf.String()
-	if !strings.Contains(logged, "visitor.maxNum field is present but wrong-typed") {
-		t.Errorf("expected a wrong-typed-maxNum warning, got log:\n%s", logged)
-	}
-	if strings.Contains(logged, "no maxNum field") {
-		t.Errorf("wrong-typed maxNum must not be logged as a missing field -- got log:\n%s", logged)
-	}
-}
-
-// TestParseInitVisitorsNegativeMaxNumFallsBackWithWarning is the round-33 regression test for the
-// MINOR finding that a present, CORRECTLY-typed but non-positive (especially negative) maxNum fell
-// through ParseInitVisitors' whole if/else-if chain with zero diagnostic -- identical silent
-// treatment to the genuinely-and-expectedly-absent case, unlike its wrong-typed
-// (TestParseInitVisitorsWrongTypedMaxNumFallsBackWithWarning above) and too-large
-// (maxVisitorsUpperBound clamp test) siblings, which both warn. A negative maxNum can never be a
-// legitimate value for a visitor-capacity field, so it's a genuine malformed/hostile-peer signal
-// worth surfacing, even though the fallback behavior itself (the defensive ceiling) was already
-// correct either way.
-func TestParseInitVisitorsNegativeMaxNumFallsBackWithWarning(t *testing.T) {
-	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
-
-	list := sfs.NewSFSArray()
-	for i := range wantListLen {
-		v := sfs.NewSFSObject()
-		v.PutLong("uid", int64(9000+i))
-		v.PutInt("eventId", 3000+int32(i))
-		list.AddSFSObject(v)
-	}
-	visitor := sfs.NewSFSObject()
-	visitor.PutInt("maxNum", -5) // correctly-typed, but never a legitimate value
-	visitor.PutSFSArray("list", list)
-	params := sfs.NewSFSObject()
-	params.PutSFSObject("visitor", visitor)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := ParseInitVisitors(params)
-	slog.SetDefault(orig)
-
-	if len(got) != maxVisitorsDefensiveCeiling {
-		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (a negative maxNum must fall back to the defensive ceiling, not be treated as 0 visitors or unbounded)", len(got), maxVisitorsDefensiveCeiling)
-	}
-
-	logged := buf.String()
-	if !strings.Contains(logged, "visitor.maxNum field is present and correctly-typed but not positive") {
-		t.Errorf("expected a not-positive-maxNum warning, got log:\n%s", logged)
-	}
-}
-
-// TestParseInitVisitorsOutOfRangeLongMaxNumFallsBackWithWarning is the round-35 regression test for
-// the MINOR finding that a present, correctly-typed maxNum Long whose VALUE is out of int32's range
-// (e.g. 5000000000) used to pass the sfsFieldKindAccepts type check (a pure Go-type check, by
-// design), then silently degrade to 0 via GetInt's own int64 range-clamp -- landing in the
-// "not positive" branch and MISCHARACTERIZING the real huge value as merely non-positive, with the
-// real value lost entirely (that branch's own Warn logs the already-zeroed maxNum, not the real
-// one). This is the exact fourth anomaly shape gsl.go's getIntFlexible was hardened against in
-// round 33, backported here. Proves the new branch fires with the REAL out-of-range value in the
-// log, not the post-clamp 0, and that it's distinguishable from the plain negative-maxNum case
-// above.
-func TestParseInitVisitorsOutOfRangeLongMaxNumFallsBackWithWarning(t *testing.T) {
-	const wantListLen = maxVisitorsDefensiveCeiling + 5 // well over the fallback ceiling
-	const hugeMaxNum = int64(math.MaxInt32) + 5000000000
-
-	list := sfs.NewSFSArray()
-	for i := range wantListLen {
-		v := sfs.NewSFSObject()
-		v.PutLong("uid", int64(9000+i))
-		v.PutInt("eventId", 3000+int32(i))
-		list.AddSFSObject(v)
-	}
-	visitor := sfs.NewSFSObject()
-	visitor.PutLong("maxNum", hugeMaxNum) // correctly-typed Long, but out of int32's range
-	visitor.PutSFSArray("list", list)
-	params := sfs.NewSFSObject()
-	params.PutSFSObject("visitor", visitor)
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := ParseInitVisitors(params)
-	slog.SetDefault(orig)
-
-	if len(got) != maxVisitorsDefensiveCeiling {
-		t.Fatalf("ParseInitVisitors parsed %d visitors, want exactly %d (an out-of-range maxNum Long must fall back to the defensive ceiling)", len(got), maxVisitorsDefensiveCeiling)
-	}
-
-	logged := buf.String()
-	if !strings.Contains(logged, "out-of-int32-range") {
-		t.Errorf("expected a Warn mentioning the out-of-range Long, got log:\n%s", logged)
-	}
-	if !strings.Contains(logged, "7147483647") { // hugeMaxNum's real value (math.MaxInt32 + 5000000000)
-		t.Errorf("expected the log to contain the real out-of-range value (5005000000), not a post-clamp 0, got log:\n%s", logged)
-	}
-	if strings.Contains(logged, "not positive") {
-		t.Errorf("expected the out-of-range-Long branch, not the plain not-positive branch, got log:\n%s", logged)
+	for name, c := range cases {
+		params := newVisitorInitParams(false, 0, listLen)
+		c.set(evObject(params, "visitor"))
+		buf := captureVisitorLog(t)
+		if got := ParseInitVisitors(params); len(got) != listLen {
+			t.Errorf("%s: parsed %d visitors, want all %d", name, len(got), listLen)
+		}
+		if logged := strings.Contains(buf.String(), "visitor.list is longer than maxNum"); logged != c.wantLog {
+			t.Errorf("%s: listLen/maxNum Info line = %v, want %v:\n%s", name, logged, c.wantLog, buf.String())
+		}
+		if strings.Contains(buf.String(), "truncating") {
+			t.Errorf("%s: a %d-entry list must not be truncated:\n%s", name, listLen, buf.String())
+		}
 	}
 }
 
@@ -822,7 +530,7 @@ func TestParseInitVisitorsOutOfRangeLongMaxNumFallsBackWithWarning(t *testing.T)
 // test coverage -- each was only ever exercised indirectly, end to end, by happy-path tests that
 // build a valid visitor/list/sfs.SFSArray/sfs.SFSObject chain. ParseInitVisitors parses the bare `init`
 // bootstrap push, which this codebase's own threat-model comments (e.g.
-// maxVisitorsDefensiveCeiling's doc comment) explicitly treat as attacker-influenceable via a
+// MaxVisitorsUpperBound's doc comment) explicitly treat as attacker-influenceable via a
 // hostile/misbehaving -cs-ip peer, so these four malformed shapes are squarely in scope.
 func TestParseInitVisitorsMalformedTopLevelShapes(t *testing.T) {
 	t.Run("visitor field present but wrong-typed (not an sfs.SFSObject)", func(t *testing.T) {
