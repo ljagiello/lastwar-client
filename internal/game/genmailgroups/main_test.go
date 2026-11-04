@@ -82,18 +82,76 @@ func TestParseFixture(t *testing.T) {
 	if !slices.Equal(p.show, []int64{2, 3, 4, 9, 5, 6, 7, 8}) || p.favor != 8 || p.hide != 1 {
 		t.Errorf("show %v favor %d hide %d", p.show, p.favor, p.hide)
 	}
-	code, err := render(p, "1.0.367")
+	code, err := render(p, "1.0.367", "39879")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range []string{
-		`const mailGroupsVersion = "1.0.367"`,
+		`mailGroupsVersion      = "1.0.367"`,
+		`mailGroupsTableVersion = "39879"`,
 		"\t9:   2, // MAIL_SCOUT_ALERT: MAIL_IN_report",
 		"var mailShowGroups = []int64{2, 3, 4, 9, 5, 6, 7, 8}",
 		"const mailFavorGroup = 8",
 	} {
 		if !strings.Contains(string(code), s) {
 			t.Errorf("rendered code lacks %q:\n%s", s, code)
+		}
+	}
+}
+
+// tableFixture is a mail_group.json with the live table's column layout (id, type, group): it adds
+// a type the Lua map lacks, 208 (RECHARGE_REFUND in the live table), moves 9 to another group, and
+// repeats 3 with the group the Lua map already gives it.
+const tableFixture = `{"name":"mail_group","index":{"group":[3,"number"],"id":[1,"number"],"type":[2,"number"]},` +
+	`"rows":[[1,[1,208,5]],[2,[2,9,6]],[3,[3,3,3]]]}`
+
+// The client applies every mail_group row over MailEnum.lua's map (MailDataManager.lua:30-36).
+func TestOverlayTheMailGroupTable(t *testing.T) {
+	p, err := parse([]byte(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := parseTable([]byte(tableFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := overlay(&p, rows); err != nil {
+		t.Fatal(err)
+	}
+	got := map[int64]int64{}
+	for _, e := range p.entries {
+		got[e.typ] = e.group
+	}
+	for typ, g := range map[int64]int64{208: 5, 9: 6, 3: 3, 2: 4} {
+		if got[typ] != g {
+			t.Errorf("type %d: group %d, want %d", typ, got[typ], g)
+		}
+	}
+	if len(got) != 9 {
+		t.Errorf("%d types, want the fixture's 8 plus 208", len(got))
+	}
+	code, err := render(p, "1.0.367", "39879")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(code), "208: 5, // type 208: MAIL_IN_system (mail_group)") {
+		t.Errorf("rendered code lacks the table's type 208:\n%s", code)
+	}
+
+	for name, src := range map[string]string{
+		"another table":   strings.Replace(tableFixture, `"mail_group"`, `"mail"`, 1),
+		"unknown group":   strings.Replace(tableFixture, "[1,208,5]", "[1,208,12]", 1),
+		"type in two":     strings.Replace(tableFixture, "[3,3,3]", "[3,208,6]", 1),
+		"no group column": strings.Replace(tableFixture, `"group":`, `"grp":`, 1),
+		"string cell":     strings.Replace(tableFixture, "[1,208,5]", `[1,"x",5]`, 1),
+	} {
+		rows, err := parseTable([]byte(src))
+		if err == nil {
+			p, _ := parse([]byte(fixture))
+			err = overlay(&p, rows)
+		}
+		if err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }

@@ -3227,14 +3227,17 @@ func TestClaimAllMailSkipsWhatTheClientsBulkActionsSkip(t *testing.T) {
 		newTestMailObj("auto-rating", 135, 0),                                          // Automatic_TranslationRating
 		mailWith(newTestMailObj("saved", 3, 0), map[string]int32{"saveFlag": 1}),       // favor group
 		mailWith(newTestMailObj("not-saved", 2, 0), map[string]int32{"saveFlag": 0}),   // explicit 0: normal
-		newTestMailObj("arena", 117, 0),                                                // ARENA_BATTLE_REPORT: the hide group, in no tab
+		newTestMailObj("system", 136, 0),                                               // REFUND_COST_GOLD: the system group (5)
+		newTestMailObj("season", 143, 0),                                               // LW_SEASON_REWARD_MAIL: the season group (9)
+		newTestMailObj("arena", 117, 0),                                                // ARENA_BATTLE_REPORT: the hide group, read at login, never claimed
 		newTestMailObj("wounded", 11, 0),                                               // MAIL_WOUNDED: no group
 		newTestMailObj("unknown", 4242, 0),                                             // not a 1.0.367 mail type
 	)
 	if err := ClaimAllMail(client); err != nil {
 		t.Fatalf("ClaimAllMail() = %v, want nil", err)
 	}
-	if got, want := mailUIDsSent(fake, "mail.read.status.betch"), []string{"plain", "unread-report", "not-saved"}; !slices.Equal(got, want) {
+	// The hide group is read (ReadAllHideMail, MailDataManager.lua:381-409); mail in no group isn't.
+	if got, want := mailUIDsSent(fake, "mail.read.status.betch"), []string{"plain", "unread-report", "not-saved", "system", "season", "arena"}; !slices.Equal(got, want) {
 		t.Errorf("read-status uids = %v, want %v", got, want)
 	}
 	var claims []string
@@ -3248,8 +3251,8 @@ func TestClaimAllMailSkipsWhatTheClientsBulkActionsSkip(t *testing.T) {
 		}
 		claims = append(claims, r.Params.GetString("type")+":"+r.Params.GetString("uids"))
 	}
-	// Alliance (3) before activity (4), the client's MailShowGroup order.
-	if want := []string{"3:plain,read-reward", "4:not-saved"}; !slices.Equal(claims, want) {
+	// The client's MailShowGroup order: alliance (3), activity (4), then season (9) before system (5).
+	if want := []string{"3:plain,read-reward", "4:not-saved", "9:season", "5:system"}; !slices.Equal(claims, want) {
 		t.Errorf("reward claims = %v, want %v", claims, want)
 	}
 }

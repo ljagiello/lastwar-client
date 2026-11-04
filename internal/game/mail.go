@@ -47,13 +47,16 @@ func (m Mail) RewardStatus() int32 { return m.Raw.GetInt("rewardStatus") }
 // translation-rating mail, a rating reward (MASTER §6): left for the player.
 var mailCantClaimAllTypes = map[int64]bool{112: true, 134: true, 135: true}
 
-// inBulkActions reports whether the client's Read All / Claim All would touch m: its type is not
-// in mailCantClaimAllTypes, it is not saved, and it is in a group those walk (shownGroup). Saved
-// mail (saveFlag != 0; MailInfo.lua:90-92 keeps only a non-zero value, so absent is 0) is the favor
-// group, which both skip (MailDBManager.lua:1048-1050, 1065-1067) and whose SQL requires saveFlag =
-// 0 (:449-468). The client's in-memory fallbacks (MailDataManager.lua:422-425, 449-456), taken only
-// when the SQL finds nothing, can still pick up the excluded types and saved mail; Go follows the
-// main path.
+// inBulkActions reports whether the client's bulk reads would touch m, the read-status filter: its
+// type is not in mailCantClaimAllTypes, it is not saved, and it is in a group (group). Saved mail
+// (saveFlag != 0; MailInfo.lua:90-92 keeps only a non-zero value, so absent is 0) is the favor
+// group, which Read All and Claim All skip (MailDBManager.lua:1048-1050, 1065-1067) and whose SQL
+// requires saveFlag = 0 (:449-468). Mail in no group is in no list the client keeps
+// (MailDataManager.lua:279-287), so nothing reads it. The hide group is read: Read All walks only
+// the tabs, but ReadAllHideMail marks every unread hide-group mail read at each login
+// (MailDataManager.lua:223, 306, 381-409). Claims also need a tab (shownGroup). The client's
+// in-memory fallbacks (MailDataManager.lua:422-425, 449-456), taken only when the SQL finds
+// nothing, can still pick up the excluded types and saved mail; Go follows the main path.
 func (m Mail) inBulkActions() bool {
 	if t, ok := claimInt(m.Raw, "type"); ok && mailCantClaimAllTypes[t] {
 		return false
@@ -61,19 +64,17 @@ func (m Mail) inBulkActions() bool {
 	if f, ok := claimInt(m.Raw, "saveFlag"); ok && f != 0 {
 		return false
 	}
-	_, ok := m.shownGroup()
+	_, ok := m.group()
 	return ok
 }
 
-//go:generate go run ./genmailgroups -lua=${LASTWAR_LUA} -version=${LASTWAR_LUA_VERSION} -out mail_groups_gen.go
+//go:generate go run ./genmailgroups -lua=${LASTWAR_LUA} -version=${LASTWAR_LUA_VERSION} -tables=${LASTWAR_TABLES} -table-version=${LASTWAR_TABLE_VERSION} -out mail_groups_gen.go
 
-// shownGroup is the mailbox group the client files m under (__mailTypeToGroup,
+// group is the mailbox group the client files m under (__mailTypeToGroup,
 // MailDataManager.lua:39-45, 279-283): saved mail (saveFlag 1) is the favor group, and any other
-// mail its type's MailTypeToInternalGroup entry (mailTypeGroup). Read All and Claim All walk the
-// groups in mailShowGroups (UILWMailMainCtrl.lua:172-185), so ok is false for a missing or
-// wrong-typed type, a type with no group, and the hide group (1, the arena and truck reports),
-// which no tab lists.
-func (m Mail) shownGroup() (group int64, ok bool) {
+// mail its type's entry in the client's MailTypeToInternalGroup (mailTypeGroup). ok is false for a
+// missing or wrong-typed type and for a type with no group.
+func (m Mail) group() (group int64, ok bool) {
 	if f, ok := claimInt(m.Raw, "saveFlag"); ok && f == 1 {
 		return mailFavorGroup, true
 	}
@@ -82,6 +83,14 @@ func (m Mail) shownGroup() (group int64, ok bool) {
 		return 0, false
 	}
 	g, ok := mailTypeGroup[t]
+	return g, ok
+}
+
+// shownGroup is m's group when it is a mailbox tab, one of the groups Claim All walks
+// (mailShowGroups, UILWMailMainCtrl.lua:172-185). ok is false for mail in no group and for the hide
+// group (1: the arena, truck, train and KOF reports), which no tab lists, so no bulk path claims.
+func (m Mail) shownGroup() (group int64, ok bool) {
+	g, ok := m.group()
 	if !ok || !slices.Contains(mailShowGroups, g) {
 		return 0, false
 	}
@@ -111,7 +120,7 @@ func (m Mail) isRead() bool {
 // Go type isn't in its accepted set (int32/int16/byte/int64) to int32(0), not just a missing field,
 // so a present-but-wrong-typed rewardStatus (e.g. sent as a string or float) passed the old guard,
 // coerced to 0 via GetInt, and the "== 0" comparison DETERMINISTICALLY (every time, not merely a
-// collision risk) misclassified it as unclaimed -- feeding groupUnclaimedByType, which would then
+// collision risk) misclassified it as unclaimed -- feeding groupUnclaimedByGroup, which would then
 // bucket that mail's uid into a real mail.reward.batch request for a reward that may not exist.
 //
 // Fixed (round 30): the round-29 fix above routed this through requireFieldType (buildings.go),
@@ -259,7 +268,7 @@ func ListMail(conn *session.GameConn) ([]Mail, error) {
 	// values were never independently confirmed against the real client), so if the server's
 	// cursor ever repeats a uid across two pages -- e.g. an off-by-one boundary re-send -- that
 	// duplicate must not flow into the returned slice twice. Left unguarded, ClaimAllMail's
-	// groupUnclaimedByType would bucket the same uid twice under its type and put it twice into a
+	// groupUnclaimedByGroup would bucket the same uid twice under its group and put it twice into a
 	// single mail.reward.batch request's comma-joined uids field for that mail if it has an
 	// unclaimed reward -- unverified server-side behavior for a duplicate uid in one batch
 	// request, and not worth risking when a defensive guard is this cheap.
@@ -657,7 +666,7 @@ rewardLoop:
 
 // truncateMailBatches caps batches at maxMailBatchesPerLoop, warning and dropping the remainder
 // when it's exceeded -- see that constant's own doc comment for the full rationale. label
-// distinguishes the read-status loop from a specific mail type's reward-claim loop in the
+// distinguishes the read-status loop from a specific mail group's reward-claim loop in the
 // resulting Warn, since both of ClaimAllMail's batch loops share this same truncation.
 func truncateMailBatches(batches [][]string, label string) [][]string {
 	if len(batches) > maxMailBatchesPerLoop {
@@ -713,12 +722,16 @@ func groupUnclaimedByGroup(mail []Mail) map[int64][]string {
 			continue
 		}
 		if !m.inBulkActions() {
-			if _, ok := m.shownGroup(); !ok {
-				left = append(left, m.Type())
+			if _, ok := m.group(); !ok {
+				left = append(left, m.Type()) // in no group
 			}
 			continue
 		}
-		g, _ := m.shownGroup()
+		g, ok := m.shownGroup()
+		if !ok {
+			left = append(left, m.Type()) // the hide group: read at login, never claimed in bulk
+			continue
+		}
 		byGroup[g] = append(byGroup[g], m.Uid())
 	}
 	if len(left) > 0 {
