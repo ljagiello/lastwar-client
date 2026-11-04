@@ -26,9 +26,11 @@ func newTestMailObj(uid string, mailType, rewardStatus int32) *sfs.SFSObject {
 	return o
 }
 
-// distinctMailType is the i-th of many distinct claimable mail types for the cap tests: it starts
-// past the mailCantClaimAllTypes (112, 134, 135), which ClaimAllMail never claims.
-func distinctMailType(i int) int32 { return int32(1000 + i) }
+// claimableMailTypes is one mail type in each group the client's Claim All walks, apart from the
+// favor group, which only saved mail is in (mail_groups_gen.go): MAIL_SCOUT_ALERT (report 2),
+// MAIL_SYSTEM_EXTRA (alliance 3), MAIL_SYSTEM (activity 4), LW_SEASON_REWARD_MAIL (season 9),
+// REFUND_COST_GOLD (system 5), NEW_COLLECT_MAIL (daily 6) and GIFT_BUY_EXCHANGE (charge 7).
+var claimableMailTypes = []int32{9, 3, 2, 143, 136, 73, 34}
 
 // TestListMailPaginates checks ListMail's pagination loop end to end: a first page with
 // `more: true` must trigger a second request seeded from the first page's `lastUid`/
@@ -890,7 +892,7 @@ func TestListMailAggregateCeilingSinglePageOvershootDoesNotExceedCap(t *testing.
 // ListMail's own doc comment already flags real uncertainty about the pagination cursor's true
 // semantics, so if the server's cursor ever repeats the same mail uid across two pages, ListMail
 // must only return it once rather than letting a duplicate flow unfiltered into ClaimAllMail (where
-// groupUnclaimedByType would bucket it twice and put it twice into a single mail.reward.batch
+// groupUnclaimedByGroup would bucket it twice and put it twice into a single mail.reward.batch
 // request's comma-joined uids field for a reward-bearing mail). The fake server here answers page 1
 // with two mail entries, then page 2 with one brand-new uid PLUS a resend of page 1's second uid --
 // simulating a cursor that unexpectedly repeats a boundary entry -- and more=false to stop there.
@@ -1317,45 +1319,45 @@ func TestListMailAcceptsUidExactlyAtLenCap(t *testing.T) {
 	}
 }
 
-// TestGroupUnclaimedByTypeWrongTypedTypeFieldIsRejected is the round-28 regression test for
-// requireFieldType (buildings.go), exercised here at groupUnclaimedByType's own type guard: before
+// TestGroupUnclaimedByGroupWrongTypedTypeFieldIsRejected is the round-28 regression test for
+// requireFieldType (buildings.go), exercised here at groupUnclaimedByGroup's own type guard: before
 // this round's fix, requirePresentField only checked presence, never that type's concrete decoded
 // SFS type actually matched what Mail.Type() (GetInt) accepts. A present-but-wrong-typed type
 // (e.g. the server sending it as a UtfString instead of an Int) used to silently pass that
 // presence-only guard and then coerce to int32(0) via GetInt's own zero-value fallback -- merging
 // that mail into a genuinely-type=0 batch it doesn't belong to.
 //
-// The input here has one reward-bearing mail with a wrong-typed type field and a separate,
-// genuinely-well-typed type=0 reward-bearing mail -- proving these two are no longer conflated:
-// exactly one distinct type (0) with exactly the genuine mail's uid must come back.
+// The input here has one reward-bearing mail with a wrong-typed type field ("3" as a string) and a
+// separate, genuinely-well-typed type=3 reward-bearing mail -- proving these two are not
+// conflated: exactly one group (3, alliance) with exactly the genuine mail's uid must come back.
 //
-// Mutation check: reverting groupUnclaimedByType's `requireFieldType(m.Raw, "type", "mail reward",
-// sfsFieldKindInt)` back to `requirePresentField(m.Raw, "type", "mail reward")` makes this test
-// fail with both uids merged under byType[0].
-func TestGroupUnclaimedByTypeWrongTypedTypeFieldIsRejected(t *testing.T) {
+// Mutation check: reverting groupUnclaimedByGroup's `requireFieldType(m.Raw, "type", "mail
+// reward", sfsFieldKindInt)` back to `requirePresentField(m.Raw, "type", "mail reward")` makes this
+// test fail with both uids merged under group 3 (claimInt reads the string "3" as 3).
+func TestGroupUnclaimedByGroupWrongTypedTypeFieldIsRejected(t *testing.T) {
 	wrongTyped := sfs.NewSFSObject()
 	wrongTyped.PutUtfString("uid", "wrong-type-1")
-	wrongTyped.PutUtfString("type", "not-an-int") // wrong SFS type: type must be an Int
+	wrongTyped.PutUtfString("type", "3") // wrong SFS type: type must be an Int
 	wrongTyped.PutInt("rewardStatus", 0)
 
-	genuineZero := sfs.NewSFSObject()
-	genuineZero.PutUtfString("uid", "genuine-zero-1")
-	genuineZero.PutInt("type", 0)
-	genuineZero.PutInt("rewardStatus", 0)
+	genuine := sfs.NewSFSObject()
+	genuine.PutUtfString("uid", "genuine-1")
+	genuine.PutInt("type", 3)
+	genuine.PutInt("rewardStatus", 0)
 
-	mail := []Mail{{Raw: wrongTyped}, {Raw: genuineZero}}
+	mail := []Mail{{Raw: wrongTyped}, {Raw: genuine}}
 
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	got := groupUnclaimedByType(mail)
+	got := groupUnclaimedByGroup(mail)
 	slog.SetDefault(orig)
 
 	if len(got) != 1 {
-		t.Fatalf("got %d distinct types, want 1 (only the genuine type=0 entry -- the wrong-typed one must be rejected, not merged into the same type=0 batch)", len(got))
+		t.Fatalf("got %d groups, want 1 (only the genuine type=3 entry -- the wrong-typed one must be rejected, not merged into its batch)", len(got))
 	}
-	if len(got[0]) != 1 || got[0][0] != "genuine-zero-1" {
-		t.Errorf("type 0: got %v, want [genuine-zero-1] -- wrong-type-1 (wrong-typed type field) must not appear", got[0])
+	if len(got[3]) != 1 || got[3][0] != "genuine-1" {
+		t.Errorf("group 3: got %v, want [genuine-1] -- wrong-type-1 (wrong-typed type field) must not appear", got[3])
 	}
 
 	logged := buf.String()
@@ -1372,22 +1374,22 @@ func TestGroupUnclaimedByTypeWrongTypedTypeFieldIsRejected(t *testing.T) {
 // wantReadBatches read-status batches and wantRewardBatches reward-claim batches, recording each
 // batch's uids (split back out of the joined "uids" string) so the test can assert the batch
 // boundaries and that no uid was dropped or duplicated.
-func mailBatchServer(t *testing.T, server *session.GameConn, mails []*sfs.SFSObject, wantReadBatches, wantRewardBatches int) (readBatches, rewardBatches [][]string, rewardType int32) {
+func mailBatchServer(t *testing.T, server *session.GameConn, mails []*sfs.SFSObject, wantReadBatches, wantRewardBatches int) (readBatches, rewardBatches [][]string, rewardType string) {
 	t.Helper()
 
 	env, err := server.ReadEnvelope()
 	if err != nil {
 		t.Errorf("read list-mail request: %v", err)
-		return nil, nil, 0
+		return nil, nil, ""
 	}
 	msg, ok := env.AsExtension()
 	if !ok {
 		t.Errorf("list-mail request: AsExtension() = false")
-		return nil, nil, 0
+		return nil, nil, ""
 	}
 	if msg.Cmd != "chat.get.system.mails" {
 		t.Errorf("list-mail request: Cmd = %q, want chat.get.system.mails", msg.Cmd)
-		return nil, nil, 0
+		return nil, nil, ""
 	}
 	listResp := sfs.NewSFSObject()
 	arr := sfs.NewSFSArray()
@@ -1398,7 +1400,7 @@ func mailBatchServer(t *testing.T, server *session.GameConn, mails []*sfs.SFSObj
 	listResp.PutBool("more", false)
 	if err := server.SendExtension("push.chat.get.system.mails", listResp); err != nil {
 		t.Errorf("send list-mail response: %v", err)
-		return nil, nil, 0
+		return nil, nil, ""
 	}
 
 	readUids := func(cmd string) []string {
@@ -1447,7 +1449,7 @@ func mailBatchServer(t *testing.T, server *session.GameConn, mails []*sfs.SFSObj
 			t.Errorf("mail.reward.batch request: Cmd = %q, want mail.reward.batch", msg.Cmd)
 			return readBatches, rewardBatches, rewardType
 		}
-		rewardType = msg.Params.GetInt("type")
+		rewardType = msg.Params.GetString("type")
 		resp := sfs.NewSFSObject()
 		resp.PutBool("success", true)
 		if err := server.SendExtension("mail.reward.batch", resp); err != nil {
@@ -1496,7 +1498,7 @@ func TestClaimAllMailItemCountBatching(t *testing.T) {
 	client, server := session.NewPipeGameConnPair(t)
 
 	const total = 101
-	const mailType = int32(7)
+	const mailType = int32(73) // NEW_COLLECT_MAIL: the daily group (6)
 	var wantUids []string
 	var mails []*sfs.SFSObject
 	for i := range total {
@@ -1506,7 +1508,7 @@ func TestClaimAllMailItemCountBatching(t *testing.T) {
 	}
 
 	var readBatches, rewardBatches [][]string
-	var rewardType int32
+	var rewardType string
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1524,8 +1526,8 @@ func TestClaimAllMailItemCountBatching(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimAllMail() = %v, want nil", err)
 	}
-	if rewardType != mailType {
-		t.Errorf("reward-batch type = %d, want %d", rewardType, mailType)
+	if rewardType != "6" {
+		t.Errorf("reward-batch type = %q, want the daily group \"6\"", rewardType)
 	}
 	assertBatchesCoverExactly(t, "read-status", readBatches, []int{100, 1}, wantUids)
 	assertBatchesCoverExactly(t, "reward-claim", rewardBatches, []int{100, 1}, wantUids)
@@ -1541,7 +1543,7 @@ func TestClaimAllMailByteLengthBatching(t *testing.T) {
 
 	const total = 11
 	const uidLen = 3249
-	const mailType = int32(5)
+	const mailType = int32(136) // REFUND_COST_GOLD: the system group (5)
 	var wantUids []string
 	var mails []*sfs.SFSObject
 	for i := range total {
@@ -1555,7 +1557,7 @@ func TestClaimAllMailByteLengthBatching(t *testing.T) {
 	}
 
 	var readBatches, rewardBatches [][]string
-	var rewardType int32
+	var rewardType string
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1573,8 +1575,8 @@ func TestClaimAllMailByteLengthBatching(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimAllMail() = %v, want nil", err)
 	}
-	if rewardType != mailType {
-		t.Errorf("reward-batch type = %d, want %d", rewardType, mailType)
+	if rewardType != "5" {
+		t.Errorf("reward-batch type = %q, want the system group \"5\"", rewardType)
 	}
 	assertBatchesCoverExactly(t, "read-status", readBatches, []int{9, 2}, wantUids)
 	assertBatchesCoverExactly(t, "reward-claim", rewardBatches, []int{9, 2}, wantUids)
@@ -1658,7 +1660,7 @@ func TestClaimAllMailProcessesPartialMailOnListPageFailure(t *testing.T) {
 	}
 
 	var readStatusUIDs, rewardUIDs []string
-	var rewardType int32
+	var rewardType string
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1670,7 +1672,7 @@ func TestClaimAllMailProcessesPartialMailOnListPageFailure(t *testing.T) {
 		resp1 := sfs.NewSFSObject()
 		arr1 := sfs.NewSFSArray()
 		arr1.AddSFSObject(newTestMailObj("uid-1", 3, 0)) // rewardStatus=0: unclaimed reward
-		arr1.AddSFSObject(newTestMailObj("uid-2", 4, 1)) // rewardStatus=1: already claimed/no reward
+		arr1.AddSFSObject(newTestMailObj("uid-2", 2, 1)) // rewardStatus=1: already claimed/no reward
 		resp1.PutSFSArray("msg", arr1)
 		resp1.PutBool("more", true)
 		resp1.PutUtfString("lastUid", "uid-2")
@@ -1702,7 +1704,7 @@ func TestClaimAllMailProcessesPartialMailOnListPageFailure(t *testing.T) {
 			}
 		}
 		if msg := readReq("mail.reward.batch"); msg != nil {
-			rewardType = msg.Params.GetInt("type")
+			rewardType = msg.Params.GetString("type")
 			if uids := msg.Params.GetString("uids"); uids != "" {
 				rewardUIDs = strings.Split(uids, ",")
 			}
@@ -1742,8 +1744,8 @@ func TestClaimAllMailProcessesPartialMailOnListPageFailure(t *testing.T) {
 	if len(rewardUIDs) != 1 || rewardUIDs[0] != "uid-1" {
 		t.Fatalf("reward-claim uids = %v, want [\"uid-1\"] -- page 1's one unclaimed reward must still be claimed", rewardUIDs)
 	}
-	if rewardType != 3 {
-		t.Errorf("reward-claim type = %d, want 3 (uid-1's type)", rewardType)
+	if rewardType != "3" {
+		t.Errorf("reward-claim type = %q, want \"3\" (uid-1's alliance group)", rewardType)
 	}
 }
 
@@ -2017,7 +2019,7 @@ func (c *sequencedConn) SetWriteDeadline(time.Time) error { return nil }
 // still attempts read-status batch 2 -- which also fails with a net.Error and re-sets the same
 // already-true flag -- before the skip check correctly skips the reward loop, so this shows up as
 // writeCount()==3, not 2. Dropping only the post-loop `if readAbortedByNetErr { return ... }` skip
-// (while leaving both loops' own per-batch break intact) lets groupUnclaimedByType run and the
+// (while leaving both loops' own per-batch break intact) lets groupUnclaimedByGroup run and the
 // reward loop start, but that loop's own net.Error break still limits it to exactly one attempted
 // batch, so this also shows up as writeCount()==3. Reverting the whole fix back to the old
 // unconditional-append-no-break shape in both loops shows up as writeCount()==5 (list-mail + both
@@ -2194,12 +2196,12 @@ func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
 		newTestMailObj("t9-b", 9, 0),
 		newTestMailObj("t9-c", 9, 0),
 	}
-	wantByType := map[int32][]string{
-		3: {"t3-a", "t3-b"},
-		9: {"t9-a", "t9-b", "t9-c"},
+	wantByType := map[string][]string{
+		"3": {"t3-a", "t3-b"},         // MAIL_SYSTEM_EXTRA: the alliance group
+		"2": {"t9-a", "t9-b", "t9-c"}, // MAIL_SCOUT_ALERT: the report group
 	}
 
-	gotByType := make(map[int32][]string)
+	gotByType := make(map[string][]string)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -2241,8 +2243,7 @@ func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
 			return
 		}
 
-		// Two reward-claim batches, one per distinct type -- byType map iteration order is not
-		// guaranteed by Go, so this reads whichever type comes first without assuming an order.
+		// Two reward-claim batches, one per group, read in whichever order they come.
 		for i := 0; i < len(wantByType); i++ {
 			env, err := server.ReadEnvelope()
 			if err != nil {
@@ -2254,7 +2255,7 @@ func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
 				t.Errorf("mail.reward.batch request %d malformed: %+v ok=%v", i, msg, ok)
 				return
 			}
-			mailType := msg.Params.GetInt("type")
+			mailType := msg.Params.GetString("type")
 			var uids []string
 			if s := msg.Params.GetString("uids"); s != "" {
 				uids = strings.Split(s, ",")
@@ -2280,249 +2281,29 @@ func TestClaimAllMailClaimsRewardsForEachDistinctType(t *testing.T) {
 		t.Fatalf("ClaimAllMail() = %v, want nil", err)
 	}
 	if len(gotByType) != len(wantByType) {
-		t.Fatalf("server saw mail.reward.batch requests for %d distinct types, want %d: got %v", len(gotByType), len(wantByType), gotByType)
+		t.Fatalf("server saw mail.reward.batch requests for %d groups, want %d: got %v", len(gotByType), len(wantByType), gotByType)
 	}
 	for mailType, wantUids := range wantByType {
 		gotUids, ok := gotByType[mailType]
 		if !ok {
-			t.Errorf("no mail.reward.batch request seen for type %d", mailType)
+			t.Errorf("no mail.reward.batch request seen for group %s", mailType)
 			continue
 		}
 		if len(gotUids) != len(wantUids) {
-			t.Errorf("type %d: got uids %v, want %v", mailType, gotUids, wantUids)
+			t.Errorf("group %s: got uids %v, want %v", mailType, gotUids, wantUids)
 			continue
 		}
 		for i, uid := range wantUids {
 			if gotUids[i] != uid {
-				t.Errorf("type %d uids[%d] = %q, want %q", mailType, i, gotUids[i], uid)
+				t.Errorf("group %s uids[%d] = %q, want %q", mailType, i, gotUids[i], uid)
 			}
 		}
-	}
-}
-
-// TestClaimAllMailRewardLoopCapsDistinctTypes is the round-41 regression test for the MAJOR
-// finding that ClaimAllMail's reward-claim loop had no cap on the number of distinct mail `type`
-// buckets it would issue sequential mail.reward.batch requests for -- unlike buildings.go's
-// CollectAll (maxCollectibleBuildingsPerRun=300) and visitors.go's GreetVisitors
-// (maxVisitorsUpperBound=300), both explicitly sized to bound worst-case wall-clock to ~40 minutes
-// against a peer that never responds. Sends maxMailRewardTypesPerRun+1 (301) distinct-type mail
-// entries, each with a single unclaimed reward, and proves the reward-claim loop only issues
-// exactly maxMailRewardTypesPerRun (300) mail.reward.batch requests, not 301 -- the fake server
-// only reads and answers that many, so if the client tried to send a 301st, the whole exchange
-// would hang and this test would time out rather than pass.
-func TestClaimAllMailRewardLoopCapsDistinctTypes(t *testing.T) {
-	client, server := session.NewPipeGameConnPair(t)
-
-	const totalTypes = maxMailRewardTypesPerRun + 1 // 301 distinct types, one unclaimed mail each
-	const readBatchSize = 100                       // must match ClaimAllMail's own unexported readBatchSize constant
-
-	mails := make([]*sfs.SFSObject, totalTypes)
-	for i := range totalTypes {
-		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), distinctMailType(i), 0)
-	}
-
-	var rewardBatchCount int
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-
-		env, err := server.ReadEnvelope()
-		if err != nil {
-			t.Errorf("read list-mail request: %v", err)
-			return
-		}
-		msg, ok := env.AsExtension()
-		if !ok || msg.Cmd != "chat.get.system.mails" {
-			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
-			return
-		}
-		listResp := sfs.NewSFSObject()
-		arr := sfs.NewSFSArray()
-		for _, mo := range mails {
-			arr.AddSFSObject(mo)
-		}
-		listResp.PutSFSArray("msg", arr)
-		listResp.PutBool("more", false)
-		if err := server.SendExtension("push.chat.get.system.mails", listResp); err != nil {
-			return
-		}
-
-		numReadBatches := (totalTypes + readBatchSize - 1) / readBatchSize
-		for i := range numReadBatches {
-			env, err := server.ReadEnvelope()
-			if err != nil {
-				t.Errorf("read read-status request %d: %v", i, err)
-				return
-			}
-			if msg, ok = env.AsExtension(); !ok || msg.Cmd != "mail.read.status.betch" {
-				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
-				return
-			}
-			readResp := sfs.NewSFSObject()
-			readResp.PutBool("success", true)
-			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
-				return
-			}
-		}
-
-		// Exactly maxMailRewardTypesPerRun expected -- the 301st type must never even be sent,
-		// since truncation happens client-side before the loop starts, not as an early-abort
-		// mid-loop.
-		for i := range maxMailRewardTypesPerRun {
-			env, err := server.ReadEnvelope()
-			if err != nil {
-				t.Errorf("read mail.reward.batch request %d: %v", i, err)
-				return
-			}
-			msg, ok := env.AsExtension()
-			if !ok || msg.Cmd != "mail.reward.batch" {
-				t.Errorf("mail.reward.batch request %d malformed: %+v ok=%v", i, msg, ok)
-				return
-			}
-			rewardBatchCount++
-			resp := sfs.NewSFSObject()
-			resp.PutBool("success", true)
-			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
-				return
-			}
-		}
-	}()
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	defer slog.SetDefault(orig)
-
-	err := ClaimAllMail(client)
-
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("fake server never finished all expected requests -- ClaimAllMail likely tried to send more than maxMailRewardTypesPerRun reward-claim batches")
-	}
-
-	if err != nil {
-		t.Fatalf("ClaimAllMail() = %v, want nil", err)
-	}
-	if rewardBatchCount != maxMailRewardTypesPerRun {
-		t.Errorf("server saw %d mail.reward.batch requests, want exactly %d (maxMailRewardTypesPerRun)", rewardBatchCount, maxMailRewardTypesPerRun)
-	}
-	if logged := buf.String(); !strings.Contains(logged, "distinct unclaimed mail reward types exceeds sanity ceiling") {
-		t.Errorf("expected a warning about truncating the reward-claim loop, got log:\n%s", logged)
-	}
-}
-
-// TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate is the round-42 regression test for the
-// MINOR finding that TestClaimAllMailRewardLoopCapsDistinctTypes above only proves the cap fires
-// at maxMailRewardTypesPerRun+1 -- it never exercises the boundary itself, so a regression
-// tightening mail.go's `len(mailTypes) > maxMailRewardTypesPerRun` to an off-by-one `>=` would
-// silently drop the 300th legitimate distinct mail-reward type with zero test signal. Confirmed
-// via mutation testing: that exact `>=` tightening passed TestClaimAllMailRewardLoopCapsDistinctTypes
-// unchanged (301 trips both the correct and mutant check identically). Sends exactly
-// maxMailRewardTypesPerRun distinct types and proves ALL of them get a reward-claim batch, with
-// no truncation warning logged.
-func TestClaimAllMailRewardLoopExactlyAtCapDoesNotTruncate(t *testing.T) {
-	client, server := session.NewPipeGameConnPair(t)
-
-	const totalTypes = maxMailRewardTypesPerRun // exactly at the cap -- must NOT be truncated
-	const readBatchSize = 100                   // must match ClaimAllMail's own unexported readBatchSize constant
-
-	mails := make([]*sfs.SFSObject, totalTypes)
-	for i := range totalTypes {
-		mails[i] = newTestMailObj(fmt.Sprintf("uid-%d", i), distinctMailType(i), 0)
-	}
-
-	var rewardBatchCount int
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-
-		env, err := server.ReadEnvelope()
-		if err != nil {
-			t.Errorf("read list-mail request: %v", err)
-			return
-		}
-		msg, ok := env.AsExtension()
-		if !ok || msg.Cmd != "chat.get.system.mails" {
-			t.Errorf("list-mail request malformed: %+v ok=%v", msg, ok)
-			return
-		}
-		listResp := sfs.NewSFSObject()
-		arr := sfs.NewSFSArray()
-		for _, mo := range mails {
-			arr.AddSFSObject(mo)
-		}
-		listResp.PutSFSArray("msg", arr)
-		listResp.PutBool("more", false)
-		if err := server.SendExtension("push.chat.get.system.mails", listResp); err != nil {
-			return
-		}
-
-		numReadBatches := (totalTypes + readBatchSize - 1) / readBatchSize
-		for i := range numReadBatches {
-			env, err := server.ReadEnvelope()
-			if err != nil {
-				t.Errorf("read read-status request %d: %v", i, err)
-				return
-			}
-			if msg, ok = env.AsExtension(); !ok || msg.Cmd != "mail.read.status.betch" {
-				t.Errorf("read-status request %d malformed: %+v ok=%v", i, msg, ok)
-				return
-			}
-			readResp := sfs.NewSFSObject()
-			readResp.PutBool("success", true)
-			if err := server.SendExtension("mail.read.status.betch", readResp); err != nil {
-				return
-			}
-		}
-
-		for i := range totalTypes {
-			env, err := server.ReadEnvelope()
-			if err != nil {
-				t.Errorf("read mail.reward.batch request %d: %v", i, err)
-				return
-			}
-			msg, ok := env.AsExtension()
-			if !ok || msg.Cmd != "mail.reward.batch" {
-				t.Errorf("mail.reward.batch request %d malformed: %+v ok=%v", i, msg, ok)
-				return
-			}
-			rewardBatchCount++
-			resp := sfs.NewSFSObject()
-			resp.PutBool("success", true)
-			if err := server.SendExtension("mail.reward.batch", resp); err != nil {
-				return
-			}
-		}
-	}()
-
-	var buf bytes.Buffer
-	orig := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	defer slog.SetDefault(orig)
-
-	err := ClaimAllMail(client)
-
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("fake server never finished all expected requests -- ClaimAllMail likely truncated below maxMailRewardTypesPerRun")
-	}
-
-	if err != nil {
-		t.Fatalf("ClaimAllMail() = %v, want nil", err)
-	}
-	if rewardBatchCount != totalTypes {
-		t.Errorf("server saw %d mail.reward.batch requests, want exactly %d (maxMailRewardTypesPerRun, the boundary value)", rewardBatchCount, totalTypes)
-	}
-	if logged := buf.String(); strings.Contains(logged, "distinct unclaimed mail reward types exceeds sanity ceiling") {
-		t.Errorf("expected NO truncation warning for exactly-at-cap input, got log:\n%s", logged)
 	}
 }
 
 // TestClaimAllMailReadStatusLoopCapsBatchCount is the round-44 regression test for the MAJOR
 // finding that batchByCountAndBytes' batches, unlike maxAggregateMailPerFetch (total mail item
-// count) and maxMailRewardTypesPerRun (distinct type count), had no cap on the NUMBER of batches
+// count), had no cap on the NUMBER of batches
 // -- since batchByCountAndBytes always admits at least one uid per batch even if that uid alone
 // exceeds maxUIDsBytes, a peer returning mail with maximal-length uids can force every batch down
 // to a single item, turning maxAggregateMailPerFetch(2000) items into up to 2000 sequential
@@ -2542,7 +2323,7 @@ func TestClaimAllMailReadStatusLoopCapsBatchCount(t *testing.T) {
 	mails := make([]*sfs.SFSObject, totalMails)
 	for i := range totalMails {
 		uid := fmt.Sprintf("%0*d", oversizedUIDLen, i) // unique, fixed-length oversized uid
-		mails[i] = newTestMailObj(uid, 0, 1)           // rewardStatus=1: already claimed
+		mails[i] = newTestMailObj(uid, 9, 1)           // rewardStatus=1: already claimed
 	}
 
 	var readBatchCount int
@@ -2632,7 +2413,7 @@ func TestClaimAllMailReadStatusLoopBatchCountExactlyAtCapDoesNotTruncate(t *test
 	mails := make([]*sfs.SFSObject, totalMails)
 	for i := range totalMails {
 		uid := fmt.Sprintf("%0*d", oversizedUIDLen, i)
-		mails[i] = newTestMailObj(uid, 0, 1)
+		mails[i] = newTestMailObj(uid, 9, 1)
 	}
 
 	var readBatchCount int
@@ -2707,26 +2488,22 @@ func TestClaimAllMailReadStatusLoopBatchCountExactlyAtCapDoesNotTruncate(t *test
 
 // TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes is the round-46 regression test for the
 // MAJOR finding that ClaimAllMail's reward-claim loop had no cap on the TOTAL number of
-// mail.reward.batch round trips summed across all distinct mail types in one run --
-// maxMailRewardTypesPerRun bounds distinct TYPE count, and maxMailBatchesPerLoop bounds batches
-// PER TYPE (reset fresh for every type via truncateMailBatches), but neither bounds their product:
-// a hostile peer can spread mail entries across many distinct types, each with an oversized uid
-// forcing singleton batching, so that NO single type ever reaches maxMailBatchesPerLoop's own
-// per-type truncation, yet the SUM across all types still runs into the hundreds -- the exact
-// "~4.4 hours instead of ~40 minutes" threat maxMailBatchesPerLoop's own doc comment describes,
-// but which only holds per type. Sends 301 mail entries (one over maxMailRewardBatchesPerRun)
-// spread across 43 distinct types (7 entries each -- both comfortably under the type-count and
-// per-type-batch-count caps on their own), each with an oversized uid forcing its own singleton
-// batch, and proves the fake server sees only maxMailRewardBatchesPerRun mail.reward.batch
+// mail.reward.batch round trips summed across the mail groups in one run -- maxMailBatchesPerLoop
+// bounds batches PER GROUP (reset fresh for every group via truncateMailBatches), not their sum:
+// a hostile peer can spread mail entries across the groups, each with an oversized uid forcing
+// singleton batching, so that NO single group ever reaches maxMailBatchesPerLoop's own per-group
+// truncation, yet the SUM still runs into the hundreds. Sends 301 mail entries (one over
+// maxMailRewardBatchesPerRun) spread across the 7 claimable groups (43 entries each -- under the
+// per-group batch cap on its own), each with an oversized uid forcing its own singleton batch, and proves the fake server sees only maxMailRewardBatchesPerRun mail.reward.batch
 // requests, not 301 -- if ClaimAllMail tried to send a 301st, the fake server (which only answers
 // that many) would hang the test instead of passing it.
 func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 	client, server := session.NewPipeGameConnPair(t)
 
-	const numTypes = 43
-	const entriesPerType = 7
-	const totalMails = numTypes * entriesPerType // 301 -- one over maxMailRewardBatchesPerRun
-	const oversizedUIDLen = 30001                // > maxUIDsBytes/2, forces singleton batches
+	numTypes := len(claimableMailTypes) // 7
+	const entriesPerType = 43
+	totalMails := numTypes * entriesPerType // 301 -- one over maxMailRewardBatchesPerRun
+	const oversizedUIDLen = 30001           // > maxUIDsBytes/2, forces singleton batches
 
 	mails := make([]*sfs.SFSObject, 0, totalMails)
 	uidCounter := 0
@@ -2734,7 +2511,7 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 		for range entriesPerType {
 			uid := fmt.Sprintf("%0*d", oversizedUIDLen, uidCounter)
 			uidCounter++
-			mails = append(mails, newTestMailObj(uid, int32(typ), 0)) // rewardStatus=0: unclaimed
+			mails = append(mails, newTestMailObj(uid, claimableMailTypes[typ], 0)) // rewardStatus=0: unclaimed
 		}
 	}
 
@@ -2829,7 +2606,7 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 	if rewardBatchCount != maxMailRewardBatchesPerRun {
 		t.Errorf("server saw %d mail.reward.batch requests, want exactly %d (maxMailRewardBatchesPerRun)", rewardBatchCount, maxMailRewardBatchesPerRun)
 	}
-	if logged := buf.String(); !strings.Contains(logged, "total mail.reward.batch round trips across all types exceeds sanity ceiling") {
+	if logged := buf.String(); !strings.Contains(logged, "total mail.reward.batch round trips across all groups exceeds sanity ceiling") {
 		t.Errorf("expected a warning about the aggregate reward-batch ceiling, got log:\n%s", logged)
 	}
 }
@@ -2837,14 +2614,13 @@ func TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes(t *testing.T) {
 // TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate is
 // TestClaimAllMailRewardLoopCapsTotalBatchesAcrossTypes's boundary counterpart: sends exactly
 // maxMailRewardBatchesPerRun oversized-uid mail entries (each still forcing its own singleton
-// batch), spread across 60 distinct types (well under maxMailRewardTypesPerRun, and only 5
-// batches/type -- well under maxMailBatchesPerLoop), and proves ALL of them get a reward-claim
-// batch, with no aggregate-ceiling warning logged.
+// batch), spread across 6 claimable groups (50 batches/group -- well under maxMailBatchesPerLoop),
+// and proves ALL of them get a reward-claim batch, with no aggregate-ceiling warning logged.
 func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testing.T) {
 	client, server := session.NewPipeGameConnPair(t)
 
-	const numTypes = 60
-	const entriesPerType = 5
+	const numTypes = 6
+	const entriesPerType = 50
 	const totalMails = numTypes * entriesPerType // exactly maxMailRewardBatchesPerRun (300)
 	const oversizedUIDLen = 30001
 
@@ -2858,7 +2634,7 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 		for range entriesPerType {
 			uid := fmt.Sprintf("%0*d", oversizedUIDLen, uidCounter)
 			uidCounter++
-			mails = append(mails, newTestMailObj(uid, int32(typ), 0))
+			mails = append(mails, newTestMailObj(uid, claimableMailTypes[typ], 0))
 		}
 	}
 
@@ -2945,7 +2721,7 @@ func TestClaimAllMailRewardLoopTotalBatchesExactlyAtCapDoesNotTruncate(t *testin
 	if rewardBatchCount != totalMails {
 		t.Errorf("server saw %d mail.reward.batch requests, want exactly %d (maxMailRewardBatchesPerRun, the boundary value)", rewardBatchCount, totalMails)
 	}
-	if logged := buf.String(); strings.Contains(logged, "total mail.reward.batch round trips across all types exceeds sanity ceiling") {
+	if logged := buf.String(); strings.Contains(logged, "total mail.reward.batch round trips across all groups exceeds sanity ceiling") {
 		t.Errorf("expected NO aggregate-ceiling warning for exactly-at-cap input, got log:\n%s", logged)
 	}
 }
@@ -2969,7 +2745,7 @@ func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing
 		newTestMailObj("t9-a", 9, 0),
 	}
 
-	var seenTypes []int32
+	var seenTypes []string
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -3020,7 +2796,7 @@ func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing
 				t.Errorf("mail.reward.batch request %d malformed", i)
 				return
 			}
-			seenTypes = append(seenTypes, msg.Params.GetInt("type"))
+			seenTypes = append(seenTypes, msg.Params.GetString("type"))
 			resp := sfs.NewSFSObject()
 			if i == 0 {
 				resp.PutUtfString("errorCode", "999999") // genuine failure, not benign -- whichever type this is
@@ -3051,11 +2827,11 @@ func TestClaimAllMailRewardLoopContinuesAcrossTypesAfterBusinessError(t *testing
 		t.Fatalf("server saw %d mail.reward.batch requests, want 2 -- the loop must not stop after the first type's failure", len(seenTypes))
 	}
 	if seenTypes[0] == seenTypes[1] {
-		t.Fatalf("both mail.reward.batch requests used the same type %d, want one request each for types 3 and 9", seenTypes[0])
+		t.Fatalf("both mail.reward.batch requests used the same type %s, want one request each for groups 3 and 2", seenTypes[0])
 	}
-	gotTypes := map[int32]bool{seenTypes[0]: true, seenTypes[1]: true}
-	if !gotTypes[3] || !gotTypes[9] {
-		t.Errorf("mail.reward.batch types seen = %v, want exactly {3, 9}", seenTypes)
+	gotTypes := map[string]bool{seenTypes[0]: true, seenTypes[1]: true}
+	if !gotTypes["3"] || !gotTypes["2"] {
+		t.Errorf("mail.reward.batch types seen = %v, want exactly {3, 2} (the alliance and report groups of types 3 and 9)", seenTypes)
 	}
 }
 
@@ -3214,7 +2990,7 @@ func TestClaimAllMailProcessesPartialMailOnListPageTimeout(t *testing.T) {
 // reward-claim loop entirely, showing up as writeCount()==2.
 func TestClaimAllMailReadStatusContinuesAfterTimeout(t *testing.T) {
 	const total = 101
-	const mailType = int32(7)
+	const mailType = int32(73) // NEW_COLLECT_MAIL: the daily group (6)
 	var mails []*sfs.SFSObject
 	for i := range total {
 		mails = append(mails, newTestMailObj(fmt.Sprintf("uid-%03d", i), mailType, 0)) // rewardStatus=0: unclaimed
@@ -3450,7 +3226,10 @@ func TestClaimAllMailSkipsWhatTheClientsBulkActionsSkip(t *testing.T) {
 		newTestMailObj("rating", 134, 0),                                               // TranslationRating
 		newTestMailObj("auto-rating", 135, 0),                                          // Automatic_TranslationRating
 		mailWith(newTestMailObj("saved", 3, 0), map[string]int32{"saveFlag": 1}),       // favor group
-		mailWith(newTestMailObj("not-saved", 4, 0), map[string]int32{"saveFlag": 0}),   // explicit 0: normal
+		mailWith(newTestMailObj("not-saved", 2, 0), map[string]int32{"saveFlag": 0}),   // explicit 0: normal
+		newTestMailObj("arena", 117, 0),                                                // ARENA_BATTLE_REPORT: the hide group, in no tab
+		newTestMailObj("wounded", 11, 0),                                               // MAIL_WOUNDED: no group
+		newTestMailObj("unknown", 4242, 0),                                             // not a 1.0.367 mail type
 	)
 	if err := ClaimAllMail(client); err != nil {
 		t.Fatalf("ClaimAllMail() = %v, want nil", err)
@@ -3460,8 +3239,16 @@ func TestClaimAllMailSkipsWhatTheClientsBulkActionsSkip(t *testing.T) {
 	}
 	var claims []string
 	for _, r := range fake.only("mail.reward.batch") {
-		claims = append(claims, fmt.Sprintf("%d:%s", r.Params.GetInt("type"), r.Params.GetString("uids")))
+		v, _ := r.Params.Get("type")
+		if v.Type != sfs.SFSUtfString {
+			t.Errorf("mail.reward.batch type is SFS type %v, want a UtfString (MailRewardBatchMessage.lua:13)", v.Type)
+		}
+		if got := session.ParamKeysWithoutID(r.Params); !slices.Equal(got, []string{"uids", "type"}) {
+			t.Errorf("mail.reward.batch keys %v, want uids and type", got)
+		}
+		claims = append(claims, r.Params.GetString("type")+":"+r.Params.GetString("uids"))
 	}
+	// Alliance (3) before activity (4), the client's MailShowGroup order.
 	if want := []string{"3:plain,read-reward", "4:not-saved"}; !slices.Equal(claims, want) {
 		t.Errorf("reward claims = %v, want %v", claims, want)
 	}
@@ -3483,21 +3270,54 @@ func TestClaimAllMailSendsNoReadStatusWhenAllRead(t *testing.T) {
 	}
 }
 
-// TestGroupUnclaimedByTypeSkipsCantClaimAllAndSaved checks the claim filter alone, with a
-// saveFlag sent as a Byte and a neighbouring type (136) that is not excluded.
-func TestGroupUnclaimedByTypeSkipsCantClaimAllAndSaved(t *testing.T) {
-	savedByte := newTestMailObj("saved-byte", 5, 0)
+// TestGroupUnclaimedByGroupSkipsCantClaimAllAndSaved checks the claim filter alone, with a
+// saveFlag sent as a Byte and a type in the same system group (136) that is not excluded.
+func TestGroupUnclaimedByGroupSkipsCantClaimAllAndSaved(t *testing.T) {
+	savedByte := newTestMailObj("saved-byte", 3, 0)
 	savedByte.PutByte("saveFlag", 1)
 	mail := []Mail{
-		{Raw: newTestMailObj("ok", 5, 0)},
+		{Raw: newTestMailObj("ok", 3, 0)},
 		{Raw: newTestMailObj("t112", 112, 0)},
 		{Raw: newTestMailObj("t134", 134, 0)},
 		{Raw: newTestMailObj("t135", 135, 0)},
 		{Raw: savedByte},
-		{Raw: newTestMailObj("t136", 136, 0)}, // REFUND_COST_GOLD: not in MailCantClaimAllType
+		{Raw: newTestMailObj("t136", 136, 0)}, // REFUND_COST_GOLD, system group: not in MailCantClaimAllType
 	}
-	got := groupUnclaimedByType(mail)
-	if len(got) != 2 || !slices.Equal(got[5], []string{"ok"}) || !slices.Equal(got[136], []string{"t136"}) {
-		t.Errorf("groupUnclaimedByType = %v, want map[5:[ok] 136:[t136]]", got)
+	got := groupUnclaimedByGroup(mail)
+	if len(got) != 2 || !slices.Equal(got[3], []string{"ok"}) || !slices.Equal(got[5], []string{"t136"}) {
+		t.Errorf("groupUnclaimedByGroup = %v, want map[3:[ok] 5:[t136]]", got)
+	}
+}
+
+// TestGroupUnclaimedByGroupUsesTheClientsGroups: mail is claimed by MailTypeToInternalGroup group,
+// so several types share one batch, and mail in no tab the client's Claim All walks (a type with
+// no group, or the hide group) is left and logged (MailEnum.lua:174-183, 287-428).
+func TestGroupUnclaimedByGroupUsesTheClientsGroups(t *testing.T) {
+	mail := []Mail{
+		{Raw: newTestMailObj("scout-alert", 9, 0)}, // MAIL_SCOUT_ALERT: report (2)
+		{Raw: newTestMailObj("new-fight", 72, 0)},  // NEW_FIGHT: report (2)
+		{Raw: newTestMailObj("season", 143, 0)},    // LW_SEASON_REWARD_MAIL: season (9)
+		{Raw: newTestMailObj("system", 2, 0)},      // MAIL_SYSTEM: activity (4)
+		{Raw: newTestMailObj("arena", 117, 0)},     // ARENA_BATTLE_REPORT: hide (1)
+		{Raw: newTestMailObj("wounded", 11, 0)},    // MAIL_WOUNDED: no group
+		{Raw: newTestMailObj("unknown", 4242, 0)},  // not a 1.0.367 mail type
+		{Raw: newTestMailObj("claimed", 143, 1)},   // no reward left
+	}
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	got := groupUnclaimedByGroup(mail)
+	slog.SetDefault(orig)
+	want := map[int64][]string{2: {"scout-alert", "new-fight"}, 9: {"season"}, 4: {"system"}}
+	if len(got) != len(want) {
+		t.Fatalf("groupUnclaimedByGroup = %v, want %v", got, want)
+	}
+	for g, uids := range want {
+		if !slices.Equal(got[g], uids) {
+			t.Errorf("group %d: %v, want %v", g, got[g], uids)
+		}
+	}
+	if !strings.Contains(buf.String(), "count=3 types=\"[11 117 4242]\"") {
+		t.Errorf("the left-over rewards were not logged: %s", buf.String())
 	}
 }
