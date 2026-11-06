@@ -97,6 +97,10 @@
           {
             "label": "By Lukasz Jagiello",
             "href": "https://lukasz.jagiello.org"
+          },
+          {
+            "label": "Project write-up",
+            "href": "https://lukasz.jagiello.org/projects/lastwar-client"
           }
         ]
       }
