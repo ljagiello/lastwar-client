@@ -411,4 +411,4 @@ layer only imports the ones below it (`session` -> `game` -> `auth` -> `app`).
 
 Apache License 2.0 -- see [LICENSE](LICENSE).
 
-Created by [Lukasz Jagiello](https://lukasz.jagiello.org).
+Created by [Lukasz Jagiello](https://lukasz.jagiello.org). Write-up: [lukasz.jagiello.org/projects/lastwar-client](https://lukasz.jagiello.org/projects/lastwar-client).
