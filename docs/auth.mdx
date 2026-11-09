@@ -32,7 +32,7 @@ A stock SFS2X `LoginRequest` (`action=1`, system controller), but every call sit
 | `CoreV` | hash chain: `MD5(reverse(base64(rand32)))` then `MD5(that + rand32)`, interleaved |
 | `packageSign` | despite the name, *not* a certificate check, just `SHA1(packageName)`, a constant public string, trivially reproducible without touching the APK's real signing certificate. The field that actually depends on the real signing cert is `psh`, below. |
 | `psh` | Android: `MD5(cmdBaseTime + hex(signing-cert DER bytes))`, confirmed in the decompiled Android SDK, `SdkManager.LW_PSH()`, which concatenates `cmdBaseTime` with each `PackageInfo.signatures[i].toCharsString()` and MD5s the result. Unchanged in 1.0.364, whose signing certificate is byte-identical to 1.0.351's. iOS: `MD5(cmdBaseTime + "7" + "com.lastwar.ios")`, which `goclient` sends in iOS mode (`-cs-ios` or a session config's `iosMode`). It matches two captures of the App Store app on a Mac (the iPhone/iPad build in `Wrapper/LastWar.app`): `cmdBaseTime` `1791877000` (2026-10-13) and `1792390017` (1.0.364/900, 2026-10-18). A `Login` sending it into the real account was accepted on 2026-10-18 (confirmed live). Until then iOS mode sent the Android value, which the server also accepted for weeks. In the iOS binary, `rg_getPsh:` puts `"7"` between the timestamp and the bundle id when the app bundle has no `embedded.mobileprovision`, as in an App Store install, and `"3"` when it has one (static-analysis-only: no captured `Login` has used `"3"`). |
-| `shumeiBoxId` | ShuMei anti-fraud device fingerprint — the ShuMei SDK's `smid`, assigned by the ShuMei backend in response to a `deviceprofile/v4` device-profile upload. **An empty string is a first-class, non-error client path**: the 1.0.364 C# sends `""` when the SDK isn't ready or `client_config` switch 25 is off. In the 2026-10-04 capture, a TLS call to a ShuMei endpoint preceded the game connection by 0.5 s, and the value had changed in both observed token rotations. The server doesn't require it: the same day, a captured iOS session reconnected into the established account with `shumeiBoxId` sent empty (confirmed live). The full flow is documented in [ShuMei device fingerprint](/shumei) |
+| `shumeiBoxId` | ShuMei anti-fraud device fingerprint — the ShuMei SDK's `smid`, assigned by the ShuMei backend in response to a `deviceprofile/v4` device-profile upload. **An empty string is a first-class, non-error client path**: the 1.0.364 C# sends `""` when the SDK isn't ready or `client_config` switch 25 is off. In the 2026-10-04 capture, a TLS call to a ShuMei endpoint preceded the game connection by 0.5 s, and the value had changed in both observed token rotations. The server doesn't require it: the same day, a captured iOS session reconnected into the established account with `shumeiBoxId` sent empty (confirmed live). An empty or emulator-looking fingerprint is also the trigger for the account-creation risk ban, see [How ShuMei drives account bans](/shumei#how-shumei-drives-account-bans) |
 | `dataConfigMd5` | not computed by the client: an echo of a server-issued value, omitted when the client has none, see [Live validation against production](/live-validation) |
 | `resVersion` | built from check-version data, see [Startup, version-check & hot-update](/bootstrap#resversion) |
 | `androidDid`, `IMEI`, `gaid`, `afuid`, `firebaseId`… | ~15 more device/ad identifiers, all static/spoofable strings |
@@ -130,6 +130,15 @@ A ban's `ep[0]` is one string with its details separated by `;` inside it, for e
 The dialog names a reason only for `705` (Data Error), `706` (Exploitation of Glitches), `727` (Violation of Speech Rules), and `602` (character deletion). Any other code, such as the `703` in #53, displays as "Data Error", so the dialog doesn't tell you the real reason. Don't read the ban time's other digits as a duration: the client ignores them.
 
 `goclient` logs the code, whether a ban is permanent, and its reason, then exits with code `4`. It reads the sign from the text, so it never parses the number.
+
+#### The ShuMei risk ban is a different surface
+
+The `ep[0]` ban above is the account-level `ERROR_BANID`, returned as a `Login` rejection. A separate,
+ShuMei-driven ban arrives **after a successful login** as a server push: `push.shumei.exception.level`
+in game (or `login.push.shumei.exception.level` on the account-selection screen) carries
+`creat_account_rick_level`, which the client turns into the account-ban popup when it's `1` or `2`.
+It targets the *device* behind the account, not a specific role, and it never appears in `ep[0]`. See
+[How ShuMei drives account bans](/shumei#how-shumei-drives-account-bans).
 
 ### Following a `serverInfo` redirect
 
@@ -250,7 +259,7 @@ Around and after `init`, the real client sends, in order (observed in the captur
 
 4. Nine `mail.delete.batch {type: "auto", uids}` calls about 4.7 s in. The real client auto-deletes mail older than 30 days once a day, see [Alliance, chat & mail](/alliance-chat-mail).
 
-The server also pushes `push.shumei.id {shumeiId}` about 0.5 s after `Login` (observed live). The client caches that value and reports it as `ta.lw_shumei_id` in its next `Login`.
+The server also pushes `push.shumei.id {shumeiId}` about 0.5 s after `Login` (observed live). The client caches that value and reports it as `ta.lw_shumei_id` in its next `Login`. `shumeiId` is the server's own device identifier and is distinct from both `shumeiBoxId` and the `push.shumei.exception.level` risk push; the client also folds it into the analytics super properties (`lw_shumei_id`, `Assembly-CSharp:58829,58940`).
 
 `login.init` is an active pull that the real client never sent in the capture. The C# sends `dataConfigMd5` with it only when non-empty.
 
@@ -302,7 +311,7 @@ No OAuth is required to play: `account.login.new` with `type=1` and only `device
 
 ### New-device account selection
 
-With `client_config` switch 21 on and no stored `gameUid`, the 1.0.364 C# first connects to the `loginServer {ip, port, ws_ip, ws_port}` that the GSL response names, not to a game zone. The server's `login.push.shumei.exception.level` push then decides whether the account picker offers **New game** (static-analysis-only). That push is an anti-fraud surface, recorded here only as a protocol fact.
+With `client_config` switch 21 on and no stored `gameUid`, the 1.0.364 C# first connects to the `loginServer {ip, port, ws_ip, ws_port}` that the GSL response names, not to a game zone. The server then pushes `login.push.shumei.exception.level`, whose `creat_account_rick_level == 1` hides the account picker's **New game** button (`AccountSelectState.OnPushShumeiExceptLevel`, `Assembly-CSharp:8915-8929`; gated on switch 36, `ENABLE_SHUMEI_CREATE_ACCOUNT_RISK_BAN`). It's the login-server half of the ShuMei risk ban, see [How ShuMei drives account bans](/shumei#how-shumei-drives-account-bans) (static-analysis-only).
 
 ## A second, optional channel: chat
 

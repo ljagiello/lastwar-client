@@ -24,6 +24,9 @@ func TestNewInstall(t *testing.T) {
 	if b, err := base64.StdEncoding.DecodeString(parts[0]); err != nil || len(b) != widevineIDLen {
 		t.Errorf("Widevine ID decodes to %d bytes (error %v), want %d", len(b), err, widevineIDLen)
 	}
+	if !appUIDRe.MatchString(in.AppUID) {
+		t.Errorf("AppUID = %q, want the \"u0_a<uid>\" form", in.AppUID)
+	}
 	if lo, hi := now.Add(-400*24*time.Hour), now.Add(-30*24*time.Hour); in.FirstInstallTime.Before(lo) || in.FirstInstallTime.After(hi) {
 		t.Errorf("FirstInstallTime = %v, want 30 to 400 days before %v", in.FirstInstallTime, now)
 	}
@@ -50,7 +53,7 @@ func TestInstallFill(t *testing.T) {
 	}
 
 	got, filled := Install{}.Fill(now)
-	if !filled || got.AndroidID == "" || got.MediaDrmID == "" || got.PUUID == "" || got.FirstInstallTime.IsZero() || got.LastUpdateTime.IsZero() {
+	if !filled || got.AndroidID == "" || got.MediaDrmID == "" || got.PUUID == "" || got.AppUID == "" || got.FirstInstallTime.IsZero() || got.LastUpdateTime.IsZero() {
 		t.Errorf("Fill on an empty install = %+v, %v; want every value set, true", got, filled)
 	}
 
@@ -135,6 +138,8 @@ func TestInstallValidate(t *testing.T) {
 		"puuid with dashes":      func(in *Install) { in.PUUID = "6f1c2b3a-4d5e-4f60-a7b8-c9d0e1f20314" },
 		"puuid not version 4":    func(in *Install) { in.PUUID = "ffeeddccbbaa99887766554433221100" },
 		"puuid wrong variant":    func(in *Install) { in.PUUID = "6f1c2b3a4d5e4f6077b8c9d0e1f20314" },
+		"appUid without u0_":     func(in *Install) { in.AppUID = "a123" },
+		"appUid with dashes":     func(in *Install) { in.AppUID = "u0_a-1" },
 		"update before install":  func(in *Install) { in.LastUpdateTime = in.FirstInstallTime.Add(-time.Second) },
 		"boxId without B":        func(in *Install) { in.BoxID, in.BoxIDSavedAt = "smid", time.UnixMilli(1) },
 		"boxId without saved at": func(in *Install) { in.BoxID = "Bsmid" },

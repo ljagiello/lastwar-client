@@ -1,6 +1,6 @@
 ---
 title: "ShuMei device fingerprint (shumeiBoxId)"
-description: "How the ShuMei (数美) anti-fraud SDK produces the shumeiBoxId device fingerprint, and how a clean-room Go client can generate one without the native library."
+description: "How the ShuMei (数美) anti-fraud SDK produces the shumeiBoxId device fingerprint, how a clean-room Go client can generate one without the native library, and how the server uses it to ban accounts it classifies as null or emulator."
 ---
 
 `shumeiBoxId` is the value the SFS2X `Login` request sends as its ShuMei anti-fraud device fingerprint. It is **not** a locally-invented token: it is the `smid` (ShuMei Machine ID) that the ShuMei backend assigns in response to uploading a device profile to `/deviceprofile/v4`. This page documents that flow, recovered from the Obfuscator-LLVM-hardened `libsmsdk.so` and the `com.ishumei.smantifraud` Java classes, so a from-scratch Go client can register a device and mint its own `shumeiBoxId`.
@@ -152,6 +152,81 @@ decompiled Java builder references `enc` or `sid`.
 The `detail` object (`l1l11I1l.l11l1111I11l`) carries `deviceId` (the smid),
 `oldDeviceId`, `sid`, `c`, `t` (`l11l111llI1l.java`).
 
+## How ShuMei drives account bans
+
+The `shumeiBoxId` isn't only a stored fingerprint. It feeds a ShuMei-backed
+**account-creation risk** decision that the server pushes back to the client in two places. Both
+carry the same field, `creat_account_rick_level` (the wire name is misspelled in the client), which
+the server sets to `1` or `2` when it classifies the device behind the login as risky.
+
+### The two risk pushes
+
+| Push | When | Client handler | Effect |
+|---|---|---|---|
+| `login.push.shumei.exception.level` | while the account-selection screen is connected to the login server, before a zone is chosen | `AccountSelectState.OnPushShumeiExceptLevel` (`Assembly-CSharp:8915-8929`) | hides the **New Game** button when `creat_account_rick_level == 1` |
+| `push.shumei.exception.level` | in game, after `init` | `AccountManager:OnPushShumeiExceptionLevel` (`AccountManager.lua:526-540`) | opens the account-ban popup when the level is `1` or `2` |
+
+The login-server variant tests only `== 1` (`Assembly-CSharp:8921`); the in-game one treats both
+`1` and `2` as a ban (`AccountManager.lua:486-494`). Both are gated client-side on
+`ClientSwitch.IsOn(36)` (`ENABLE_SHUMEI_CREATE_ACCOUNT_RISK_BAN`, `Assembly-CSharp:44163`): with the
+switch off, the real client still shows **New Game** and never pops the ban, whatever the level the
+server pushed. The server's decision to push is independent of that switch.
+
+### What the levels mean
+
+The server's own telemetry lumps the reason into one string,
+`shumei_null_or_emulator` (`AccountManager.lua:510-515`), but the two levels map onto its two halves:
+
+| Level | In-game effect | Contact escalation | Meaning |
+|---|---|---|---|
+| `1` | ban popup, **New Game** still offered | AIHelp `E021` → `shumei_id_risk_e021` | the device fingerprint is *risky* — an emulator, virtualized, or farm device |
+| `2` | harder ban, **New Game** hidden, title `error_notice_title_001` | AIHelp `E022` → `shumei_id_null_e022` | the ShuMei ID is *null* — the login carried no usable fingerprint |
+
+The level-to-contact mapping is `UIAccountBanView.lua:121-149` (`contactType 2` → `E021`,
+`contactType 3` → `E022`) and the contact entrances are `Assembly-CSharp:238427-238432`. So
+`creat_account_rick_level == 2` is the "no ShuMei ID at all" case, and it's the one the client treats
+as permanent: the popup offers no way to start a new game.
+
+This risk push is a separate surface from the `Login` rejection ban (`ec=28`, `ep[0]` starting with
+`4;`). The `Login` ban is the account-level `ERROR_BANID` documented in
+[Identity, login & session](/auth#reading-a-ban); the ShuMei push arrives after a successful login and
+targets the *device behind the account* rather than a specific role.
+
+### A stale build is a separate ShuMei gate
+
+`ShumeiSdkManager.IsForbidCreateRole` (`Assembly-CSharp:59785-59841`) blocks **new role creation** on
+a different signal: when the server has set the player switch `shumei_new_user_check` and the client's
+claimed `appVersion` is more than `login_shumei_level_limit.k6` minor-versions behind the server's
+`new_version`, the client shows a "go to the store" dialog instead of creating the role. It's a version
+gate, not a ban, but it's ShuMei-branded and targets the same fresh-account flow.
+
+### What this means for a clean-room client
+
+The fingerprint is spoofable in principle: the `aNN` device data is collected locally by the SDK and
+self-reported, protected only with the static embedded public key (see
+[Cryptography](#cryptography)), so nothing on the wire binds it to a real phone's hardware. A
+from-scratch client *can* build a plausible profile, and `goclient` now does the three things that
+make one convincing:
+
+- **Per-device hardware** — a catalog entry selected by `deviceId` (`hardwareFor`/`HardwareFor` in
+  `internal/shumei/hardware.go`), not one shared Samsung profile.
+- **Internal consistency** — a real Android 12 `SP1A` build ID, a SoC that matches the board and the
+  boot hardware, a screen whose dpi matches its resolution, and RAM/cores/clock that match the SoC.
+- **Cross-field consistency with the `Login`** — `auth.BuildLoginParams` derives `phone_model`,
+  `osVersion`, `device_string`, `mt`, `AndroidID` (Build.SERIAL), `IMEI` (the build dump) and
+  `androidDid` from the same `HardwareFor(deviceId)` entry, and the `ta` blob's `#device_model`/
+  `#manufacturer`/`#os_version`/`#screen_*`/`#ram`/`#fps` follow it too, so the ShuMei fingerprint and
+  the login describe the same phone. The iOS `Login` is left as-is: it has its own device model
+  domain (`idfa`/`idfv`), and no iOS hardware is modeled yet.
+
+Three things are genuinely hard to reproduce — a real Widevine `deviceUniqueId`, keystore attestation
+chains, and Play Integrity — but Last War's ShuMei config mostly skips those (`notCollect`
+`{input, protect}`, no `ACCESS_FINE_LOCATION`, the cloudconf default excludes `gps`/`tel`). The
+practical bar for a spoof is therefore consistency and uniqueness per device, not any single
+unforgeable field. None of this has been validated against the server's risk verdict, and the game's
+emulator check (`Udid.CheckEmulatorBuild`) only runs on the real device's own build properties, so a
+convincing fingerprint is still a *constructed* one, not a proven pass.
+
 ## iOS
 
 The iOS app (1.0.344, build 786) links the ShuMei SDK statically into
@@ -204,11 +279,10 @@ hybrid scheme, returns `code:1100` and a real `smid`, so `BoxID` now mints a
 real `shumeiBoxId` (`"B"` + 88-char `deviceId`). The server validates the
 protection: an empty or minimal `data`/`tn`/`ep` returns `1902`, and an empty
 body returns `9101 "invalid organization"`. The `aNN` fingerprint is a spoofed
-Android device profile (a Samsung SM-G988N on Android 12), because this client
-runs on a desktop and has no real device telemetry — so the `smid` it mints is
-for a device that does not exist. The game server does not require a real
-`shumeiBoxId` (an empty one is accepted), so this is an optional best-effort
-path, not a hard gate.
+Android device profile — this client runs on a desktop and has no real device
+telemetry — so the `smid` it mints is for a device that does not exist. The
+game server does not require a real `shumeiBoxId` (an empty one is accepted), so
+this is an optional best-effort path, not a hard gate.
 
 **What is byte-exact vs. reconstructed:** the configuration values, field
 names, endpoint, response shape, and crypto primitives (RSA-OAEP spec, AES-256
@@ -216,6 +290,24 @@ CBC IV, the MD5-derived key) are byte-exact from decompilation and confirmed
 live. The `aNN` device-data values themselves are a spoofed profile, not
 collected from a real device. The clock fields below come from the host, and
 the per-install values below are generated in the formats a real phone uses.
+
+**Per-device hardware.** The device-specific half of the profile (build
+fingerprint, model, brand, board, SoC, screen, sensors, launcher, locale) is
+not one fixed phone: `HardwareFor(deviceId)` selects an internally-consistent
+entry from a catalog of eight real Android 12 signatures (`hardware.go`), so
+two distinct `deviceId`s report two distinct phones instead of sharing a single
+Samsung profile. The selection is a pure function of the `deviceId`, so one
+device stays the same phone across registrations. `a60` (the app's Linux uid,
+`u0_a<uid>`) is per-install, generated with the other install values and kept
+in the session config.
+
+The same `Hardware` drives the Android `Login`'s device fields
+(`auth/identity.go`): `phone_model`, `osVersion`, `device_string`, `mt`,
+`AndroidID` (Build.SERIAL), `IMEI` (the build dump) and `androidDid` all come
+from the selected entry, and the `ta` blob's `#device_model`/`#manufacturer`/
+`#os_version`/`#screen_*`/`#ram`/`#fps` follow it, so the ShuMei fingerprint and
+the login describe one phone. The `#device_id`/`#install_time` and the iOS login
+fields are not modeled yet.
 
 **Credit:** the `aNN` template started as C485's C# `ShumeiInnerTemplate`, and
 the `FUN_0010c160` address comes from their `GetShumeiBoxId`. Both were shared
@@ -332,6 +424,7 @@ share the one persisted `deviceId`.
 | `a24` | `Settings.Secure.ANDROID_ID` (`l1l11I111ll`), unhashed because Last War doesn't set `needUsingMD5` | `androidId` | 16 random lowercase hex digits |
 | `a84` | the base64 `deviceUniqueId` of the Widevine, ClearKey (W3C and DASH-IF UUIDs) and PlayReady `MediaDrm` schemes, in that order, joined with `_` (`l1111l111111Il`), cached in the `auc` prefs | `mediaDrmId` | 32 random bytes for Widevine, then `___`. Android's ClearKey plugin keeps its test ID under `deviceId`, not `deviceUniqueId`, and the Samsung has no PlayReady |
 | `a163` | `UUID.randomUUID()` without dashes, cached as `puuid` in the `seq` prefs (`l1l11I11l`) | `puuid` | a random version 4 UUID |
+| `a60` | the app's Linux uid as `u0_a<uid-10000>` on API 27+ (`l11l1l1l1Il.l1111l111111Il(int)`), from `getApplicationInfo().uid` | `appUid` | a random low `u0_a<0..199>` |
 | `a125` | `{fit, lut}`: `PackageInfo.firstInstallTime` and `lastUpdateTime` | `firstInstallTime`, `lastUpdateTime` | installed 30 to 400 days ago, updated in the last 20 days |
 | `a126` | `getDeviceId()` unless it's a `D` fallback: the `"B"` + `smid` cached from the last registration | `boxId` | absent until the first registration |
 | `a167`, `a168` | the smid cache file's timestamp (`SMSDK.u2`), and the copy the SDK records as `bfic` right after writing that file | `boxIdSavedAt` | 0 until the first registration |

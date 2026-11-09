@@ -9,6 +9,7 @@ import (
 
 	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
+	"lastwar-client/internal/shumei"
 )
 
 // TestBuildLoginParamsTaIOSUnchanged pins the iOS ta blob byte for byte: the cron's captured iOS
@@ -32,7 +33,6 @@ func TestBuildLoginParamsTaAndroidMarkers(t *testing.T) {
 	}
 	for k, want := range map[string]any{
 		"#os": "Android", "#bundle_id": gsl.PackageName, "lw_platform": "market_global",
-		"#manufacturer": "unknown", "#device_model": "Android",
 		"#app_version": "1.0.364", "lw_version": "1.0.364", "lw_buildcode": "1892", "lw_zone": "APS783",
 		"lw_device_id": "", "lw_shumei_id": "", "lw_airKey": "",
 	} {
@@ -40,8 +40,51 @@ func TestBuildLoginParamsTaAndroidMarkers(t *testing.T) {
 			t.Errorf("ta[%q] = %v, want %q", k, ta[k], want)
 		}
 	}
+	// The Android device model and manufacturer now describe the hardware the
+	// (empty) deviceId selects -- matching the ShuMei fingerprint -- not the
+	// old "unknown"/"Android" placeholders.
+	hw := shumei.HardwareFor("")
+	if ta["#manufacturer"] != hw.Build["manufacturer"] || ta["#device_model"] != hw.Model() {
+		t.Errorf("ta #manufacturer/#device_model = %v/%v, want %q/%q",
+			ta["#manufacturer"], ta["#device_model"], hw.Build["manufacturer"], hw.Model())
+	}
 	if got := p.GetString("packageName"); got != ta["#bundle_id"] {
 		t.Errorf("ta #bundle_id %v does not match packageName %q", ta["#bundle_id"], got)
+	}
+}
+
+// TestBuildLoginParamsAndroidDeviceFields checks the Android Login's device
+// fields describe the same phone the ShuMei fingerprint does (shumei.HardwareFor),
+// not the old "GoClient" placeholders: phone_model is the model, osVersion is
+// Unity's "Android OS .." string, device_string/mt/AndroidID/IMEI are the
+// DeviceManager/Device dumps, and androidDid is a per-device UUID.
+func TestBuildLoginParamsAndroidDeviceFields(t *testing.T) {
+	const deviceID = "0123456789abcdef0123456789abcdef_n3d"
+	p := BuildLoginParams(LoginParamsInput{DeviceID: deviceID, AirKey: "lwDid_x", ServerID: "783", AppVersion: "1.0.364", VersionCode: "1892"})
+	hw := shumei.HardwareFor(deviceID)
+
+	for key, want := range map[string]string{
+		"phone_model":   hw.Model(),
+		"osVersion":     hw.OSVersionString(),
+		"device_string": hw.DeviceString(),
+		"mt":            hw.HandSetInfo(),
+		"AndroidID":     hw.Serial,
+		"IMEI":          hw.DeviceInfo(),
+		"androidDid":    shumei.DeviceUUID(deviceID),
+	} {
+		if got := p.GetString(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+
+	// The ta blob's model and manufacturer agree with the top-level fields.
+	var ta map[string]any
+	if err := json.Unmarshal([]byte(p.GetString("ta")), &ta); err != nil {
+		t.Fatalf("ta is not JSON: %v", err)
+	}
+	if ta["#device_model"] != hw.Model() || ta["#manufacturer"] != hw.Build["manufacturer"] {
+		t.Errorf("ta #device_model/#manufacturer = %v/%v, want %q/%q",
+			ta["#device_model"], ta["#manufacturer"], hw.Model(), hw.Build["manufacturer"])
 	}
 }
 

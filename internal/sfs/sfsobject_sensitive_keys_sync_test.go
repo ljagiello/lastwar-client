@@ -79,6 +79,7 @@ var knownNonSensitiveSFSKeys = map[string]bool{
 	"dataConfigMd5":         true,
 	"deeplinkParams":        true,
 	"delete_account_status": true,
+	"device_string":         true, // GetDeviceString() device description (model/RAM/GPU), no credentials
 	"firstCmd":              true,
 	"forbidden_froce_merge": true,
 	"fromCountry":           true,

@@ -276,16 +276,19 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 	return data, base64.StdEncoding.EncodeToString(epBytes), base64.StdEncoding.EncodeToString(tnBytes), nil
 }
 
-// innerTemplate is the static part of the `aNN` device-data fingerprint the
-// SDK's SubCollector fills. It is a spoofed Android device profile (a Samsung
-// SM-G988N running Android 12), because this client runs on a desktop and has
-// no real device telemetry. It started as C485's C# ShumeiInnerTemplate,
-// shared in https://github.com/ljagiello/lastwar-client/discussions/21.
+// baseTemplate is the constant part of the `aNN` device-data fingerprint: the
+// app-level and generic-Android slots that are the same on every Android 12
+// phone of the same SDK version. The device-specific half (build, SoC, screen,
+// sensors, launcher, locale — see hardware.go) is filled by deviceData from the
+// catalog entry selected for the deviceId, so two devices no longer share one
+// fixed phone profile. It started as C485's C# ShumeiInnerTemplate, shared in
+// https://github.com/ljagiello/lastwar-client/discussions/21.
+//
 // deviceData adds the fields that change between collections: the device ID
 // (a2, a97), the clocks (a9, a40, a170, a171), the SDK session ID (a80), the
 // collection time (a133), the app version (a38), and the Wi-Fi details (a19,
 // a30, a31) when a Device carries them. It also adds the per-install values
-// from Device.Install: a24, a84, a125, a126, a163, a167 and a168.
+// from Device.Install: a24, a84, a125, a126, a163, a167, a168 and a60.
 //
 // The empty entries stay here to document which slots this device leaves
 // empty. deviceData drops them, the way the SDK's serializer does. a63, the
@@ -298,30 +301,20 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // excludes "gps" and "tel". So a fresh install most likely sends {"input",
 // "tel", "gps", "protect"}, in Java's HashSet order. A later server reply could
 // change the cloud half; this client doesn't fetch the cloud config.
-const innerTemplate = `{
+const baseTemplate = `{
   "a1": "all", "a4": "1", "a5": "default",
-  "a6": "android", "a10": "12", "a7": "3.14.3",
+  "a6": "android", "a7": "3.14.3",
   "a62": "/data/user/0/com.fun.lastwar.gp/files",
   "a64": { "enable": "0", "service": [], "suc": "1" },
-  "a36": "1080,1920,320", "a45": "26006",
-  "a143": "exynos990", "a33": "exynos990", "a34": 2457000, "a37": 128, "a32": 8, "a48": 8000000000,
-  "a56": "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US",
-  "a57": -1802451281, "a11": "default", "a29": "",
+  "a11": "default", "a29": "",
   "a44": "WIFI",
-  "a46": { "board": "z3q", "model": "SM-G988N", "brand": "samsung", "manufacturer": "samsung",
-           "fingerprint": "samsung/z3qksx/z3q:12/NRD90M/1201240816:user/release-keys",
-           "cpu_abi": "arm64-v8a", "cpu_abi2": "", "radioVersion": "" },
-  "a47": [ "1,InvenSense", "4,AKM", "9,Bosch", "13,Bosch" ],
-  "a18": { "ro.debuggable": "0", "ro.boot.hardware": "exynos990", "gsm.sim.state": "READY",
-           "gsm.operator.alpha": "Netia", "sys.usb.state": "android,adb" },
   "a39": "com.fun.lastwar.gp",
   "a136": "build1", "a96": "9dNCYkjHeFMYZMOjxgX8",
   "a68": [], "a69": 120000000000, "a70": 130000000000, "a71": 128000000000, "a127": 12,
   "a99": "", "a100": "", "a101": "", "a113": 0, "a130": 3, "a116": {}, "a117": false,
   "a120": { "mr": 0, "mt": 0, "tr": 123456789, "tt": 987654321 }, "a121": 0, "a124": "",
   "a135": 0, "a139": 0, "a142": 1,
-  "a153": {}, "a154": { "pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.5.01.7" },
-  "a144": "", "a155": 0, "a160": 0, "a161": 0, "a162": [],
+  "a153": {}, "a144": "", "a155": 0, "a160": 0, "a161": 0, "a162": [],
   "a164": 0, "a165": 0,
   "a169": "",
   "a172": {}, "a173": 0, "a174": 1, "a15": "false",
@@ -330,9 +323,9 @@ const innerTemplate = `{
   "a83": "1011100",
   "a85": [ "input", "tel", "gps", "protect" ], "a86": "0111001",
   "a88": "locateServiceName:android.location.ILocationManager$Stub$Proxy|phoneServiceName:com.android.internal.telephony.ITelephony$Stub$Proxy",
-  "a90": 32, "a92": "1080,1920", "a93": 1,
+  "a90": 32, "a93": 1,
   "a102": [], "a103": "", "a107": {}, "a108": "", "a110": "", "a114": [], "a115": [],
-  "a131": "pl", "a132": "pl", "a141": 1, "a156": [], "a157": 0, "a159": ""
+  "a141": 1, "a156": [], "a157": 0, "a159": ""
 }`
 
 // Device holds the fingerprint values that change during a device's life: the
@@ -406,11 +399,11 @@ func (d Device) withHostDefaults() Device {
 // the SDK (SmAntiFraud.create), whose clock a80 records.
 const sdkStartLead = time.Second
 
-// deviceData builds the device-data JSON that protect encrypts: innerTemplate
-// plus deviceID and d's clock, Wi-Fi and install values. It serializes the way
-// the SDK's reflection serializer (l1l1l11Ill) does: compact, and without
-// top-level entries that are empty strings, lists or maps. d must already
-// carry its host defaults.
+// deviceData builds the device-data JSON that protect encrypts: baseTemplate
+// plus the deviceId-selected hardware, deviceID and d's clock, Wi-Fi and
+// install values. It serializes the way the SDK's reflection serializer
+// (l1l1l11Ill) does: compact, and without top-level entries that are empty
+// strings, lists or maps. d must already carry its host defaults.
 func deviceData(deviceID string, d Device) (string, error) {
 	if d.BootTime.After(d.Now) {
 		return "", fmt.Errorf("shumei: boot time %s is after the collection time %s",
@@ -420,7 +413,7 @@ func deviceData(deviceID string, d Device) (string, error) {
 		return "", errors.New("shumei: no app version for a38 (set Device.AppVersion)")
 	}
 	in := d.Install
-	if in.AndroidID == "" || in.MediaDrmID == "" || in.PUUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() {
+	if in.AndroidID == "" || in.MediaDrmID == "" || in.PUUID == "" || in.AppUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() {
 		return "", errors.New("shumei: install values are unset (Install.Fill sets them)")
 	}
 	if err := in.Validate(); err != nil {
@@ -429,7 +422,7 @@ func deviceData(deviceID string, d Device) (string, error) {
 	if _, ok := in.For(deviceID); !ok {
 		return "", errors.New("shumei: the install belongs to a different deviceId")
 	}
-	dec := json.NewDecoder(strings.NewReader(innerTemplate))
+	dec := json.NewDecoder(strings.NewReader(baseTemplate))
 	dec.UseNumber()
 	var m map[string]any
 	if err := dec.Decode(&m); err != nil {
@@ -449,9 +442,32 @@ func deviceData(deviceID string, d Device) (string, error) {
 	m["a133"] = d.CollectTime.Milliseconds()
 	m["a38"] = d.AppVersion
 
+	// The device-specific half, from the catalog entry this deviceId selects.
+	// A pure function of deviceId, so one device stays the same phone and
+	// distinct devices report distinct, internally-consistent hardware.
+	hw := HardwareFor(deviceID)
+	m["a10"] = hw.AndroidVersion
+	m["a36"] = hw.Screen
+	m["a45"] = hw.DeviceName
+	m["a143"], m["a33"] = hw.SoC, hw.SoC
+	m["a34"] = hw.MaxFreq
+	m["a32"] = hw.Cores
+	m["a48"] = hw.RAMBytes
+	m["a37"] = hw.StorageGB
+	m["a56"] = hw.CertSubject
+	m["a57"] = hw.CertHash
+	m["a46"] = hw.Build
+	m["a47"] = hw.Sensors
+	m["a18"] = hw.Props
+	m["a154"] = hw.Launcher
+	m["a131"], m["a132"] = hw.Locale, hw.Locale
+	// a92 is a36's "width,height" without the dpi component.
+	m["a92"] = screenPrefix(hw.Screen)
+
 	m["a24"] = in.AndroidID
 	m["a84"] = in.MediaDrmID
 	m["a163"] = in.PUUID
+	m["a60"] = in.AppUID
 	m["a125"] = map[string]any{"fit": in.FirstInstallTime.UnixMilli(), "lut": in.LastUpdateTime.UnixMilli()}
 	m["a126"] = in.BoxID
 	var saved int64
@@ -496,6 +512,15 @@ func isEmpty(v any) bool {
 		return len(v) == 0
 	}
 	return false
+}
+
+// screenPrefix returns a92, a36's "width,height" without its dpi component:
+// a36 is "width,height,dpi", a92 is the same screen minus the density.
+func screenPrefix(screen string) string {
+	if i := strings.LastIndex(screen, ","); i >= 0 {
+		return screen[:i]
+	}
+	return screen
 }
 
 // javaRandomDigits returns n digits drawn with java.util.Random(seed).nextInt(10).
