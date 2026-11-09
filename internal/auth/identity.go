@@ -503,6 +503,7 @@ type LoginParamsInput struct {
 	AccessTok   string // "at" from the GSL response, if any
 	ServerID    string // zone minus "APS" prefix
 	ShumeiBoxId string // anti-fraud device-fingerprint token, if a real one is known
+	AndroidID   string // Settings.Secure.ANDROID_ID (16 hex), ThinkingData's ta #device_id
 
 	// IOSMode switches PackageName/packageSign/Platform/pf/psh (and adds the
 	// iOS-only idfa/idfv/phone_native_screen fields) to match a real iOS
@@ -676,7 +677,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		totalGB := float64(hw.RAMBytes) / 1e9
 		blobRAM = fmt.Sprintf("%.1f/%.1f", totalGB*0.35, totalGB)
 		blobFPS = 60
-		blobDeviceID = shumei.DeviceUUID(in.DeviceID)
+		blobDeviceID = in.AndroidID
 	}
 
 	// The ta analytics blob is part of the login gate for an established account. Confirmed live
@@ -725,12 +726,12 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	}
 	p.PutUtfString("ta", ta)
 	p.PutUtfString("distinct_id", "")
-	// phone_screen is Screen.width*Screen.height: for a portrait phone shown in
-	// landscape, that's height*width. Android reports the selected device's
+	// phone_screen is Screen.width*Screen.height. The game's activity is locked
+	// to portrait, so that's width*height. Android reports the selected device's
 	// screen; iOS keeps the 1920*1080 the captured session sent.
 	phoneScreen := "1920*1080"
 	if !in.IOSMode {
-		phoneScreen = fmt.Sprintf("%d*%d", screenHeight, screenWidth)
+		phoneScreen = fmt.Sprintf("%d*%d", screenWidth, screenHeight)
 	}
 	p.PutUtfString("phone_screen", phoneScreen)
 	p.PutSFSObject("configVersion", sfs.NewSFSObject())
@@ -750,11 +751,11 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 
 	// AndroidID/IMEI are Android-only identifiers; a real iOS client's
 	// captured request omits both entirely rather than sending them empty. The
-	// names are the game's own: "AndroidID" is really Build.SERIAL, and "IMEI"
-	// is Udid.getDeviceInfo()'s space-separated build dump, both from the
-	// selected device.
+	// names are the game's own: "AndroidID" is really Build.SERIAL (which reads
+	// "unknown" on a SDK 36 target), and "IMEI" is Udid.getDeviceInfo()'s
+	// space-separated build dump, both from the selected device.
 	if !in.IOSMode {
-		p.PutUtfString("AndroidID", hw.Serial)
+		p.PutUtfString("AndroidID", "unknown")
 		p.PutUtfString("IMEI", hw.DeviceInfo())
 	}
 	p.PutUtfString("psh", pshField(in.IOSMode, cmdBaseTime))
@@ -772,7 +773,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p.PutUtfString("googlePlay", "")
 	androidDid := ""
 	if !in.IOSMode {
-		androidDid = shumei.DeviceUUID(in.DeviceID)
+		androidDid = hw.AndroidDid()
 	}
 	p.PutUtfString("androidDid", androidDid)
 	p.PutUtfString("googleName", "")

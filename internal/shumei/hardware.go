@@ -27,7 +27,7 @@ type Hardware struct {
 	AndroidVersion string            // a10, Build.VERSION.RELEASE ("12")
 	APILevel       string            // Build.VERSION.SDK_INT ("31")
 	Screen         string            // a36, "width,height,dpi"; a92 is the "width,height" prefix
-	DeviceName     string            // a45, Build.DEVICE
+	DeviceName     string            // Build.DEVICE (the IMEI dump's device component)
 	SoC            string            // a143/a33, ro.board.platform (ro.hardware)
 	MaxFreq        int               // a34, CPU max frequency in kHz
 	Cores          int               // a32, CPU core count
@@ -42,8 +42,7 @@ type Hardware struct {
 	Locale         string            // a131/a132
 	GPUModel       string            // SystemInfo.graphicsDeviceName
 	GPUVendor      string            // SystemInfo.graphicsDeviceVendor
-	SimOperator    string            // TelephonyManager.getSimOperator(): MCC+MNC
-	Serial         string            // Build.SERIAL (the Login's misnamed "AndroidID" field)
+	SimOperator    string            // a45, TelephonyManager.getSimOperator(): MCC+MNC
 }
 
 // Model returns Build.MODEL, SystemInfo.deviceModel, and the Login's
@@ -51,9 +50,11 @@ type Hardware struct {
 func (h Hardware) Model() string { return h.Build["model"] }
 
 // OSVersionString returns GetOSVersion(): SystemInfo.operatingSystem, Unity's
-// "Android OS <release> / API-<sdk> (<fingerprint>)" string.
+// "Android OS <release> / API-<sdk> (<buildID>/<incremental>)" string (the
+// libunity.so format is %s %s / API-%i (%s/%s)).
 func (h Hardware) OSVersionString() string {
-	return fmt.Sprintf("Android OS %s / API-%s (%s)", h.AndroidVersion, h.APILevel, h.Build["fingerprint"])
+	buildID, incremental := h.buildIDIncremental()
+	return fmt.Sprintf("Android OS %s / API-%s (%s/%s)", h.AndroidVersion, h.APILevel, buildID, incremental)
 }
 
 // DeviceString returns GetDeviceString(), the "Model=..|Memory=..|Vendor=..|
@@ -82,10 +83,38 @@ func (h Hardware) DeviceInfo() string {
 	return strings.Join([]string{
 		h.Build["board"], h.Props["ro.boot.hardware"], h.Build["brand"],
 		h.Build["cpu_abi"], h.Build["cpu_abi2"], h.DeviceName,
-		h.Build["manufacturer"], h.Serial, h.product(),
+		h.Build["manufacturer"], "unknown" /* Build.SERIAL, SDK 36 */, h.product(),
 		strconv.Itoa(w), strconv.Itoa(hgt), strconv.Itoa(dpi),
 		h.Build["fingerprint"], h.Build["manufacturer"], h.Model(),
 	}, " ") + " "
+}
+
+// buildIDIncremental returns Build.ID and Build.VERSION.INCREMENTAL, the two
+// components of the build fingerprint after the release: the 4th and 5th
+// slash-separated fields of brand/product/device:release/buildID/incremental:...
+func (h Hardware) buildIDIncremental() (buildID, incremental string) {
+	fp := h.Build["fingerprint"]
+	colon := strings.SplitN(fp, ":", 3)
+	if len(colon) < 2 {
+		return "", ""
+	}
+	parts := strings.SplitN(colon[1], "/", 3)
+	if len(parts) < 3 {
+		return "", ""
+	}
+	return parts[1], parts[2]
+}
+
+// AndroidDid returns GetNewAndroidDeviceID(): generateHighVersionUUID() in
+// Udid.java, an MD5 (lowercase hex) of the build fields concatenated without
+// separators -- board, brand, cpu_abi, cpu_abi2, device, manufacturer, serial
+// (Build.SERIAL, "unknown" on a SDK 36 target), product, width, height, dpi.
+func (h Hardware) AndroidDid() string {
+	w, hgt, dpi := h.screenParts()
+	sum := md5.Sum([]byte(h.Build["board"] + h.Build["brand"] + h.Build["cpu_abi"] + h.Build["cpu_abi2"] +
+		h.DeviceName + h.Build["manufacturer"] + "unknown" + h.product() +
+		strconv.Itoa(w) + strconv.Itoa(hgt) + strconv.Itoa(dpi)))
+	return hex.EncodeToString(sum[:])
 }
 
 // product returns Build.PRODUCT (ro.product.name), the second component of the
@@ -122,8 +151,7 @@ func (h Hardware) ScreenWH() (w, height int) {
 // list all belong to the same phone, so the fingerprint reads as one real
 // device rather than a patchwork. The build IDs are Android 12 (SP1A.*),
 // matching androidVersion "12". Model numbers, SoC platforms, RAM, storage,
-// screen resolutions and CPU clocks are the devices' published specifications;
-// serials are plausible Build.SERIAL-shaped strings.
+// screen resolutions and CPU clocks are the devices' published specifications.
 var hardwareCatalog = []Hardware{
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -144,7 +172,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.5.01.7",
 		},
 		Locale:   "ko",
-		GPUModel: "Mali-G77 MP11", GPUVendor: "ARM", SimOperator: "45005", Serial: "RF8M12345AB",
+		GPUModel: "Mali-G77 MP11", GPUVendor: "ARM", SimOperator: "45005",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -165,7 +193,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.1.01.7",
 		},
 		Locale:   "en",
-		GPUModel: "Mali-G78 MP14", GPUVendor: "ARM", SimOperator: "26006", Serial: "R58M67890CD",
+		GPUModel: "Mali-G78 MP14", GPUVendor: "ARM", SimOperator: "26006",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -186,7 +214,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.0.02.10",
 		},
 		Locale:   "en",
-		GPUModel: "ANGLE (Samsung Xclipse 920)", GPUVendor: "Samsung Electronics Co., Ltd.", SimOperator: "23410", Serial: "RF8N11223DE",
+		GPUModel: "ANGLE (Samsung Xclipse 920)", GPUVendor: "Samsung Electronics Co., Ltd.", SimOperator: "23410",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -207,7 +235,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "com.google.android.apps.nexuslauncher", "label": "Pixel Launcher", "versionName": "12",
 		},
 		Locale:   "en",
-		GPUModel: "Mali-G78 MP20", GPUVendor: "ARM", SimOperator: "310260", Serial: "1A051FDT300123",
+		GPUModel: "Mali-G78 MP20", GPUVendor: "ARM", SimOperator: "310260",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -228,7 +256,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "com.google.android.apps.nexuslauncher", "label": "Pixel Launcher", "versionName": "12",
 		},
 		Locale:   "en",
-		GPUModel: "Mali-G78 MP20", GPUVendor: "ARM", SimOperator: "310410", Serial: "1B061FDT400456",
+		GPUModel: "Mali-G78 MP20", GPUVendor: "ARM", SimOperator: "310410",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -249,7 +277,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "com.miui.home", "label": "System launcher", "versionName": "ALPHA-4.23.0.2350-12211819",
 		},
 		Locale:   "pl",
-		GPUModel: "Mali-G77 MC9", GPUVendor: "ARM", SimOperator: "26006", Serial: "X01234567890",
+		GPUModel: "Mali-G77 MC9", GPUVendor: "ARM", SimOperator: "26006",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -270,7 +298,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "com.miui.home", "label": "System launcher", "versionName": "RELEASE-4.26.0.2742-12111057",
 		},
 		Locale:   "pl",
-		GPUModel: "Adreno (TM) 660", GPUVendor: "Qualcomm", SimOperator: "26001", Serial: "X12345678901",
+		GPUModel: "Adreno (TM) 660", GPUVendor: "Qualcomm", SimOperator: "26001",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -291,7 +319,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "net.oneplus.launcher", "label": "OnePlus Launcher", "versionName": "5.4.9.220608151019.99bc7a5",
 		},
 		Locale:   "en",
-		GPUModel: "Adreno (TM) 660", GPUVendor: "Qualcomm", SimOperator: "311480", Serial: "OP5B7A9C3D",
+		GPUModel: "Adreno (TM) 660", GPUVendor: "Qualcomm", SimOperator: "311480",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -312,7 +340,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.5.01.7",
 		},
 		Locale:   "en",
-		GPUModel: "Mali-G77 MP11", GPUVendor: "ARM", SimOperator: "23430", Serial: "RF8N9A1B2C3D",
+		GPUModel: "Mali-G77 MP11", GPUVendor: "ARM", SimOperator: "23430",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -333,7 +361,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "com.google.android.apps.nexuslauncher", "label": "Pixel Launcher", "versionName": "12",
 		},
 		Locale:   "en",
-		GPUModel: "Adreno (TM) 620", GPUVendor: "Qualcomm", SimOperator: "310260", Serial: "1A051FDT500789",
+		GPUModel: "Adreno (TM) 620", GPUVendor: "Qualcomm", SimOperator: "310260",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
@@ -354,7 +382,7 @@ var hardwareCatalog = []Hardware{
 			"pkg": "net.oneplus.launcher", "label": "OnePlus Launcher", "versionName": "5.4.10.220407150435.64ec0c2",
 		},
 		Locale:   "en",
-		GPUModel: "Adreno (TM) 650", GPUVendor: "Qualcomm", SimOperator: "23430", Serial: "OP5B7A9C3E",
+		GPUModel: "Adreno (TM) 650", GPUVendor: "Qualcomm", SimOperator: "23430",
 	},
 }
 
@@ -366,16 +394,4 @@ func HardwareFor(deviceID string) Hardware {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(deviceID))
 	return hardwareCatalog[h.Sum32()%uint32(len(hardwareCatalog))]
-}
-
-// DeviceUUID returns the deterministic version-4 UUID (32 lowercase hex
-// digits) this deviceId maps to, the shape of the game's
-// GenerateHighVersionUUID() (UUID.randomUUID() without dashes) for the Login's
-// androidDid field. Pure in deviceId, so one device keeps one UUID.
-func DeviceUUID(deviceID string) string {
-	sum := md5.Sum([]byte(deviceID))
-	b := sum[:16]
-	b[6] = b[6]&0x0f | 0x40 // version 4
-	b[8] = b[8]&0x3f | 0x80 // variant 10
-	return hex.EncodeToString(b)
 }

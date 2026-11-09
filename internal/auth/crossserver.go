@@ -68,6 +68,7 @@ type CrossServerLoginParams struct {
 	AirKey      string
 	AccessTok   string // included as p.at -- confirmed live this IS required, see below
 	ShumeiBoxId string // real anti-fraud device fingerprint, if known
+	AndroidID   string // Settings.Secure.ANDROID_ID (16 hex), ThinkingData's ta #device_id
 	Handshake   bool   // experimental: send the vanilla SFS2X pre-Login Handshake (see conn.go:DoHandshake)
 	IOSMode     bool   // send an iOS-flavored identity instead of Android; see LoginParamsInput.IOSMode
 	AppVersion  string // build the token was issued under, if known; see LoginParamsInput.AppVersion
@@ -216,6 +217,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			AccessTok:   p.AccessTok,
 			ServerID:    serverIDFromZone(zone),
 			ShumeiBoxId: p.ShumeiBoxId,
+			AndroidID:   p.AndroidID,
 			IOSMode:     p.IOSMode,
 			AppVersion:  p.AppVersion,
 			VersionCode: p.VersionCode,

@@ -56,8 +56,9 @@ func TestBuildLoginParamsTaAndroidMarkers(t *testing.T) {
 // TestBuildLoginParamsAndroidDeviceFields checks the Android Login's device
 // fields describe the same phone the ShuMei fingerprint does (shumei.HardwareFor),
 // not the old "GoClient" placeholders: phone_model is the model, osVersion is
-// Unity's "Android OS .." string, device_string/mt/AndroidID/IMEI are the
-// DeviceManager/Device dumps, and androidDid is a per-device UUID.
+// Unity's "Android OS .. / API-.. (buildID/incremental)" string, device_string/
+// mt/AndroidID/IMEI are the DeviceManager/Device dumps, and androidDid is the
+// MD5 of the build fields (generateHighVersionUUID).
 func TestBuildLoginParamsAndroidDeviceFields(t *testing.T) {
 	const deviceID = "0123456789abcdef0123456789abcdef_n3d"
 	p := BuildLoginParams(LoginParamsInput{DeviceID: deviceID, AirKey: "lwDid_x", ServerID: "783", AppVersion: "1.0.364", VersionCode: "1892"})
@@ -68,9 +69,9 @@ func TestBuildLoginParamsAndroidDeviceFields(t *testing.T) {
 		"osVersion":     hw.OSVersionString(),
 		"device_string": hw.DeviceString(),
 		"mt":            hw.HandSetInfo(),
-		"AndroidID":     hw.Serial,
+		"AndroidID":     "unknown",
 		"IMEI":          hw.DeviceInfo(),
-		"androidDid":    shumei.DeviceUUID(deviceID),
+		"androidDid":    hw.AndroidDid(),
 	} {
 		if got := p.GetString(key); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)

@@ -1590,6 +1590,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
 		DeviceID: deviceID, AirKey: airKey,
 		AccessTok: accessTok, ShumeiBoxId: shumeiBoxId,
+		AndroidID: shumeiInstall.AndroidID,
 		Handshake: o.handshake, IOSMode: o.iosMode,
 		AppVersion: o.appVersion, VersionCode: o.versionCode,
 		ResVersion: resVersion,

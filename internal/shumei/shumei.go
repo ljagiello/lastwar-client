@@ -448,7 +448,7 @@ func deviceData(deviceID string, d Device) (string, error) {
 	hw := HardwareFor(deviceID)
 	m["a10"] = hw.AndroidVersion
 	m["a36"] = hw.Screen
-	m["a45"] = hw.DeviceName
+	m["a45"] = hw.SimOperator
 	m["a143"], m["a33"] = hw.SoC, hw.SoC
 	m["a34"] = hw.MaxFreq
 	m["a32"] = hw.Cores

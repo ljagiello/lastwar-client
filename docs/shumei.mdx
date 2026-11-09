@@ -213,11 +213,12 @@ make one convincing:
 - **Internal consistency** — a real Android 12 `SP1A` build ID, a SoC that matches the board and the
   boot hardware, a screen whose dpi matches its resolution, and RAM/cores/clock that match the SoC.
 - **Cross-field consistency with the `Login`** — `auth.BuildLoginParams` derives `phone_model`,
-  `osVersion`, `device_string`, `mt`, `AndroidID` (Build.SERIAL) and `IMEI` (the build dump) from the
-  same `HardwareFor(deviceId)` entry, `androidDid` from the per-device `DeviceUUID(deviceId)`, and
-  the `ta` blob's `#device_model`/`#manufacturer`/`#os_version`/`#screen_*`/`#ram`/`#fps` follow it
-  too, so the ShuMei fingerprint and the login describe the same phone. The iOS `Login` is left
-  as-is: it has its own device model domain (`idfa`/`idfv`), and no iOS hardware is modeled yet.
+  `osVersion`, `device_string`, `mt`, `AndroidID` (Build.SERIAL, `"unknown"` on a SDK 36 target) and
+  `IMEI` (the build dump) from the same `HardwareFor(deviceId)` entry, `androidDid` from the build
+  fields' MD5 (`generateHighVersionUUID`), and the `ta` blob's `#device_model`/`#manufacturer`/
+  `#os_version`/`#screen_*`/`#ram`/`#fps`/`#device_id` (ANDROID_ID) follow it too, so the ShuMei
+  fingerprint and the login describe the same phone. The iOS `Login` is left as-is: it has its own
+  device model domain (`idfa`/`idfv`), and no iOS hardware is modeled yet.
 
 Three things are genuinely hard to reproduce — a real Widevine `deviceUniqueId`, keystore attestation
 chains, and Play Integrity — but Last War's ShuMei config mostly skips those (`notCollect`
@@ -303,11 +304,12 @@ in the session config.
 
 The same `Hardware` drives the Android `Login`'s device fields
 (`auth/identity.go`): `phone_model`, `osVersion`, `device_string`, `mt`,
-`AndroidID` (Build.SERIAL) and `IMEI` (the build dump) all come from the
-selected entry, `androidDid` is the per-device `DeviceUUID(deviceId)`, and the
-`ta` blob's `#device_model`/`#manufacturer`/`#os_version`/`#screen_*`/`#ram`/
-`#fps` follow it, so the ShuMei fingerprint and the login describe one phone.
-The `#device_id`/`#install_time` and the iOS login fields are not modeled yet.
+`AndroidID` (Build.SERIAL, `"unknown"` on a SDK 36 target) and `IMEI` (the
+build dump) all come from the selected entry, `androidDid` is the build fields'
+MD5 (`generateHighVersionUUID`), and the `ta` blob's `#device_model`/
+`#manufacturer`/`#os_version`/`#screen_*`/`#ram`/`#fps` and `#device_id`
+(ANDROID_ID) follow it, so the ShuMei fingerprint and the login describe one
+phone. The `#install_time` and the iOS login fields are not modeled yet.
 
 **Credit:** the `aNN` template started as C485's C# `ShumeiInnerTemplate`, and
 the `FUN_0010c160` address comes from their `GetShumeiBoxId`. Both were shared

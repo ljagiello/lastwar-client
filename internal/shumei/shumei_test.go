@@ -499,7 +499,7 @@ func TestDeviceDataHardware(t *testing.T) {
 		"a48":  fmt.Sprint(hw.RAMBytes),
 		"a37":  fmt.Sprint(hw.StorageGB),
 		"a57":  fmt.Sprint(hw.CertHash),
-		"a45":  hw.DeviceName,
+		"a45":  hw.SimOperator,
 		"a56":  hw.CertSubject,
 		"a131": hw.Locale,
 		"a132": hw.Locale,
