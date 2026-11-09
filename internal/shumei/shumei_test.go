@@ -105,19 +105,22 @@ func TestBoxID(t *testing.T) {
 // testInstall is a filled install with pinned values, so deviceData's output is
 // fixed.
 var testInstall = Install{
-	AndroidID:        "3f9c1e0a7b2d4c58",
 	MediaDrmID:       "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=___",
 	PUUID:            "6f1c2b3a4d5e4f60a7b8c9d0e1f20314",
+	AppUID:           "u0_a123",
 	FirstInstallTime: time.UnixMilli(1775000000000),
 	LastUpdateTime:   time.UnixMilli(1789000000000),
 }
+
+// testAndroidID is the pinned device ANDROID_ID (a24) the test devices use.
+const testAndroidID = "3f9c1e0a7b2d4c58"
 
 // testDevice is a Device with every field pinned that withHostDefaults would
 // otherwise fill.
 func testDevice() Device {
 	return Device{
 		Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000),
-		Install: testInstall, CollectTime: 287 * time.Millisecond,
+		AndroidID: testAndroidID, Install: testInstall, CollectTime: 287 * time.Millisecond,
 		AppVersion: testAppVersion,
 	}
 }
@@ -160,7 +163,7 @@ func TestBoxIDErrors(t *testing.T) {
 					Header:     http.Header{},
 				}, nil
 			})}
-			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall, AppVersion: testAppVersion})
+			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{AndroidID: testAndroidID, Install: testInstall, AppVersion: testAppVersion})
 			if err == nil {
 				t.Fatalf("BoxID = %q, nil; want an error", boxID)
 			}
@@ -184,7 +187,7 @@ func TestBoxIDNeedsInstall(t *testing.T) {
 		calls++
 		return nil, errors.New("unexpected request")
 	})}
-	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{AppVersion: testAppVersion})
+	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{AndroidID: testAndroidID, AppVersion: testAppVersion})
 	if err == nil || !strings.Contains(err.Error(), "install values are unset") || calls != 0 {
 		t.Errorf("BoxID with no install = %q, %v after %d requests; want the unset-install error and no request", boxID, err, calls)
 	}
@@ -198,7 +201,7 @@ func TestBoxIDNeedsAppVersion(t *testing.T) {
 		calls++
 		return nil, errors.New("unexpected request")
 	})}
-	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall})
+	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{AndroidID: testAndroidID, Install: testInstall})
 	if err == nil || !strings.Contains(err.Error(), "no app version") || calls != 0 {
 		t.Errorf("BoxID with no app version = %q, %v after %d requests; want the no-app-version error and no request", boxID, err, calls)
 	}
@@ -219,7 +222,7 @@ func TestProtectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rsa.GenerateKey = %v", err)
 	}
-	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall, AppVersion: testAppVersion}.withHostDefaults())
+	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{AndroidID: testAndroidID, Install: testInstall, AppVersion: testAppVersion}.withHostDefaults())
 	data, ep, tn, err := protect(&priv.PublicKey, in)
 	if err != nil {
 		t.Fatalf("protect = %v", err)
@@ -352,9 +355,10 @@ func TestDeviceData(t *testing.T) {
 		"a170": "882444713",
 		"a80":  "1790882443713-36769",
 		"a133": "287",
-		"a24":  testInstall.AndroidID,
+		"a24":  testAndroidID,
 		"a84":  testInstall.MediaDrmID,
 		"a163": testInstall.PUUID,
+		"a60":  testInstall.AppUID,
 		"a125": "map[fit:1775000000000 lut:1789000000000]",
 		// No smid cached yet: the cache file doesn't exist, so both are 0.
 		"a167": "0",
@@ -415,9 +419,9 @@ func TestDeviceData(t *testing.T) {
 		t.Error("deviceData with no install values = nil error, want an error")
 	}
 	for name, unsetOne := range map[string]func(*Install){
-		"androidId":        func(in *Install) { in.AndroidID = "" },
 		"mediaDrmId":       func(in *Install) { in.MediaDrmID = "" },
 		"puuid":            func(in *Install) { in.PUUID = "" },
+		"appUid":           func(in *Install) { in.AppUID = "" },
 		"firstInstallTime": func(in *Install) { in.FirstInstallTime = time.Time{} },
 		"lastUpdateTime":   func(in *Install) { in.LastUpdateTime = time.Time{} },
 	} {
@@ -428,9 +432,14 @@ func TestDeviceData(t *testing.T) {
 		}
 	}
 	invalid := d
-	invalid.Install.AndroidID = "not-an-android-id"
+	invalid.AndroidID = "not-an-android-id"
 	if _, err := deviceData(id, invalid); err == nil {
 		t.Error("deviceData with an invalid androidId = nil error, want an error")
+	}
+	noAndroidID := d
+	noAndroidID.AndroidID = ""
+	if _, err := deviceData(id, noAndroidID); err == nil {
+		t.Error("deviceData with no android id = nil error, want an error")
 	}
 	other := d
 	other.Install.DeviceID = "another-device"
@@ -453,6 +462,123 @@ func TestDeviceDataRegistered(t *testing.T) {
 		if got := fmt.Sprint(m[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
 		}
+	}
+}
+
+// TestDeviceDataHardware checks the device-specific half is deterministic per
+// deviceId and internally consistent: the build's model/brand/board match the
+// catalog entry, a143/a33 carry the SoC, a92 is a36 without its dpi, and every
+// catalog entry describes one coherent phone (no NRD90M-style cross-generation
+// mismatch).
+func TestDeviceDataHardware(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef_n3d"
+	d := testDevice()
+
+	// Deterministic: the same deviceId reports the same phone every time.
+	first := decodeDeviceData(t, mustDeviceData(t, id, d))
+	second := decodeDeviceData(t, mustDeviceData(t, id, d))
+	for _, key := range []string{"a46", "a143", "a33", "a34", "a32", "a48", "a37", "a36", "a92", "a56", "a57", "a47", "a18", "a154", "a131", "a132", "a10", "a45"} {
+		if fmt.Sprint(first[key]) != fmt.Sprint(second[key]) {
+			t.Errorf("%s = %v then %v, want it stable for one deviceId", key, first[key], second[key])
+		}
+	}
+
+	// Consistent with the selected catalog entry.
+	hw := HardwareFor(id)
+	if got := fmt.Sprint(first["a10"]); got != hw.AndroidVersion {
+		t.Errorf("a10 = %s, want %s", got, hw.AndroidVersion)
+	}
+	if got := fmt.Sprint(first["a36"]); got != hw.Screen {
+		t.Errorf("a36 = %s, want %s", got, hw.Screen)
+	}
+	if got := fmt.Sprint(first["a92"]); got != screenPrefix(hw.Screen) {
+		t.Errorf("a92 = %s, want %s (a36 minus dpi)", got, screenPrefix(hw.Screen))
+	}
+	for _, key := range []string{"a143", "a33"} {
+		if got := fmt.Sprint(first[key]); got != hw.SoC {
+			t.Errorf("%s = %s, want %s", key, got, hw.SoC)
+		}
+	}
+	for key, want := range map[string]string{
+		"a34":  fmt.Sprint(hw.MaxFreq),
+		"a32":  fmt.Sprint(hw.Cores),
+		"a48":  fmt.Sprint(hw.RAMBytes),
+		"a37":  fmt.Sprint(hw.StorageGB),
+		"a57":  fmt.Sprint(hw.CertHash),
+		"a45":  hw.SimOperator,
+		"a56":  hw.CertSubject,
+		"a131": hw.Locale,
+		"a132": hw.Locale,
+	} {
+		if got := fmt.Sprint(first[key]); got != want {
+			t.Errorf("%s = %s, want %s", key, got, want)
+		}
+	}
+
+	// The nested objects (a46 build, a18 props, a154 launcher) carry the entry's
+	// values, key for key.
+	build, _ := first["a46"].(map[string]any)
+	for k, want := range hw.Build {
+		if got := fmt.Sprint(build[k]); got != want {
+			t.Errorf("a46.%s = %s, want %s", k, got, want)
+		}
+	}
+	props, _ := first["a18"].(map[string]any)
+	for k, want := range hw.Props {
+		if got := fmt.Sprint(props[k]); got != want {
+			t.Errorf("a18.%s = %s, want %s", k, got, want)
+		}
+	}
+	launcher, _ := first["a154"].(map[string]any)
+	for k, want := range hw.Launcher {
+		if got := fmt.Sprint(launcher[k]); got != want {
+			t.Errorf("a154.%s = %s, want %s", k, got, want)
+		}
+	}
+	if got, want := fmt.Sprint(first["a47"]), fmt.Sprint(hw.Sensors); got != want {
+		t.Errorf("a47 = %s, want %s", got, want)
+	}
+
+	// Every catalog entry is internally coherent: an Android 12 fingerprint
+	// (SP1A.*), a boot hardware matching the SoC or board, and sane metrics.
+	for i, hw := range hardwareCatalog {
+		if hw.AndroidVersion == "" || hw.SoC == "" || hw.Screen == "" || hw.DeviceName == "" {
+			t.Errorf("catalog[%d] has an empty device field: %+v", i, hw)
+		}
+		// Android 12 build IDs: SP1A (Pixel 3/4/5 and most OEMs), SD1A/SQ1D
+		// (Pixel 6/6 Pro — the Tensor build IDs differ from the Qualcomm ones).
+		fp := hw.Build["fingerprint"]
+		android12Build := strings.Contains(fp, "SP1A.") || strings.Contains(fp, "SD1A.") || strings.Contains(fp, "SQ1D.")
+		if !strings.Contains(fp, ":12/") || !android12Build {
+			t.Errorf("catalog[%d] fingerprint %q is not an Android 12 build", i, fp)
+		}
+		if hw.Props["ro.boot.hardware"] != hw.SoC && hw.Props["ro.boot.hardware"] != hw.Build["board"] {
+			t.Errorf("catalog[%d] boot hardware %q matches neither SoC %q nor board %q", i, hw.Props["ro.boot.hardware"], hw.SoC, hw.Build["board"])
+		}
+		if hw.Build["model"] == "" || hw.Build["brand"] == "" || hw.Build["manufacturer"] == "" {
+			t.Errorf("catalog[%d] has an empty build field: %+v", i, hw.Build)
+		}
+		if hw.Cores <= 0 || hw.MaxFreq <= 0 || hw.RAMBytes <= 0 || hw.StorageGB <= 0 {
+			t.Errorf("catalog[%d] has a zero hardware metric: %+v", i, hw)
+		}
+	}
+}
+
+// TestHardwareForDistribution checks HardwareFor is a pure function of the
+// deviceId and that distinct ids spread across the catalog (so a leveler that
+// gives each account its own deviceId doesn't hand them all the same phone).
+func TestHardwareForDistribution(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		id := fmt.Sprintf("%032x_n3d", i)
+		h := HardwareFor(id)
+		if again := HardwareFor(id); !reflect.DeepEqual(again, h) {
+			t.Fatalf("HardwareFor(%q) = %+v then %+v, want it pure", id, h, again)
+		}
+		seen[h.Build["model"]] = true
+	}
+	if len(seen) < 2 {
+		t.Errorf("HardwareFor mapped 200 deviceIds onto %d model(s), want more than one", len(seen))
 	}
 }
 

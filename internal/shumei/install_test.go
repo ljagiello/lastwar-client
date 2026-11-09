@@ -24,6 +24,9 @@ func TestNewInstall(t *testing.T) {
 	if b, err := base64.StdEncoding.DecodeString(parts[0]); err != nil || len(b) != widevineIDLen {
 		t.Errorf("Widevine ID decodes to %d bytes (error %v), want %d", len(b), err, widevineIDLen)
 	}
+	if !appUIDRe.MatchString(in.AppUID) {
+		t.Errorf("AppUID = %q, want the \"u0_a<uid>\" form", in.AppUID)
+	}
 	if lo, hi := now.Add(-400*24*time.Hour), now.Add(-30*24*time.Hour); in.FirstInstallTime.Before(lo) || in.FirstInstallTime.After(hi) {
 		t.Errorf("FirstInstallTime = %v, want 30 to 400 days before %v", in.FirstInstallTime, now)
 	}
@@ -35,7 +38,7 @@ func TestNewInstall(t *testing.T) {
 	}
 
 	other := NewInstall(now)
-	if other.AndroidID == in.AndroidID || other.MediaDrmID == in.MediaDrmID || other.PUUID == in.PUUID {
+	if other.MediaDrmID == in.MediaDrmID || other.PUUID == in.PUUID {
 		t.Errorf("two fresh installs share an ID: %+v and %+v", in, other)
 	}
 }
@@ -50,14 +53,8 @@ func TestInstallFill(t *testing.T) {
 	}
 
 	got, filled := Install{}.Fill(now)
-	if !filled || got.AndroidID == "" || got.MediaDrmID == "" || got.PUUID == "" || got.FirstInstallTime.IsZero() || got.LastUpdateTime.IsZero() {
+	if !filled || got.MediaDrmID == "" || got.PUUID == "" || got.AppUID == "" || got.FirstInstallTime.IsZero() || got.LastUpdateTime.IsZero() {
 		t.Errorf("Fill on an empty install = %+v, %v; want every value set, true", got, filled)
-	}
-
-	// A pinned Android ID stays; the rest are filled in.
-	got, filled = Install{AndroidID: "0123456789abcdef"}.Fill(now)
-	if !filled || got.AndroidID != "0123456789abcdef" || got.PUUID == "" {
-		t.Errorf("Fill = %+v, %v; want the pinned androidId kept and the rest filled", got, filled)
 	}
 
 	// A pinned update time earlier than any fresh install time pulls the
@@ -76,7 +73,7 @@ func TestInstallFill(t *testing.T) {
 	}
 
 	// Filling only the times still counts, so the caller saves them.
-	ids := Install{AndroidID: testInstall.AndroidID, MediaDrmID: testInstall.MediaDrmID, PUUID: testInstall.PUUID}
+	ids := Install{MediaDrmID: testInstall.MediaDrmID, PUUID: testInstall.PUUID}
 	if got, filled := ids.Fill(now); !filled || got.FirstInstallTime.IsZero() || got.LastUpdateTime.IsZero() {
 		t.Errorf("Fill with only the IDs set = %+v, %v; want both times set, true", got, filled)
 	}
@@ -91,7 +88,7 @@ func TestInstallFill(t *testing.T) {
 // with, and refuses any other.
 func TestInstallFor(t *testing.T) {
 	got, ok := testInstall.For("dev-1")
-	if !ok || got.DeviceID != "dev-1" || got.AndroidID != testInstall.AndroidID {
+	if !ok || got.DeviceID != "dev-1" || got.MediaDrmID != testInstall.MediaDrmID {
 		t.Fatalf("For on an unbound install = %+v, %v; want it bound to dev-1, true", got, ok)
 	}
 	if again, ok := got.For("dev-1"); !ok || again != got {
@@ -128,13 +125,13 @@ func TestInstallValidate(t *testing.T) {
 		t.Errorf("registered Install.Validate() = %v, want nil", err)
 	}
 	for name, mutate := range map[string]func(*Install){
-		"uppercase androidId":    func(in *Install) { in.AndroidID = "3F9C1E0A7B2D4C58" },
-		"short androidId":        func(in *Install) { in.AndroidID = "3f9c1e0a" },
 		"mediaDrmId three parts": func(in *Install) { in.MediaDrmID = "AAEC__" },
 		"mediaDrmId not base64":  func(in *Install) { in.MediaDrmID = "not base64!___" },
 		"puuid with dashes":      func(in *Install) { in.PUUID = "6f1c2b3a-4d5e-4f60-a7b8-c9d0e1f20314" },
 		"puuid not version 4":    func(in *Install) { in.PUUID = "ffeeddccbbaa99887766554433221100" },
 		"puuid wrong variant":    func(in *Install) { in.PUUID = "6f1c2b3a4d5e4f6077b8c9d0e1f20314" },
+		"appUid without u0_":     func(in *Install) { in.AppUID = "a123" },
+		"appUid with dashes":     func(in *Install) { in.AppUID = "u0_a-1" },
 		"update before install":  func(in *Install) { in.LastUpdateTime = in.FirstInstallTime.Add(-time.Second) },
 		"boxId without B":        func(in *Install) { in.BoxID, in.BoxIDSavedAt = "smid", time.UnixMilli(1) },
 		"boxId without saved at": func(in *Install) { in.BoxID = "Bsmid" },
@@ -148,7 +145,7 @@ func TestInstallValidate(t *testing.T) {
 			continue
 		}
 		// The error reaches the logs, so it must not carry the identifiers.
-		for _, id := range []string{in.AndroidID, in.PUUID} {
+		for _, id := range []string{in.PUUID} {
 			if strings.Contains(err.Error(), id) {
 				t.Errorf("%s: Validate() = %q, which contains the value %q", name, err, id)
 			}
@@ -170,7 +167,7 @@ func TestInstallJSON(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("json.Unmarshal = %v", err)
 	}
-	if got.AndroidID != testInstall.AndroidID || !got.FirstInstallTime.Equal(testInstall.FirstInstallTime) ||
+	if got.MediaDrmID != testInstall.MediaDrmID || !got.FirstInstallTime.Equal(testInstall.FirstInstallTime) ||
 		!got.LastUpdateTime.Equal(testInstall.LastUpdateTime) {
 		t.Errorf("round trip = %+v, want %+v", got, testInstall)
 	}

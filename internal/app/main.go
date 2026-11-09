@@ -1226,6 +1226,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		os.Exit(1)
 	}
 	deviceID, airKey := ident.DeviceID, ident.AirKey()
+	androidID := ident.AndroidID
 	if o.deviceID != "" {
 		deviceID = o.deviceID
 		airKey = "lwDid_" + gsl.B64OfString(deviceID)
@@ -1584,12 +1585,14 @@ func runCrossServerTest(o crossServerTestOpts) {
 		// config's appVersion, or the default Android build's (auth's loginBuild).
 		dev := o.shumeiDevice
 		dev.AppVersion = cmp.Or(o.appVersion, gsl.AppVersion)
+		dev.AndroidID = androidID
 		shumeiBoxId, shumeiInstall = mintShumeiBoxID(httpClient, deviceID, dev, o.shumeiInstall, o.configSavePath)
 	}
 	params := auth.CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
 		DeviceID: deviceID, AirKey: airKey,
 		AccessTok: accessTok, ShumeiBoxId: shumeiBoxId,
+		AndroidID: androidID,
 		Handshake: o.handshake, IOSMode: o.iosMode,
 		AppVersion: o.appVersion, VersionCode: o.versionCode,
 		ResVersion: resVersion,

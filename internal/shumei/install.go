@@ -23,11 +23,6 @@ type Install struct {
 	// binds it.
 	DeviceID string `json:"deviceId,omitempty"`
 
-	// AndroidID is a24, Settings.Secure.ANDROID_ID (l1l11I111ll): 16
-	// lowercase hex digits, which Android 8 and later derive per app signing
-	// key. Last War doesn't set needUsingMD5, so the SDK sends it unhashed.
-	AndroidID string `json:"androidId,omitempty"`
-
 	// MediaDrmID is a84: the base64 deviceUniqueId of the Widevine, ClearKey
 	// (W3C and DASH-IF UUIDs) and PlayReady MediaDrm schemes, in that order,
 	// joined with "_" (l1111l111111Il.l111l1111lIl). A scheme the phone lacks,
@@ -38,6 +33,11 @@ type Install struct {
 	// PUUID is a163, the SDK's own install ID: java.util.UUID.randomUUID()
 	// without dashes, kept in its "seq" prefs as "puuid" (l1l11I11l).
 	PUUID string `json:"puuid,omitempty"`
+
+	// AppUID is a60, the app's Linux uid as Android formats it on API 27+:
+	// "u0_a" + (uid - 10000) (l11l1l1l1Il.l1111l111111Il(int)). The uid is
+	// assigned per install, so this is a per-install value like androidId.
+	AppUID string `json:"appUid,omitempty"`
 
 	// FirstInstallTime and LastUpdateTime are a125's fit and lut, the app's
 	// PackageInfo.firstInstallTime and lastUpdateTime.
@@ -68,9 +68,9 @@ func NewInstall(now time.Time) Install {
 	installed := now.Add(-randDuration(30*24*time.Hour, 400*24*time.Hour)).Truncate(time.Millisecond)
 	updated := now.Add(-randDuration(time.Hour, 20*24*time.Hour)).Truncate(time.Millisecond)
 	return Install{
-		AndroidID:        hex.EncodeToString(randBytes(8)),
 		MediaDrmID:       base64.StdEncoding.EncodeToString(randBytes(widevineIDLen)) + "___",
 		PUUID:            randomUUID(),
+		AppUID:           newAppUID(),
 		FirstInstallTime: installed,
 		LastUpdateTime:   updated,
 	}
@@ -87,9 +87,9 @@ func (in Install) Fill(now time.Time) (Install, bool) {
 			*dst, filled = v, true
 		}
 	}
-	fill(&in.AndroidID, fresh.AndroidID)
 	fill(&in.MediaDrmID, fresh.MediaDrmID)
 	fill(&in.PUUID, fresh.PUUID)
+	fill(&in.AppUID, fresh.AppUID)
 	if in.FirstInstallTime.IsZero() {
 		in.FirstInstallTime, filled = fresh.FirstInstallTime, true
 		if !in.LastUpdateTime.IsZero() && in.LastUpdateTime.Before(in.FirstInstallTime) {
@@ -132,17 +132,14 @@ func (in Install) Registered(boxID string, t time.Time) (Install, bool) {
 }
 
 var (
-	androidIDRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
-	puuidRe     = regexp.MustCompile(`^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$`)
+	puuidRe  = regexp.MustCompile(`^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$`)
+	appUIDRe = regexp.MustCompile(`^u0_a[0-9]+$`)
 )
 
 // Validate reports the first set value a real install couldn't hold. Empty
 // values pass: Fill supplies them. The errors give lengths, never the values,
 // since they end up in logs.
 func (in Install) Validate() error {
-	if in.AndroidID != "" && !androidIDRe.MatchString(in.AndroidID) {
-		return fmt.Errorf("androidId (%d characters) is not 16 lowercase hex digits", len(in.AndroidID))
-	}
 	if in.MediaDrmID != "" {
 		parts := strings.Split(in.MediaDrmID, "_")
 		if len(parts) != 4 {
@@ -156,6 +153,9 @@ func (in Install) Validate() error {
 	}
 	if in.PUUID != "" && !puuidRe.MatchString(in.PUUID) {
 		return fmt.Errorf("puuid (%d characters) is not a random (version 4) UUID as 32 lowercase hex digits", len(in.PUUID))
+	}
+	if in.AppUID != "" && !appUIDRe.MatchString(in.AppUID) {
+		return fmt.Errorf("appUid (%d characters) is not the \"u0_a<uid>\" form a real app uid takes", len(in.AppUID))
 	}
 	if !in.FirstInstallTime.IsZero() && !in.LastUpdateTime.IsZero() && in.LastUpdateTime.Before(in.FirstInstallTime) {
 		return errors.New("lastUpdateTime is before firstInstallTime")
@@ -176,6 +176,14 @@ func randomUUID() string {
 	b[6] = b[6]&0x0f | 0x40
 	b[8] = b[8]&0x3f | 0x80
 	return hex.EncodeToString(b)
+}
+
+// newAppUID returns a60, the app's Linux uid as Android formats it on API 27+
+// (l11l1l1l1Il.l1111l111111Il(int)): "u0_a" + (uid - 10000). Android assigns
+// the uid per install, in install order, so a fresh install sits somewhere in
+// the low u0_aNN range.
+func newAppUID() string {
+	return fmt.Sprintf("u0_a%d", mrand.N(200))
 }
 
 func randBytes(n int) []byte {
