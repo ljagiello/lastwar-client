@@ -37,8 +37,9 @@ const (
 )
 
 // mintDevice is the device a default Android run registers: no -cs-shumei-* flags, and the
-// default build's app version.
-var mintDevice = shumei.Device{AppVersion: gsl.AppVersion}
+// default build's app version. Its AndroidID is the device identity's, which the real run wires in
+// from LoadOrCreateDeviceIdentity; the tests pin it here.
+var mintDevice = shumei.Device{AppVersion: gsl.AppVersion, AndroidID: "3f9c1e0a7b2d4c58"}
 
 // writeTestSessionConfig saves cfg to a fresh session config file and returns its path.
 func writeTestSessionConfig(t *testing.T, cfg *SessionConfig) string {
@@ -53,7 +54,7 @@ func writeTestSessionConfig(t *testing.T, cfg *SessionConfig) string {
 // sameInstall compares two installs field by field, times with Equal, so one read back from JSON
 // matches the one that was saved.
 func sameInstall(a, b shumei.Install) bool {
-	return a.DeviceID == b.DeviceID && a.AndroidID == b.AndroidID && a.MediaDrmID == b.MediaDrmID &&
+	return a.DeviceID == b.DeviceID && a.MediaDrmID == b.MediaDrmID &&
 		a.PUUID == b.PUUID && a.BoxID == b.BoxID &&
 		a.FirstInstallTime.Equal(b.FirstInstallTime) && a.LastUpdateTime.Equal(b.LastUpdateTime) &&
 		a.BoxIDSavedAt.Equal(b.BoxIDSavedAt)
@@ -73,7 +74,7 @@ func TestMintShumeiBoxIDKeepsInstall(t *testing.T) {
 	if boxID != "Bsmid-1" {
 		t.Fatalf("boxID = %q, want Bsmid-1", boxID)
 	}
-	if install.DeviceID != "dev-1" || install.BoxID != "Bsmid-1" || install.BoxIDSavedAt.IsZero() || install.AndroidID == "" || install.PUUID == "" {
+	if install.DeviceID != "dev-1" || install.BoxID != "Bsmid-1" || install.BoxIDSavedAt.IsZero() || install.PUUID == "" {
 		t.Errorf("install = %+v, want filled values bound to dev-1, and the minted box ID with its save time", install)
 	}
 	saved, err := LoadSessionConfig(path)
@@ -134,7 +135,7 @@ func TestMintShumeiBoxIDOtherDeviceID(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, got := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-2", mintDevice, d1Install, path)
-	if got.DeviceID != "dev-2" || got.AndroidID == d1Install.AndroidID || got.PUUID == d1Install.PUUID || got.BoxID != "Bsmid-2" {
+	if got.DeviceID != "dev-2" || got.PUUID == d1Install.PUUID || got.BoxID != "Bsmid-2" {
 		t.Errorf("install for dev-2 = %+v, want a fresh one bound to dev-2, not dev-1's %+v", got, d1Install)
 	}
 	if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
@@ -164,7 +165,7 @@ func TestMintShumeiBoxIDConfigWithoutDeviceID(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, other := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-2", mintDevice, saved.ShumeiInstall, path)
-	if other.DeviceID != "dev-2" || other.AndroidID == install.AndroidID {
+	if other.DeviceID != "dev-2" || other.PUUID == install.PUUID {
 		t.Errorf("install for dev-2 = %+v, want a fresh one, not dev-1's", other)
 	}
 	if after, err := os.ReadFile(path); err != nil || string(after) != string(before) {
@@ -195,7 +196,7 @@ func TestMintShumeiBoxIDFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSessionConfig: %v", err)
 	}
-	if saved.ShumeiInstall.AndroidID == "" || !sameInstall(saved.ShumeiInstall, install) {
+	if saved.ShumeiInstall.PUUID == "" || !sameInstall(saved.ShumeiInstall, install) {
 		t.Errorf("saved shumeiInstall = %+v, want the filled install %+v", saved.ShumeiInstall, install)
 	}
 }
@@ -217,7 +218,7 @@ func TestMintShumeiBoxIDSaveFails(t *testing.T) {
 // install it can't keep.
 func TestMintShumeiBoxIDNoConfig(t *testing.T) {
 	boxID, install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", mintDevice, shumei.Install{}, "")
-	if boxID != "Bsmid-1" || install.AndroidID == "" || install.DeviceID != "dev-1" {
+	if boxID != "Bsmid-1" || install.PUUID == "" || install.DeviceID != "dev-1" {
 		t.Errorf("mintShumeiBoxID = %q, %+v; want Bsmid-1 and a fresh install for dev-1", boxID, install)
 	}
 }
@@ -258,7 +259,7 @@ func TestRunShumeiInstallGate(t *testing.T) {
 
 	path := writeTestSessionConfig(t, &SessionConfig{
 		DeviceID: "dev-1", AccessToken: "tok-1",
-		ShumeiInstall: shumei.Install{AndroidID: "NOT-AN-ANDROID-ID"},
+		ShumeiInstall: shumei.Install{PUUID: "NOT-A-VALID-PUUID"},
 	})
 	for _, c := range []struct {
 		name, args string
@@ -288,8 +289,8 @@ func TestRunShumeiInstallGate(t *testing.T) {
 			if gated != c.gated || pastGate == c.gated {
 				t.Errorf("gate logged %v, run continued past it %v; want gated %v; stderr=%s", gated, pastGate, c.gated, stderr.String())
 			}
-			if strings.Contains(stderr.String(), "NOT-AN-ANDROID-ID") {
-				t.Errorf("stderr = %s, which logs the androidId value itself", stderr.String())
+			if strings.Contains(stderr.String(), "NOT-A-VALID-PUUID") {
+				t.Errorf("stderr = %s, which logs the puuid value itself", stderr.String())
 			}
 		})
 	}
@@ -345,7 +346,7 @@ func TestRunCrossServerTestSaveBackKeepsMintedInstall(t *testing.T) {
 	if saved.ShumeiBoxId != "" {
 		t.Errorf("saved shumeiBoxId = %q, want it left empty: the minted one belongs in shumeiInstall", saved.ShumeiBoxId)
 	}
-	if in := saved.ShumeiInstall; in.BoxID != "Bsmid-1" || in.DeviceID != "dev-1" || in.AndroidID == "" {
+	if in := saved.ShumeiInstall; in.BoxID != "Bsmid-1" || in.DeviceID != "dev-1" {
 		t.Errorf("saved shumeiInstall = %+v, want the minted Bsmid-1 on a filled install bound to dev-1", in)
 	}
 }
@@ -427,7 +428,7 @@ func TestRunCrossServerTestShumeiAppVersion(t *testing.T) {
 // TestRunCrossServerTestSaveBackDropsOtherDeviceInstall checks the save-back, which writes this
 // run's deviceId, doesn't keep another deviceId's install next to it.
 func TestRunCrossServerTestSaveBackDropsOtherDeviceInstall(t *testing.T) {
-	d1Install := shumei.Install{DeviceID: "dev-1", AndroidID: "3f9c1e0a7b2d4c58", BoxID: "Bsmid-0", BoxIDSavedAt: time.UnixMilli(1789500000000)}
+	d1Install := shumei.Install{DeviceID: "dev-1", BoxID: "Bsmid-0", BoxIDSavedAt: time.UnixMilli(1789500000000)}
 	path := writeTestSessionConfig(t, &SessionConfig{DeviceID: "dev-1", ShumeiInstall: d1Install})
 	saved := runSaveBack(t, crossServerTestOpts{deviceID: "dev-2", shumeiInstall: d1Install, configSavePath: path})
 	if saved.DeviceID != "dev-2" || saved.ShumeiInstall != (shumei.Install{}) {
@@ -452,10 +453,10 @@ func TestRunCrossServerTestSaveBackWritesNoStubInstall(t *testing.T) {
 // TestRunCrossServerTestSaveBackKeepsUnboundInstall checks a run that doesn't mint still saves back
 // an install pasted without a deviceId, bound to the run's, instead of dropping it.
 func TestRunCrossServerTestSaveBackKeepsUnboundInstall(t *testing.T) {
-	pasted := shumei.Install{AndroidID: "3f9c1e0a7b2d4c58"}
+	pasted := shumei.Install{MediaDrmID: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=___"}
 	path := writeTestSessionConfig(t, &SessionConfig{DeviceID: "dev-1", ShumeiInstall: pasted})
 	saved := runSaveBack(t, crossServerTestOpts{deviceID: "dev-1", shumeiInstall: pasted, configSavePath: path})
-	if saved.ShumeiInstall.AndroidID != pasted.AndroidID || saved.ShumeiInstall.DeviceID != "dev-1" {
-		t.Errorf("saved shumeiInstall = %+v, want the pasted androidId bound to dev-1", saved.ShumeiInstall)
+	if saved.ShumeiInstall.MediaDrmID != pasted.MediaDrmID || saved.ShumeiInstall.DeviceID != "dev-1" {
+		t.Errorf("saved shumeiInstall = %+v, want the pasted mediaDrmId bound to dev-1", saved.ShumeiInstall)
 	}
 }

@@ -325,7 +325,6 @@ func TestSaveSessionConfigRoundTrip(t *testing.T) {
 		AccessToken: "some-access-token",
 		IOSMode:     true,
 		ShumeiInstall: shumei.Install{
-			AndroidID:        "3f9c1e0a7b2d4c58",
 			MediaDrmID:       "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=___",
 			PUUID:            "6f1c2b3a4d5e4f60a7b8c9d0e1f20314",
 			FirstInstallTime: time.UnixMilli(1775000000000).UTC(),

@@ -429,6 +429,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		loginParams := BuildLoginParams(LoginParamsInput{
 			FutureID:    1,
 			DeviceID:    ident.DeviceID,
+			AndroidID:   ident.AndroidID,
 			AirKey:      ident.AirKey(),
 			GameUid:     "",
 			AccessTok:   accessTok,

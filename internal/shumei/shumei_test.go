@@ -105,7 +105,6 @@ func TestBoxID(t *testing.T) {
 // testInstall is a filled install with pinned values, so deviceData's output is
 // fixed.
 var testInstall = Install{
-	AndroidID:        "3f9c1e0a7b2d4c58",
 	MediaDrmID:       "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=___",
 	PUUID:            "6f1c2b3a4d5e4f60a7b8c9d0e1f20314",
 	AppUID:           "u0_a123",
@@ -113,12 +112,15 @@ var testInstall = Install{
 	LastUpdateTime:   time.UnixMilli(1789000000000),
 }
 
+// testAndroidID is the pinned device ANDROID_ID (a24) the test devices use.
+const testAndroidID = "3f9c1e0a7b2d4c58"
+
 // testDevice is a Device with every field pinned that withHostDefaults would
 // otherwise fill.
 func testDevice() Device {
 	return Device{
 		Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000),
-		Install: testInstall, CollectTime: 287 * time.Millisecond,
+		AndroidID: testAndroidID, Install: testInstall, CollectTime: 287 * time.Millisecond,
 		AppVersion: testAppVersion,
 	}
 }
@@ -161,7 +163,7 @@ func TestBoxIDErrors(t *testing.T) {
 					Header:     http.Header{},
 				}, nil
 			})}
-			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall, AppVersion: testAppVersion})
+			boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{AndroidID: testAndroidID, Install: testInstall, AppVersion: testAppVersion})
 			if err == nil {
 				t.Fatalf("BoxID = %q, nil; want an error", boxID)
 			}
@@ -185,7 +187,7 @@ func TestBoxIDNeedsInstall(t *testing.T) {
 		calls++
 		return nil, errors.New("unexpected request")
 	})}
-	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{AppVersion: testAppVersion})
+	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{AndroidID: testAndroidID, AppVersion: testAppVersion})
 	if err == nil || !strings.Contains(err.Error(), "install values are unset") || calls != 0 {
 		t.Errorf("BoxID with no install = %q, %v after %d requests; want the unset-install error and no request", boxID, err, calls)
 	}
@@ -199,7 +201,7 @@ func TestBoxIDNeedsAppVersion(t *testing.T) {
 		calls++
 		return nil, errors.New("unexpected request")
 	})}
-	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall})
+	boxID, err := BoxID(client, "0123456789abcdef0123456789abcdef_n3d", Device{AndroidID: testAndroidID, Install: testInstall})
 	if err == nil || !strings.Contains(err.Error(), "no app version") || calls != 0 {
 		t.Errorf("BoxID with no app version = %q, %v after %d requests; want the no-app-version error and no request", boxID, err, calls)
 	}
@@ -220,7 +222,7 @@ func TestProtectRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rsa.GenerateKey = %v", err)
 	}
-	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{Install: testInstall, AppVersion: testAppVersion}.withHostDefaults())
+	in := mustDeviceData(t, "0123456789abcdef0123456789abcdef_n3d", Device{AndroidID: testAndroidID, Install: testInstall, AppVersion: testAppVersion}.withHostDefaults())
 	data, ep, tn, err := protect(&priv.PublicKey, in)
 	if err != nil {
 		t.Fatalf("protect = %v", err)
@@ -353,7 +355,7 @@ func TestDeviceData(t *testing.T) {
 		"a170": "882444713",
 		"a80":  "1790882443713-36769",
 		"a133": "287",
-		"a24":  testInstall.AndroidID,
+		"a24":  testAndroidID,
 		"a84":  testInstall.MediaDrmID,
 		"a163": testInstall.PUUID,
 		"a60":  testInstall.AppUID,
@@ -417,7 +419,6 @@ func TestDeviceData(t *testing.T) {
 		t.Error("deviceData with no install values = nil error, want an error")
 	}
 	for name, unsetOne := range map[string]func(*Install){
-		"androidId":        func(in *Install) { in.AndroidID = "" },
 		"mediaDrmId":       func(in *Install) { in.MediaDrmID = "" },
 		"puuid":            func(in *Install) { in.PUUID = "" },
 		"appUid":           func(in *Install) { in.AppUID = "" },
@@ -431,9 +432,14 @@ func TestDeviceData(t *testing.T) {
 		}
 	}
 	invalid := d
-	invalid.Install.AndroidID = "not-an-android-id"
+	invalid.AndroidID = "not-an-android-id"
 	if _, err := deviceData(id, invalid); err == nil {
 		t.Error("deviceData with an invalid androidId = nil error, want an error")
+	}
+	noAndroidID := d
+	noAndroidID.AndroidID = ""
+	if _, err := deviceData(id, noAndroidID); err == nil {
+		t.Error("deviceData with no android id = nil error, want an error")
 	}
 	other := d
 	other.Install.DeviceID = "another-device"

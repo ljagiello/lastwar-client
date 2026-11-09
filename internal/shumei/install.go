@@ -23,11 +23,6 @@ type Install struct {
 	// binds it.
 	DeviceID string `json:"deviceId,omitempty"`
 
-	// AndroidID is a24, Settings.Secure.ANDROID_ID (l1l11I111ll): 16
-	// lowercase hex digits, which Android 8 and later derive per app signing
-	// key. Last War doesn't set needUsingMD5, so the SDK sends it unhashed.
-	AndroidID string `json:"androidId,omitempty"`
-
 	// MediaDrmID is a84: the base64 deviceUniqueId of the Widevine, ClearKey
 	// (W3C and DASH-IF UUIDs) and PlayReady MediaDrm schemes, in that order,
 	// joined with "_" (l1111l111111Il.l111l1111lIl). A scheme the phone lacks,
@@ -73,7 +68,6 @@ func NewInstall(now time.Time) Install {
 	installed := now.Add(-randDuration(30*24*time.Hour, 400*24*time.Hour)).Truncate(time.Millisecond)
 	updated := now.Add(-randDuration(time.Hour, 20*24*time.Hour)).Truncate(time.Millisecond)
 	return Install{
-		AndroidID:        hex.EncodeToString(randBytes(8)),
 		MediaDrmID:       base64.StdEncoding.EncodeToString(randBytes(widevineIDLen)) + "___",
 		PUUID:            randomUUID(),
 		AppUID:           newAppUID(),
@@ -93,7 +87,6 @@ func (in Install) Fill(now time.Time) (Install, bool) {
 			*dst, filled = v, true
 		}
 	}
-	fill(&in.AndroidID, fresh.AndroidID)
 	fill(&in.MediaDrmID, fresh.MediaDrmID)
 	fill(&in.PUUID, fresh.PUUID)
 	fill(&in.AppUID, fresh.AppUID)
@@ -139,18 +132,14 @@ func (in Install) Registered(boxID string, t time.Time) (Install, bool) {
 }
 
 var (
-	androidIDRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
-	puuidRe     = regexp.MustCompile(`^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$`)
-	appUIDRe    = regexp.MustCompile(`^u0_a[0-9]+$`)
+	puuidRe  = regexp.MustCompile(`^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$`)
+	appUIDRe = regexp.MustCompile(`^u0_a[0-9]+$`)
 )
 
 // Validate reports the first set value a real install couldn't hold. Empty
 // values pass: Fill supplies them. The errors give lengths, never the values,
 // since they end up in logs.
 func (in Install) Validate() error {
-	if in.AndroidID != "" && !androidIDRe.MatchString(in.AndroidID) {
-		return fmt.Errorf("androidId (%d characters) is not 16 lowercase hex digits", len(in.AndroidID))
-	}
 	if in.MediaDrmID != "" {
 		parts := strings.Split(in.MediaDrmID, "_")
 		if len(parts) != 4 {

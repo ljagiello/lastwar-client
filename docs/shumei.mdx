@@ -397,7 +397,13 @@ Some fields stay the same for the life of an app install. `goclient` keeps them
 per session, in the session config's `shumeiInstall` object. The first
 `-cs-shumei-gen` run for a session generates whatever the object leaves out and
 writes it back, so every later registration reports the same phone. A value
-already in the object stays, such as a real phone's Android ID.
+already in the object stays, such as a real phone's MediaDrm ID.
+
+`a24` (the Android ID, `Settings.Secure.ANDROID_ID`) is **not** an install
+value: it is one per device, like the Login `deviceId`, persisted in the
+device-identity state file (`.lastwar_goclient_android_id`) and shared by both
+the ShuMei fingerprint's `a24` and the `Login`'s `ta.#device_id` (ThinkingData's
+`#device_id`). `deviceData` reads it from `Device.AndroidID`, not the install.
 
 One install belongs to one Login `deviceId`, so the object records the one it
 was made for, in its own `deviceId` key. A run under a different `deviceId`
@@ -423,7 +429,6 @@ share the one persisted `deviceId`.
 
 | Field | SDK source | `shumeiInstall` key | Fresh value |
 |---|---|---|---|
-| `a24` | `Settings.Secure.ANDROID_ID` (`l1l11I111ll`), unhashed because Last War doesn't set `needUsingMD5` | `androidId` | 16 random lowercase hex digits |
 | `a84` | the base64 `deviceUniqueId` of the Widevine, ClearKey (W3C and DASH-IF UUIDs) and PlayReady `MediaDrm` schemes, in that order, joined with `_` (`l1111l111111Il`), cached in the `auc` prefs | `mediaDrmId` | 32 random bytes for Widevine, then `___`. Android's ClearKey plugin keeps its test ID under `deviceId`, not `deviceUniqueId`, and the Samsung has no PlayReady |
 | `a163` | `UUID.randomUUID()` without dashes, cached as `puuid` in the `seq` prefs (`l1l11I11l`) | `puuid` | a random version 4 UUID |
 | `a60` | the app's Linux uid as `u0_a<uid-10000>` on API 27+ (`l11l1l1l1Il.l1111l111111Il(int)`), from `getApplicationInfo().uid` | `appUid` | a random low `u0_a<0..199>` |

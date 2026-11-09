@@ -65,9 +65,14 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// androidIDRe is Settings.Secure.ANDROID_ID: 16 lowercase hex digits, the a24
+// the SDK sends unhashed (Last War doesn't set needUsingMD5).
+var androidIDRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // Organization and AppID are the values the shipped game (Last War)
 // configures the SDK with in SmSdkManager.callCreate(). They are
@@ -344,6 +349,12 @@ type Device struct {
 	// uptime.
 	BootTime time.Time
 
+	// AndroidID is a24, Settings.Secure.ANDROID_ID (16 lowercase hex digits).
+	// It is one per device, not per install: the caller passes the device
+	// identity's persisted value, so a24 and the Login's ta #device_id agree.
+	// It must be set: BoxID refuses an empty one rather than invent it.
+	AndroidID string
+
 	// WiFi adds the connected network's details. Nil is what a real Last War
 	// install sends: the SDK reads them only when the app holds
 	// ACCESS_FINE_LOCATION (l1l11l1Illl), Last War doesn't request it, so a19,
@@ -412,8 +423,11 @@ func deviceData(deviceID string, d Device) (string, error) {
 	if d.AppVersion == "" {
 		return "", errors.New("shumei: no app version for a38 (set Device.AppVersion)")
 	}
+	if d.AndroidID == "" || !androidIDRe.MatchString(d.AndroidID) {
+		return "", errors.New("shumei: no valid android id for a24 (set Device.AndroidID, 16 lowercase hex digits)")
+	}
 	in := d.Install
-	if in.AndroidID == "" || in.MediaDrmID == "" || in.PUUID == "" || in.AppUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() {
+	if in.MediaDrmID == "" || in.PUUID == "" || in.AppUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() {
 		return "", errors.New("shumei: install values are unset (Install.Fill sets them)")
 	}
 	if err := in.Validate(); err != nil {
@@ -464,7 +478,7 @@ func deviceData(deviceID string, d Device) (string, error) {
 	// a92 is a36's "width,height" without the dpi component.
 	m["a92"] = screenPrefix(hw.Screen)
 
-	m["a24"] = in.AndroidID
+	m["a24"] = d.AndroidID
 	m["a84"] = in.MediaDrmID
 	m["a163"] = in.PUUID
 	m["a60"] = in.AppUID

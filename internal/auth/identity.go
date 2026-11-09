@@ -135,10 +135,11 @@ func reverseString(s string) string {
 // re-sending opt=new for a device GSL already recognizes appears to cause
 // the E011 rejection observed empirically.
 type deviceIdentity struct {
-	DeviceID string
-	Username string
-	GameUid  string
-	LoginKey string
+	DeviceID  string
+	AndroidID string // Settings.Secure.ANDROID_ID (16 lowercase hex), one per device, like DeviceID
+	Username  string
+	GameUid   string
+	LoginKey  string
 }
 
 // String/GoString are the round-48 regression fix for the MAJOR finding that deviceIdentity --
@@ -178,10 +179,11 @@ func StateFilePath(name string) string {
 	return filepath.Join(dir, name)
 }
 
-func deviceIDStatePath() string { return StateFilePath(".lastwar_goclient_device_id") }
-func usernameStatePath() string { return StateFilePath(".lastwar_goclient_username") }
-func gameUidStatePath() string  { return StateFilePath(".lastwar_goclient_gameuid") }
-func loginKeyStatePath() string { return StateFilePath(".lastwar_goclient_loginkey") }
+func deviceIDStatePath() string  { return StateFilePath(".lastwar_goclient_device_id") }
+func androidIDStatePath() string { return StateFilePath(".lastwar_goclient_android_id") }
+func usernameStatePath() string  { return StateFilePath(".lastwar_goclient_username") }
+func gameUidStatePath() string   { return StateFilePath(".lastwar_goclient_gameuid") }
+func loginKeyStatePath() string  { return StateFilePath(".lastwar_goclient_loginkey") }
 
 // readTrimmed reads path and returns its trimmed contents. A missing file (os.IsNotExist) is not
 // an error -- it just means that piece of state hasn't been persisted yet (e.g. first run, or a
@@ -317,6 +319,29 @@ func AtomicWriteStateFile(path, content string) error {
 	return os.Rename(tmpPath, path)
 }
 
+// loadOrCreateAndroidID returns the device's persisted Settings.Secure.ANDROID_ID (16 lowercase hex
+// digits), generating and persisting one on first use, the way a real device has an ANDROID_ID from
+// install. It is one value for the life of the device, used by both the ShuMei fingerprint's a24 and
+// ThinkingData's ta #device_id, so a guest login and a session reconnect report the same ID.
+func loadOrCreateAndroidID() (string, error) {
+	id, err := readTrimmed(androidIDStatePath())
+	if err != nil {
+		return "", fmt.Errorf("read android id state: %w", err)
+	}
+	if id != "" {
+		return id, nil
+	}
+	raw := make([]byte, 8) // 8 bytes -> 16 lowercase hex digits
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	id = hex.EncodeToString(raw)
+	if err := AtomicWriteStateFile(androidIDStatePath(), id); err != nil {
+		return "", fmt.Errorf("persist android id: %w", err)
+	}
+	return id, nil
+}
+
 func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 	id, err := readTrimmed(deviceIDStatePath())
 	if err != nil {
@@ -386,9 +411,15 @@ func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 	// every persisted state file gets the same loose-permissions check, not
 	// just loginKey.
 	warnIfLoosePermissions(deviceIDStatePath())
+	warnIfLoosePermissions(androidIDStatePath())
 	warnIfLoosePermissions(usernameStatePath())
 	warnIfLoosePermissions(gameUidStatePath())
 	warnIfLoosePermissions(loginKeyStatePath())
+	androidID, err := loadOrCreateAndroidID()
+	if err != nil {
+		slog.Warn("failed to load or create the android id state file", "path", androidIDStatePath(), "error", err)
+		return nil, err
+	}
 	username, err := readTrimmed(usernameStatePath())
 	if err != nil {
 		slog.Warn("failed to read username state file", "path", usernameStatePath(), "error", err)
@@ -405,10 +436,11 @@ func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 		return nil, fmt.Errorf("read loginKey state: %w", err)
 	}
 	return &deviceIdentity{
-		DeviceID: id,
-		Username: username,
-		GameUid:  gameUid,
-		LoginKey: loginKey,
+		DeviceID:  id,
+		AndroidID: androidID,
+		Username:  username,
+		GameUid:   gameUid,
+		LoginKey:  loginKey,
 	}, nil
 }
 
