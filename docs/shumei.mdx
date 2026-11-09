@@ -208,16 +208,16 @@ self-reported, protected only with the static embedded public key (see
 from-scratch client *can* build a plausible profile, and `goclient` now does the three things that
 make one convincing:
 
-- **Per-device hardware** — a catalog entry selected by `deviceId` (`hardwareFor`/`HardwareFor` in
+- **Per-device hardware** — a catalog entry selected by `deviceId` (`HardwareFor` in
   `internal/shumei/hardware.go`), not one shared Samsung profile.
 - **Internal consistency** — a real Android 12 `SP1A` build ID, a SoC that matches the board and the
   boot hardware, a screen whose dpi matches its resolution, and RAM/cores/clock that match the SoC.
 - **Cross-field consistency with the `Login`** — `auth.BuildLoginParams` derives `phone_model`,
-  `osVersion`, `device_string`, `mt`, `AndroidID` (Build.SERIAL), `IMEI` (the build dump) and
-  `androidDid` from the same `HardwareFor(deviceId)` entry, and the `ta` blob's `#device_model`/
-  `#manufacturer`/`#os_version`/`#screen_*`/`#ram`/`#fps` follow it too, so the ShuMei fingerprint and
-  the login describe the same phone. The iOS `Login` is left as-is: it has its own device model
-  domain (`idfa`/`idfv`), and no iOS hardware is modeled yet.
+  `osVersion`, `device_string`, `mt`, `AndroidID` (Build.SERIAL) and `IMEI` (the build dump) from the
+  same `HardwareFor(deviceId)` entry, `androidDid` from the per-device `DeviceUUID(deviceId)`, and
+  the `ta` blob's `#device_model`/`#manufacturer`/`#os_version`/`#screen_*`/`#ram`/`#fps` follow it
+  too, so the ShuMei fingerprint and the login describe the same phone. The iOS `Login` is left
+  as-is: it has its own device model domain (`idfa`/`idfv`), and no iOS hardware is modeled yet.
 
 Three things are genuinely hard to reproduce — a real Widevine `deviceUniqueId`, keystore attestation
 chains, and Play Integrity — but Last War's ShuMei config mostly skips those (`notCollect`
@@ -259,7 +259,7 @@ the iOS SDK's device-data fields, haven't been reversed.
 The server does accept `os: "ios"` with the Android key and fingerprint, but
 `goclient` doesn't use that. Only the outer `os` field would change: the
 protected fingerprint would still describe an Android phone (`a6: "android"`,
-the `com.fun.lastwar.gp` package and paths, a Samsung model), which is the
+the `com.fun.lastwar.gp` package and paths, a catalog Android model), which is the
 pairing the iOS-mode skip below avoids. A real iOS `shumeiBoxId` needs the iOS
 protection scheme and an iOS fingerprint template.
 
@@ -294,7 +294,7 @@ the per-install values below are generated in the formats a real phone uses.
 **Per-device hardware.** The device-specific half of the profile (build
 fingerprint, model, brand, board, SoC, screen, sensors, launcher, locale) is
 not one fixed phone: `HardwareFor(deviceId)` selects an internally-consistent
-entry from a catalog of eight real Android 12 signatures (`hardware.go`), so
+entry from a catalog of 11 real Android 12 signatures (`hardware.go`), so
 two distinct `deviceId`s report two distinct phones instead of sharing a single
 Samsung profile. The selection is a pure function of the `deviceId`, so one
 device stays the same phone across registrations. `a60` (the app's Linux uid,
@@ -303,11 +303,11 @@ in the session config.
 
 The same `Hardware` drives the Android `Login`'s device fields
 (`auth/identity.go`): `phone_model`, `osVersion`, `device_string`, `mt`,
-`AndroidID` (Build.SERIAL), `IMEI` (the build dump) and `androidDid` all come
-from the selected entry, and the `ta` blob's `#device_model`/`#manufacturer`/
-`#os_version`/`#screen_*`/`#ram`/`#fps` follow it, so the ShuMei fingerprint and
-the login describe one phone. The `#device_id`/`#install_time` and the iOS login
-fields are not modeled yet.
+`AndroidID` (Build.SERIAL) and `IMEI` (the build dump) all come from the
+selected entry, `androidDid` is the per-device `DeviceUUID(deviceId)`, and the
+`ta` blob's `#device_model`/`#manufacturer`/`#os_version`/`#screen_*`/`#ram`/
+`#fps` follow it, so the ShuMei fingerprint and the login describe one phone.
+The `#device_id`/`#install_time` and the iOS login fields are not modeled yet.
 
 **Credit:** the `aNN` template started as C485's C# `ShumeiInnerTemplate`, and
 the `FUN_0010c160` address comes from their `GetShumeiBoxId`. Both were shared
@@ -453,7 +453,7 @@ registering.
 
 Three assumptions remain. `SMSDK.u2` is native and hasn't been traced, so "0
 for a missing file" comes from its Java wrapper, which returns 0 when the call
-fails. The Widevine ID length (32 bytes) is the common one, not one read from an
-SM-G988N. And the `a133` range of 150 to 600 ms is a guess: the real collection
+fails. The Widevine ID length (32 bytes) is the common one, not one read from a
+catalog device. And the `a133` range of 150 to 600 ms is a guess: the real collection
 waits up to 3 s on one of its threads (`thread.join(3000L)`), and no real
 timing has been measured.
