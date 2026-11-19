@@ -2,6 +2,7 @@ package game
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"lastwar-client/internal/session"
@@ -29,13 +30,25 @@ import (
 //     ≥ 2). isAutoClaim is echoed back and only changes the tip text; 1 is what the client sends
 //     when it claims without a tap.
 //   - `receive.week.free.reward {}`, the free weekly package. Gate: init weekFreeReward.lastRewardTime
-//     (ms) is not today (GiftPackManager.lua:152-176, 394-400).
+//     (ms) is not today (GiftPackManager.lua:152-176, 394-400), and the package's welfare tag is
+//     open. In 1.0.370 / tables 40413 the only screen still offering the claim is the new weekly
+//     package (WeeklyPackageNewMain.lua:255-262): the Daily tab's row (recharge 1020000, type 19) is
+//     onoff 1 / unlock_lv 99 and there is no type-6 row (WelfareTagInfo.lua:34, 138-140). That
+//     screen needs the recharge 1250000 (type 17) unlock_lv 8 and the weekgift_new_switch switch
+//     (CheckIfNewWeeklyPackageOpen, GiftPackManager.lua:406-417, whose weekly_sale.k1 HQ 5 the
+//     unlock level covers). So Go asks for HQ >= 8 and, when init dataConfig carries
+//     weekgift_new_switch, for it to be on; the switch has no local item row, so an absent key keeps
+//     the claim (MASTER 1.0.370 B49). An init without weekFreeReward is logged at Warn and skipped:
+//     the client builds the package from that object (GiftPackManager.lua:169-176).
 //   - `receive.week.card.daily.free.reward {}`, the week-card free gift. Gate: the reply to
 //     `get.week.card.info {isLogin: 1}` (sent by the client once, right after init,
-//     WeekCardManager.lua:23-25; GetWeekCardListMessage.lua:4-26; shared with card-dailies through
+//     WeekCardManager.lua:23-25; GetWeekCardListMessage.lua:5-12; shared with card-dailies through
 //     weekCardInfo) carries dailyFree.lastRewardTime (ms) that is not today
-//     (WeekCardManager.lua:65-76). The Lua checks no card ownership; whether the server does is
-//     open (MASTER.md §8.1), so log the first reply.
+//     (WeekCardManager.lua:75-88). The client's lastRecvFreeTime starts at 0 and the reply updates
+//     it only when it carries dailyFree (WeekCardManager.lua:7; GetWeekCardListMessage.lua:26-28),
+//     so a reply without dailyFree reads as never claimed and the gift is claimed (MASTER 1.0.370
+//     B47). The Lua checks no card ownership; whether the server does is open (MASTER.md §8.1),
+//     so log the first reply.
 //
 // The weekly package and the week-card free gift are skipped when init dataConfig carries switch
 // free_chest_receive turned off: the subscription panel builds both rows only behind it
@@ -49,13 +62,15 @@ import (
 // season-week-card feature (feature_season_week_card.go). Static-only: none of these has been
 // sent live yet.
 const (
-	freeChestsStoreCmd    = "free.reward.receive"
-	freeChestsWeeklyCmd   = "receive.week.free.reward"
-	freeChestsWeekCardCmd = "receive.week.card.daily.free.reward"
-	freeChestSwitch       = "free_chest_receive"
+	freeChestsStoreCmd     = "free.reward.receive"
+	freeChestsWeeklyCmd    = "receive.week.free.reward"
+	freeChestsWeekCardCmd  = "receive.week.card.daily.free.reward"
+	freeChestSwitch        = "free_chest_receive"
+	freeChestsWeeklySwitch = "weekgift_new_switch"
 
 	freeChestsStoreType = 1 // FreeRewardType.PackageInStoreFreeReward (EnumType.lua:13301)
 	freeChestsStoreHQ   = 2 // unlock 113 (UISubscriptionListPanelView.lua:56-61)
+	freeChestsWeeklyHQ  = 8 // recharge 1250000 (WeeklyPackageNew, type 17) unlock_lv, tables 40413
 )
 
 func init() {
@@ -121,11 +136,15 @@ func freeChestsStore(conn *session.GameConn, in *Init) error {
 	return nil
 }
 
-// freeChestSwitchOff reports whether init dataConfig carries free_chest_receive set to anything
-// but 1, which DataConfig:CheckSwitch reads as off (DataConfig.lua:76-88). An absent key is not
-// off here: that keeps the claims as they were before the gate.
-func freeChestSwitchOff(in *Init) bool {
-	return in.Object("dataConfig").Has(freeChestSwitch) && !claimSwitchOn(in, freeChestSwitch)
+// freeChestSwitchOff reports whether init dataConfig carries free_chest_receive turned off
+// (freeChestsSwitchOff).
+func freeChestSwitchOff(in *Init) bool { return freeChestsSwitchOff(in, freeChestSwitch) }
+
+// freeChestsSwitchOff reports whether init dataConfig carries switch key set to anything but 1,
+// which DataConfig:CheckSwitch reads as off (DataConfig.lua:76-88). An absent key is not off here:
+// that keeps the claims as they were before the gate.
+func freeChestsSwitchOff(in *Init, key string) bool {
+	return in.Object("dataConfig").Has(key) && !claimSwitchOn(in, key)
 }
 
 func freeChestsWeekly(conn *session.GameConn, in *Init) error {
@@ -133,9 +152,17 @@ func freeChestsWeekly(conn *session.GameConn, in *Init) error {
 		slog.Info("free-chests: init dataConfig turns " + freeChestSwitch + " off; skipping the free weekly package")
 		return nil
 	}
+	if freeChestsSwitchOff(in, freeChestsWeeklySwitch) {
+		slog.Info("free-chests: init dataConfig turns " + freeChestsWeeklySwitch + " off; skipping the free weekly package")
+		return nil
+	}
+	if hq := claimHQLevel(in); hq < freeChestsWeeklyHQ {
+		slog.Info("free-chests: free weekly package locked", "hqLevel", hq, "unlockLevel", freeChestsWeeklyHQ)
+		return nil
+	}
 	w := in.Object("weekFreeReward")
 	if w == nil {
-		slog.Info("free-chests: init has no weekFreeReward")
+		slog.Warn("free-chests: init has no weekFreeReward; skipping the free weekly package")
 		return nil
 	}
 	last, _ := claimInt(w, "lastRewardTime") // absent reads as 0, the client's default (GiftPackManager.lua:10)
@@ -156,15 +183,22 @@ func freeChestsWeekCard(conn *session.GameConn, in *Init) error {
 	if err != nil {
 		return err
 	}
-	var free *sfs.SFSObject
-	if v, ok := info.Params.Get("dailyFree"); ok {
-		free, _ = v.Val.(*sfs.SFSObject)
-	}
-	if free == nil {
-		slog.Info("free-chests: week card info has no dailyFree")
+	if info == nil || info.Params.Has("errorCode") {
+		slog.Info("free-chests: week card info was refused; skipping the week-card free gift")
 		return nil
 	}
-	last, _ := claimInt(free, "lastRewardTime")
+	var last int64 // no dailyFree: the client's lastRecvFreeTime stays 0 (WeekCardManager.lua:7)
+	if v, ok := info.Params.Get("dailyFree"); ok && v.Val != nil {
+		free, isObj := v.Val.(*sfs.SFSObject)
+		if !isObj {
+			slog.Warn("free-chests: week card info has a dailyFree that is not an object; skipping the week-card free gift",
+				"type", fmt.Sprintf("%T", v.Val))
+			return nil
+		}
+		last, _ = claimInt(free, "lastRewardTime")
+	} else {
+		slog.Info("free-chests: week card info has no dailyFree; the client then shows the gift as never claimed")
+	}
 	if due, _ := claimBeforeToday(in, last); !due {
 		slog.Info("free-chests: week-card free gift already claimed today")
 		return nil

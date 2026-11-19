@@ -35,11 +35,14 @@ const (
 	questMaxClaims  = 300 // bounds the follow-up chain in one run
 )
 
-// questStageRanges are the activity_stage.stage_quest ids in the 1.0.364 tables, as inclusive ranges.
+// questStageRanges are every activity_stage.stage_quest id in tables 40413 (stageQuestTableVersion),
+// as inclusive ranges. 40413 added the S7 Lockhart quest 2400008 (activity_stage row 16, stage
+// 1201025), which the client claims only from its Lockhart panel (LockhartActivityMain.lua:187-197,
+// 282-284), so it is left to stage-quests like the other Lockhart quests.
 var questStageRanges = [][2]int64{
 	{2201001, 2201005}, {2202001, 2202005}, {2203001, 2203005}, {2204001, 2204005}, {2205001, 2205005},
 	{2206001, 2206005}, {2207001, 2207005}, {2301001, 2301005}, {2302001, 2302005}, {2303001, 2303005},
-	{2304001, 2304005}, {2305001, 2305005}, {2306001, 2306005}, {2307001, 2307005}, {2400000, 2400007},
+	{2304001, 2304005}, {2305001, 2305005}, {2306001, 2306005}, {2307001, 2307005}, {2400000, 2400008},
 	{2500001, 2500005}, {8000001, 8000010}, {8000101, 8000112}, {8010011, 8010015}, {8010018, 8010018},
 	{8010101, 8010108}, {8010201, 8010208}, {8010301, 8010344}, {9010001, 9010008}, {9010101, 9010107},
 	{9010201, 9010207}, {9100000, 9100149}, {9100300, 9100449}, {9100600, 9100749},

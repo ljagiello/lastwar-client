@@ -157,6 +157,60 @@ func TestDailyQuestsFailures(t *testing.T) {
 	}
 }
 
+// TestDailyQuestsChestIndexSkipsIncompleteEntries is MASTER 1.0.370 B48 (aud-dailies F7,
+// cov-dc-events F9): the client numbers only rewardList entries with a point and info or
+// infoBuilder (dailyBoxActive, DailyTaskManager.lua:61-80) and curReward indexes that list
+// (GetBoxState, :164-179). With every complete chest the points reach already in curReward, an
+// entry without point or without a reward must not shift the numbering into a phantom claim.
+func TestDailyQuestsChestIndexSkipsIncompleteEntries(t *testing.T) {
+	chest := func(point int32, rewardKey string) *sfs.SFSObject {
+		o := sfs.NewSFSObject()
+		if point > 0 {
+			o.PutInt("point", point)
+		}
+		if rewardKey != "" {
+			o.PutSFSArray(rewardKey, sfs.NewSFSArray())
+		}
+		return o
+	}
+	for name, c := range map[string]struct {
+		chests  []*sfs.SFSObject
+		claimed []int32
+		want    []string
+	}{
+		"entry without a reward": {
+			[]*sfs.SFSObject{chest(40, "info"), chest(30, ""), chest(80, "infoBuilder"), chest(160, "info")},
+			[]int32{1, 2}, []string{dailyQuestsListCmd}},
+		"entry without a point": {
+			[]*sfs.SFSObject{chest(0, "info"), chest(40, "info"), chest(80, "info")},
+			[]int32{1, 2}, []string{dailyQuestsListCmd}},
+		"complete chest still open": {
+			[]*sfs.SFSObject{chest(30, ""), chest(40, "info"), chest(80, "infoBuilder")},
+			[]int32{1}, []string{dailyQuestsListCmd, dailyQuestsChestCmd}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			list := dailyQuestsList([]dailyQuest{{"120", 2}, {"121", 2}, {"101", 2}}) // 90 points
+			arr := sfs.NewSFSArray()
+			for _, o := range c.chests {
+				arr.AddSFSObject(o)
+			}
+			list.PutSFSArray("rewardList", arr)
+			cur := sfs.NewSFSArray()
+			for _, i := range c.claimed {
+				cur.AddInt(i)
+			}
+			list.PutSFSArray("curReward", cur)
+			fake, err := dailyQuestsRun(t, list, rewardOK(), rewardOK())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := fake.cmds(); !slices.Equal(got, c.want) {
+				t.Errorf("sent %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestDailyQuestsNoInitSendsNothing(t *testing.T) {
 	conn, fake := startRewardFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return rewardOK() })
 	if err := runDailyQuests(conn, &Init{}); err != nil {

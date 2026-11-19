@@ -67,7 +67,7 @@ func TestStageQuestsClaimsOnlyFreeStageQuests(t *testing.T) {
 		questTask("8000112", 1), // Growth Foundation
 		questTask("8010101", 1), // Hero Trial: claimed with hero.experiment.reward
 		questTask("8010344", 1), // Hero Trial
-		questTask("8010018", 1), // stage type 200 only, no activity row
+		questTask("8010018", 1), // stage 200 only, and no stage-200 activity runs
 		questTask("9100150", 1), // gap between stage runs: not a stage quest
 		questTask("2201006", 1), // gap between stage runs: not a stage quest
 		questTask("1001", 1),    // a main quest: the quests feature's
@@ -183,16 +183,80 @@ func TestStageQuestRangesAreStageQuestsTheQuestsFeatureSkips(t *testing.T) {
 			}
 		}
 	}
-	// 70 Strongest Commander + 8 Lockhart + 5 King + 5 + 8 + 7 + 450 task-event + 7 TaskActivity2.
-	if n != 560 {
-		t.Errorf("stageQuestRanges cover %d ids, want 560", n)
+	// 70 Strongest Commander + 9 Lockhart + 5 King + 6 (stages 4 and 200) + 8 + 7 + 450 task-event
+	// + 7 TaskActivity2 (tables 40413).
+	if n != 562 {
+		t.Errorf("stageQuestRanges cover %d ids, want 562", n)
 	}
-	for _, r := range [][2]int64{{8000001, 8000010}, {8000101, 8000112}, {8010101, 8010108}, {8010201, 8010208}, {8010301, 8010344}, {8010018, 8010018}} {
+	for _, r := range [][2]int64{{8000001, 8000010}, {8000101, 8000112}, {8010101, 8010108}, {8010201, 8010208}, {8010301, 8010344}} {
 		for id := r[0]; id <= r[1]; id++ {
 			if _, ok := stageQuestStages(strconv.FormatInt(id, 10)); ok {
-				t.Errorf("%d (Growth Foundation, Hero Trial or stage 200 only) is claimable", id)
+				t.Errorf("%d (Growth Foundation or Hero Trial) is claimable", id)
 			}
 		}
+	}
+}
+
+// TestStageQuestMapsMatchTables40413 is MASTER 1.0.370 B18 (aud-dailies F3, cov-tables F7): tables
+// 40413 add the S7 Lockhart stage 1201025 (quest 2400008), stage 200's first activity (task event
+// 1071011; activity_stage row 302 lists 8010018 and 8010012-8010015) and two King activities on
+// stage 100. 8010011 stays stage 4 only.
+func TestStageQuestMapsMatchTables40413(t *testing.T) {
+	for id, want := range map[string][]int64{
+		"2400008": {1201025}, "8010011": {4}, "8010012": {4, 200}, "8010015": {4, 200}, "8010018": {200},
+		"8010016": nil, "8010017": nil, "2400009": nil,
+	} {
+		got, ok := stageQuestStages(id)
+		if ok != (want != nil) || !slices.Equal(got, want) {
+			t.Errorf("stageQuestStages(%s) = %v, %v; want %v", id, got, ok, want)
+		}
+	}
+	for id, want := range map[int32]int64{1201025: 1201025, 1071011: 200, 1201016: 100, 1201017: 100} {
+		if got, ok := stageQuestActivityStage[id]; !ok || got != want {
+			t.Errorf("stageQuestActivityStage[%d] = %d, %v; want %d", id, got, ok, want)
+		}
+	}
+}
+
+// withActivityRows adds rows to the generated activityTable for one test when it lacks them (it is
+// at 39879 until the WP0 regeneration lands), and removes what it added afterwards.
+func withActivityRows(t *testing.T, rows map[int32]activityRow) {
+	t.Helper()
+	var added []int32
+	for id, row := range rows {
+		if _, ok := activityTable[id]; !ok {
+			activityTable[id] = row
+			added = append(added, id)
+		}
+	}
+	t.Cleanup(func() {
+		for _, id := range added {
+			delete(activityTable, id)
+		}
+	})
+}
+
+// TestStageQuestsClaimsTheTables40413Stages runs B18's new rows end to end: the S7 Lockhart
+// activity claims 2400008, the stage-200 task event claims 8010018 and 8010013 (which stage 4's
+// events also list), and a 40413 King activity claims its stage-100 target.
+func TestStageQuestsClaimsTheTables40413Stages(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withActivityRows(t, map[int32]activityRow{
+		1201025: {typ: stageQuestTypeLockhart},
+		1071011: {typ: stageQuestTypeTaskActivity},
+		1201016: {typ: stageQuestTypeKing, needHQ: 12},
+	})
+	tasks := []*sfs.SFSObject{
+		questTask("2400008", 1), questTask("8010018", 1), questTask("8010013", 1), questTask("2500002", 1),
+		questTask("8010011", 1), // stage 4 only: no stage-4 activity runs
+	}
+	in := stageQuestsInit(30, tasks, evActivity(1201025), evActivity(1071011), evActivity(1201016))
+	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+	if err := runStageQuests(conn, in); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stageQuestIDsSent(t, fake), []string{"2400008", "8010018", "8010013", "2500002"}; !slices.Equal(got, want) {
+		t.Errorf("claimed %v, want %v", got, want)
 	}
 }
 
@@ -200,7 +264,10 @@ func TestStageQuestRangesAreStageQuestsTheQuestsFeatureSkips(t *testing.T) {
 // a stage and the map lists no other id, so a table bump that adds or drops rows fails here until
 // the map is updated; every stage a range names is some activity's. The stage values themselves
 // come from tableInfoType, which the generated table doesn't carry, so they are checked by hand.
+// While the generated activityTable is older than stageQuestTableVersion, the four rows 40413 added
+// (stageQuestNewIn40413) may be missing from it; once it is regenerated the check is exact again.
 func TestStageQuestActivityStageCoversTheActivityTable(t *testing.T) {
+	stageQuestNewIn40413 := map[int32]bool{1071011: true, 1201016: true, 1201017: true, 1201025: true}
 	types := []int32{stageQuestTypeStrongestCommander, stageQuestTypeLockhart, stageQuestTypeTaskActivity,
 		stageQuestTypeTaskActivity2, stageQuestTypeKing}
 	stages := map[int64]bool{}
@@ -214,8 +281,13 @@ func TestStageQuestActivityStageCoversTheActivityTable(t *testing.T) {
 		}
 		stages[stage] = true
 	}
-	for id := range stageQuestActivityStage {
-		if row, ok := activityTable[id]; !ok || !slices.Contains(types, row.typ) {
+	for id, stage := range stageQuestActivityStage {
+		row, ok := activityTable[id]
+		if !ok && activityTableVersion != stageQuestTableVersion && stageQuestNewIn40413[id] {
+			stages[stage] = true // a 40413 row the older generated table lacks
+			continue
+		}
+		if !ok || !slices.Contains(types, row.typ) {
 			t.Errorf("stage map lists %d, which is no activity of the five types", id)
 		}
 	}
