@@ -177,10 +177,9 @@ func TestStorageBytes(t *testing.T) {
 // TestTrafficSinceBoot checks a120 only grows within one boot and its mobile
 // counts stay inside the totals.
 func TestTrafficSinceBoot(t *testing.T) {
-	boot := time.UnixMilli(1790000000000)
 	var prev map[string]any
 	for _, up := range []time.Duration{time.Minute, time.Hour, 3 * time.Hour, 30 * 24 * time.Hour} {
-		got := trafficSinceBoot("dev", boot, up)
+		got := trafficSinceBoot("dev", 37, up)
 		mr, mt, tr, tt := got["mr"].(int64), got["mt"].(int64), got["tr"].(int64), got["tt"].(int64)
 		if mr > tr || mt > tt || tt > tr || tr <= 0 {
 			t.Errorf("a120 after %v = %v, want mobile within total and sent below received", up, got)
@@ -192,8 +191,24 @@ func TestTrafficSinceBoot(t *testing.T) {
 		}
 		prev = got
 	}
-	if fmt.Sprint(trafficSinceBoot("dev", boot, time.Hour)) == fmt.Sprint(trafficSinceBoot("dev", boot.Add(time.Hour), time.Hour)) {
+	if fmt.Sprint(trafficSinceBoot("dev", 37, time.Hour)) == fmt.Sprint(trafficSinceBoot("dev", 38, time.Hour)) {
 		t.Error("a120 is the same for two boots, want each boot its own rate")
+	}
+}
+
+// TestDeviceDataTrafficOneBoot checks a120 never drops between two runs in one
+// boot, although each run resamples the boot time (here 300 ms apart, as
+// Now - uptime gives it).
+func TestDeviceDataTrafficOneBoot(t *testing.T) {
+	first := testDevice()
+	second := first
+	second.Now, second.BootTime = first.Now.Add(3*time.Hour), first.BootTime.Add(300*time.Millisecond)
+	a := decodeDeviceData(t, mustDeviceData(t, testDeviceID, first))["a120"].(map[string]any)
+	b := decodeDeviceData(t, mustDeviceData(t, testDeviceID, second))["a120"].(map[string]any)
+	for _, k := range []string{"mr", "mt", "tr", "tt"} {
+		if jsonInt(t, b[k]) < jsonInt(t, a[k]) {
+			t.Errorf("a120.%s went from %v to %v three hours later in the same boot", k, a[k], b[k])
+		}
 	}
 }
 

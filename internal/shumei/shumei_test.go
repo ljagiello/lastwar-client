@@ -517,8 +517,8 @@ func TestDeviceDataRegistered(t *testing.T) {
 
 // TestDeviceDataHardware checks the device-specific half is deterministic per
 // deviceId and internally consistent: the build's model/brand/board match the
-// catalog entry, a143/a33 carry the SoC, a92 is a36 without its dpi, and every
-// catalog entry describes one coherent phone (no NRD90M-style cross-generation
+// catalog entry, a143 carries the SoC, a92 is a36 without its dpi, and every
+// catalog entry describes one coherent US phone (no NRD90M-style cross-generation
 // mismatch).
 func TestDeviceDataHardware(t *testing.T) {
 	const id = "0123456789abcdef0123456789abcdef_n3d"

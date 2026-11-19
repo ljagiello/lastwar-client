@@ -41,10 +41,13 @@
 //     "requestId":"..."}. code 1100 success, 1902 the server's generic
 //     "can't use this" reply (any body it can't decode), 1903 hard error.
 //
-// Status (live-tested 2026-10-11): the full device-data fingerprint below,
-// protected with the hybrid scheme, returns code 1100 and a real smid. The
-// server validates the protection: an empty or minimal `data`/`tn`/`ep`
-// returns 1902. The device-data template is a spoofed Android device profile
+// Status: live-tested 2026-10-11 with the template as it was then, the full
+// device-data fingerprint, protected with the hybrid scheme, returned code 1100
+// and a real smid. The server validates the protection: an empty or minimal
+// `data`/`tn`/`ep` returns 1902. The 1.0.370 slot corrections (app certificate,
+// stored smid, counters, readings, the US catalog) and the cloudconf request
+// are static-only: no registration has been sent with them yet, and a template
+// the server dislikes only shows up live as a 1902. The device-data template is a spoofed Android device profile
 // (the client runs on a desktop, not a phone), so the smid it mints is for a
 // device that does not exist — see the note in BoxID.
 package shumei
@@ -593,7 +596,6 @@ func deviceData(deviceID string, d Device) (string, error) {
 		"status": d.battery.Status, "level": d.battery.Level, "scale": d.battery.Scale,
 		"temp": d.battery.Temp, "vol": d.battery.Voltage,
 	}
-	m["a120"] = trafficSinceBoot(deviceID, d.BootTime, d.Now.Sub(d.BootTime))
 
 	m["a24"] = d.AndroidID
 	m["a84"] = in.MediaDrmID
@@ -611,6 +613,7 @@ func deviceData(deviceID string, d Device) (string, error) {
 	m["a4"] = strconv.Itoa(c.Collections)
 	m["a130"] = c.AppStarts
 	m["a127"] = c.BootCount
+	m["a120"] = trafficSinceBoot(deviceID, c.BootCount, d.Now.Sub(d.BootTime))
 
 	if w := d.WiFi; w != nil {
 		m["a19"] = w.BSSID
@@ -680,11 +683,12 @@ func storageBytes(deviceID string, storageGB int, used int64) (avail, free, tota
 
 // trafficSinceBoot returns a120, TrafficStats' mobile and total bytes received
 // and sent since boot (l1l11l1Illl.java:42-48). Within one boot they only grow,
-// so each is the uptime times a rate that follows the device and the boot: 2 to
-// 20 KB/s received on average, a tenth to a quarter of that sent, and up to a
-// third of both over the mobile network.
-func trafficSinceBoot(deviceID string, boot time.Time, uptime time.Duration) map[string]any {
-	h := deviceHash(deviceID, "traffic"+strconv.FormatInt(boot.UnixMilli(), 10))
+// so each is the uptime times a rate that follows the device and the boot (its
+// boot count; the boot time itself is resampled every run and jitters by
+// milliseconds): 2 to 20 KB/s received on average, a tenth to a quarter of that
+// sent, and up to a third of both over the mobile network.
+func trafficSinceBoot(deviceID string, bootCount int, uptime time.Duration) map[string]any {
+	h := deviceHash(deviceID, "traffic"+strconv.Itoa(bootCount))
 	rxRate := int64(2000 + h%18001)
 	txPct := int64(10 + (h>>16)%16)
 	mobilePct := int64((h >> 32) % 34)
