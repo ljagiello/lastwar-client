@@ -62,10 +62,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math/big"
+	mrand "math/rand/v2"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -87,6 +90,12 @@ const (
 // field: it is the cloudconf request's `sdkver`, and here only the `a7` slot
 // inside the protected device data (with "build1" in `a136`).
 const OSName = "android"
+
+// TargetSDKVersion is a90, the app's ApplicationInfo.targetSdkVersion
+// (l111l1111llIl.java:828-829, l111l11111lIl.java:405-411): the 1.0.370
+// manifest's uses-sdk targetSdkVersion. It belongs to the build, so it moves
+// with gsl.AppVersion when a new APK raises it.
+const TargetSDKVersion = 36
 
 // Region the game selects (AREA_FJNY) and the numeric area code the SDK
 // derives from it (l11l11lI1lll.l1111l111111Il: "bj"->"001", "xjp"->"010",
@@ -284,16 +293,39 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // baseTemplate is the constant part of the `aNN` device-data fingerprint: the
 // app-level and generic-Android slots that are the same on every Android 12
 // phone of the same SDK version. The device-specific half (build, SoC, screen,
-// sensors, launcher, locale — see hardware.go) is filled by deviceData from the
-// catalog entry selected for the deviceId, so two devices no longer share one
+// sensors, launcher, SIM; see hardware.go) is filled by deviceData from the
+// catalog entry selected for the deviceId, so two devices don't share one
 // fixed phone profile. It started as C485's C# ShumeiInnerTemplate, shared in
-// https://github.com/ljagiello/lastwar-client/discussions/21.
+// https://github.com/ljagiello/lastwar-client/discussions/21, and was checked
+// slot by slot against the 1.0.370 SDK (3.14.3) collector, l111l1111llIl.java.
 //
-// deviceData adds the fields that change between collections: the device ID
+// deviceData adds the fields that change between collections: the stored smid
 // (a2, a97), the clocks (a9, a40, a170, a171), the SDK session ID (a80), the
-// collection time (a133), the app version (a38), and the Wi-Fi details (a19,
-// a30, a31) when a Device carries them. It also adds the per-install values
-// from Device.Install: a24, a84, a125, a126, a163, a167, a168 and a60.
+// collection time (a133), the app version (a38), the per-run readings
+// (a37 brightness, a72 battery, a120 traffic, a69/a70 free storage), the Wi-Fi
+// details (a19, a30, a31) when a Device carries them, the app's signing
+// certificate (a56, a57) and the target SDK (a90). It also adds the per-install
+// values from Device.Install: a24, a84, a125, a126, a163, a167, a168, a60 and
+// the counters a4, a127 and a130.
+//
+// App-level slots, from the 1.0.370 manifest and SmSdkManager.callCreate():
+//
+//   - a83 is seven checkSelfPermission digits (l1111l111111Il.java:583-589):
+//     READ_PHONE_STATE, WRITE_EXTERNAL_STORAGE, WRITE_SETTINGS,
+//     ACCESS_WIFI_STATE, ACCESS_NETWORK_STATE, ACCESS_FINE_LOCATION,
+//     ACCESS_COARSE_LOCATION. The manifest declares only the fourth and fifth
+//     of those that can be granted (WRITE_EXTERNAL_STORAGE is declared but not
+//     granted to a target-36 app), so "0001100".
+//   - a86 is the option status string (SmAntiFraud.java:233-243): transport,
+//     cloudConf, usingMD5, usingHttps, a callback, a non-empty notCollect,
+//     checkCrt. SmSdkManager keeps the defaults, sets HTTPS, registers a
+//     callback and two notCollect names, so "1101110".
+//   - a5 is the option's channel (l111l1111llIl.java:807-808), which
+//     SmSdkManager never sets: "" is dropped, so there is no a5. "default" is
+//     a11, the appId.
+//   - a141 counts displays and a156 lists them only when there is more than one
+//     (l111l1111llIl.java:837-843); a phone has one, so a141 is 0 and a156 is
+//     absent.
 //
 // The empty entries stay here to document which slots this device leaves
 // empty. deviceData drops them, the way the SDK's serializer does. a63, the
@@ -306,38 +338,42 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // excludes "gps" and "tel". So a fresh install most likely sends {"input",
 // "tel", "gps", "protect"}, in Java's HashSet order. A later server reply could
 // change the cloud half; this client doesn't fetch the cloud config.
+//
+// a88 is left as it was: the SDK reports the class names of the "location" and
+// "phone" service binders (l1111l111111Il.java:389-403), whose runtime value is
+// Android framework behaviour no capture of this SDK build has shown yet.
 const baseTemplate = `{
-  "a1": "all", "a4": "1", "a5": "default",
+  "a1": "all",
   "a6": "android", "a7": "3.14.3",
   "a62": "/data/user/0/com.fun.lastwar.gp/files",
   "a64": { "enable": "0", "service": [], "suc": "1" },
-  "a11": "default", "a29": "",
+  "a11": "default",
   "a44": "WIFI",
   "a39": "com.fun.lastwar.gp",
   "a136": "build1", "a96": "9dNCYkjHeFMYZMOjxgX8",
-  "a68": [], "a69": 120000000000, "a70": 130000000000, "a71": 128000000000, "a127": 12,
-  "a99": "", "a100": "", "a101": "", "a113": 0, "a130": 3, "a116": {}, "a117": false,
-  "a120": { "mr": 0, "mt": 0, "tr": 123456789, "tt": 987654321 }, "a121": 0, "a124": "",
+  "a68": [],
+  "a99": "", "a100": "", "a101": "", "a113": 0, "a116": {}, "a117": false,
+  "a121": 0, "a124": "",
   "a135": 0, "a139": 0, "a142": 1,
   "a153": {}, "a144": "", "a155": 0, "a160": 0, "a161": 0, "a162": [],
   "a164": 0, "a165": 0,
   "a169": "",
   "a172": {}, "a173": 0, "a174": 1, "a15": "false",
-  "a72": { "status": 2, "level": 85, "scale": 100, "temp": 320, "vol": 4200 },
   "a73": 0, "a74": 0, "a75": 0, "a76": "", "a77": {}, "a78": [], "a79": "",
-  "a83": "1011100",
-  "a85": [ "input", "tel", "gps", "protect" ], "a86": "0111001",
+  "a83": "0001100",
+  "a85": [ "input", "tel", "gps", "protect" ], "a86": "1101110",
   "a88": "locateServiceName:android.location.ILocationManager$Stub$Proxy|phoneServiceName:com.android.internal.telephony.ITelephony$Stub$Proxy",
-  "a90": 32, "a93": 1,
+  "a93": 1,
   "a102": [], "a103": "", "a107": {}, "a108": "", "a110": "", "a114": [], "a115": [],
-  "a141": 1, "a156": [], "a157": 0, "a159": ""
+  "a141": 0, "a157": 0, "a159": ""
 }`
 
 // Device holds the fingerprint values that change during a device's life: the
 // clocks the SDK samples on every collection, the Wi-Fi details it reads when
-// the app may see them, and the values one install keeps. BoxID fills each
-// zero clock, Wi-Fi IP and collection time with the host's real value or a
-// random one. It never makes up install values: the caller passes them.
+// the app may see them, the readings it takes on every run, and the values
+// one install keeps. BoxID and Register fill each zero clock, Wi-Fi IP and
+// collection time with the host's real value or a random one, and draw the
+// run's readings. They never make up install values: the caller passes them.
 type Device struct {
 	// Now is the collection time, a9 (System.currentTimeMillis()). Zero means
 	// the current time.
@@ -376,6 +412,48 @@ type Device struct {
 	// build the Login claims, so the fingerprint and the Login name the same
 	// app. It must be set: BoxID refuses an empty one rather than guess.
 	AppVersion string
+
+	// brightness and battery are what the SDK reads at collection time:
+	// Settings.System "screen_brightness" (a37, l1l11I111ll.java:50-63) and the
+	// sticky ACTION_BATTERY_CHANGED extras (a72, l11l1111Il.java:17-28). They
+	// move between runs on a real phone, so withHostDefaults draws them per run.
+	brightness int
+	battery    battery
+
+	// storageUsed is how much the phone's free space shrank since a fixed
+	// baseline (see storageBytes), drawn per run so a69/a70 aren't byte-equal
+	// on every registration.
+	storageUsed int64
+}
+
+// battery is a72: the status, level, scale, temperature (tenths of a degree
+// Celsius) and voltage (mV) extras of Android's ACTION_BATTERY_CHANGED.
+type battery struct {
+	Status, Level, Scale, Temp, Voltage int
+}
+
+// Android's BatteryManager status values the per-run battery uses.
+const (
+	batteryCharging    = 2
+	batteryDischarging = 3
+	batteryFull        = 5
+)
+
+// randomBattery returns a plausible a72 reading: a level from 15 to 100 %, a
+// charging, discharging or full status that fits it, 25 to 38 degrees and a
+// voltage that follows the level the way a Li-ion cell's does.
+func randomBattery() battery {
+	b := battery{Level: 15 + mrand.N(86), Scale: 100, Temp: 250 + mrand.N(131)}
+	switch {
+	case b.Level == 100 && mrand.N(2) == 0:
+		b.Status = batteryFull
+	case mrand.N(4) == 0:
+		b.Status = batteryCharging
+	default:
+		b.Status = batteryDischarging
+	}
+	b.Voltage = 3600 + b.Level*6 + mrand.N(60)
+	return b
 }
 
 // WiFi is the connected network, as Android's WifiInfo reports it to an app
@@ -387,7 +465,8 @@ type WiFi struct {
 }
 
 // withHostDefaults fills d's zero clocks and Wi-Fi IP with the host's real
-// values and a zero CollectTime with a random one. It leaves Install as given.
+// values, and a zero CollectTime and unset readings (brightness, battery,
+// storage drift) with random ones. It leaves Install as given.
 func (d Device) withHostDefaults() Device {
 	if d.Now.IsZero() {
 		d.Now = time.Now()
@@ -402,6 +481,16 @@ func (d Device) withHostDefaults() Device {
 	}
 	if d.CollectTime == 0 {
 		d.CollectTime = randDuration(150*time.Millisecond, 600*time.Millisecond).Truncate(time.Millisecond)
+	}
+	if d.brightness == 0 {
+		// The 0-255 slider range; the extremes are rare on a phone in use.
+		d.brightness = 20 + mrand.N(211)
+	}
+	if d.battery == (battery{}) {
+		d.battery = randomBattery()
+	}
+	if d.storageUsed == 0 {
+		d.storageUsed = 1 + mrand.N(int64(storageDrift))
 	}
 	return d
 }
@@ -426,8 +515,11 @@ func deviceData(deviceID string, d Device) (string, error) {
 	if d.AndroidID == "" || !androidIDRe.MatchString(d.AndroidID) {
 		return "", errors.New("shumei: no valid android id for a24 (set Device.AndroidID, 16 lowercase hex digits)")
 	}
+	if d.battery == (battery{}) || d.storageUsed == 0 {
+		return "", errors.New("shumei: no per-run readings for a69/a70/a72 (withHostDefaults sets them)")
+	}
 	in := d.Install
-	if in.MediaDrmID == "" || in.PUUID == "" || in.AppUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() {
+	if in.MediaDrmID == "" || in.PUUID == "" || in.AppUID == "" || in.FirstInstallTime.IsZero() || in.LastUpdateTime.IsZero() || in.BootCount == 0 {
 		return "", errors.New("shumei: install values are unset (Install.Fill sets them)")
 	}
 	if err := in.Validate(); err != nil {
@@ -443,7 +535,13 @@ func deviceData(deviceID string, d Device) (string, error) {
 		return "", fmt.Errorf("shumei: parse device-data template: %w", err)
 	}
 
-	m["a2"], m["a97"] = deviceID, deviceID
+	// a2 and a97 are the smid the SDK stored from its last registration
+	// (l111l1111llIl.java:789-790, 804-805; l111l11I1IIIl.java:29-35, 76-105):
+	// none on a first registration, so the serializer drops both. The SDK never
+	// sees the game's deviceId (SmSdkManager.callCreate passes none).
+	if smid := strings.TrimPrefix(in.BoxID, "B"); smid != "" {
+		m["a2"], m["a97"] = smid, smid
+	}
 	now, boot := d.Now.UnixMilli(), d.BootTime.UnixMilli()
 	m["a9"] = now
 	m["a40"] = boot
@@ -451,10 +549,11 @@ func deviceData(deviceID string, d Device) (string, error) {
 	// uptimeMillis() leaves out deep sleep. The host's sleep time isn't
 	// measured, so this equals elapsedRealtime().
 	m["a170"] = now - boot
-	start := d.Now.Add(-sdkStartLead).UnixMilli()
-	m["a80"] = fmt.Sprintf("%d-%s", start, javaRandomDigits(start, 5))
+	m["a80"] = sessionID(d.Now)
 	m["a133"] = d.CollectTime.Milliseconds()
 	m["a38"] = d.AppVersion
+	m["a90"] = TargetSDKVersion
+	m["a56"], m["a57"] = appCertSubject, appCertHash
 
 	// The device-specific half, from the catalog entry this deviceId selects.
 	// A pure function of deviceId, so one device stays the same phone and
@@ -463,20 +562,33 @@ func deviceData(deviceID string, d Device) (string, error) {
 	m["a10"] = hw.AndroidVersion
 	m["a36"] = hw.Screen
 	m["a45"] = hw.SimOperator
-	m["a143"], m["a33"] = hw.SoC, hw.SoC
+	// a131 and a132 are TelephonyManager's SIM and network country ISO codes
+	// (l111l1111llIl.java:300-313, l11l11Il1l.java:37-53).
+	m["a131"], m["a132"] = hw.SimCountryISO, hw.NetworkCountryISO
+	// a143 is /proc/cpuinfo's "Hardware" line and a33 its "Processor" or
+	// "model name" line (l111l111llIl.java:226-246). The catalog has no captured
+	// cpuinfo, so a33 is left out rather than made up.
+	m["a143"] = hw.SoC
 	m["a34"] = hw.MaxFreq
 	m["a32"] = hw.Cores
 	m["a48"] = hw.RAMBytes
-	m["a37"] = hw.StorageGB
-	m["a56"] = hw.CertSubject
-	m["a57"] = hw.CertHash
 	m["a46"] = hw.Build
+	// a29 is Build.getRadioVersion() (l111l1111llIl.java:327-328), the same
+	// call a46's radioVersion reads (l11l1111Il1l.java:12-19).
+	m["a29"] = hw.Build["radioVersion"]
 	m["a47"] = hw.Sensors
 	m["a18"] = hw.Props
 	m["a154"] = hw.Launcher
-	m["a131"], m["a132"] = hw.Locale, hw.Locale
 	// a92 is a36's "width,height" without the dpi component.
 	m["a92"] = screenPrefix(hw.Screen)
+	m["a69"], m["a70"], m["a71"] = storageBytes(deviceID, hw.StorageGB, d.storageUsed)
+
+	m["a37"] = d.brightness
+	m["a72"] = map[string]any{
+		"status": d.battery.Status, "level": d.battery.Level, "scale": d.battery.Scale,
+		"temp": d.battery.Temp, "vol": d.battery.Voltage,
+	}
+	m["a120"] = trafficSinceBoot(deviceID, d.BootTime, d.Now.Sub(d.BootTime))
 
 	m["a24"] = d.AndroidID
 	m["a84"] = in.MediaDrmID
@@ -489,6 +601,11 @@ func deviceData(deviceID string, d Device) (string, error) {
 		saved = in.BoxIDSavedAt.UnixMilli()
 	}
 	m["a167"], m["a168"] = saved, saved
+	// The counters as this start and collection leave them.
+	c := in.collected(d.BootTime)
+	m["a4"] = strconv.Itoa(c.Collections)
+	m["a130"] = c.AppStarts
+	m["a127"] = c.BootCount
 
 	if w := d.WiFi; w != nil {
 		m["a19"] = w.BSSID
@@ -510,6 +627,66 @@ func deviceData(deviceID string, d Device) (string, error) {
 		return "", fmt.Errorf("shumei: marshal device data: %w", err)
 	}
 	return strings.TrimSuffix(b.String(), "\n"), nil
+}
+
+// sessionID returns a80, the SDK session ID: the time SmAntiFraud.create ran
+// (sdkStartLead before the collection at now) in milliseconds, "-", then five
+// java.util.Random digits seeded with that time (l11l11Il11l.java:11-17). The
+// cloudconf request's sid is the same value.
+func sessionID(now time.Time) string {
+	start := now.Add(-sdkStartLead).UnixMilli()
+	return fmt.Sprintf("%d-%s", start, javaRandomDigits(start, 5))
+}
+
+// deviceHash returns a stable 64-bit hash of the deviceId and a salt, for the
+// per-device values that must not move between runs.
+func deviceHash(deviceID, salt string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(salt))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(deviceID))
+	return h.Sum64()
+}
+
+const (
+	// storageBlock is the filesystem block size StatFs counts in.
+	storageBlock = 4096
+	// storageReserved is what getFreeBytes counts and getAvailableBytes
+	// doesn't: the blocks /data keeps back for the system (128 MiB, f2fs's
+	// reserve_root=32768 on Android 12 phones).
+	storageReserved = 128 << 20
+	// storageDrift bounds Device.storageUsed, how much of the free space one
+	// run's reading differs by.
+	storageDrift = 512 << 20
+)
+
+// storageBytes returns a69, a70 and a71: getAvailableBytes, getFreeBytes and
+// getTotalBytes of one StatFs of the external storage (l111l1111llIl.java:
+// 411-414, l11l111lIll.java:120-126), so available <= free <= total always.
+// The total is the data partition: the flash size less about a tenth for the
+// system partitions. How full the phone is follows the deviceId (20 to 70 %
+// free), less the run's drift.
+func storageBytes(deviceID string, storageGB int, used int64) (avail, free, total int64) {
+	total = int64(storageGB) * 1e9 * 9 / 10 / storageBlock * storageBlock
+	freePct := int64(20 + deviceHash(deviceID, "storage")%51)
+	free = max(total*freePct/100-used, storageReserved) / storageBlock * storageBlock
+	return free - storageReserved, free, total
+}
+
+// trafficSinceBoot returns a120, TrafficStats' mobile and total bytes received
+// and sent since boot (l1l11l1Illl.java:42-48). Within one boot they only grow,
+// so each is the uptime times a rate that follows the device and the boot: 2 to
+// 20 KB/s received on average, a tenth to a quarter of that sent, and up to a
+// third of both over the mobile network.
+func trafficSinceBoot(deviceID string, boot time.Time, uptime time.Duration) map[string]any {
+	h := deviceHash(deviceID, "traffic"+strconv.FormatInt(boot.UnixMilli(), 10))
+	rxRate := int64(2000 + h%18001)
+	txPct := int64(10 + (h>>16)%16)
+	mobilePct := int64((h >> 32) % 34)
+	secs := int64(uptime / time.Second)
+	tr := rxRate * secs
+	tt := tr * txPct / 100
+	return map[string]any{"mr": tr * mobilePct / 100, "mt": tt * mobilePct / 100, "tr": tr, "tt": tt}
 }
 
 // isEmpty reports whether the SDK's serializer would skip v: null, an empty
@@ -561,12 +738,16 @@ func javaRandomDigits(seed int64, n int) string {
 
 // BoxID registers a device with the ShuMei backend and returns its assigned
 // device fingerprint, already prefixed with `"B"` to match the Login request's
-// `shumeiBoxId` field. deviceID should match the request's own deviceId so the
-// server can bind the fingerprint to the same device identity. dev carries
-// the install values, which must be filled (see Device.Install), the app
-// version the Login claims (Device.AppVersion), and the clock and Wi-Fi
+// `shumeiBoxId` field. deviceID is the Login's deviceId: it picks the phone
+// (HardwareFor) and must own dev.Install, but the SDK never sends it. dev
+// carries the install values, which must be filled (see Device.Install), the
+// app version the Login claims (Device.AppVersion), and the clock and Wi-Fi
 // fields; zero clocks and no Wi-Fi report the host's clocks and no Wi-Fi, like
 // a real Last War install.
+//
+// BoxID is Register's device-profile upload alone: it returns no install, so
+// a caller that keeps only Install.Registered's result reports the same
+// counters (a4, a127, a130) on every run. Register keeps them moving.
 //
 // Note on scope: the device-data fingerprint this mints is a spoofed Android
 // profile for a device that does not exist. The game server does not require a
@@ -580,6 +761,40 @@ func BoxID(client Client, deviceID string, dev Device) (string, error) {
 	return boxID(client, pub, deviceID, dev.withHostDefaults())
 }
 
+// Register does what one start of the SDK on dev's install does: it collects
+// the device data and uploads it to /deviceprofile/v4. It returns the box ID
+// ("B" + smid, "" when the upload failed), the install as that start leaves
+// it, and the upload's error. The install counts the start and the collection
+// (a4, a130, and a127 when the phone rebooted) even when the upload fails, as
+// the SDK counts before it uploads, and caches the box ID that came back
+// (Install.Registered). Saving it whenever it differs from dev.Install keeps
+// the counters moving from run to run. An install deviceData refuses comes
+// back unchanged, with nothing sent.
+func Register(client Client, deviceID string, dev Device) (string, Install, error) {
+	pub, err := publicKey()
+	if err != nil {
+		return "", dev.Install, err
+	}
+	return register(client, pub, deviceID, dev.withHostDefaults(), time.Now)
+}
+
+// register is Register with the RSA key and the clock as parameters, so a test
+// can decrypt the upload and pin the box ID's save time. dev must already carry
+// its host defaults.
+func register(client Client, pub *rsa.PublicKey, deviceID string, dev Device, now func() time.Time) (string, Install, error) {
+	inner, err := deviceData(deviceID, dev)
+	if err != nil {
+		return "", dev.Install, err
+	}
+	in := dev.Install.collected(dev.BootTime)
+	id, err := upload(client, pub, inner)
+	if err != nil {
+		return "", in, err
+	}
+	in, _ = in.Registered(id, now())
+	return id, in, nil
+}
+
 // boxID is BoxID with the RSA key as a parameter, the same way protect takes
 // it, so a test can use its own key pair and decrypt the POSTed body. dev must
 // already carry its host defaults.
@@ -588,6 +803,12 @@ func boxID(client Client, pub *rsa.PublicKey, deviceID string, dev Device) (stri
 	if err != nil {
 		return "", err
 	}
+	return upload(client, pub, inner)
+}
+
+// upload protects the device-data JSON inner and POSTs it to /deviceprofile/v4,
+// returning "B" + the smid the reply assigns.
+func upload(client Client, pub *rsa.PublicKey, inner string) (string, error) {
 	data, ep, tn, err := protect(pub, inner)
 	if err != nil {
 		return "", err

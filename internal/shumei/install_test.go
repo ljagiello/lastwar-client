@@ -36,6 +36,11 @@ func TestNewInstall(t *testing.T) {
 	if in.BoxID != "" || !in.BoxIDSavedAt.IsZero() {
 		t.Errorf("BoxID = %q, BoxIDSavedAt = %v, want neither on a fresh install", in.BoxID, in.BoxIDSavedAt)
 	}
+	// A phone in use has booted before; the SDK has counted nothing yet.
+	if in.BootCount < 10 || in.BootCount > 99 || in.Collections != 0 || in.AppStarts != 0 || !in.LastBoot.IsZero() {
+		t.Errorf("counters = boot %d, collections %d, app starts %d, last boot %v; want a boot count of 10-99 and nothing else",
+			in.BootCount, in.Collections, in.AppStarts, in.LastBoot)
+	}
 
 	other := NewInstall(now)
 	if other.MediaDrmID == in.MediaDrmID || other.PUUID == in.PUUID {
@@ -53,8 +58,20 @@ func TestInstallFill(t *testing.T) {
 	}
 
 	got, filled := Install{}.Fill(now)
-	if !filled || got.MediaDrmID == "" || got.PUUID == "" || got.AppUID == "" || got.FirstInstallTime.IsZero() || got.LastUpdateTime.IsZero() {
+	if !filled || got.MediaDrmID == "" || got.PUUID == "" || got.AppUID == "" || got.FirstInstallTime.IsZero() || got.LastUpdateTime.IsZero() || got.BootCount == 0 {
 		t.Errorf("Fill on an empty install = %+v, %v; want every value set, true", got, filled)
+	}
+
+	// An install saved before the boot count existed gets one, once.
+	old := testInstall
+	old.BootCount = 0
+	if got, filled := old.Fill(now); !filled || got.BootCount == 0 || got.PUUID != testInstall.PUUID {
+		t.Errorf("Fill without a boot count = %+v, %v; want only the boot count set, true", got, filled)
+	}
+	// The SDK counters start at zero, so Fill leaves them alone.
+	counted := testInstall.collected(now)
+	if got, filled := counted.Fill(now); filled || got != counted {
+		t.Errorf("Fill on a counted install = %+v, %v; want it unchanged, false", got, filled)
 	}
 
 	// A pinned update time earlier than any fresh install time pulls the
@@ -136,6 +153,9 @@ func TestInstallValidate(t *testing.T) {
 		"boxId without B":        func(in *Install) { in.BoxID, in.BoxIDSavedAt = "smid", time.UnixMilli(1) },
 		"boxId without saved at": func(in *Install) { in.BoxID = "Bsmid" },
 		"saved at without boxId": func(in *Install) { in.BoxIDSavedAt = time.UnixMilli(1) },
+		"negative collections":   func(in *Install) { in.Collections = -1 },
+		"negative app starts":    func(in *Install) { in.AppStarts = -1 },
+		"negative boot count":    func(in *Install) { in.BootCount = -1 },
 	} {
 		in := testInstall
 		mutate(&in)
@@ -168,7 +188,25 @@ func TestInstallJSON(t *testing.T) {
 		t.Fatalf("json.Unmarshal = %v", err)
 	}
 	if got.MediaDrmID != testInstall.MediaDrmID || !got.FirstInstallTime.Equal(testInstall.FirstInstallTime) ||
-		!got.LastUpdateTime.Equal(testInstall.LastUpdateTime) {
+		!got.LastUpdateTime.Equal(testInstall.LastUpdateTime) || got.BootCount != testInstall.BootCount {
 		t.Errorf("round trip = %+v, want %+v", got, testInstall)
+	}
+	if strings.Contains(string(b), "collections") || strings.Contains(string(b), "lastBoot") {
+		t.Errorf("JSON = %s, want no SDK counters before the first collection", b)
+	}
+
+	// The counters a registration leaves survive the config, so the next run
+	// counts on from them.
+	counted := testInstall.collected(time.UnixMilli(1790000000000))
+	b, err = json.Marshal(counted)
+	if err != nil {
+		t.Fatalf("json.Marshal = %v", err)
+	}
+	var back Install
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("json.Unmarshal = %v", err)
+	}
+	if back.Collections != 1 || back.AppStarts != 1 || back.BootCount != counted.BootCount || !back.LastBoot.Equal(counted.LastBoot) {
+		t.Errorf("counted round trip = %+v, want %+v", back, counted)
 	}
 }
