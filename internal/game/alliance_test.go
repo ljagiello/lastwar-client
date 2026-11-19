@@ -630,8 +630,9 @@ func TestDonateRecommendedAllianceTechNullScienceIdSkipped(t *testing.T) {
 }
 
 // TestDonateRecommendedAllianceTechDonates checks the real donation path: given a state==1 entry
-// with a well-formed scienceId, DonateRecommendedAllianceTech must send al.science.donate with
-// that exact scienceId and option=1, then return nil once it gets a real success response.
+// with a well-formed scienceId, DonateRecommendedAllianceTech must read the charges
+// (al.science.refreshNum, MASTER B32) and, with charges left, send al.science.donate with that
+// exact scienceId and option=1, then return nil once it gets a real success response.
 func TestDonateRecommendedAllianceTechDonates(t *testing.T) {
 	client, server := session.NewPipeGameConnPair(t)
 
@@ -644,6 +645,7 @@ func TestDonateRecommendedAllianceTechDonates(t *testing.T) {
 			allianceScienceEntry(111, 0),
 			allianceScienceEntry(555, 1), // the recommended one
 		))
+		session.ReadAndReply(server, "", obj("scienceId", 555, "useNum", 3, "maxNum", 30))
 
 		env, err := server.ReadEnvelope()
 		if err != nil {
@@ -701,6 +703,7 @@ func TestDonateRecommendedAllianceTechBenignCooldown(t *testing.T) {
 		session.ReadAndReply(server, "", allianceScienceRefreshResponse(
 			allianceScienceEntry(555, 1), // the recommended one
 		))
+		session.ReadAndReply(server, "", obj("scienceId", 555, "useNum", 1, "maxNum", 30))
 
 		env, err := server.ReadEnvelope()
 		if err != nil {

@@ -2,6 +2,7 @@ package game
 
 import (
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -196,6 +197,104 @@ func TestAllianceSalaryOpensAtSalaryTime(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			claimed, _, err := salaryRun(t, c.in, salaryInfo(-1, nil), ok)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if !slices.Equal(claimed, c.want) {
+				t.Errorf("claimed %v, want %v", claimed, c.want)
+			}
+		})
+	}
+}
+
+// salaryActivity is an init activity entry for id with a window around now.
+func salaryActivity(id int32, start, end time.Duration) *sfs.SFSObject {
+	a := sfs.NewSFSObject()
+	a.PutInt("id", id)
+	a.PutLong("startTime", time.Now().Add(start).UnixMilli())
+	a.PutLong("endTime", time.Now().Add(end).UnixMilli())
+	return a
+}
+
+// TestAllianceSalaryActivityGate pins MASTER B37's IsFunctionOpen gate
+// (AllianceMilitaryPayDataManager.lua:171-177): nothing is sent when init lists the type-372
+// activity (row 28) closed, or lists only known activities of other types; an id the generated
+// table lacks, or no activity field, leaves the old behaviour.
+func TestAllianceSalaryActivityGate(t *testing.T) {
+	ok := func(int32) *sfs.SFSObject { return rewardOK() }
+	withActs := func(acts ...*sfs.SFSObject) *Init {
+		return allianceInit(func(raw *sfs.SFSObject) {
+			raw.PutInt("salaryActivityState", 10)
+			raw.PutInt("dailySalaryStatus", 1)
+			m := sfs.NewSFSObject()
+			for _, a := range acts {
+				m.PutSFSObject(strconv.Itoa(int(a.GetInt("id"))), a)
+			}
+			raw.PutSFSObject("activity", m)
+		})
+	}
+	open := salaryActivity(28, -time.Hour, 24*time.Hour)
+	ended := salaryActivity(28, -48*time.Hour, -time.Hour)
+	other := salaryActivity(99108, -time.Hour, 24*time.Hour) // Thanksgiving, type 321
+	unknown := salaryActivity(424242, -time.Hour, 24*time.Hour)
+	cases := []struct {
+		name string
+		in   *Init
+		want []int32
+	}{
+		{"salary activity open", withActs(other, open), []int32{101}},
+		{"salary activity ended", withActs(other, ended), nil},
+		{"only other known activities", withActs(other), nil},
+		{"an empty activity list", withActs(), nil},
+		{"an unknown id leaves it undecided", withActs(other, unknown), []int32{101}},
+		{"no activity field", salaryInit(10, 1), []int32{101}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			claimed, fake, err := salaryRun(t, c.in, salaryInfo(-1, nil), ok)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if !slices.Equal(claimed, c.want) {
+				t.Errorf("claimed %v, want %v", claimed, c.want)
+			}
+			if c.want == nil && len(fake.cmds()) != 0 {
+				t.Errorf("sent %v, want nothing", fake.cmds())
+			}
+		})
+	}
+	if typ, known := activityTypeOf(28); !known || typ != allianceSalaryActivityType {
+		t.Errorf("table activity row 28 = type %d (%v), want 372", typ, known)
+	}
+}
+
+// TestAllianceSalaryOfficerBox pins MASTER B37's R4/R5 box: 301 is skipped only when init
+// alliance shows a rank below 4 (LWAllianceMilitaryPayMainView.lua:184-188).
+func TestAllianceSalaryOfficerBox(t *testing.T) {
+	ok := func(int32) *sfs.SFSObject { return rewardOK() }
+	withRank := func(fill func(al *sfs.SFSObject)) *Init {
+		in := salaryInit(10, 0)
+		u := sfs.NewSFSObject()
+		u.PutUtfString("uid", "uid-self-0001")
+		in.Raw.PutSFSObject("user", u)
+		fill(in.Object("alliance"))
+		return in
+	}
+	cases := []struct {
+		name string
+		in   *Init
+		want []int32
+	}{
+		{"R3", withRank(func(al *sfs.SFSObject) { al.PutInt("rank", 3) }), []int32{202}},
+		{"R4", withRank(func(al *sfs.SFSObject) { al.PutInt("rank", 4) }), []int32{202, 301}},
+		{"R5 as a string", withRank(func(al *sfs.SFSObject) { al.PutUtfString("rank", "5") }), []int32{202, 301}},
+		{"leader without rank", withRank(func(al *sfs.SFSObject) { al.PutUtfString("learderUid", "uid-self-0001") }), []int32{202, 301}},
+		{"another leader, no rank", withRank(func(al *sfs.SFSObject) { al.PutUtfString("learderUid", "uid-other") }), []int32{202, 301}},
+		{"rank unknown", withRank(func(*sfs.SFSObject) {}), []int32{202, 301}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			claimed, _, err := salaryRun(t, c.in, salaryInfo(-1, map[int32]int32{202: 1, 301: 1}), ok)
 			if err != nil {
 				t.Fatalf("run: %v", err)
 			}

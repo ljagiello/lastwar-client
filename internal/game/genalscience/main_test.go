@@ -6,12 +6,13 @@ import (
 )
 
 // tabFixture and detailFixture are minimal dumps with the known rows plus one more each, in the
-// 39879 column positions (tab: id 1, max_lv 7 of 12; detail: id 1, science_id 2, science_lv 3,
-// value 7 of 17). Cells the generator doesn't read are null.
+// 39879/40413 column positions (tab: id 1, max_lv 7, tab 11 of 12; detail: id 1, science_id 2,
+// science_lv 3, value 7 of 17). Cells the generator doesn't read are null.
 var (
-	tabFixture = `{"name":"lw_alliance_science_tab","index":{"id":[1,"number"],"name":[2,"string"],"max_lv":[7,"number"]},"rows":[` +
+	tabFixture = `{"name":"lw_alliance_science_tab","index":{"id":[1,"number"],"name":[2,"string"],"max_lv":[7,"number"],"tab":[11,"number"]},"rows":[` +
 		`[10011200,[10011200,"454001",null,null,null,null,10,null,null,null,1,null]],` +
 		`[10011100,[10011100,"454009",null,null,null,null,1,null,null,null,1,null]],` +
+		`[10031100,[10031100,"alliance_science_name001",null,null,null,null,1,null,null,null,3,"10"]],` +
 		`[10011300,[10011300,"454015",null,null,null,null,10,null,null,null,1,null]]]}`
 	detailFixture = `{"name":"lw_alliance_science_detail","index":{"id":[1,"number"],"science_id":[2,"number"],"science_lv":[3,"number"],"max_lv":[4,"number"],"value":[7,"number"]},"rows":[` +
 		`[10011100,[10011100,10011100,0,1,0,[],10000,7200,2,100,2,2,50,50,50,90015,"0"]],` +
@@ -21,7 +22,7 @@ var (
 )
 
 func TestParseAndRender(t *testing.T) {
-	lv, err := parseTab([]byte(tabFixture))
+	lv, tabs, err := parseTab([]byte(tabFixture))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,19 +30,25 @@ func TestParseAndRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lv) != 3 || lv[0] != (entry{10011100, 1}) || len(pro) != 4 || pro[3] != (entry{10011210, 0}) {
+	if len(lv) != 4 || lv[0] != (entry{10011100, 1}) || len(pro) != 4 || pro[3] != (entry{10011210, 0}) {
 		t.Fatalf("max levels %v, targets %v", lv, pro)
 	}
-	code, err := render(lv, pro, "39879")
+	if len(tabs) != 4 || tabs[0] != (entry{10011100, 1}) || tabs[3] != (entry{10031100, 3}) {
+		t.Fatalf("tabs %v", tabs)
+	}
+	code, err := render(lv, tabs, pro, "40413")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"table version 39879",
-		`const allianceScienceTableVersion = "39879"`,
-		"all 3 rows of table lw_alliance_science_tab",
+		"table version 40413",
+		`const allianceScienceTableVersion = "40413"`,
+		"all 4 rows of table lw_alliance_science_tab as tech id -> max_lv",
 		"10011100: 1,",
 		"10011200: 10,",
+		"all 4 rows of table lw_alliance_science_tab as tech id -> tab",
+		"var allianceScienceTab = map[int32]int32{",
+		"10031100: 3,",
 		"all 4 rows of table lw_alliance_science_detail",
 		"10011101: 80000,",
 		"10011210: 0,",
@@ -57,6 +64,10 @@ func TestParseRejectsWrongTables(t *testing.T) {
 		"another table":           strings.Replace(tabFixture, `"name":"lw_alliance_science_tab"`, `"name":"lw_camp_science_tab"`, 1),
 		"max_lv one cell off":     strings.Replace(tabFixture, `"max_lv":[7,`, `"max_lv":[6,`, 1),
 		"a known max_lv changed":  strings.Replace(tabFixture, `"454009",null,null,null,null,1,`, `"454009",null,null,null,null,2,`, 1),
+		"tab one cell off":        strings.Replace(tabFixture, `"tab":[11,`, `"tab":[12,`, 1),
+		"no tab column":           strings.Replace(tabFixture, `,"tab":[11,"number"]`, ``, 1),
+		"a known tab changed":     strings.Replace(tabFixture, `null,null,null,3,"10"`, `null,null,null,2,"10"`, 1),
+		"a tab of 0":              strings.Replace(tabFixture, `"454015",null,null,null,null,10,null,null,null,1,`, `"454015",null,null,null,null,10,null,null,null,0,`, 1),
 		"a key that isn't the id": strings.Replace(tabFixture, `[10011300,[10011300,`, `[10011301,[10011300,`, 1),
 		"a duplicate id":          strings.Replace(tabFixture, `[10011300,[10011300,`, `[10011200,[10011200,`, 1),
 		"no rows":                 `{"name":"lw_alliance_science_tab","index":{"id":[1,"number"],"max_lv":[7,"number"]},"rows":[]}`,
@@ -66,7 +77,7 @@ func TestParseRejectsWrongTables(t *testing.T) {
 			t.Errorf("tab %s: the case didn't change the fixture", name)
 			continue
 		}
-		if _, err := parseTab([]byte(src)); err == nil {
+		if _, _, err := parseTab([]byte(src)); err == nil {
 			t.Errorf("tab %s must be rejected", name)
 		}
 	}

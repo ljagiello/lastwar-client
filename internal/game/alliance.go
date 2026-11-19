@@ -1,12 +1,14 @@
 package game
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
+	"sync"
 )
 
 // HelpAllianceMembers sends `al.help.all` ("help all") -- confirmed live
@@ -285,6 +287,12 @@ func ClaimAllianceGifts(conn *session.GameConn) error {
 // donated, consistent with its charges being spent. 120471 is registered in
 // conn.go's benignErrorCodes, so it is a benign no-op here.
 //
+// Since the 1.0.370 audit (MASTER B32) the charges are read before the first donation, as the
+// client does: every science.data.refresh reply makes it send `al.science.refreshNum` at once
+// (AllianceScienceDataManager.lua:118-134), and the donate button refuses with tip 120471 and no
+// send while useNum <= 0 (AlScienceDonateInfo.lua:432-436, GetCanDonate :316-321). See
+// allianceScienceRun.
+//
 // This sends one donation per run, the default: each donation spends the
 // player's resources. The opt-in feature alliance-donate-all
 // (feature_alliance_donate_all.go) spends every remaining charge instead.
@@ -304,15 +312,36 @@ func DonateRecommendedAllianceTech(conn *session.GameConn) error {
 	return donateRecommendedAllianceTech(conn, nil)
 }
 
-// allianceScienceRefreshCmd, allianceDonateCmd and the two per-tech pushes (MsgDefines.lua:405-415).
+// allianceScienceRefreshCmd, allianceScienceNumCmd, allianceDonateCmd and the two per-tech pushes
+// (MsgDefines.lua:405-415).
 const (
 	allianceScienceRefreshCmd    = "science.data.refresh"
+	allianceScienceNumCmd        = "al.science.refreshNum"
 	allianceDonateCmd            = "al.science.donate"
 	allianceSciencePushCmd       = "push.al.science"
 	allianceSciencePushUpdateCmd = "push.al.science.update"
 	allianceChargesUsedUpCode    = "120471"
 	allianceScienceEntrance      = "alliancescience_entrance"
+	// allianceDonateUnavailableCode is the live answer to al.science.donate in the run right after
+	// the 02:00 UTC day reset. It is in no 1.0.370 source (Lua 835, tables 40413, C#): the client
+	// would only show its generic tip (AlScienceDonateMessage.lua:15-17). Its meaning is a live
+	// observation, not a client fact; nothing is lost, the next run donates.
+	allianceDonateUnavailableCode = "120836"
+	// allianceScienceSeasonTab is the season tab of lw_alliance_science_tab, refused out of season.
+	allianceScienceSeasonTab = 3
 )
+
+// allianceDonateStops are the donate answers that end this run's donations without an error.
+var allianceDonateStops = map[string]string{
+	allianceChargesUsedUpCode:     "donation charges used up",
+	allianceDonateUnavailableCode: "donation unavailable right after the day reset (live observation; no client text)",
+}
+
+func init() {
+	// MASTER B33: 120471 is registered in conn.go; 120836 is registered here, scoped to the
+	// donation, so a SendAndWait of it is logged at Warn and not counted as a run failure.
+	session.RegisterBenignErrorCode(allianceDonateUnavailableCode, allianceDonateCmd)
+}
 
 //go:generate go run ./genalscience -tab ${LASTWAR_TABLES}/lw_alliance_science_tab.json -detail ${LASTWAR_TABLES}/lw_alliance_science_detail.json -version ${LASTWAR_TABLE_VERSION} -out alliance_science_gen.go
 
@@ -323,25 +352,201 @@ const (
 // AllianceScience unlock it also checks is always true, :513-514). The switch is not in the local
 // item table, so it comes from init alone; an init without it is not gated, since which switches
 // the live init carries is unknown. The donation is also skipped when init resource shows too few
-// of the tech's lowRes for its lowNum (UIAllianceScienceInfoCtrl.lua:138-145, tip 120020).
+// of the tech's lowRes for its lowNum (UIAllianceScienceInfoCtrl.lua:138-145, tip 120020), and
+// when the charge read shows none left. It sends at most one donation; the tree, the charges and
+// what the donation changed stay in this run's allianceScienceRun for alliance-donate-all.
 func donateRecommendedAllianceTech(conn *session.GameConn, in *Init) error {
 	if !allianceScienceAllowed(in) {
 		return nil
 	}
-	tech, found, err := fetchRecommendedTech(conn)
-	if err != nil || !found {
+	run, err := allianceScienceFor(conn, in)
+	if err != nil {
 		return err
 	}
-	if why := tech.blocked(claimNow(in).UnixMilli(), newAllianceLedger(in)); why != "" {
-		slog.Info("not donating to the recommended alliance tech", append([]any{"reason", why}, tech.logAttrs()...)...)
+	return run.donate(conn, "alliance tech donation", 1)
+}
+
+// allianceScienceRun is one run's alliance tech donation state, shared by collectCore's single
+// donation and alliance-donate-all (MASTER B32), so a -collect run with both sends
+// science.data.refresh and al.science.refreshNum once and reads the charges before the first
+// donation: before the 1.0.370 audit the core donated blind and the feature then fetched the tree
+// and the charges again. It holds the recommended tech (nil when the tree has none), the
+// resource ledger, the charges left and why donations stopped this run. One run is cached, keyed by
+// (conn, in) like the activity sweep: a new login or init starts over.
+type allianceScienceRun struct {
+	conn         *session.GameConn
+	in           *Init
+	tech         *allianceTech
+	ledger       allianceLedger
+	outOfSeason  bool
+	chargesRead  bool
+	chargesKnown bool
+	charges      int32
+	donated      int
+	stop         string
+}
+
+var (
+	allianceScienceMu    sync.Mutex
+	allianceScienceCache *allianceScienceRun
+)
+
+// cachedAllianceScience returns this run's donation state, or nil before the first tree fetch.
+func cachedAllianceScience(conn *session.GameConn, in *Init) *allianceScienceRun {
+	allianceScienceMu.Lock()
+	defer allianceScienceMu.Unlock()
+	if r := allianceScienceCache; r != nil && r.conn == conn && r.in == in {
+		return r
+	}
+	return nil
+}
+
+// allianceScienceFor returns this run's donation state, fetching the tree on first use. A failed
+// fetch is not cached, so the next caller tries again.
+func allianceScienceFor(conn *session.GameConn, in *Init) (*allianceScienceRun, error) {
+	if r := cachedAllianceScience(conn, in); r != nil {
+		return r, nil
+	}
+	tech, found, err := fetchRecommendedTech(conn)
+	if err != nil {
+		return nil, err
+	}
+	r := &allianceScienceRun{conn: conn, in: in, ledger: newAllianceLedger(in), outOfSeason: allianceScienceOutOfSeason(in)}
+	if found {
+		r.tech = tech
+	} else {
+		r.stop = "no recommended tech"
+	}
+	allianceScienceMu.Lock()
+	allianceScienceCache = r
+	allianceScienceMu.Unlock()
+	return r, nil
+}
+
+// allianceScienceOutOfSeason is the client's `not SeasonUtil.IsInSeason()` for the tab-3 gate
+// (AlScienceDonateInfo.lua:426-430): true with init when allianceTasksInSeason, the
+// ServerInReady() and InNormalMode() part of IsInSeason (SeasonUtil.lua:73-90,
+// SeasonInfoTemplate.lua:281-297) on init playerServerSeasonInfo, says no season is running.
+// IsInSeason's battle-server-group test (IsInBattleServerGroupInt, which needs table lw_season) is
+// not modelled, so Go can call a season running where the client would not; that only lets a
+// tab-3 donation through, as before this gate existed. Without init (the blind form) nothing is
+// known and nothing is gated.
+func allianceScienceOutOfSeason(in *Init) bool {
+	return in != nil && in.Raw != nil && !allianceTasksInSeason(in)
+}
+
+// readCharges sends `al.science.refreshNum {scienceId: Int}` once per run for the recommended
+// tech, as the tech window does (UIAllianceScienceInfoView.lua:16-17; the manager sends it for the
+// first tree entry, AllianceScienceDataManager.lua:130-133, and the client keeps one useNum for the
+// player, :7, 258-264, so either id reads the same pool; the recommended id is the one
+// alliance-donate-all has sent live). The reply is applied to the tech (AlScienceNumFreshMessage.lua:
+// 10-19 runs UpdateOneAllianceScience on it). Its charge fields are logged, with donateAvailable
+// and maxdonate.count, which the client never reads: logged to see the server's state around the
+// day reset, never a gate.
+func (r *allianceScienceRun) readCharges(conn *session.GameConn) error {
+	if r.chargesRead {
 		return nil
 	}
-	slog.Info("donating to recommended alliance tech", "scienceId", tech.id)
+	r.chargesRead = true
 	params := sfs.NewSFSObject()
-	params.PutInt("scienceId", tech.id)
-	params.PutInt("option", 1)
-	_, err = session.SendAndWait(conn, fmt.Sprintf("alliance tech donate response (scienceId %d)", tech.id), allianceDonateCmd, params)
-	return err
+	params.PutInt("scienceId", r.tech.id)
+	msg, err := session.SendAndWait(conn, "alliance tech donation charges", allianceScienceNumCmd, params)
+	if err != nil {
+		return err
+	}
+	r.charges, r.chargesKnown = donationCharges(msg.Params)
+	r.tech.apply(msg.Params)
+	slog.Info("alliance tech donation charges", append([]any{"scienceId", r.tech.id, "useNumKnown", r.chargesKnown},
+		allianceChargeAttrs(msg.Params)...)...)
+	return nil
+}
+
+// allianceChargeAttrs are the charge fields of a refreshNum or donate reply, for the log.
+func allianceChargeAttrs(o *sfs.SFSObject) []any {
+	useNum, _ := claimInt(o, "useNum")
+	maxNum, _ := claimInt(o, "maxNum")
+	timePoint, _ := claimInt(o, "timePoint")
+	block, _ := claimInt(o, "refreshTimeBlock")
+	maxDonate, _ := claimInt(objectField(o, "maxdonate"), "count")
+	available, availableKnown := claimBool(o, "donateAvailable")
+	return []any{"useNum", useNum, "maxNum", maxNum, "timePoint", timePoint, "refreshTimeBlock", block,
+		"donateAvailable", available, "donateAvailableKnown", availableKnown, "maxdonateCount", maxDonate}
+}
+
+// donate sends up to limit donations to the recommended tech, each only while the client would:
+// the tech is not blocked (allianceTech.blocked, checked again before every donation since a
+// reply or push can fill it) and the charge read, then each donate reply, shows useNum > 0. It
+// stops at the first errorCode: one of allianceDonateStops ends this run's donations without an
+// error, anything else (for example too few resources) is returned. A reply without useNum stops
+// the next donation. who prefixes the log lines.
+func (r *allianceScienceRun) donate(conn *session.GameConn, who string, limit int) error {
+	if r.stop != "" {
+		slog.Info(who+": no donation", append([]any{"reason", r.stop, "donatedThisRun", r.donated}, r.techAttrs()...)...)
+		return nil
+	}
+	for sent := 0; sent < limit; sent++ {
+		if why := r.tech.blocked(claimNow(r.in).UnixMilli(), r.ledger, r.outOfSeason); why != "" {
+			r.stop = why
+			slog.Info(who+": not donating to the recommended tech", append([]any{"reason", why, "donatedThisRun", r.donated}, r.tech.logAttrs()...)...)
+			return nil
+		}
+		if err := r.readCharges(conn); err != nil {
+			r.stop = "charge read failed"
+			return err
+		}
+		switch {
+		case !r.chargesKnown:
+			r.stop = "no useNum"
+			slog.Warn(who+": no useNum in the charge read or the last donate reply; not donating", "scienceId", r.tech.id, "donatedThisRun", r.donated)
+			return nil
+		case r.charges <= 0:
+			r.stop = "no charges left"
+			slog.Info(who+": no donation charges left", "scienceId", r.tech.id, "useNum", r.charges, "donatedThisRun", r.donated)
+			return nil
+		}
+		costRes, cost, costKnown := r.tech.lowRes, r.tech.lowNum, r.tech.hasLowRes && r.tech.hasLowNum
+		slog.Info(who+": donating to the recommended tech", "scienceId", r.tech.id, "useNum", r.charges)
+		msg, err := sendAllianceDonation(conn, r.tech)
+		if err != nil {
+			r.stop = "donation failed"
+			slog.Warn(who+": donation failed; stopping", "scienceId", r.tech.id, "donatedThisRun", r.donated)
+			return err
+		}
+		if msg.Params.Has("errorCode") {
+			code := idString(msg.Params, "errorCode")
+			if meaning := allianceDonateStops[code]; meaning != "" {
+				r.stop = meaning
+				level := slog.LevelInfo
+				if code == allianceDonateUnavailableCode {
+					level = slog.LevelWarn
+				}
+				slog.Log(context.Background(), level, who+": donation refused; no more donations this run",
+					append([]any{"scienceId", r.tech.id, "donatedThisRun", r.donated, "errorCode", code, "meaning", meaning},
+						allianceChargeAttrs(msg.Params)...)...)
+				return nil
+			}
+			r.stop = "errorCode " + code
+			slog.Error(who+": donation failed; stopping", "scienceId", r.tech.id, "donatedThisRun", r.donated, "errorCode", code)
+			return fmt.Errorf("alliance tech donate response (scienceId %d): errorCode=%s", r.tech.id, code)
+		}
+		r.donated++
+		r.tech.apply(msg.Params)
+		if res := objectField(msg.Params, "resource"); res != nil {
+			r.ledger.set(res)
+		} else if have, ok := r.ledger.balance(costRes); ok && costKnown {
+			r.ledger[costRes] = have - cost
+		}
+		r.charges, r.chargesKnown = donationCharges(msg.Params)
+	}
+	return nil
+}
+
+// techAttrs is the tech's log attributes, or none without a recommended tech.
+func (r *allianceScienceRun) techAttrs() []any {
+	if r.tech == nil {
+		return nil
+	}
+	return r.tech.logAttrs()
 }
 
 // allianceScienceAllowed applies the init gates on science.data.refresh (see
@@ -442,6 +647,9 @@ func (t *allianceTech) target() (int64, bool) {
 }
 
 // blocked returns why the client offers no donation for t at nowMs, or "" when it does:
+//   - a season tech out of season: tab 3 of lw_alliance_science_tab while outOfSeason
+//     (AlScienceDonateInfo.lua:426-430, tip season_tips147; the window carries the tab it was
+//     opened from, UIAllianceScienceCtrl.lua:43-44, and a tab-3 tech is listed on tab 3);
 //   - max level: level >= max_lv (AlScienceDonateInfo.lua:266, 352-359; FindCanRecommendScienceByTab,
 //     AllianceScienceDataManager.lua:197);
 //   - full: currentPro >= the target (the donate buttons show only while pro < 1,
@@ -450,10 +658,14 @@ func (t *allianceTech) target() (int64, bool) {
 //   - too few resources: lowNum above the ledger's lowRes balance (UIAllianceScienceInfoCtrl.lua:138-145).
 //
 // Each gate needs its fields: a missing one never blocks, or one donate reply without them would
-// stop alliance-donate-all after a single donation. The lock and tab-3 season checks need
-// science_condition and AlScienceTab, which Go does not have; the client never recommends a locked
-// tech (FindCanRecommendScienceByTab skips it).
-func (t *allianceTech) blocked(nowMs int64, ledger allianceLedger) string {
+// stop alliance-donate-all after a single donation. The lock check needs science_condition, which
+// Go does not have; the client never recommends a locked tech (FindCanRecommendScienceByTab skips
+// it). The season camp-science window (UICampScienceInfoCtrl.lua:150) is another sender without
+// the tab-3 gate; Go does not model it.
+func (t *allianceTech) blocked(nowMs int64, ledger allianceLedger, outOfSeason bool) string {
+	if outOfSeason && allianceScienceTab[t.id] == allianceScienceSeasonTab {
+		return "season tech (tab 3) out of season"
+	}
 	if maxLv, ok := allianceScienceMaxLevel[t.id]; ok && t.hasLevel && t.level >= int64(maxLv) {
 		return "max level"
 	}
@@ -475,7 +687,7 @@ func (t *allianceTech) logAttrs() []any {
 	need, needKnown := t.target()
 	_, inTable := allianceScienceMaxLevel[t.id]
 	return []any{"scienceId", t.id, "currentPro", t.currentPro, "target", need, "targetKnown", needKnown,
-		"level", t.level, "levelKnown", t.hasLevel, "maxLevel", allianceScienceMaxLevel[t.id], "inTable", inTable,
+		"level", t.level, "levelKnown", t.hasLevel, "maxLevel", allianceScienceMaxLevel[t.id], "tab", allianceScienceTab[t.id], "inTable", inTable,
 		"tableVersion", allianceScienceTableVersion, "finishTime", t.finishTime, "lowRes", t.lowRes, "lowNum", t.lowNum}
 }
 
