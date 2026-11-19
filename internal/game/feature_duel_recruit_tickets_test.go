@@ -281,11 +281,11 @@ func TestDuelRecruitTenPullBoundary(t *testing.T) {
 		held int
 		want []string
 	}{
-		{9, []string{"p:0", "p:0", "p:0", "p:0", "p:0", "p:0", "p:0", "p:0", "p:0"}},
-		{10, []string{"p:1"}},
-		{1, []string{"p:0"}},
+		{9, []string{"221700:0", "221700:0", "221700:0", "221700:0", "221700:0", "221700:0", "221700:0", "221700:0", "221700:0"}},
+		{10, []string{"221700:1"}},
+		{1, []string{"221700:0"}},
 	} {
-		in := duelRecruitInit(1000, map[string]int{"230006": c.held}, duelPool("p", 2, "230006;1|230006;10"))
+		in := duelRecruitInit(1000, map[string]int{"230006": c.held}, duelPool("221700", 2, "230006;1|230006;10"))
 		conn, f := startDuelSpendFake(t, duelTestDay(DuelThemeHeroes, duelTestHeroes), duelRecruitServer(1000, 0))
 		if err := runDuelRecruitTickets(conn, in); err != nil {
 			t.Fatalf("held %d: %v", c.held, err)
@@ -295,12 +295,12 @@ func TestDuelRecruitTenPullBoundary(t *testing.T) {
 		}
 	}
 	// A pool whose ten pull costs another item never gets isTen 1.
-	in := duelRecruitInit(1000, map[string]int{"230006": 12}, duelPool("p", 2, "230006;1|999999;10"))
+	in := duelRecruitInit(1000, map[string]int{"230006": 12}, duelPool("221700", 2, "230006;1|999999;10"))
 	conn, f := startDuelSpendFake(t, duelTestDay(DuelThemeHeroes, duelTestHeroes), duelRecruitServer(1000, 0))
 	if err := runDuelRecruitTickets(conn, in); err != nil {
 		t.Fatal(err)
 	}
-	if got := pullsOf(t, f); len(got) != 12 || slices.Contains(got, "p:1") {
+	if got := pullsOf(t, f); len(got) != 12 || slices.Contains(got, "221700:1") {
 		t.Errorf("pulls %v, want 12 singles", got)
 	}
 }
@@ -350,7 +350,7 @@ func TestDuelRecruitPicksTheClientsPoolPerTicket(t *testing.T) {
 
 func TestDuelRecruitKeepsTicketsForAWishPoolWithNoWishHero(t *testing.T) {
 	// The init lotteryFreeInfo wish fields (LotteryInfo.lua:284-295); 221708 has a wish list in
-	// officer_recruit 39879, 221700 has none.
+	// officer_recruit 40413, 221700 has none.
 	wish := func(id string, order int, on bool, receive int, hero string) *sfs.SFSObject {
 		p := duelPool(id, order, "230006;1|230006;10")
 		p.PutBool("wishSwitch", on)
@@ -365,7 +365,8 @@ func TestDuelRecruitKeepsTicketsForAWishPoolWithNoWishHero(t *testing.T) {
 		"no wish hero":           {[]*sfs.SFSObject{wish("221708", 2, true, 200, "")}, nil},
 		"wish hero chosen":       {[]*sfs.SFSObject{wish("221708", 2, true, 200, "50006")}, []string{"221708:1"}},
 		"no wish list":           {[]*sfs.SFSObject{wish("221700", 2, true, 200, "")}, []string{"221700:1"}},
-		"pool newer than 39879":  {[]*sfs.SFSObject{wish("221709", 2, true, 200, "")}, nil},
+		"pool new in 40413":      {[]*sfs.SFSObject{wish("221709", 2, true, 200, "")}, nil},
+		"pool not in 40413":      {[]*sfs.SFSObject{wish("221799", 2, false, 0, "")}, nil},
 		"wish switched off":      {[]*sfs.SFSObject{wish("221708", 2, false, 200, "")}, []string{"221708:1"}},
 		"no wish pity to aim at": {[]*sfs.SFSObject{wish("221708", 2, true, 0, "")}, []string{"221708:1"}},
 		// The ticket is kept, not spent on a later tab the player didn't pick.
@@ -380,15 +381,137 @@ func TestDuelRecruitKeepsTicketsForAWishPoolWithNoWishHero(t *testing.T) {
 			t.Errorf("%s: pulls %v, want %v", name, got, c.want)
 		}
 	}
-	// The table copy matches officer_recruit 39879: the nine wish pools, and 27 rows in all.
+	// The generated table is officer_recruit 40413: ten wish pools, 30 rows in all.
 	n := 0
-	for _, has := range duelRecruitWishLists {
-		if has {
+	for _, row := range duelRecruitTable {
+		if len(row.wishList) > 0 {
 			n++
 		}
 	}
-	if len(duelRecruitWishLists) != 27 || n != 9 || !duelRecruitWishLists["221708"] {
-		t.Errorf("duelRecruitWishLists: %d rows, %d with a wish list; want 27 and 9, 221708 among them", len(duelRecruitWishLists), n)
+	if len(duelRecruitTable) != 30 || n != 10 || len(duelRecruitTable["221709"].wishList) != 15 {
+		t.Errorf("duelRecruitTable: %d rows, %d with a wish list; want 30 and 10, 221709 among them", len(duelRecruitTable), n)
+	}
+}
+
+// duelWishPool is a wish pool of officer_recruit 221708 (wish list 50006|50008|...|50014, every
+// hero max_rank 26 and max_honorLevel 600 in lw_hero 40413) with the given wish hero.
+func duelWishPool(hero string) *sfs.SFSObject {
+	p := duelPool("221708", 2, "230006;1|230006;10")
+	p.PutBool("wishSwitch", true)
+	p.PutInt("wishPityReceiveNum", 200)
+	p.PutUtfString("wishHero", hero)
+	return p
+}
+
+// duelUserHeroes puts init userHero entries {uuid, heroId, rankLv[, honorLevel]}; honor < 0 omits
+// honorLevel.
+func duelUserHeroes(in *Init, heroes ...[3]int) {
+	arr := sfs.NewSFSArray()
+	for i, h := range heroes {
+		e := duelObj("uuid", int64(900+i), "heroId", h[0], "lev", 100, "rankLv", h[1])
+		if h[2] >= 0 {
+			e.PutInt("honorLevel", int32(h[2]))
+		}
+		arr.AddSFSObject(e)
+	}
+	in.Raw.PutSFSArray("userHero", arr)
+}
+
+func TestDuelRecruitKeepsTicketsWhereTheClientAsksASecondWishConfirmation(t *testing.T) {
+	// MASTER B3: GetWishLotterySecondConfirmKey (LotteryInfo.lua:839-893). 50006 is the chosen wish
+	// hero; 50008 is another hero of 221708's wish list.
+	for name, c := range map[string]struct {
+		heroes [][3]int
+		want   []string
+	}{
+		"chosen hero not owned":                   {[][3]int{{50008, 10, 0}}, []string{"221708:1"}},
+		"chosen hero below max rank":              {[][3]int{{50006, 25, 0}, {50008, 10, 0}}, []string{"221708:1"}},
+		"alert2: another wish hero below max":     {[][3]int{{50006, 26, 600}, {50008, 25, 600}}, nil},
+		"max rank, other wish heroes not owned":   {[][3]int{{50006, 26, 0}, {10001, 1, 0}}, []string{"221708:1"}},
+		"alert5: another wish hero below honor":   {[][3]int{{50006, 26, 600}, {50008, 26, 10}}, nil},
+		"every wish hero at max rank and honor":   {[][3]int{{50006, 26, 600}, {50008, 26, 600}}, []string{"221708:1"}},
+		"chosen hero below max honor":             {[][3]int{{50006, 26, 599}, {50008, 26, 10}}, []string{"221708:1"}},
+		"a hero without honorLevel counts 0":      {[][3]int{{50006, 26, 600}, {50008, 26, -1}}, nil},
+		"no honorLevel in init: assumed to ask":   {[][3]int{{50006, 26, -1}, {50008, 26, -1}}, nil},
+		"no honorLevel, chosen below max rank":    {[][3]int{{50006, 20, -1}, {50008, 26, -1}}, []string{"221708:1"}},
+		"no honorLevel, alert2 decides as before": {[][3]int{{50006, 26, -1}, {50008, 3, -1}}, nil},
+	} {
+		in := duelRecruitInit(1000, map[string]int{"230006": 10}, duelWishPool("50006"))
+		duelUserHeroes(in, c.heroes...)
+		conn, f := startDuelSpendFake(t, duelTestDay(DuelThemeHeroes, duelTestHeroes), duelRecruitServer(1000, 0))
+		if err := runDuelRecruitTickets(conn, in); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := pullsOf(t, f); !slices.Equal(got, c.want) {
+			t.Errorf("%s: pulls %v, want %v", name, got, c.want)
+		}
+	}
+	// The keys themselves, the way the recruit view would show them.
+	owned := func(heroes ...[3]int) duelRecruitHeroes {
+		in := duelRecruitInit(0, nil)
+		duelUserHeroes(in, heroes...)
+		return duelRecruitOwnedHeroes(in)
+	}
+	for _, c := range []struct {
+		pool   *sfs.SFSObject
+		heroes duelRecruitHeroes
+		want   string
+	}{
+		{duelWishPool(""), owned(), duelRecruitWishAlert1},
+		{duelWishPool("50006"), owned([3]int{50006, 26, 600}, [3]int{50008, 25, 600}), duelRecruitWishAlert2},
+		{duelWishPool("50006"), owned([3]int{50006, 26, 600}, [3]int{50008, 26, 0}), duelRecruitWishAlert5},
+		{duelWishPool("50006"), owned([3]int{50006, 26, -1}), duelRecruitWishAlert5Assumed},
+		{duelWishPool("50006"), owned([3]int{50006, 26, 600}), ""},
+		{duelWishPool("not-a-hero"), owned(), duelRecruitWishUnknown},
+	} {
+		if got := duelRecruitWishAsk(c.pool, c.heroes); got != c.want {
+			t.Errorf("wishHero %q: ask %q, want %q", c.pool.GetString("wishHero"), got, c.want)
+		}
+	}
+}
+
+func TestDuelRecruitPoolFieldsFallBackToTheTable(t *testing.T) {
+	// MASTER B54: LotteryInfo:UpdateInfo takes type and time_type from the officer_recruit row when
+	// the message has none (LotteryInfo.lua:125-129, 143-147). 401100 is the survivor pool (type 9):
+	// listed without a type it is still no hero pool. 221700 without a type is a hero pool (type 1).
+	survivor := duelWithoutKey(duelPool("401100", 9, "230006;1|230006;10"), "type")
+	hero := duelWithoutKey(duelPool("221700", 2, "230006;1|230006;10"), "type")
+	in := duelRecruitInit(1000, map[string]int{"230006": 10}, survivor, hero)
+	conn, f := startDuelSpendFake(t, duelTestDay(DuelThemeHeroes, duelTestHeroes), duelRecruitServer(1000, 0))
+	if err := runDuelRecruitTickets(conn, in); err != nil {
+		t.Fatal(err)
+	}
+	if got := pullsOf(t, f); !slices.Equal(got, []string{"221700:1"}) {
+		t.Errorf("pulls %v, want the ten pull on 221700 only", got)
+	}
+	// An unknown pool on an earlier tab keeps its ticket rather than passing it to a later tab.
+	unknown := duelPool("221799", 9, "230006;1|230006;10")
+	in = duelRecruitInit(1000, map[string]int{"230006": 10}, unknown, duelPool("221700", 2, "230006;1|230006;10"))
+	conn, f = startDuelSpendFake(t, duelTestDay(DuelThemeHeroes, duelTestHeroes), duelRecruitServer(1000, 0))
+	if err := runDuelRecruitTickets(conn, in); err != nil {
+		t.Fatal(err)
+	}
+	if got := pullsOf(t, f); len(got) != 0 {
+		t.Errorf("pulls %v, want none: the unknown pool 221799 is the ticket's tab", got)
+	}
+}
+
+func TestDuelItemFieldsUseTheClientsPrecedence(t *testing.T) {
+	// MASTER B55: ItemInfo:UpdateInfo (ItemInfo.lua:43-67): goodsId overwrites itemId, itemLeftCnt
+	// overwrites num, which overwrites count.
+	in := duelRecruitInit(1000, nil)
+	arr := sfs.NewSFSArray()
+	arr.AddSFSObject(duelObj("uuid", "a", "itemId", "111111", "goodsId", "230006", "count", 50, "num", 20, "itemLeftCnt", 3))
+	arr.AddSFSObject(duelObj("uuid", "b", "goodsId", "230015", "count", 9, "num", 4))
+	in.Raw.PutSFSArray("items", arr)
+	got := duelInitItemCounts(in)
+	if got["230006"] != 3 || got["111111"] != 0 || got["230015"] != 4 {
+		t.Errorf("counts %v, want 230006 = 3 (itemLeftCnt), 230015 = 4 (num), nothing under itemId 111111", got)
+	}
+	g := &duelSpendGuard{items: map[string]int64{"230006": 10}}
+	g.seeItem(duelPushItemUse, duelObj("itemId", "999999", "goodsId", "230006", "count", 9, "itemLeftCnt", 2))
+	if g.items["230006"] != 2 {
+		t.Errorf("ledger %d after the push, want 2 (goodsId, itemLeftCnt)", g.items["230006"])
 	}
 }
 

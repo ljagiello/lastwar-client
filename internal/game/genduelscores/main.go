@@ -2,8 +2,12 @@
 // table, keyed by score id, with the row's scoring type, value and points. The Alliance Duel's
 // per-day hero.event.info.get reply lists today's scoring ids (`score`); this table turns an id into
 // "what action scores" (e.g. type 51 value 7 = one minute of construction speed-up), which is how
-// the real client gates its duel prompts (AllianceCompeteDataManager.lua:631-654). Regenerate after
-// a table update with:
+// the real client gates its duel prompts (AllianceCompeteDataManager.lua:678-701). The same file
+// holds the two other tables the duel features read from rows: every `lw_hero` row (quality,
+// max_rank, max_honorLevel) and every `officer_recruit` row (type, time_type, wish_list); see
+// tables.go. Both are read from the same dump directory as score.json unless -heroes / -recruits
+// name other files, so the one-table command line below keeps working. Regenerate after a table
+// update with:
 //
 //	go generate ./internal/game   (with LASTWAR_TABLES and LASTWAR_TABLE_VERSION set)
 //
@@ -23,6 +27,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -46,27 +51,52 @@ type row struct {
 func main() {
 	in := flag.String("in", "", "path to the score table's JSON dump (score.json)")
 	version := flag.String("version", "", "table version the dump came from, recorded in the header (e.g. 39432)")
+	heroesPath := flag.String("heroes", "", "path to lw_hero.json (default: lw_hero.json next to -in)")
+	recruitsPath := flag.String("recruits", "", "path to officer_recruit.json (default: officer_recruit.json next to -in)")
 	out := flag.String("out", "duel_scores_gen.go", "output file")
 	flag.Parse()
 	if *in == "" || *version == "" {
 		log.Fatal("genduelscores: -in and -version are required")
 	}
-	src, err := os.ReadFile(*in)
+	if *heroesPath == "" {
+		*heroesPath = filepath.Join(filepath.Dir(*in), "lw_hero.json")
+	}
+	if *recruitsPath == "" {
+		*recruitsPath = filepath.Join(filepath.Dir(*in), "officer_recruit.json")
+	}
+	rows, err := parseFile(*in, parse)
 	if err != nil {
 		log.Fatal(err)
 	}
-	rows, err := parse(src)
+	heroes, err := parseFile(*heroesPath, parseHeroes)
 	if err != nil {
-		log.Fatalf("genduelscores: %s: %v", *in, err)
+		log.Fatal(err)
 	}
-	code, err := render(rows, *version)
+	recruits, err := parseFile(*recruitsPath, parseRecruits)
+	if err != nil {
+		log.Fatal(err)
+	}
+	code, err := render(rows, heroes, recruits, *version)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if err := os.WriteFile(*out, code, 0o644); err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("genduelscores: wrote %d rows to %s", len(rows), *out)
+	log.Printf("genduelscores: wrote %d score, %d lw_hero and %d officer_recruit rows to %s", len(rows), len(heroes), len(recruits), *out)
+}
+
+// parseFile reads path and parses it with fn.
+func parseFile[T any](path string, fn func([]byte) ([]T, error)) ([]T, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := fn(src)
+	if err != nil {
+		return nil, fmt.Errorf("genduelscores: %s: %w", path, err)
+	}
+	return rows, nil
 }
 
 // knownRows are (id, type, value, points) facts from DUEL.md §2 that the dump must reproduce, so a
@@ -81,14 +111,9 @@ var knownRows = []row{
 }
 
 func parse(src []byte) ([]row, error) {
-	dec := json.NewDecoder(bytes.NewReader(src))
-	dec.UseNumber()
-	var t table
-	if err := dec.Decode(&t); err != nil {
+	t, err := decodeTable(src, "score")
+	if err != nil {
 		return nil, err
-	}
-	if t.Name != "score" {
-		return nil, fmt.Errorf("table name %q, want score", t.Name)
 	}
 	cols := map[string]int{}
 	for _, name := range []string{"type", "value", "points"} {
@@ -141,19 +166,50 @@ func parse(src []byte) ([]row, error) {
 	return rows, nil
 }
 
+// decodeTable decodes a JSON dump and checks its table name.
+func decodeTable(src []byte, name string) (table, error) {
+	dec := json.NewDecoder(bytes.NewReader(src))
+	dec.UseNumber()
+	var t table
+	if err := dec.Decode(&t); err != nil {
+		return t, err
+	}
+	if t.Name != name {
+		return t, fmt.Errorf("table name %q, want %s", t.Name, name)
+	}
+	return t, nil
+}
+
+// column returns name's 0-based position. A linked (interned) column is refused: its cells are
+// indexes into the module's string pool unless the dumper resolved them (linkedColumn).
 func column(t table, name string) (int, error) {
-	spec, ok := t.Index[name]
-	if !ok || len(spec) < 1 {
-		return 0, fmt.Errorf("no %s column in index", name)
+	pos, linked, err := columnSpec(t, name)
+	if err != nil {
+		return 0, err
 	}
-	pos, ok, err := number(spec[0])
-	if err != nil || !ok || pos < 1 {
-		return 0, fmt.Errorf("%s: bad column position %s", name, spec[0])
-	}
-	if len(spec) > 2 && string(spec[2]) == "true" {
+	if linked {
 		return 0, fmt.Errorf("%s is a linked column", name)
 	}
-	return int(pos - 1), nil
+	return pos, nil
+}
+
+// linkedColumn returns the position of a column that may be linked; the caller must reject a
+// numeric cell in it (an unresolved pool index) with resolvedText.
+func linkedColumn(t table, name string) (int, error) {
+	pos, _, err := columnSpec(t, name)
+	return pos, err
+}
+
+func columnSpec(t table, name string) (pos int, linked bool, err error) {
+	spec, ok := t.Index[name]
+	if !ok || len(spec) < 1 {
+		return 0, false, fmt.Errorf("no %s column in index", name)
+	}
+	p, ok, err := number(spec[0])
+	if err != nil || !ok || p < 1 {
+		return 0, false, fmt.Errorf("%s: bad column position %s", name, spec[0])
+	}
+	return int(p - 1), len(spec) > 2 && string(spec[2]) == "true", nil
 }
 
 func cell(vals []json.RawMessage, col int) (int64, bool, error) {
@@ -201,18 +257,21 @@ func number(raw json.RawMessage) (int64, bool, error) {
 	return n, true, nil
 }
 
-func render(rows []row, version string) ([]byte, error) {
+func render(rows []row, heroes []heroRow, recruits []recruitRow, version string) ([]byte, error) {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "// Code generated by genduelscores from the score data table (table version %s); DO NOT EDIT.\n\n", version)
+	fmt.Fprintf(&b, "// Code generated by genduelscores from the score, lw_hero and officer_recruit data tables (table version %s); DO NOT EDIT.\n\n", version)
 	b.WriteString("package game\n\n")
 	b.WriteString("// duelScoreTable holds every score table row, keyed by score id: typ is the scoring action\n")
-	b.WriteString("// (ScoreType, EnumType.lua:15728-15738; 51 = speed-up minutes, 82 = radar task, 42 = hero\n")
+	b.WriteString("// (ScoreType, EnumType.lua:15799-15809; 51 = speed-up minutes, 82 = radar task, 42 = hero\n")
 	b.WriteString("// recruit, ...), value narrows it (for type 51 the queue: 4 training, 6 research, 7 build, 9 heal)\n")
-	b.WriteString("// and points is the score per unit before tech bonuses.\n")
+	fmt.Fprintf(&b, "// and points is the score per unit before tech bonuses. %d rows.\n", len(rows))
 	b.WriteString("var duelScoreTable = map[int32]duelScoreRow{\n")
 	for _, r := range rows {
 		fmt.Fprintf(&b, "\t%d: {typ: %d, value: %s, points: %d},\n", r.id, r.typ, strconv.Quote(strings.TrimSpace(r.value)), r.points)
 	}
-	b.WriteString("}\n")
+	b.WriteString("}\n\n")
+	renderHeroes(&b, heroes)
+	b.WriteString("\n")
+	renderRecruits(&b, recruits)
 	return format.Source(b.Bytes())
 }

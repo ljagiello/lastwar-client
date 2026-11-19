@@ -2,6 +2,7 @@ package game
 
 import (
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -17,12 +18,54 @@ import (
 // (Feature.Hold) runs only on a day that scores one of them, so the work is saved for a day it
 // counts. See DUEL.md for the data model, tables and evidence.
 
+// The generator also reads lw_hero.json and officer_recruit.json from ${LASTWAR_TABLES}.
 //go:generate go run ./genduelscores -in ${LASTWAR_TABLES}/score.json -version ${LASTWAR_TABLE_VERSION} -out duel_scores_gen.go
 
 type duelScoreRow struct {
 	typ    int32
 	value  string
 	points int64
+}
+
+// duelHeroRow is one lw_hero row (duelHeroTable): what HeroInfo takes from the row.
+type duelHeroRow struct {
+	quality       int8
+	maxRank       int32
+	maxHonorLevel int32
+}
+
+// duelRecruitRow is one officer_recruit row (duelRecruitTable): what LotteryInfo takes from the row.
+type duelRecruitRow struct {
+	typ      int32
+	timeType string
+	wishList []int32
+}
+
+// duelHero returns the lw_hero row of a hero id; ok is false for an id the table lacks.
+func duelHero(id int64) (duelHeroRow, bool) {
+	if id <= 0 || id > math.MaxInt32 {
+		return duelHeroRow{}, false
+	}
+	row, ok := duelHeroTable[int32(id)]
+	return row, ok
+}
+
+// duelSeasonDay returns the account's season and season day the way SeasonUtil does: the season is
+// init playerServerSeasonInfo.seasonId (the first value of SeasonUtil.GetSeason, SeasonUtil.lua:
+// 286-298, from SeasonDataManager:GetUserSeasonInfo, SeasonDataManager.lua:1022-1024), and the day
+// is (now - seasonStartTime) // 86400000 + 1 (SeasonUtil.GetSeasonDay, SeasonUtil.lua:308-316),
+// seasonStartTime (ms) from the same object (SeasonInfoTemplate.lua:23, 660-661). dayOK is false
+// when the season is 0 (the client then counts the server's open days instead) or init carries no
+// positive seasonStartTime (the client then falls back to nextSeasonStartTime or a far-future
+// time, which only lowers the day).
+func duelSeasonDay(in *Init, now time.Time) (season, day int64, dayOK bool) {
+	info := in.Object("playerServerSeasonInfo")
+	season, _ = evNum(info, "seasonId")
+	start, ok := evNum(info, "seasonStartTime")
+	if season <= 0 || !ok || start <= 0 {
+		return season, 0, false
+	}
+	return season, (now.UnixMilli()-start)/86_400_000 + 1, true
 }
 
 // DuelScore names one kind of duel-scoring action: Type is the score table's type (ScoreType,

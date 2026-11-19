@@ -91,6 +91,7 @@ type stServer struct {
 	listGold  []int64
 	startGold int64
 	startErr  map[int]string
+	placeErr  string // when set, every placement is answered with this errorCode
 	lists     int
 	starts    int
 }
@@ -117,6 +118,9 @@ func (s *stServer) reply(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		resp.PutSFSArray("ls", arr)
 		return resp
 	case secretTaskStartsPlaceCmd:
+		if s.placeErr != "" {
+			return rewardErr(s.placeErr)
+		}
 		// The reply is the task with its new point (DispatchPutPointInWorldMessage.lua:8-16).
 		uuid := p.GetLong("uuid")
 		resp := sfs.NewSFSObject()
@@ -425,18 +429,23 @@ func TestSecretTaskStartsConditionsAndTables(t *testing.T) {
 			t.Errorf("conditions(%q) ok; want it refused", bad)
 		}
 	}
-	if len(secretTaskStartsCfgs) != 328 || len(secretTaskStartsQualityByHero) != 393 {
-		t.Errorf("tables: %d tasks, %d heroes; want 328 and 393", len(secretTaskStartsCfgs), len(secretTaskStartsQualityByHero))
+	// lw_dispatch_tasks and lw_hero at tables 40413: 328 tasks, 398 heroes.
+	if len(secretTaskStartsCfgs) != 328 || len(duelHeroTable) != 398 {
+		t.Errorf("tables: %d tasks, %d heroes; want 328 and 398", len(secretTaskStartsCfgs), len(duelHeroTable))
 	}
 	for id, color := range map[int64]int64{stTaskUR: 5, stTaskURHard: 5, stTaskSSR: 4, stTaskSR: 3} {
 		if secretTaskStartsCfgs[id].color != color {
 			t.Errorf("task %d color %d, want %d", id, secretTaskStartsCfgs[id].color, color)
 		}
 	}
-	for id, q := range map[int64]int64{stHeroUR: 5, stHeroSSR: 4, stHeroSR: 3} {
-		if secretTaskStartsQualityByHero[id] != q {
-			t.Errorf("hero %d quality %d, want %d", id, secretTaskStartsQualityByHero[id], q)
+	// 550019-950019 are the five 40413 rows the 1.0.364 copy lacked (MASTER B52).
+	for id, q := range map[int64]int64{stHeroUR: 5, stHeroSSR: 4, stHeroSR: 3, 550019: 5, 950019: 5} {
+		if got, ok := secretTaskStartsQuality(id); !ok || got != q {
+			t.Errorf("hero %d quality %d (known %v), want %d", id, got, ok, q)
 		}
+	}
+	if _, ok := secretTaskStartsQuality(1 << 40); ok {
+		t.Error("an id beyond Int32 must be unknown")
 	}
 }
 
@@ -549,5 +558,47 @@ func TestSecretTaskStartsPlacesAnUnplacedTaskFirst(t *testing.T) {
 	}
 	if got := fake.cmds(); !slices.Equal(got, []string{secretTasksListCmd}) {
 		t.Errorf("plan sent %v, want only the list", got)
+	}
+}
+
+func TestSecretTaskStartsRefusedPlacementIsAQuietSkip(t *testing.T) {
+	// MASTER B56: with the city in the black land the client never sends the placement
+	// (DispatchTaskItem.lua:455-481); the server's errorCode stands in for that test, so the task is
+	// skipped and the run does not fail. The next task still gets its turn.
+	in := stInit(2, 1000, stHeroRow{1, stHeroUR, 40, 7}, stHeroRow{2, stHeroUR, 40, 7})
+	s := &stServer{
+		tasks:     []stTask{{uuid: 21, cfgID: stTaskUR, point: 0}, {uuid: 22, cfgID: stTaskUR, point: stNear}},
+		listGold:  []int64{1000},
+		startGold: -1,
+		placeErr:  "457082",
+	}
+	fake, err := stRun(t, in, s, false)
+	if err != nil {
+		t.Fatalf("run: %v; a refused placement must not fail the run", err)
+	}
+	want := []string{secretTasksListCmd, secretTaskStartsPlaceCmd, secretTaskStartsCmd, secretTasksListCmd}
+	if got := fake.cmds(); !slices.Equal(got, want) {
+		t.Fatalf("sent %v, want %v", got, want)
+	}
+	if got := stStarts(fake)[0].GetLong("uuid"); got != 22 {
+		t.Errorf("started task %d, want 22 (21 could not be placed)", got)
+	}
+}
+
+func TestSecretTaskStartsUsesHeroesNewIn40413(t *testing.T) {
+	// MASTER B52: 550019 is one of the five lw_hero rows the 1.0.364 copy lacked; it is quality 5,
+	// so it meets the UR task alone and is no longer left out as unreadable.
+	in := stInit(2, 1000, stHeroRow{1, 550019, 40, 7})
+	s := &stServer{tasks: []stTask{{uuid: 31, cfgID: stTaskUR, point: stNear}}, listGold: []int64{1000}, startGold: -1}
+	fake, err := stRun(t, in, s, false)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	starts := stStarts(fake)
+	if len(starts) != 1 {
+		t.Fatalf("sent %v, want one start", fake.cmds())
+	}
+	if v, _ := starts[0].Get("heroList"); !slices.Equal(v.Val.([]int64), []int64{1}) {
+		t.Errorf("heroList = %v, want [1]", v.Val)
 	}
 }
