@@ -24,11 +24,14 @@ import (
 // (IsOpen, LotteryInfo.lua:329-335; startTime/endTime in seconds, :179-184).
 //
 // The claim spends nothing: it hands out the hero the pulls already earned. The wish hero is never
-// chosen here (hero.lottery.switch.wish is the player's choice). The table wish list comes from
-// duelRecruitWishLists (feature_duel_recruit_tickets.go): a pool it lists without a wish list is
-// skipped; a pool it does not know is not, since a chosen wishHero already shows the server runs a
-// wish list there. No error code is registered as benign: the first reply is logged and an error
-// stops the claims.
+// chosen here (hero.lottery.switch.wish is the player's choice). IsShowWish (wishSwitch,
+// wishPityReceiveNum and the table wish list) is the duel-recruit-tickets feature's own test,
+// asked through duelRecruitWishUnset (feature_duel_recruit_tickets.go) on the pool's wish fields
+// with no wish hero: it is true exactly when the entrance would show. A pool id that helper's table
+// lacks counts as having a wish list. It is not a recruit: ScoreType.Recruit (42,
+// Global/EnumType.lua:15799-15809) counts hero recruitments, and this sends none, so no Duel score
+// is declared; whether the server counts it is not decidable from the client. No error code is
+// registered as benign: the first reply is logged and an error stops the claims.
 const (
 	heroWishClaimFeature = "hero-wish-claim"
 	heroWishClaimCmd     = "hero.lottery.receive.wish"
@@ -41,6 +44,22 @@ func init() {
 			"(hero.lottery.receive.wish); never picks the wish hero (static-only, not validated live)",
 		Run: runHeroWishClaim,
 	})
+}
+
+// heroWishShowFields are the pool fields IsShowWish reads (LotteryInfo.lua:468-478); heroWishShown
+// copies them, and no wishHero, into a probe for duelRecruitWishUnset.
+var heroWishShowFields = []string{"id", "wishSwitch", "wishPityReceiveNum"}
+
+// heroWishShown is IsShowWish for pool (without the duration-type start test, which the open-window
+// test covers): duelRecruitWishUnset on its wish fields with no wish hero chosen.
+func heroWishShown(pool *sfs.SFSObject) bool {
+	probe := sfs.NewSFSObject()
+	for _, k := range heroWishShowFields {
+		if v, ok := pool.Get(k); ok {
+			probe.PutValue(k, v)
+		}
+	}
+	return duelRecruitWishUnset(probe)
 }
 
 // heroWishClaimable returns the ids of the init pools whose wish hero the client would let the
@@ -62,10 +81,7 @@ func heroWishClaimable(in *Init, nowS int64) []string {
 		if end > start && (nowS <= start || nowS >= end) {
 			continue
 		}
-		if v, ok := pool.Get("wishSwitch"); !ok || v.Val == nil || v.Val == false {
-			continue
-		}
-		if hasList, known := duelRecruitWishLists[id]; known && !hasList {
+		if !heroWishShown(pool) {
 			continue
 		}
 		need, _ := evNum(pool, "wishPityReceiveNum")

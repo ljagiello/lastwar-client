@@ -131,6 +131,30 @@ func TestHeroWishClaimIsOptInAndStaticOnly(t *testing.T) {
 		t.Errorf("Summary = %q, want it to end with (static-only, not validated live)", f.Summary)
 	}
 	if len(f.Duel) != 0 {
-		t.Errorf("Duel = %v: claiming the wish hero is no recruit and scores nothing", f.Duel)
+		t.Errorf("Duel = %v: the claim sends no recruitment (ScoreType.Recruit 42), so it declares no duel score", f.Duel)
+	}
+}
+
+// TestHeroWishShownIsTheWishEntranceTest: heroWishShown is IsShowWish (LotteryInfo.lua:468-478)
+// whatever the pool's wishHero: wishSwitch on, wishPityReceiveNum > 0 and a table wish list
+// (221500 has none in officer_recruit).
+func TestHeroWishShownIsTheWishEntranceTest(t *testing.T) {
+	for _, c := range []struct {
+		pool wishPool
+		want bool
+	}{
+		{wishPool{id: "221501", wishSwitch: true, need: 200, hero: "100005"}, true},
+		{wishPool{id: "221501", wishSwitch: true, need: 200}, true},
+		{wishPool{id: "221501", wishSwitch: false, need: 200, hero: "100005"}, false},
+		{wishPool{id: "221501", wishSwitch: true, need: 0, hero: "100005"}, false},
+		{wishPool{id: "221500", wishSwitch: true, need: 200, hero: "100005"}, false},
+	} {
+		pool := wishInit(c.pool).Objects("lotteryFreeInfo")[0]
+		if got := heroWishShown(pool); got != c.want {
+			t.Errorf("heroWishShown(%+v) = %v, want %v", c.pool, got, c.want)
+		}
+		if pool.GetString("wishHero") != c.pool.hero {
+			t.Errorf("heroWishShown changed the pool's wishHero")
+		}
 	}
 }
