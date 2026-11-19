@@ -31,6 +31,8 @@ type timerInit struct {
 	shieldEnd *time.Time // nil: no defend_wall
 	stockCap  float64    // 0: no effect["30122"]
 	soldiers  int64      // < 0: no resource_items
+	hq        int32      // 0: HQ 25
+	settings  *sfs.SFSObject
 }
 
 func ms(t time.Time) int64 {
@@ -41,7 +43,14 @@ func ms(t time.Time) int64 {
 }
 
 func (c timerInit) build() *Init {
-	return rewardInitWithDay(25, func(raw *sfs.SFSObject) {
+	hq := c.hq
+	if hq == 0 {
+		hq = 25
+	}
+	return rewardInitWithDay(hq, func(raw *sfs.SFSObject) {
+		if c.settings != nil {
+			raw.PutSFSObject("userSetting", c.settings)
+		}
 		v, _ := raw.Get("building_new")
 		builds := v.Val.(*sfs.SFSArray)
 		for _, b := range c.buildings {
@@ -284,5 +293,89 @@ func TestFinishedTimersNothingDueBenignAndFailure(t *testing.T) {
 	}
 	if len(sent) != 3 {
 		t.Errorf("sent %v, want all three tried", sent)
+	}
+}
+
+// B13: with user setting 19 ("confirm finished building") on and the HQ at building_finish_check.k1
+// (16) or above, the client asks before every upgrade finish (BuildManager.lua:3089-3113), so
+// finished-timers leaves upgrades to the player; repairs, queues and camp output are not behind
+// that dialog. The client compares the value with the string "1".
+func TestFinishedTimersLeavesUpgradesWhenConfirmSettingIsOn(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-time.Minute)
+	setting := func(v any) *sfs.SFSObject {
+		o := sfs.NewSFSObject()
+		o.PutUtfString("18", "1") // DIAMOND_USAGE_REMINDER: unrelated
+		switch v := v.(type) {
+		case string:
+			o.PutUtfString("19", v)
+		case int32:
+			o.PutInt("19", v)
+		}
+		return o
+	}
+	base := timerInit{
+		buildings: []timerBuilding{
+			{uuid: 1, bID: 10202000, lv: 5, uT: past},
+			{uuid: 4, bID: 10107000, lv: 5, dEndT: past},
+			{uuid: 7, bID: 10101000, lv: 3, prodST: now.Add(-2 * time.Hour), prodET: past},
+		},
+		queues:   []timerQueue{{uuid: 21, qType: 6, start: now.Add(-time.Hour), end: past}},
+		soldiers: -1,
+	}
+	held := []timerSent{{finishedTimersRepairCmd, 4}, {finishedTimersCampCmd, 7}, {finishedTimersQueueCmd, 21}}
+	all := append([]timerSent{{finishedTimersUpgradeCmd, 1}}, held...)
+	for name, c := range map[string]struct {
+		settings *sfs.SFSObject
+		hq       int32
+		want     []timerSent
+	}{
+		"on, HQ 25":                   {setting("1"), 25, held},
+		"on, HQ 16":                   {setting("1"), 16, held},
+		"on, HQ 15":                   {setting("1"), 15, all},
+		"off":                         {setting("0"), 25, all},
+		"integer 1 is not the string": {setting(int32(1)), 25, all},
+		"key missing":                 {setting(nil), 25, all},
+		"no userSetting":              {nil, 25, all},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ti := base
+			ti.settings, ti.hq = c.settings, c.hq
+			sent, err := runTimers(t, ti.build(), okTimers)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if !slices.Equal(sent, c.want) {
+				t.Errorf("sent %v\nwant %v", sent, c.want)
+			}
+		})
+	}
+}
+
+// B72: the client overrides a building's uT with the uT of the build queue (type 0 or 110) whose
+// itemObj.itemId names it (BuildQueueManager.lua:18-55), so finished-timers decides on that value.
+func TestFinishedTimersUsesTheBuildQueueUpgradeTime(t *testing.T) {
+	now := time.Now()
+	past, future := now.Add(-time.Minute), now.Add(time.Hour)
+	in := timerInit{
+		buildings: []timerBuilding{
+			{uuid: 1, bID: 10202000, lv: 5, uT: future}, // queue says done: finish
+			{uuid: 2, bID: 10202000, lv: 5, uT: past},   // queue says running: leave
+			{uuid: 3, bID: 10202000, lv: 5, uT: future}, // only a research queue names it: leave
+			{uuid: 4, bID: 10202000, lv: 5, uT: past},   // no queue names it: finish on its own uT
+		},
+		queues: []timerQueue{
+			{uuid: 31, qType: 0, start: now.Add(-time.Hour), end: past, itemID: "1"},
+			{uuid: 32, qType: 110, start: now.Add(-time.Hour), end: future, itemID: "2"},
+			{uuid: 33, qType: 6, start: now.Add(-time.Hour), end: future, itemID: "3"},
+		},
+		soldiers: -1,
+	}
+	sent, err := runTimers(t, in.build(), okTimers)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if want := []timerSent{{finishedTimersUpgradeCmd, 1}, {finishedTimersUpgradeCmd, 4}}; !slices.Equal(sent, want) {
+		t.Errorf("sent %v, want %v", sent, want)
 	}
 }

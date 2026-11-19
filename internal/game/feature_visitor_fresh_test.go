@@ -105,6 +105,9 @@ func TestVisitorFreshSkips(t *testing.T) {
 		"newest inside the margin": freshTestInit(5, int32(1),
 			queuedTestVisitor(1, 2001, 0, now.Add(-visitorArrivalMargin/2))),
 		"function not open": freshTestInit(5, int32(0), queuedTestVisitor(1, 2001, 0, arrived)),
+		// B14: BattlePlanCaptive (queue type 9, eventId 22001) is Queue1 in 1.0.370 (Const.lua:19, 42).
+		"captives fill the queue": freshTestInit(2, int32(1),
+			queuedTestVisitor(1, 22001, 9, arrived), queuedTestVisitor(2, 22001, 9, arrived)),
 	}
 	for name, in := range cases {
 		fake := &fakeNetErrConn{}
@@ -158,7 +161,7 @@ func TestInitEffect(t *testing.T) {
 // (CityVisitorManager.lua:505-520). Go's visitor-fresh reads the same init list after the core
 // greets, so it must leave out the visitors GreetVisitors greeted (a reply with no errorCode, in
 // the shared slice). A visitor_err_coming reply (benign, nil error) or a failed greet leaves the
-// visitor in the queue, and so does an eventId Go's 39879 snapshot lacks: the client drops only
+// visitor in the queue, and so does an eventId Go's table snapshot lacks: the client drops only
 // ids its own current table lacks (:263-267), and Go doesn't greet them.
 func TestVisitorFreshDropsGreetedVisitors(t *testing.T) {
 	now := time.Now()

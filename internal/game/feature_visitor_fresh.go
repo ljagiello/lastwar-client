@@ -18,16 +18,17 @@ func init() {
 	})
 }
 
-// visitorQueue1Types are the queue types (Visitor.QueueType, Scene/CityVisitor/Const.lua:10-41)
-// the client keeps in Queue1, the queue visitor.fresh refills.
-var visitorQueue1Types = map[int32]bool{0: true, 1: true, 5: true, 6: true, 12: true, 18: true, 20: true}
+// visitorQueue1Types are the queue types (Visitor.QueueType) the client keeps in Queue1, the queue
+// visitor.fresh refills: 0, 1, 5, 6, 9, 12, 18 and 20 in 1.0.370 (Scene/CityVisitor/Const.lua:10-43).
+// 9 is BattlePlanCaptive (:19, :42), new with the Season 7 Battle Plan captives.
+var visitorQueue1Types = map[int32]bool{0: true, 1: true, 5: true, 6: true, 9: true, 12: true, 18: true, 20: true}
 
-// effectVisitorEventFunctionOpen is VISITOR_EVENT_FUNCTION_OPEN (Global/EnumType.lua:4571).
+// effectVisitorEventFunctionOpen is VISITOR_EVENT_FUNCTION_OPEN (Global/EnumType.lua:4603).
 const effectVisitorEventFunctionOpen = "90004"
 
 // runVisitorFresh sends `visitor.fresh {}`, which asks the server to schedule the next timed
-// visitor, under the client's own rule (GetNewVisitorInfo, CityVisitorManager.lua:187-205, run
-// on entering the game and after every visitor leaves, DeleteVisitor :505-520):
+// visitor, under the client's own rule (GetNewVisitorInfo, CityVisitorManager.lua:190-208, run
+// on entering the game and after every visitor leaves, DeleteVisitor :528-543):
 //   - init.visitor.maxNum is present;
 //   - fewer than maxNum visitors are in Queue1;
 //   - the newest Queue1 visitor's startTime has passed (an empty queue passes);
@@ -41,7 +42,7 @@ const effectVisitorEventFunctionOpen = "90004"
 // earlier in the same -collect run (marked by GreetVisitors; the client deletes each one on the
 // reply). An entry whose eventId has no row in Go's lw_base_visitor_event snapshot still counts:
 // the client drops only ids its own, current table lacks (AddVisitor returns without a table line,
-// CityVisitorManager.lua:263-267), and a stale snapshot must not make every run refill a queue the
+// CityVisitorManager.lua:268-270), and a stale snapshot must not make every run refill a queue the
 // client sees as full. Under -run nothing was greeted and the list is current.
 //
 // The reply's addVisitor arrives at its own startTime (lw_base_visitor_config slots are 300 to
@@ -71,8 +72,8 @@ func refreshVisitors(conn *session.GameConn, in *Init, now time.Time) error {
 		}
 		if _, ok := visitorBehaviourType(v.EventId()); !ok {
 			// Counted as queued: the live client's table, which the server keeps current, very
-			// likely has the row Go's 39879 snapshot lacks (new season visitors), and Go doesn't
-			// greet them, so they hold their slot.
+			// likely has the row Go's table snapshot (40413) lacks (new season visitors), and Go
+			// doesn't greet them, so they hold their slot.
 			unknown++
 		}
 		if v.greeted {

@@ -1,6 +1,7 @@
 package game
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -18,6 +19,30 @@ var productionLineIDs = []int32{
 	BuildingBlessingFountain1, BuildingBlessingFountain2, BuildingBlessingFountain3, BuildingBlessingFountain4, BuildingBlessingFountainWC,
 	BuildingSeason4Quartz1, BuildingSeason4Quartz2, BuildingSeason4Quartz3, BuildingSeason4Quartz4, BuildingSeason4QuartzCard,
 	BuildingSeason5City1, BuildingSeason5City2, BuildingSeason5City3, BuildingSeason5City4, BuildingSeason5CityCard,
+	BuildingSeason7Fountain1, BuildingSeason7Fountain2, BuildingSeason7Fountain3, BuildingSeason7Fountain4, BuildingSeason7FountainWC,
+}
+
+// TestSeason7FarmsFollowSeasonWeekCard10014 pins the Season 7 family to season_weekcard row 10014
+// of tables 40413 (farm_building "853000|854000|855000|856000", farm_building_weekcard "857000"),
+// which the 1.0.370 client adds to its production lines (ProductLineManager.lua:57-80), and the
+// week-card farm to SeasonWeekCardCityBuildingMap (BuildingUtils.lua:379-387).
+func TestSeason7FarmsFollowSeasonWeekCard10014(t *testing.T) {
+	for _, id := range []int32{853000, 854000, 855000, 856000, 857000} {
+		if _, ok := collectCmdFor(id); !ok {
+			t.Errorf("collectCmdFor(%d): not collected", id)
+		}
+		if BuildingNameOf(id) == fmt.Sprintf("(unknown type %d)", id) {
+			t.Errorf("BuildingNameOf(%d) has no name", id)
+		}
+	}
+	if !seasonWeekCardBuildings[857000] {
+		t.Error("857000 is not a week-card farm: the settle-time guard would not apply to it")
+	}
+	for _, id := range []int32{853000, 854000, 855000, 856000} {
+		if seasonWeekCardBuildings[id] {
+			t.Errorf("%d is a farm_building, not the week-card farm", id)
+		}
+	}
 }
 
 // TestCollectCmdForSeasonFamilies checks every ProductLineBuilds/season_weekcard family is
@@ -42,7 +67,8 @@ func TestCollectCmdForSeasonFamilies(t *testing.T) {
 }
 
 // TestProductionTableSpotValues pins a few rows of the generated table against the values the
-// tables report lists for table 39432.
+// tables report lists for table 39432, plus rows tables 40413 added (the Season 7 farms and Crystal
+// Factory levels 21-25).
 func TestProductionTableSpotValues(t *testing.T) {
 	cases := []struct {
 		id   int32
@@ -55,6 +81,13 @@ func TestProductionTableSpotValues(t *testing.T) {
 		{BuildingDronePartsShop + 1, productionLevel{tickMs: 21360000, capS: 86400}},
 		{BuildingCrystalFactory + 1, productionLevel{tickMs: 10800000, capS: 172800}},
 		{BuildingSporeFactoryCard + 1, productionLevel{tickMs: 5000, capS: 86400}},
+		{BuildingSeason7Fountain1 + 1, productionLevel{tickMs: 5000, capS: 86400}},
+		{BuildingSeason7FountainWC + 30, productionLevel{tickMs: 5000, capS: 86400}},
+		{BuildingCrystalFactory + 21, productionLevel{tickMs: 10800000, capS: 266400}},
+		{BuildingCrystalFactory + 25, productionLevel{tickMs: 10800000, capS: 295200}},
+	}
+	if len(productionTable) != 1665 {
+		t.Errorf("productionTable has %d rows, want the 1,665 of tables 40413", len(productionTable))
 	}
 	for _, c := range cases {
 		if got := productionTable[c.id]; got != c.want {
@@ -106,7 +139,9 @@ func TestReadyBuildingsWeekCardSettleGuard(t *testing.T) {
 	weekCard := productionBuilding(1, BuildingSporeFactoryCard, 1, now.Add(-time.Hour), now.Add(-time.Minute), now.Add(time.Hour))
 	tier := productionBuilding(2, BuildingSporeFactory4, 1, now.Add(-time.Hour), now.Add(-time.Minute), now.Add(time.Hour))
 	s1Card := productionBuilding(3, BuildingSeason1FarmCard, 1, now.Add(-time.Hour), now.Add(-time.Minute), now.Add(time.Hour))
-	all := []Building{weekCard, tier, s1Card}
+	s7Card := productionBuilding(4, BuildingSeason7FountainWC, 1, now.Add(-time.Hour), now.Add(-time.Minute), now.Add(time.Hour))
+	s7Farm := productionBuilding(5, BuildingSeason7Fountain2, 1, now.Add(-time.Hour), now.Add(-time.Minute), now.Add(time.Hour))
+	all := []Building{weekCard, tier, s1Card, s7Card, s7Farm}
 	season := func(settle any) *Init {
 		if settle == nil {
 			return &Init{Raw: obj("playerServerSeasonInfo", obj("seasonId", 6))}
@@ -118,10 +153,10 @@ func TestReadyBuildingsWeekCardSettleGuard(t *testing.T) {
 		in   *Init
 		want []int64
 	}{
-		{"settled", season(now.Add(-time.Second).UnixMilli()), []int64{2}},
-		{"not settled yet", season(now.Add(time.Hour).UnixMilli()), []int64{1, 2, 3}},
-		{"no settle time", season(nil), []int64{1, 2, 3}},
-		{"no season info", &Init{Raw: sfs.NewSFSObject()}, []int64{1, 2, 3}},
+		{"settled", season(now.Add(-time.Second).UnixMilli()), []int64{2, 5}},
+		{"not settled yet", season(now.Add(time.Hour).UnixMilli()), []int64{1, 2, 3, 4, 5}},
+		{"no settle time", season(nil), []int64{1, 2, 3, 4, 5}},
+		{"no season info", &Init{Raw: sfs.NewSFSObject()}, []int64{1, 2, 3, 4, 5}},
 	}
 	for _, c := range cases {
 		var got []int64

@@ -17,13 +17,16 @@ import (
 // `build.ccd.*` / `queue.ccd.*` speed-ups and `free.building.up.new {gold}`, never sent here.
 //
 //   - Upgrades: `free.building.upgrade.finish {uuid: Long}` for each init building_new entry with
-//     uT > 0 && now >= uT (ms; BuildingDate.lua:439-442; FreeBuildingUpgradeFinishMessage.lua:3-9;
-//     BuildManager.lua:2892-2992). Skipped: the wormhole sub-building (792000) at level 0
-//     (:2938-2940), and HQ level 7 while defend_wall.protectEndTime (ms) >= now, because finishing
-//     HQ 8 drops the newbie shield and the client asks first (:2944-2959); HQ 7 is also skipped
-//     when init has no defend_wall.
+//     uT > 0 && now >= uT (ms; BuildingDate.lua:453-456; FreeBuildingUpgradeFinishMessage.lua:3-9;
+//     CheckSendBuildFinish, BuildManager.lua:3045-3118), where uT is the one the client uses: the
+//     occupying build queue's uT when init has one (buildingUpgradeTime, building_times.go).
+//     Skipped: the wormhole sub-building (792000) at level 0 (:3060-3062); HQ level 7 while
+//     defend_wall.protectEndTime (ms) >= now, because finishing HQ 8 drops the newbie shield and
+//     the client asks first (:3070-3087), and HQ 7 is also skipped when init has no defend_wall;
+//     and every upgrade while the player's "confirm finished building" setting is on
+//     (finishedTimersConfirmOn, :3089-3113).
 //   - Repairs: `user.finish.fix.building {uuid: Long}` when dEndT > 0 && now >= dEndT (ms;
-//     BuildingDate.lua:446-449; UserFinishFixBuildingMessage.lua:3-6).
+//     BuildingDate.lua:462-465; UserFinishFixBuildingMessage.lua:3-6).
 //   - Queues: `queue.finish {uuid: Long}` (QueueFinishMessage.lua:3-8) for each init queue_new
 //     entry in state Finish -- (sT != 0 && sT == uT) || (uT != 0 && now >= uT), with startTime /
 //     updateTime overriding sT / uT (QueueInfo.lua:34-124) -- of type 6 research
@@ -42,7 +45,7 @@ import (
 //
 // Troop stock cap: the client refuses to take healed troops, or Military Camp output, when the
 // player's soldier total is at LW_SOLDIER_MAX_STOCK (effect 30122), and camp output larger than the
-// cap (HospitalManager.lua:357-362; BuildingUtils.lua:1889-1902, tip 120083). The total is the
+// cap (HospitalManager.lua:357-362; BuildingUtils.lua:1961-1978, tip 120083). The total is the
 // resource items 3005-3015 (table lw_soldier, type 1) from init resource_items
 // (SoldierDataManager.lua:75-162). The cap is GetGameEffect(30122), a sum of eight sources of which
 // init effect carries only the base, so init effect["30122"] is a lower bound: checking against it
@@ -69,7 +72,13 @@ const (
 	finishedTimersQueueResearch = 6
 	finishedTimersQueueRebirth  = 117
 
-	finishedTimersStockEffect = "30122" // LW_SOLDIER_MAX_STOCK (EnumType.lua:4442)
+	finishedTimersStockEffect = "30122" // LW_SOLDIER_MAX_STOCK (EnumType.lua:4474)
+
+	// finishedTimersConfirmSetting is UserSettingKey.FINISH_BUILDING_RECEIVE_REMINDER
+	// (Global/EnumType.lua:5596), and finishedTimersConfirmHQLevel is DataConfig
+	// building_finish_check k1 (table item, 40413), the HQ level from which the setting applies.
+	finishedTimersConfirmSetting = "19"
+	finishedTimersConfirmHQLevel = 16
 )
 
 func init() {
@@ -158,6 +167,7 @@ func runFinishedTimers(conn *session.GameConn, in *Init) error {
 	now := claimNow(in).UnixMilli()
 	soldiers, stockCap, stockKnown := finishedTimersStockRoom(in)
 	stockRoom := func() bool { return stockKnown && soldiers < stockCap }
+	confirmOn := finishedTimersConfirmOn(in)
 
 	var actions []func() error
 	send := func(label, cmd string, uuid int64) {
@@ -178,11 +188,19 @@ func runFinishedTimers(conn *session.GameConn, in *Init) error {
 		lv, _ := claimInt(b, "lv")
 		name := fmt.Sprintf("%s %d", BuildingNameOf(int32(bID)), uuid)
 
-		if uT, _ := claimInt(b, "uT"); uT > 0 && now >= uT {
+		uT, fromQueue := buildingUpgradeTime(in, b)
+		if own, _ := claimInt(b, "uT"); fromQueue && own != uT {
+			slog.Info("finished-timers: the build queue's uT overrides the building's, as in the client", "uuid", uuid,
+				"buildingUT", own, "queueUT", uT)
+		}
+		if uT > 0 && now >= uT {
 			switch {
 			case bID == finishedTimersWormholeSub && lv == 0:
 			case bID == claimHQBuildingID && lv == finishedTimersShieldHQLevel && finishedTimersShieldUp(in, now):
 				slog.Info("finished-timers: leaving the HQ 8 upgrade to the player while the shield is up", "uuid", uuid)
+			case confirmOn:
+				slog.Info("finished-timers: leaving the finished upgrade to the player: the \"confirm finished building\" setting is on",
+					"uuid", uuid, "name", name)
 			default:
 				send("finish upgrade "+name, finishedTimersUpgradeCmd, uuid)
 			}
@@ -231,6 +249,23 @@ func runFinishedTimers(conn *session.GameConn, in *Init) error {
 		return nil
 	}
 	return errors.Join(claimEach(actions, func(a func() error) error { return a() })...)
+}
+
+// finishedTimersConfirmOn reports whether the client would ask before finishing an upgrade: the
+// player turned on user setting 19 (init userSetting, an object keyed by the setting id as a
+// string, PlayerInfo.lua:158-159, 1524-1530) and the HQ is at building_finish_check.k1 or above
+// (BuildManager.lua:3089-3113). The client compares the value with the string "1" (an integer 1
+// would not match in Lua) and sends "0" itself when the server has none (InitMessage.lua:707-711),
+// so a missing userSetting or key is off. A player who ticked "don't show again today" gets no
+// dialog (UIUtil.lua:3288-3305), which Go cannot see; leaving the upgrade for the player is the
+// side that only sends less. Repairs, queues and camp output are not behind this dialog.
+func finishedTimersConfirmOn(in *Init) bool {
+	v, ok := in.Object("userSetting").Get(finishedTimersConfirmSetting)
+	if !ok {
+		return false
+	}
+	on, _ := v.Val.(string)
+	return on == "1" && claimHQLevel(in) >= finishedTimersConfirmHQLevel
 }
 
 // finishedTimersShieldUp reports whether the city shield is up (defend_wall.protectEndTime >= now),
