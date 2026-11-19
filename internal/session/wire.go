@@ -223,16 +223,46 @@ const MaxConsecutiveDecodeFailures = 20
 // pattern this codebase has ever observed should plausibly reach it.
 const MaxNonMatchingEnvelopesPerWait = 1000
 
+// silenceLimit is the client's offMaxTime: with no pong, extension reply or Login for longer
+// than this, IsPingPongTimeOut holds and CheckOffline disconnects (BaseUtils.decompiled.cs:35935,
+// 36017-36031; Assembly-CSharp.decompiled.cs:8482-8491).
+const silenceLimit = 12 * time.Second
+
+// noteSilentWait is WaitFor's receive watchdog, run when a wait times out. A wait in which no
+// frame at all arrived, not even a pong to the 4 s heartbeat, adds its blocked time to the
+// connection's silence; any frame read resets it (readEnvelope). Once the silence passes
+// silenceLimit, which takes two full DefaultCmdTimeout waits in a row, the connection is dead
+// and the timeout becomes an sfs.DeadConnError, which every "abort on a dead connection" check
+// already stops on. Only blocked time counts, since frames wait unread between waits on a
+// healthy connection. The watchdog is off until the first pong, like the client's (notePong),
+// so a connection whose server never pongs keeps today's behaviour. No reconnect.
+func (c *GameConn) noteSilentWait(start time.Time, framesBefore uint64, timeoutErr error) error {
+	if !c.pongSeen.Load() || c.framesRead.Load() != framesBefore {
+		return timeoutErr
+	}
+	silent := time.Duration(c.silentFor.Add(int64(time.Since(start))))
+	if silent <= silenceLimit {
+		return timeoutErr
+	}
+	slog.Error("no frame, not even a pong, has arrived while waiting; treating the connection as dead",
+		"silentFor", silent.Round(time.Millisecond), "limit", silenceLimit)
+	return sfs.NewDeadConnError(fmt.Errorf("connection silent for %v of waiting, past the client's %v: %w",
+		silent.Round(time.Millisecond), silenceLimit, timeoutErr))
+}
+
 // WaitFor reads envelopes until pred matches or timeout elapses, logging
-// everything it skips past along the way.
+// everything it skips past along the way. A timeout after too long a silence is a dead
+// connection (noteSilentWait).
 func WaitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (*Envelope, error) {
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	framesBefore := conn.framesRead.Load()
+	deadline := start.Add(timeout)
 	consecutiveDecodeFailures := 0
 	nonMatchingEnvelopes := 0
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return nil, DeadlineExceededError{}
+			return nil, conn.noteSilentWait(start, framesBefore, DeadlineExceededError{})
 		}
 		_ = conn.conn.SetReadDeadline(time.Now().Add(remaining))
 		env, err := conn.ReadEnvelope()
@@ -245,7 +275,7 @@ func WaitFor(conn *GameConn, timeout time.Duration, pred func(*Envelope) bool) (
 				// may not actually consume real wall-clock time the way a genuine socket
 				// deadline would, so looping back to the top-of-loop remaining<=0 check
 				// could busy-spin for the rest of the window instead of returning promptly.
-				return nil, err
+				return nil, conn.noteSilentWait(start, framesBefore, err)
 			}
 			if ContainsNonTimeoutNetError(err) {
 				return nil, err
@@ -304,6 +334,49 @@ func WaitForCmd(conn *GameConn, timeout time.Duration, wantCmds ...string) (*Ext
 	}
 	msg, _ := env.AsExtension()
 	return msg, nil
+}
+
+// WaitForReply is WaitForCmd for the reply to the request SendExtensionID sent with id: a message
+// that StaleReply marks as a late reply to an earlier request is skipped, not returned.
+func WaitForReply(conn *GameConn, timeout time.Duration, id int32, wantCmds ...string) (*ExtensionMessage, error) {
+	env, err := WaitFor(conn, timeout, func(e *Envelope) bool {
+		msg, ok := e.AsExtension()
+		if !ok {
+			return false
+		}
+		return slices.Contains(wantCmds, msg.Cmd) && !StaleReply(msg, id)
+	})
+	if err != nil {
+		return nil, err
+	}
+	msg, _ := env.AsExtension()
+	return msg, nil
+}
+
+// StaleReply reports whether msg is a late reply to an earlier request than the pending one,
+// whose `_id` is pendingID (SendExtensionID), and logs it when so. The server echoes a request's
+// `_id` on its reply, and the client reads it off every reply it gets (MessageFactory,
+// Assembly-CSharp.decompiled.cs:82052-82056). A reply that arrives after its wait timed out stays
+// on the socket, and the next request with the same cmd would take it as its own, shifting every
+// later reply of that cmd by one.
+//
+// Only positive evidence counts: msg must be the first message read off the connection that
+// echoed the Int `_id` of one of its own requests (GameConn.noteReply), and that `_id` must be
+// below pendingID. A message with no `_id` (pushes, possibly error replies), one echoing an id
+// already answered, and anything when pendingID is unknown (0) are not stale. Wait loops that call
+// WaitFor with their own predicate check their match with it.
+func StaleReply(msg *ExtensionMessage, pendingID int32) bool {
+	if msg == nil || pendingID <= 0 || msg.repliesTo == 0 || msg.repliesTo >= pendingID {
+		return false
+	}
+	id := msg.repliesTo
+	code := ""
+	if ec, ok := msg.Params.Get("errorCode"); ok {
+		code = fmt.Sprintf("%v", ec.Val)
+	}
+	slog.Warn("skipping a late reply to an earlier request (its wait had timed out)",
+		"cmd", msg.Cmd, "replyId", id, "pendingId", pendingID, "errorCode", code, "replyKeys", msg.Params.Keys())
+	return true
 }
 
 // WarnIfWrongTypedField logs a Warn when o has field present (non-nil) but its concrete decoded
