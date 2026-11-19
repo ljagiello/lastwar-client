@@ -484,15 +484,26 @@ func (r *allianceScienceRun) donate(conn *session.GameConn, who string, limit in
 		slog.Info(who+": no donation", append([]any{"reason", r.stop, "donatedThisRun", r.donated}, r.techAttrs()...)...)
 		return nil
 	}
-	for sent := 0; sent < limit; sent++ {
-		if why := r.tech.blocked(claimNow(r.in).UnixMilli(), r.ledger, r.outOfSeason); why != "" {
+	blocked := func() bool {
+		why := r.tech.blocked(claimNow(r.in).UnixMilli(), r.ledger, r.outOfSeason)
+		if why != "" {
 			r.stop = why
 			slog.Info(who+": not donating to the recommended tech", append([]any{"reason", why, "donatedThisRun", r.donated}, r.tech.logAttrs()...)...)
+		}
+		return why != ""
+	}
+	for sent := 0; sent < limit; sent++ {
+		if blocked() {
 			return nil
 		}
-		if err := r.readCharges(conn); err != nil {
-			r.stop = "charge read failed"
-			return err
+		if !r.chargesRead {
+			if err := r.readCharges(conn); err != nil {
+				r.stop = "charge read failed"
+				return err
+			}
+			if blocked() { // the charge read's reply can fill the tech
+				return nil
+			}
 		}
 		switch {
 		case !r.chargesKnown:

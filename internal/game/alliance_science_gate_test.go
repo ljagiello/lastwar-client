@@ -241,6 +241,26 @@ func TestDonateRecommendedAllianceTechStops(t *testing.T) {
 	}
 }
 
+// TestDonationGateAfterTheChargeRead checks that the charge read's reply, which the client applies
+// to the tech (AlScienceNumFreshMessage.lua:10-19), is gated on before the first donation: a reply
+// showing the tech full stops it.
+func TestDonationGateAfterTheChargeRead(t *testing.T) {
+	const id = 10011900
+	client, server := session.NewPipeGameConnPair(t)
+	srv := serveScripted(server, func(msg *session.ExtensionMessage) (string, *sfs.SFSObject) {
+		if msg.Cmd == "science.data.refresh" {
+			return "", allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", 1000, "level", 3))
+		}
+		return "", obj("scienceId", id, "useNum", 5, "maxNum", 30, "currentPro", 1000, "needPro", 1000)
+	})
+	if err := donateRecommendedAllianceTech(client, inAllianceInit()); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.cmds(); !slices.Equal(got, []string{"science.data.refresh", "al.science.refreshNum"}) {
+		t.Errorf("requests = %v; a full tech is not donated to", got)
+	}
+}
+
 // TestAllianceDonateUnavailableIsBenign checks that 120836 is registered for al.science.donate
 // only: a SendAndWait of the donation is not a failure, of another command it is.
 func TestAllianceDonateUnavailableIsBenign(t *testing.T) {
