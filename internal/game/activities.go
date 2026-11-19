@@ -13,7 +13,7 @@ import (
 	"lastwar-client/internal/sfs"
 )
 
-// EnumActivity type numbers (Global/EnumType.lua:6260-6489) the event features act on. An
+// EnumActivity type numbers (Global/EnumType.lua:6295-6525, 1.0.370) the event features act on. An
 // activity's type is not on the wire: the client looks it up in table `activity` by id
 // (ActivityInfoData.FetchActivityConfigData, ActivityInfoData.lua:224-247), and so does
 // activityTypeOf below.
@@ -104,6 +104,57 @@ func (a Activity) IDString() string {
 	return strconv.FormatInt(int64(a.ID), 10)
 }
 
+// EntryID is the entry's own id as a string, never its activityid: what the client sends where it
+// uses data.id rather than data.activityId, e.g. hero.event.info.get for BattlePass_new and
+// BargainShop (ActivityListDataManager.lua:281, 423) and view.season.pre.task
+// (SeasonPreviewManager.lua:22-24). IDString stays the default (the Duel's entry needs it).
+func (a Activity) EntryID() string { return strconv.FormatInt(int64(a.ID), 10) }
+
+// eventInfoID is the activityId hero.event.info.get takes for a at login: data.id for LuckyShop
+// (ActivityListDataManager.lua:318-321; LuckyShopManager.lua:35-36), BattlePass_new (:281) and
+// BargainShop (:423), data.activityId (IDString) for every other type AddOneActivity sends it for.
+func (a Activity) eventInfoID() string {
+	switch a.Type {
+	case actTypeLuckyShop, actTypeBattlePassNew, actTypeBargainShop:
+		return a.EntryID()
+	}
+	return a.IDString()
+}
+
+// row is a's row of table activity (activityTable); the zero row when the table lacks the id.
+func (a Activity) row() activityRow { return activityTable[a.ID] }
+
+// SubType is the row's tableInfoType, the client's obj.subType (ActivityInfoData.lua:231): the row
+// of the type's own table the activity reads (e.g. activity_dig for Treasure Hunt), 0 when empty.
+func (a Activity) SubType() int32 { return a.row().subType }
+
+// ShowUIType is the row's showUiType, the client's obj.subViewType = tonumber(showUiType) or 0
+// (ActivityInfoData.lua:232); a view name such as "ActivityDailyRank" is 0.
+func (a Activity) ShowUIType() int32 { return a.row().showUIType }
+
+// Para is the row's raw para cell (ActivityInfoData.lua:351), before the SeasonPeriodicCard swap
+// the client applies from condition_giftbag (:352-356; see ConditionGiftbag).
+func (a Activity) Para() string { return a.row().para }
+
+// Para1 is the row's raw para_1 cell, the client's obj.para_1 (ActivityInfoData.lua:358).
+func (a Activity) Para1() string { return a.row().para1 }
+
+// Condition is the row's raw condition cell ("1|20" etc.), which FetchActivityConfigData does not
+// parse; each manager that gates on it reads it itself (e.g. CrystalBossDataManager.lua:402).
+func (a Activity) Condition() string { return a.row().condition }
+
+// ConditionGiftbag is the row's raw condition_giftbag cell ("2026-7-29|10008"): for a
+// SeasonPeriodicCard activity that started on or after the date, the client replaces para with the
+// card id after the "|" (GetConditionGiftbagCardId, ActivityInfoData.lua:200-222, 352-356).
+func (a Activity) ConditionGiftbag() string { return a.row().conditionGiftbag }
+
+// Group is the row's group_number and group_priority, checknumber'd by the client (0 when empty;
+// ActivityInfoData.lua:408-409).
+func (a Activity) Group() (number, priority int32) {
+	r := a.row()
+	return r.groupNumber, r.groupPriority
+}
+
 // open mirrors ActivityListDataManager:CheckIsSend (ActivityListDataManager.lua:954-966): the
 // client fetches an activity's details only while now is within [startTime-1s, endTime+1s] (a few
 // types with endTime 0 count as always open) and the HQ level reaches needMainCityLevel.
@@ -157,8 +208,9 @@ func Activities(conn *session.GameConn, in *Init) *ActivitySweep {
 // an object keyed by id and an array; an entry's own `id` (Int, Long or UtfString) wins over its
 // key. Every id table `activity` knows is kept, whatever its type (features pick theirs through
 // Open and All). An id the generated table lacks is skipped, since its type and so the right
-// detail and claim commands are unknown, and logged at Info: it is an event newer than the
-// generated table, so the table needs regenerating.
+// detail and claim commands are unknown, and logged at Warn: it is an event newer than the
+// generated table, so the table needs regenerating (the client always types an entry from its
+// bundled table, ActivityInfoData.lua:224-228; nothing on the wire says what it is).
 func parseActivities(in *Init) []Activity {
 	if in == nil || in.Raw == nil {
 		return nil
@@ -202,7 +254,7 @@ func parseActivities(in *Init) []Activity {
 		if !known {
 			missing++
 			a := Activity{ID: id, Raw: e.obj}
-			slog.Info("activity sweep: id not in table activity; skipped until the table is regenerated",
+			slog.Warn("activity sweep: id not in table activity; skipped until the table is regenerated",
 				"id", id, "startTime", a.StartTime(), "endTime", a.EndTime(), "tableVersion", activityTableVersion)
 			continue
 		}
@@ -288,14 +340,28 @@ func (s *ActivitySweep) Forget(cmd string, a Activity) {
 	delete(s.replies, cmd+"#"+a.IDString())
 }
 
+// errEventInfoNoData marks a hero.event.info.get reply that carries `success`: the client drops it
+// without reading anything (ActivityEventInfoGetMessage.lua:23-29: only a reply with no errorCode
+// and no success reaches RetEventData), so it is no data, not an empty state. A feature must not
+// read "nothing claimed yet" into it. evBatch.add skips it without counting a failure.
+var errEventInfoNoData = errors.New("hero.event.info.get answered with success and no data")
+
 // EventInfo returns the activity's hero.event.info.get reply, the detail request
 // ActivityListDataManager:AddOneActivity sends for most event types. Its activityId is a
-// UtfString, unlike the Int every claim takes (ActivityEventInfoGetMessage.lua:4-6). A reply with
-// errorCode set is an error.
+// UtfString, unlike the Int every claim takes (ActivityEventInfoGetMessage.lua:5-7), and is the id
+// eventInfoID picks for the type. A reply with errorCode set is an error; one with success is
+// errEventInfoNoData.
 func (s *ActivitySweep) EventInfo(a Activity) (*sfs.SFSObject, error) {
 	params := sfs.NewSFSObject()
-	params.PutUtfString("activityId", a.IDString())
-	return s.Info("activity info response", "hero.event.info.get", a, params)
+	params.PutUtfString("activityId", a.eventInfoID())
+	obj, err := s.Info("activity info response", "hero.event.info.get", a, params)
+	if err != nil {
+		return nil, err
+	}
+	if obj.Has("success") {
+		return nil, fmt.Errorf("activity %d (requestId %s): %w", a.ID, a.eventInfoID(), errEventInfoNoData)
+	}
+	return obj, nil
 }
 
 // Info sends a detail request for a once per sweep and caches the reply (or the failure) by cmd
@@ -332,9 +398,14 @@ type evBatch struct {
 	dead bool
 }
 
-// add records err; a non-timeout net error marks the connection dead.
+// add records err; a non-timeout net error marks the connection dead. An info reply the client
+// would drop (errEventInfoNoData) is logged and skipped, not counted as a failure.
 func (b *evBatch) add(err error) {
 	if err == nil {
+		return
+	}
+	if errors.Is(err, errEventInfoNoData) {
+		slog.Info("event info reply carries success and no data; skipped, as the client drops it", "error", err)
 		return
 	}
 	b.errs = append(b.errs, err)
@@ -505,12 +576,29 @@ func evInitEffect(in *Init, id int) int64 {
 //go:generate go run ./genactivities -in ${LASTWAR_TABLES}/activity.json -version ${LASTWAR_TABLE_VERSION} -out activity_tables_gen.go
 
 // activityRow is one row of table `activity` as the client reads it in
-// ActivityInfoData.FetchActivityConfigData: obj.type = tonumber(tabData.type) and
-// obj.needMainCityLevel = tonumber(tabData.needMainCityLevel) or 0 (ActivityInfoData.lua:224-247).
-// activityTable (activity_tables_gen.go) holds every row, whatever its type.
+// ActivityInfoData.FetchActivityConfigData (ActivityInfoData.lua:224-409). activityTable
+// (activity_tables_gen.go) holds every row, whatever its type. Features read the columns through
+// Activity's accessors (SubType, ShowUIType, Para, Para1, Condition, ConditionGiftbag, Group) or
+// activityRowOf, so a per-type list copied from the table can be a lookup instead.
 type activityRow struct {
-	typ    int32
-	needHQ int32
+	typ           int32 // obj.type = tonumber(tabData.type) (:228)
+	needHQ        int32 // obj.needMainCityLevel = tonumber(tabData.needMainCityLevel) or 0 (:247)
+	subType       int32 // tableInfoType: obj.subType = tonumber(tabData.tableInfoType) (:231), 0 when empty
+	showUIType    int32 // showUiType: obj.subViewType = tonumber(tabData.showUiType) or 0 (:232)
+	groupNumber   int32 // group_number: checknumber(tabData.group_number) (:408)
+	groupPriority int32 // group_priority: checknumber(tabData.group_priority) (:409)
+	// The raw string cells: para (:351), para_1 (:358), condition (read per feature) and
+	// condition_giftbag (the SeasonPeriodicCard swap, :352-356).
+	para             string
+	para1            string
+	condition        string
+	conditionGiftbag string
+}
+
+// activityRowOf returns table activity's row for id; false when the generated table lacks it.
+func activityRowOf(id int32) (activityRow, bool) {
+	r, ok := activityTable[id]
+	return r, ok
 }
 
 // activityTypeOf returns the EnumActivity type of activity id from table `activity`; false when

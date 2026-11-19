@@ -182,14 +182,19 @@ func TestParseActivitiesLogsIDsMissingFromTable(t *testing.T) {
 	if len(acts) != 2 || acts[0].ID != 40038 || acts[0].Type != 201 || acts[0].NeedHQ != 15 || acts[1].ID != 99011 {
 		t.Fatalf("activities = %+v, want 40038 (type 201, HQ 15) and 99011; the id missing from the table skipped", acts)
 	}
-	var info []string
+	// An unknown id is a table older than the live one (live was already 40460 when 40413 was
+	// generated), so it logs at Warn, where the cron output shows it.
+	var warn []string
 	for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
 		if strings.Contains(l, "level=INFO") {
-			info = append(info, l)
+			t.Errorf("unexpected INFO line %q", l)
+		}
+		if strings.Contains(l, "level=WARN") {
+			warn = append(warn, l)
 		}
 	}
-	if len(info) != 1 {
-		t.Fatalf("INFO lines = %q, want one, for 424242 only (a known id of an unhandled type stays quiet)", info)
+	if len(warn) != 1 {
+		t.Fatalf("WARN lines = %q, want one, for 424242 only (a known id of an unhandled type stays quiet)", warn)
 	}
 	for _, want := range []string{
 		"id=424242",
@@ -197,8 +202,8 @@ func TestParseActivitiesLogsIDsMissingFromTable(t *testing.T) {
 		"endTime=" + strconv.FormatInt(unknown.GetLong("endTime"), 10),
 		"tableVersion=" + activityTableVersion,
 	} {
-		if !strings.Contains(info[0], want) {
-			t.Errorf("INFO line %q lacks %q", info[0], want)
+		if !strings.Contains(warn[0], want) {
+			t.Errorf("WARN line %q lacks %q", warn[0], want)
 		}
 	}
 	if !strings.Contains(logs.String(), "level=DEBUG msg=\"activity sweep\" parsed=2 notInTable=1") {
@@ -216,7 +221,7 @@ func TestParseActivitiesLogsLastTimeAsEnd(t *testing.T) {
 		t.Fatalf("parsed %+v, want the id missing from the table skipped", got)
 	}
 	if !strings.Contains(logs.String(), "endTime="+strconv.FormatInt(end, 10)) {
-		t.Errorf("INFO must log the lastTime end:\n%s", logs)
+		t.Errorf("the WARN line must log the lastTime end:\n%s", logs)
 	}
 }
 
@@ -226,8 +231,8 @@ func TestParseActivitiesKnownIDsStayQuiet(t *testing.T) {
 	if got := parseActivities(evInit(30, evActivity(5401), evActivity(40038))); len(got) != 2 {
 		t.Fatalf("parsed %+v, want both", got)
 	}
-	if strings.Contains(logs.String(), "level=INFO") {
-		t.Errorf("known ids must not log at INFO:\n%s", logs)
+	if strings.Contains(logs.String(), "level=INFO") || strings.Contains(logs.String(), "level=WARN") {
+		t.Errorf("known ids must not log at INFO or WARN:\n%s", logs)
 	}
 }
 
@@ -285,7 +290,7 @@ func TestActivityTableKeepsTheHandMap(t *testing.T) {
 			t.Errorf("activityNeedHQ(%d) = %d, the hand map had %d", id, got, lv)
 		}
 	}
-	// No other id of the handled types gained an HQ gate (39879 added none).
+	// No other id of the handled types gained an HQ gate (39879 and 40413 added none).
 	for typ := range handMapTypeCounts {
 		for id, lv := range hqByType[typ] {
 			if handMapNeedHQ[id] != lv {
@@ -293,11 +298,106 @@ func TestActivityTableKeepsTheHandMap(t *testing.T) {
 			}
 		}
 	}
-	if r, ok := activityTable[99202]; !ok || r != (activityRow{typ: actTypeSignIn}) {
+	if r, ok := activityTable[99202]; !ok || r.typ != actTypeSignIn || r.needHQ != 0 {
 		t.Errorf("99202 = %+v, %v; want the 2026 Halloween sign-in, type 158 with no HQ gate (new in 39879)", r, ok)
 	}
 	if activityNeedHQ(424242) != 0 {
 		t.Error("an id the table lacks must have no HQ gate")
+	}
+}
+
+// table40413Added are the 79 ids tables 40413 added to table activity over 39879, by type (none
+// was removed or retyped). 99301 is the 2026 Thanksgiving sign-in (desc1 "2026感恩节-签到活动",
+// para1 "2026-11-23-0-0-0"), which sign-in (ON) must see; most of the rest are Season 7 rows.
+var table40413Added = map[int32][]int32{
+	100: {1201007}, 106: {1201025}, 124: {1071002},
+	126: {1071023, 1071024, 1071025, 1071026, 1071027, 1071028, 1071029, 1071030, 1071031},
+	129: {1071011}, 138: {98679, 99305}, 139: {1071012}, 141: {98678, 99306, 2110633, 2110634, 2110635},
+	142: {1071014, 1071015, 1071016, 1201006}, 156: {1071008, 1071009}, 158: {99301},
+	161: {1071018, 1071019, 1071020, 1071021}, 171: {2110632}, 172: {2110631}, 200: {1201016, 1201017},
+	202: {94318, 94319}, 212: {1201003}, 223: {1201001}, 224: {1201002}, 226: {1201011}, 228: {1201008},
+	236: {1201018}, 237: {1200222, 1200223}, 240: {1201009}, 241: {1201010}, 242: {1201004}, 243: {1201012},
+	244: {1201005}, 246: {1201013}, 247: {1201014}, 248: {1201019}, 249: {1201020}, 250: {1201026},
+	252: {2300011, 2300012, 2300013, 2300014, 2300015, 2300017}, 253: {1201029}, 257: {2300016},
+	261: {2300018, 2300019, 2300020, 2300021}, 270: {1201027}, 321: {99302}, 322: {99304},
+	350: {1071005, 1071006}, 353: {1200225}, 389: {1200224}, 391: {1200226}, 397: {1200227},
+	401: {1201030}, 421: {1200403},
+}
+
+func TestActivityTableHas40413Rows(t *testing.T) {
+	if activityTableVersion != "40413" {
+		t.Fatalf("activityTableVersion = %q; these expectations are for 40413", activityTableVersion)
+	}
+	if len(activityTable) != 1451 {
+		t.Errorf("activityTable has %d rows, table activity 40413 has 1451", len(activityTable))
+	}
+	n := 0
+	for typ, ids := range table40413Added {
+		for _, id := range ids {
+			n++
+			if got, ok := activityTypeOf(id); !ok || got != typ {
+				t.Errorf("activityTypeOf(%d) = %d, %v; want type %d (new in 40413)", id, got, ok, typ)
+			}
+		}
+	}
+	if n != 79 {
+		t.Errorf("the fixture lists %d added ids, want 79", n)
+	}
+	// The Thanksgiving sign-in reaches the sign-in feature through the sweep.
+	withEvNow(t, evTestNow)
+	if got := Activities(nil, evInit(30, evActivity(99301))).Open(actTypeSignIn); len(got) != 1 || got[0].ID != 99301 {
+		t.Errorf("Open(sign-in) = %+v, want the 2026 Thanksgiving sign-in 99301", got)
+	}
+}
+
+// TestActivityRowColumns pins the columns genactivities emits beyond type and HQ, with the 40413
+// values the dependent fixes read (each was hand-copied in a feature before).
+func TestActivityRowColumns(t *testing.T) {
+	mk := func(id int32) Activity {
+		typ, _ := activityTypeOf(id)
+		return Activity{ID: id, Type: typ, NeedHQ: activityNeedHQ(id), Raw: evActivity(id)}
+	}
+	cases := []struct {
+		id                           int32
+		subType, showUI, gNum, gPrio int32
+		para, para1, cond, giftbag   string
+	}{
+		// Treasure Hunt v2 S7: activity_dig row 6, not 5 (B10).
+		{id: 1071012, subType: 6, cond: "1|7,8|23"},
+		{id: 1000289, subType: 5, cond: "1|7,8|65"},
+		// Season military S6 and S7: para_1 49 normal days (B7).
+		{id: 1200101, para: "650053", para1: "49", cond: "1|10"},
+		{id: 1200224, para: "650053", para1: "49", cond: "1|10"},
+		// Season week cards: S6 swaps to 10013 from 2026-7-29, S7 has no swap (B19).
+		{id: 1200111, showUI: 7, para: "10007", cond: "1|10", giftbag: "2026-7-29|10013"},
+		{id: 1201008, showUI: 7, para: "10014", para1: "640064|640062|640061", cond: "1|4"},
+		// Crystal boss: condition "1|20", the HQ-20 gate (B12).
+		{id: 80152, subType: 4, para: "5;5|6;5", para1: "5;62,63,64|6;62,63,68", cond: "1|20"},
+		// Personal arms race group (feature_arms_race_chests.go armsRaceGroups).
+		{id: 29, subType: 4, gNum: 100, gPrio: 40, para: "1", cond: "1|7"},
+		// Torch relay row 3 (feature_torch_relay.go torchRelayActivityRows).
+		{id: 99162, subType: 3, cond: "1|4"},
+		// A login battle pass (showUiType 9, feature_battle_pass_overflow.go battlePassLoginPasses).
+		{id: 99044, subType: 2, showUI: 9, para: "7610001;7610002;7610003;7610004;7610005;7610006;7610007", cond: "1|4"},
+		// showUiType "ActivityDailyRank" is no number: tonumber gives nil, the client 0.
+		{id: 11, subType: 1, cond: "1|5"},
+		// An id the table lacks reads as the zero row.
+		{id: 424242},
+	}
+	for _, c := range cases {
+		a := mk(c.id)
+		gNum, gPrio := a.Group()
+		if a.SubType() != c.subType || a.ShowUIType() != c.showUI || gNum != c.gNum || gPrio != c.gPrio ||
+			a.Para() != c.para || a.Para1() != c.para1 || a.Condition() != c.cond || a.ConditionGiftbag() != c.giftbag {
+			t.Errorf("%d: subType %d showUI %d group %d/%d para %q para1 %q condition %q giftbag %q; want %+v",
+				c.id, a.SubType(), a.ShowUIType(), gNum, gPrio, a.Para(), a.Para1(), a.Condition(), a.ConditionGiftbag(), c)
+		}
+	}
+	if _, ok := activityRowOf(424242); ok {
+		t.Error("activityRowOf must report an id the table lacks")
+	}
+	if r, ok := activityRowOf(1201010); !ok || r.typ != actTypeDiggingGame || r.para != "7000" {
+		t.Errorf("activityRowOf(1201010) = %+v, %v; want the S7 digging game, para 7000 (group 7000)", r, ok)
 	}
 }
 
@@ -397,6 +497,129 @@ func TestActivityIDStringPrefersActivityid(t *testing.T) {
 	}
 	if got[5401] != "5401" {
 		t.Errorf("an entry without activityid must use its id, got %q", got[5401])
+	}
+}
+
+func TestActivityEntryIDIgnoresActivityid(t *testing.T) {
+	acts := parseActivities(evInit(30, duelActivity(), evActivity(5401)))
+	for _, a := range acts {
+		if want := strconv.Itoa(int(a.ID)); a.EntryID() != want {
+			t.Errorf("%d: EntryID = %q, want %q (data.id, ActivityListDataManager.lua:281, 423)", a.ID, a.EntryID(), want)
+		}
+	}
+}
+
+// TestEventInfoIDPerType: hero.event.info.get takes data.id for LuckyShop, BattlePass_new and
+// BargainShop (ActivityListDataManager.lua:281, 318-321, 423) and data.activityId for the rest.
+func TestEventInfoIDPerType(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		r := sfs.NewSFSObject()
+		r.PutUtfString("activityId", p.GetString("activityId"))
+		return r
+	})
+	withActivityid := func(id int32, activityid string) *sfs.SFSObject {
+		a := evActivity(id)
+		a.PutUtfString("activityid", activityid)
+		return a
+	}
+	in := evInit(30,
+		duelActivity(),                     // type 14: activityid "70000"
+		withActivityid(5038, "990001"),     // BattlePass_new (142): data.id
+		withActivityid(99020, "990002"),    // BargainShop (155): data.id
+		withActivityid(7001, "990003"),     // LuckyShop (134): data.id
+		withActivityid(99011, "990004"),    // Monopoly (153): data.activityId
+		evActivity(5401),                   // sign-in (158), no activityid: its id
+		withActivityid(99047, "0"),         // slot machine (159): activityid "0" falls back to the id
+		withActivityid(1071014, "1071014"), // BattlePass_new S7, the same either way
+	)
+	s := Activities(conn, in)
+	want := map[int32]string{
+		55000: "70000", 5038: "5038", 99020: "99020", 7001: "7001", 99011: "990004", 5401: "5401",
+		99047: "99047", 1071014: "1071014",
+	}
+	for _, a := range s.All() {
+		if _, err := s.EventInfo(a); err != nil {
+			t.Fatalf("EventInfo(%d): %v", a.ID, err)
+		}
+	}
+	got := map[string]bool{}
+	for _, r := range fake.only("hero.event.info.get") {
+		got[r.Params.GetString("activityId")] = true
+	}
+	for id, w := range want {
+		if !got[w] {
+			t.Errorf("activity %d: no hero.event.info.get with activityId %q; sent %v", id, w, got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("sent %d distinct ids %v, want %d", len(got), got, len(want))
+	}
+}
+
+// TestEventInfoDropsSuccessReply: the client drops a hero.event.info.get reply that carries
+// success (ActivityEventInfoGetMessage.lua:23-29), so EventInfo returns no data and evBatch does
+// not count it as a failure.
+func TestEventInfoDropsSuccessReply(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if p.GetString("activityId") == "99011" {
+			r := sfs.NewSFSObject()
+			r.PutLong("lastReceiveFreeTime", 0)
+			return r
+		}
+		return evOK()
+	})
+	s := Activities(conn, evInit(30, evActivity(99011), evActivity(99047)))
+	open := s.Open()
+	if info, err := s.EventInfo(open[0]); err != nil || info == nil {
+		t.Errorf("a data reply: %v, %v", info, err)
+	}
+	info, err := s.EventInfo(open[1])
+	if info != nil || !errors.Is(err, errEventInfoNoData) {
+		t.Errorf("a success reply: %v, %v; want no data", info, err)
+	}
+	if _, err := s.EventInfo(open[1]); !errors.Is(err, errEventInfoNoData) {
+		t.Errorf("the cached success reply: %v; want no data again", err)
+	}
+	if n := len(fake.only("hero.event.info.get")); n != 2 {
+		t.Errorf("sent %d info requests, want 2 (cached)", n)
+	}
+	b := &evBatch{}
+	b.add(err)
+	if b.err() != nil || b.dead {
+		t.Errorf("evBatch must skip a no-data reply: err %v, dead %v", b.err(), b.dead)
+	}
+}
+
+// TestTorchRelayFreebieSkipsSuccessReply is B61: a type-309 info answered with {success: true}
+// used to read as "never claimed" and send torch.relay.daily.reward.
+func TestTorchRelayFreebieSkipsSuccessReply(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for _, c := range []struct {
+		name  string
+		reply func() *sfs.SFSObject
+		claim int
+	}{
+		{"success only", evOK, 0},
+		{"data, never claimed", func() *sfs.SFSObject {
+			r := sfs.NewSFSObject()
+			r.PutInt("activityType", actTypeTorchRelay)
+			return r
+		}, 1},
+	} {
+		conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+			if cmd == "hero.event.info.get" {
+				return c.reply()
+			}
+			return evOK()
+		})
+		if err := runEventShopFreebies(conn, evInit(30, evActivity(99162))); err != nil {
+			t.Errorf("%s: %v", c.name, err)
+		}
+		if got := len(fake.only("torch.relay.daily.reward")); got != c.claim {
+			t.Errorf("%s: %d torch.relay.daily.reward, want %d (sent %v)", c.name, got, c.claim, fake.cmds())
+		}
 	}
 }
 

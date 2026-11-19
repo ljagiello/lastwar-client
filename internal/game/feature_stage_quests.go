@@ -78,7 +78,7 @@ var stageQuestRanges = []stageQuestRange{
 	{9010201, 9010207, []int64{7002}},
 }
 
-// stageQuestActivityStage is every table activity row 39879 of the five types: id -> its
+// stageQuestActivityStage is every table activity row 40413 of the five types: id -> its
 // tableInfoType (tableInfo activity_stage for all of them), the stage its panel lists.
 var stageQuestActivityStage = map[int32]int64{
 	// Strongest Commander (105)
@@ -90,18 +90,21 @@ var stageQuestActivityStage = map[int32]int64{
 	94023: 94023,
 	94024: 940141, 940141: 940141, 940142: 940141,
 	1000085: 1000085, 1200018: 1200018, 1200067: 1200067, 1200126: 1200126,
+	1201025: 1201025, // S7 Lockhart, tableInfoType 1201025 (tables 40413)
 	// Task events (129)
 	3008: 4, 5103: 4, 6003: 4, 6005: 4, 14002: 4, 94303: 4, 1000225: 4, 1000226: 4, 1000227: 4, 1000271: 4,
 	1000272: 4, 1000288: 4, 1000290: 4, 1000292: 4, 1000294: 4, 1000312: 4, 1000509: 4, 1010235: 4, 1010236: 4,
 	1010239: 4, 1010240: 4, 1020215: 4, 1030215: 4, 1041013: 4, 1051013: 4, 8129001: 4, 8129002: 4, 8129003: 4,
 	8129004: 4,
 	98002:   98002, 98003: 98003, 98006: 98006, 98501: 98501, 98505: 98505, 98509: 98509,
+	1071011: 200, // S7 range task, tableInfoType 200 (tables 40413)
 	// TaskActivity2 (135)
 	7002: 7002,
 	// King (200)
 	85000: 100, 85001: 100, 1000008: 100, 1000020: 100, 1000042: 100, 1000057: 100, 1000076: 100, 1000077: 100,
 	1000081: 100, 1000082: 100, 1000083: 100, 1000084: 100, 1000090: 100, 1200013: 100, 1200014: 100,
 	1200056: 100, 1200057: 100, 1200122: 100, 1200123: 100,
+	1201016: 100, 1201017: 100, // S7 throne war, tableInfoType 100 (tables 40413)
 }
 
 func init() {
