@@ -273,7 +273,7 @@ func runBirthdaySetReward(conn *session.GameConn, in *Init) error {
 		return nil
 	}
 	b := &evBatch{conn: conn}
-	evTaskSend(b, birthdaySetFeature+": claim", birthdaySetRewardCmd, sfs.NewSFSObject(), "birthday", evString(bf, "birthday"))
+	evTaskSend(b, birthdaySetFeature+": claim", birthdaySetRewardCmd, sfs.NewSFSObject(), "birthdaySet", true) // never log the date (PII)
 	return b.err()
 }
 
