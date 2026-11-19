@@ -12,7 +12,7 @@ import (
 // wp9Features are the opt-in claims added for the 1.0.370 audit's work package 9.
 var wp9Features = []string{
 	doomsdayQuestsFeature, parkourTasksFeature, frontBreakTasksFeature, leadingQuestFeature, heroTrialFeature,
-	crazyRockFeature, themeNoticeFeature, offSeasonTasksFeature,
+	crazyRockFeature, themeNoticeFeature, offSeasonTasksFeature, tacticalBoxPointsFeature, tacticalCollectionFeature, lettersFeature, survivorPackFeature,
 }
 
 // TestWP9FeaturesAreOptInAndStaticOnly: every new claim is registered, off by default, and says it
