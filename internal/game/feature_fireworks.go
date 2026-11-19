@@ -462,9 +462,19 @@ type fwBox struct {
 	AllianceID string
 }
 
+// fwBase is a player HQ found on a tile with the statuses on it (BuildInfo field 32), for
+// base-bubbles.
+type fwBase struct {
+	PointID               int32
+	ServerID, SrcServerID int32
+	OwnerUID              string
+	Statuses              []worldStatus
+}
+
 // fwScan is one read of the members' HQ tiles. name prefixes its log lines; server is the map
 // read. pointTypes counts the decoded points by reply key ("points", "alInfos") and pointType;
-// treasures are the treasure points (pointType 21) found, each once.
+// treasures are the treasure points (pointType 21) found, each once; bases are the HQs carrying
+// statuses, each once.
 type fwScan struct {
 	name               string
 	allianceID, ownUID string
@@ -480,6 +490,7 @@ type fwScan struct {
 	boxes              []fwBox
 	pointTypes         map[string]map[int32]int
 	treasures          []worldPoint
+	bases              []fwBase
 	now                time.Time
 	serverClock        bool
 }
@@ -607,7 +618,7 @@ func allianceTileScan(conn *session.GameConn, in *Init, name string, radius int)
 		"blockRadius", radius, "points", sc.points, "alInfos", sc.alInfos, "decodeErrors", sc.decodeErrors, "buildings", sc.buildings,
 		"memberHQs", len(sc.memberHQs), "hqsScanned", len(sc.roster.points), "field54Present", sc.giftLists > 0,
 		"giftLists", sc.giftLists, "fireworkShows", sc.shows, "chests", len(sc.boxes), "treasurePoints", len(sc.treasures),
-		"serverClock", sc.serverClock)
+		"hqsWithStatuses", len(sc.bases), "serverClock", sc.serverClock)
 	return sc, errors.Join(errs...)
 }
 
@@ -674,6 +685,10 @@ func (sc *fwScan) add(pt worldPoint) {
 	sc.buildings++
 	if _, member := sc.roster.byUID[bi.OwnerUID]; member && bi.OwnerUID != "" {
 		sc.memberHQs[bi.OwnerUID] = true
+	}
+	if bi.BuildID == claimHQBuildingID && len(bi.Statuses) > 0 && !slices.ContainsFunc(sc.bases, func(b fwBase) bool { return b.PointID == pt.ID }) {
+		sc.bases = append(sc.bases, fwBase{PointID: pt.ID, ServerID: pt.ServerID, SrcServerID: pt.SrcServerID,
+			OwnerUID: bi.OwnerUID, Statuses: bi.Statuses})
 	}
 	sc.shows += bi.Shows
 	if len(bi.Gifts) > 0 {
