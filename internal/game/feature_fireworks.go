@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"lastwar-client/internal/session"
@@ -24,20 +25,22 @@ import (
 //     (TryInitMemberList, AllianceMemberDataManager.lua:59-73; alliance.uid comes from init via
 //     AllianceBaseDataManager.lua:127-140) and treats the reply as its own alliance when it matches
 //     user.allianceId (PlayerInfo.lua:567-568). This reads alliance.uid, else user.allianceId.
-//  2. world.get.block for the blocks holding those HQs, built like the world scene's viewport
-//     request (WorldGetBlockMessage.CSSetData, A-CS:84179-84214; SendAoiRequest,
-//     A-CS:179237-179286). See fwPlanBlocks for the block arithmetic.
+//  2. world.get.block for the blocks around those HQs, built like the world scene's viewport
+//     request (WorldGetBlockMessage.CSSetData, CS:84579-84616; UpdateLWAoi_Normal,
+//     CS:179758-179842), one rectangle per request with a pause between requests. See
+//     fwPlanBlocksAround for the block arithmetic.
 //  3. points[] and alInfos[] in the reply are protobuf WorldPointInfo blobs (ParseWorldGetBlock,
-//     A-CS:180003-180060), decoded by worldpoint_proto.go.
+//     CS:180719), decoded by worldpoint_proto.go.
 //  4. fireworks only: get.fireworks.gift {uuid: Long, ownerUid: Utf, type: Int} per eligible chest
 //     (GetFireworksGiftMessage.lua:3-8), type being firework.type for the chest's configId. The
 //     claim is free; the launcher spent the firework.
 //
 // A chest is eligible when it was sent before now and less than 120 minutes ago (DataConfig
 // fireworks.k2; the tile applies it to type 1 only, but the chat card to every chest, and the
-// server answers firework_tips_1014 for expired chests), holds fewer claims than its max, belongs
-// to a current alliance member, and, for type 1, sits on a building of this alliance
-// (GetCurAvailableBox, FireworkWorldBuildBubble.lua:253-283). The tile shows no claimers; the
+// server answers firework_tips_1014 for expired chests), holds fewer claims than its max, sits on
+// a building with an owner, and, for type 0, the owner is a current alliance member, for type 1,
+// the building is of this alliance (GetCurAvailableBox, FireworkWorldBuildBubble.lua:281-296: the
+// member lookup is in the type-0 branch only; MASTER B36). The tile shows no claimers; the
 // client's own "got" list is local, so a chest claimed on another device comes back as
 // firework_tips_1016, which is benign.
 //
@@ -57,8 +60,11 @@ import (
 // never entered the world scene. A firework claim scores in no Alliance Duel score row
 // (TB:score has no firework type or value), so neither feature declares Duel.
 //
-// Steps 1-3 are allianceTileScan, which alliance-treasures also uses, reading more blocks around
-// each HQ.
+// Steps 1-3 are allianceTileScan, run once per run (sharedAllianceTileScan, MASTER B34) for every
+// feature that reads the member HQ tiles: fireworks, alliance-treasures and the opt-in
+// alliance-treasure-boxes and base-bubbles. The one scan reads every block within atBlockRadius
+// of each HQ, so al.rank and clearUuidSet go out once (the client sends clearUuidSet only on its
+// first request after entering the world, CS:179977-179982).
 
 const (
 	fireworksRankCmd  = "al.rank"
@@ -88,6 +94,13 @@ var fireworksClaimPace = time.Second
 
 // fwSleep is time.Sleep; tests replace it.
 var fwSleep = time.Sleep
+
+// fwBlockPace is the gap between world.get.block requests, about a camera moved from one cluster
+// of bases to the next; fwBlockSleep is time.Sleep, replaced in tests.
+var (
+	fwBlockPace  = 500 * time.Millisecond
+	fwBlockSleep = time.Sleep
+)
 
 func init() {
 	registerFeature(Feature{
@@ -156,16 +169,38 @@ type fwBlockRequest struct {
 	LeftBottom, RightTop int32
 }
 
-// fwPlanBlocks turns HQ point ids into world.get.block requests: the distinct blocks in
-// ascending order, at most 160 per request (the client sends the first 160 new blocks and the
-// rest on the next update). Each request's leftBottom/rightTop is the rectangle around its
-// blocks, computed like the client's viewport corners, and x/y, the camera tile, is its centre.
+// fwRect is a rectangle of blocks, x0..x1 by y0..y1 inclusive.
+type fwRect struct{ x0, y0, x1, y1 int }
+
+func (r fwRect) area() int { return (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1) }
+
+func (r fwRect) union(o fwRect) fwRect {
+	return fwRect{min(r.x0, o.x0), min(r.y0, o.y0), max(r.x1, o.x1), max(r.y1, o.y1)}
+}
+
+// fwViewWidth is the widest rectangle the planner sends, in blocks: 13 x 12 = 156 stays within the
+// client's 160 blocks per request.
+const fwViewWidth = 13
+
+// fwPlanBlocks turns HQ point ids into world.get.block requests for their own blocks.
 func fwPlanBlocks(points []int64) []fwBlockRequest { return fwPlanBlocksAround(points, 0) }
 
-// fwPlanBlocksAround is fwPlanBlocks for each point's block and every block within radius blocks
-// of it in each direction, clipped to the map.
+// fwPlanBlocksAround plans the world.get.block requests for each point's block and every block
+// within radius blocks of it in each direction, clipped to the map, shaped like the client's
+// camera viewports (MASTER B34; UpdateLWAoi_Normal, CS:179758-179842): one request covers one
+// rectangle of contiguous blocks, its corners as leftBottom/rightTop (the tiles block*10 and
+// block*10 + 10, clamped) and its centre as the camera tile x/y, with at most 160 blocks. The
+// wanted blocks are grouped into clusters of adjacent blocks (8-neighbour); a cluster's bounding
+// rectangle is one request, a cluster too big for one is cut into rectangles of at most
+// fwViewWidth x 12 blocks, each shrunk to the wanted blocks in it, and two rectangles are merged
+// while the merged one stays within 160 blocks and at most twice their summed size. Each
+// request's index lists the blocks of its rectangle row by row, leaving out the blocks an
+// earlier request already read, as the client sends only the blocks not yet in view
+// (`if (!_curViewIndex.Contains(item)) _addViewIndex.Add(item)`). Before the 1.0.370 audit the
+// sorted block list was cut into chunks of 160 whose bounding rectangle could span most of the
+// map.
 func fwPlanBlocksAround(points []int64, radius int) []fwBlockRequest {
-	set := map[int]bool{}
+	want := map[int]bool{}
 	for _, p := range points {
 		x, y, ok := fwTilePos(p)
 		if !ok {
@@ -174,26 +209,125 @@ func fwPlanBlocksAround(points []int64, radius int) []fwBlockRequest {
 		bx, by := x/fwBlockSize, y/fwBlockSize
 		for ny := max(by-radius, 0); ny <= min(by+radius, fwBlockCount-1); ny++ {
 			for nx := max(bx-radius, 0); nx <= min(bx+radius, fwBlockCount-1); nx++ {
-				set[ny*fwBlockCount+nx] = true
+				want[ny*fwBlockCount+nx] = true
 			}
 		}
 	}
+	var rects []fwRect
+	for _, c := range fwClusters(want) {
+		rects = append(rects, fwCutRect(c, want)...)
+	}
+	rects = fwMergeRects(rects)
+	slices.SortFunc(rects, func(a, b fwRect) int { return cmp.Or(cmp.Compare(a.y0, b.y0), cmp.Compare(a.x0, b.x0)) })
+	seen := map[int]bool{}
 	var out []fwBlockRequest
-	for chunk := range slices.Chunk(slices.Sorted(maps.Keys(set)), fwMaxBlocksPerRequest) {
-		minX, minY, maxX, maxY := fwBlockCount, fwBlockCount, 0, 0
+	for _, rc := range rects {
 		var r fwBlockRequest
-		for _, i := range chunk {
-			bx, by := i%fwBlockCount, i/fwBlockCount
-			minX, minY, maxX, maxY = min(minX, bx), min(minY, by), max(maxX, bx), max(maxY, by)
-			r.Index = append(r.Index, int32(i))
+		for by := rc.y0; by <= rc.y1; by++ {
+			for bx := rc.x0; bx <= rc.x1; bx++ {
+				if i := by*fwBlockCount + bx; !seen[i] {
+					seen[i] = true
+					r.Index = append(r.Index, int32(i))
+				}
+			}
 		}
-		lbX, lbY := minX*fwBlockSize, minY*fwBlockSize
-		rtX, rtY := maxX*fwBlockSize+fwBlockSize, maxY*fwBlockSize+fwBlockSize
+		if len(r.Index) == 0 {
+			continue
+		}
+		lbX, lbY := rc.x0*fwBlockSize, rc.y0*fwBlockSize
+		rtX, rtY := rc.x1*fwBlockSize+fwBlockSize, rc.y1*fwBlockSize+fwBlockSize
 		r.LeftBottom, r.RightTop = fwTileIndex(lbX, lbY), fwTileIndex(rtX, rtY)
 		r.X, r.Y = int32((lbX+rtX)/2), int32((lbY+rtY)/2)
 		out = append(out, r)
 	}
 	return out
+}
+
+// fwClusters returns the bounding rectangle of each 8-connected group of blocks in want, in no
+// particular order.
+func fwClusters(want map[int]bool) []fwRect {
+	done := map[int]bool{}
+	var out []fwRect
+	for _, start := range slices.Sorted(maps.Keys(want)) {
+		if done[start] {
+			continue
+		}
+		done[start] = true
+		rc := fwRect{start % fwBlockCount, start / fwBlockCount, start % fwBlockCount, start / fwBlockCount}
+		for stack := []int{start}; len(stack) > 0; {
+			i := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			bx, by := i%fwBlockCount, i/fwBlockCount
+			rc = rc.union(fwRect{bx, by, bx, by})
+			for ny := max(by-1, 0); ny <= min(by+1, fwBlockCount-1); ny++ {
+				for nx := max(bx-1, 0); nx <= min(bx+1, fwBlockCount-1); nx++ {
+					if n := ny*fwBlockCount + nx; want[n] && !done[n] {
+						done[n] = true
+						stack = append(stack, n)
+					}
+				}
+			}
+		}
+		out = append(out, rc)
+	}
+	return out
+}
+
+// fwCutRect returns rc when it fits one request, else its fwViewWidth x 12 pieces that hold a
+// wanted block, each shrunk to the wanted blocks in it.
+func fwCutRect(rc fwRect, want map[int]bool) []fwRect {
+	if rc.area() <= fwMaxBlocksPerRequest {
+		return []fwRect{rc}
+	}
+	w := min(rc.x1-rc.x0+1, fwViewWidth)
+	h := fwMaxBlocksPerRequest / w
+	var out []fwRect
+	for y := rc.y0; y <= rc.y1; y += h {
+		for x := rc.x0; x <= rc.x1; x += w {
+			var piece fwRect
+			found := false
+			for by := y; by <= min(y+h-1, rc.y1); by++ {
+				for bx := x; bx <= min(x+w-1, rc.x1); bx++ {
+					if !want[by*fwBlockCount+bx] {
+						continue
+					}
+					if b := (fwRect{bx, by, bx, by}); found {
+						piece = piece.union(b)
+					} else {
+						piece, found = b, true
+					}
+				}
+			}
+			if found {
+				out = append(out, piece)
+			}
+		}
+	}
+	return out
+}
+
+// fwMergeRects merges, smallest result first, any two rectangles whose union holds at most 160
+// blocks and at most twice their summed size, until no pair qualifies.
+func fwMergeRects(rects []fwRect) []fwRect {
+	for {
+		bi, bj, best := -1, -1, 0
+		for i := range rects {
+			for j := i + 1; j < len(rects); j++ {
+				u := rects[i].union(rects[j]).area()
+				if u > fwMaxBlocksPerRequest || u > 2*(rects[i].area()+rects[j].area()) {
+					continue
+				}
+				if bi < 0 || u < best {
+					bi, bj, best = i, j, u
+				}
+			}
+		}
+		if bi < 0 {
+			return rects
+		}
+		rects[bi] = rects[bi].union(rects[bj])
+		rects = slices.Delete(rects, bj, bj+1)
+	}
 }
 
 // fwBlockParams is WorldGetBlockMessage.CSSetData's request for r on the own server: bigMap 0
@@ -363,7 +497,47 @@ func fwAllianceID(in *Init) string {
 // fireworksScan reads the members' HQ tiles. It returns nil when there is nothing to scan, and a
 // partial scan with the error when some block request failed.
 func fireworksScan(conn *session.GameConn, in *Init) (*fwScan, error) {
-	return allianceTileScan(conn, in, "fireworks", 0)
+	return sharedAllianceTileScan(conn, in, "fireworks")
+}
+
+// allianceTileScanName prefixes the shared scan's log lines.
+const allianceTileScanName = "alliance-tile-scan"
+
+// fwScanRun is one run's alliance tile scan, keyed by (conn, in) like the activity sweep.
+type fwScanRun struct {
+	conn *session.GameConn
+	in   *Init
+	sc   *fwScan
+}
+
+var (
+	fwScanMu    sync.Mutex
+	fwScanCache *fwScanRun
+)
+
+// sharedAllianceTileScan is this run's alliance tile scan (allianceTileScan at atBlockRadius),
+// run by the first feature that needs it; who names that feature in the log. The first caller
+// gets the scan's error; later callers get the same scan and no error, so a failed block request
+// is reported once per run, not once per feature. A new login or init scans again.
+func sharedAllianceTileScan(conn *session.GameConn, in *Init, who string) (*fwScan, error) {
+	fwScanMu.Lock()
+	if r := fwScanCache; r != nil && r.conn == conn && r.in == in {
+		fwScanMu.Unlock()
+		if r.sc != nil {
+			slog.Info(who+": reusing this run's alliance tile scan", "requests", r.sc.requests, "blocks", r.sc.blocks,
+				"failedRequests", r.sc.failed, "chests", len(r.sc.boxes), "treasurePoints", len(r.sc.treasures))
+		} else {
+			slog.Info(who + ": this run's alliance tile scan found nothing to read")
+		}
+		return r.sc, nil
+	}
+	fwScanMu.Unlock()
+	slog.Info(who+": reading the alliance members' HQ tiles", "blockRadius", atBlockRadius)
+	sc, err := allianceTileScan(conn, in, allianceTileScanName, atBlockRadius)
+	fwScanMu.Lock()
+	fwScanCache = &fwScanRun{conn: conn, in: in, sc: sc}
+	fwScanMu.Unlock()
+	return sc, err
 }
 
 // allianceTileScan reads the world blocks holding the members' HQs and, with radius > 0, every
@@ -406,6 +580,9 @@ func allianceTileScan(conn *session.GameConn, in *Init, name string, radius int)
 	}
 	var errs []error
 	for i, r := range reqs {
+		if i > 0 {
+			fwBlockSleep(fwBlockPace)
+		}
 		sc.blocks += len(r.Index)
 		sc.requests++
 		label := fmt.Sprintf("%s: world blocks %d/%d", name, i+1, len(reqs))
@@ -525,10 +702,12 @@ func (sc *fwScan) eligible(b fwBox, claimed map[int64]bool) (bool, string) {
 		return false, "expired"
 	case b.Num >= b.Max:
 		return false, "full"
-	case b.OwnerUID == "" || !member:
-		return false, "owner not an alliance member"
+	case b.OwnerUID == "":
+		return false, "no owner" // the claim sends ownerUid (GetFireworksGiftMessage.lua:4-8)
 	case fwType(b.ConfigID) == 1 && b.AllianceID != sc.allianceID:
 		return false, "type 1 from another alliance"
+	case fwType(b.ConfigID) != 1 && !member:
+		return false, "owner not an alliance member"
 	}
 	return true, ""
 }
