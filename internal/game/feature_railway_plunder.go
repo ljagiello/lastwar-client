@@ -38,20 +38,29 @@ import (
 //   - a truck whose effect 90107 caps the account's wins on it is skipped once that cap is reached.
 //
 // Requests:
-//   - train.list {isRefresh: false}. The client sends true only from its Refresh button and on its
-//     first open of the day.
+//   - train.list {isRefresh: false}. The client sends true from its Refresh button and on the
+//     first list of the server day, which it tells from the device-local PlayerPrefs
+//     REFRESH_TRAIN_LIST_TIME (LWTrainDataManager.lua:170-181). A short run keeps no such memory,
+//     and what true changes on the server is unknown, so the first-of-day true is skipped on
+//     purpose.
 //   - Truck: formation.save.template {index: 8+slot, action: 8, ...}, then
 //     train.attack {uuid, serverId, squadNo, heroInfo, chipEquipGroup?} with the strongest attack
-//     squad.
+//     squad, saved again before every attack (UIHeroFakePVPFormationPanelView.lua:434-436).
 //   - Train: alliance.train.formation {type: 1} before each attack, then alliance.train.attack.kof
 //     {uuid, serverId, teamInfos[3]}, or the legacy alliance.train.attack while init
 //     allianceTrainStartInfo.isFunctionOn is off. The teams come from that reply's
-//     formation.armyUnit1-3, the lineup the client attacks with. Only when the reply has no three
-//     usable teams are the three strongest truck attack squads sent instead (a deviation: the client
-//     would wait for the player to fill the lineup).
+//     formation.armyUnit1-3, the lineup the client attacks with (LWKOFBattleManager:StartBattle,
+//     LWKOFBattleManager.lua:235-253). A lineup with a team without a hero (the client refuses,
+//     500253), or one this client won't send (a hero in two teams, a repeated team buff), leaves
+//     the trains alone. Only when the reply has no lineup at all, no team with a hero, are the
+//     three strongest truck attack squads sent instead (a deviation: the client would wait for
+//     the player to fill the lineup).
 //
-// The server resolves each fight in the reply. E400207 means someone else got there first, and the
-// next target is tried. Any other refusal, a timeout or a dead connection stops the run.
+// The server resolves each fight in the reply, and the run logs its outcome: isWin on the KOF
+// reply (UILWKOFCampaignView.lua:609-611), win on the legacy one (UILW3V3CampaignView.lua:597),
+// extraPlunder, retake and mail_id on a truck's (FakePVPLogic.lua:740-762). E400207 means someone
+// else got there first, and the next target is tried. Any other refusal, a timeout or a dead
+// connection stops the run.
 const (
 	railwayPlunderFeature = "railway-plunder"
 	railwayDailyRobs      = 4 // train_para 11
@@ -192,14 +201,25 @@ type railwayAttacker struct {
 	power int64
 }
 
+// railwayLineupState is what alliance.train.formation's lineup lets the run do.
+type railwayLineupState int
+
+const (
+	railwayLineupNone    railwayLineupState = iota // no team with a hero: the reply has no lineup
+	railwayLineupOK                                // three teams, sent as they are
+	railwayLineupRefused                           // a lineup the client refuses or this client won't send
+)
+
 // railwayLineup reads alliance.train.formation's formation.armyUnit1-3 as three attack teams
-// (LWKOFBattleManager:ParseOneAtkTeam). ok is false unless all three have a slot 1..5 hero, no hero
-// sits in two teams, and the team buffs are distinct.
-func railwayLineup(reply *sfs.SFSObject) ([]railwaySquad, bool) {
+// (LWKOFBattleManager:ParseOneAtkTeam). The state is railwayLineupNone when no team has a slot
+// 1..5 hero, and railwayLineupOK only when all three have one, no hero sits in two teams, and the
+// team buffs are distinct. StartBattle refuses a lineup with some but not all teams filled
+// (500253); it sends a hero in two teams or a repeated buff as is, but those would count a hero's
+// power twice or break the distinct-buff rule (500262), so this client won't.
+func railwayLineup(reply *sfs.SFSObject) ([]railwaySquad, railwayLineupState) {
 	f := evObject(reply, "formation")
-	var teams []railwaySquad
-	heroes := map[int64]bool{}
-	buffs := map[int32]bool{}
+	teams := make([]railwaySquad, 0, 3)
+	filled := 0
 	for i, k := range []string{"armyUnit1", "armyUnit2", "armyUnit3"} {
 		u := evObject(f, k)
 		// ArenaArmyFormationInfo:ParseData: chip set 1 when absent, the team index when <= 0.
@@ -217,22 +237,34 @@ func railwayLineup(reply *sfs.SFSObject) ([]railwaySquad, bool) {
 				sq.chip = 0
 			}
 		}
-		if n, ok := claimInt(u, "soldierType"); ok && n > 0 {
-			sq.soldier = int32(n)
+		sq.readSoldier(u)
+		if sq.mainHeroes() > 0 {
+			filled++
 		}
-		if u == nil || sq.mainHeroes() == 0 || (sq.squadNo != 0 && buffs[sq.squadNo]) {
-			return nil, false
+		teams = append(teams, sq)
+	}
+	switch filled {
+	case 0:
+		return nil, railwayLineupNone
+	case len(teams):
+	default:
+		return nil, railwayLineupRefused
+	}
+	heroes := map[int64]bool{}
+	buffs := map[int32]bool{}
+	for _, sq := range teams {
+		if sq.squadNo != 0 && buffs[sq.squadNo] {
+			return nil, railwayLineupRefused
 		}
 		buffs[sq.squadNo] = true
 		for _, h := range sq.heroes {
 			if h.index <= 5 && heroes[h.uuid] {
-				return nil, false
+				return nil, railwayLineupRefused
 			}
 			heroes[h.uuid] = true
 		}
-		teams = append(teams, sq)
 	}
-	return teams, true
+	return teams, railwayLineupOK
 }
 
 func runRailwayPlunder(conn *session.GameConn, in *Init) error {
@@ -321,9 +353,10 @@ func runRailwayPlunder(conn *session.GameConn, in *Init) error {
 		return out
 	}
 
-	// attack sends one attack and reports whether to go on with the next target.
+	// attack sends one attack and reports whether to go on with the next target. winKey names the
+	// reply's outcome flag ("" when the reply has none).
 	var errs []error
-	attack := func(label, cmd string, p *sfs.SFSObject, t railwayTarget) bool {
+	attack := func(label, cmd, winKey string, p *sfs.SFSObject, t railwayTarget) bool {
 		msg, err := session.SendAndWait(conn, label, cmd, p)
 		if msg == nil {
 			errs = append(errs, err)
@@ -341,22 +374,30 @@ func runRailwayPlunder(conn *session.GameConn, in *Init) error {
 		if n, ok := claimInt(msg.Params, "dailyRobCount"); ok {
 			robs = max(robs, n)
 		}
-		slog.Info(feature+": plundered", "type", t.typ, "uuid", t.uuid, "serverId", t.serverID, "defence", t.power,
-			"robsToday", robs, "granted", describeGrants(msg.Params))
+		attrs := []any{"type", t.typ, "uuid", t.uuid, "serverId", t.serverID, "defence", t.power,
+			"robsToday", robs, "granted", describeGrants(msg.Params)}
+		if won, ok := claimBool(msg.Params, winKey); ok {
+			attrs = append(attrs, "won", won)
+		}
+		for _, k := range []string{"extraPlunder", "retake"} {
+			if msg.Params.Has(k) {
+				attrs = append(attrs, k, describeGrants(msg.Params, k))
+			}
+		}
+		if id, ok := claimString(msg.Params, "mail_id"); ok {
+			attrs = append(attrs, "mailId", id)
+		}
+		slog.Info(feature+": attacked", attrs...)
 		return true
 	}
 
 	best := squads[0]
-	saved := false
 	for _, t := range targets("ls", trainTypeTruck, best.power) {
 		if robs >= railwayDailyRobs {
 			break
 		}
-		if !saved {
-			if err := railwaySaveSquad(conn, feature, best.railwaySquad, railwayAttackAction); err != nil {
-				return errors.Join(append(errs, err)...)
-			}
-			saved = true
+		if err := railwaySaveSquad(conn, feature, best.railwaySquad, railwayAttackAction); err != nil {
+			return errors.Join(append(errs, err)...)
 		}
 		p := sfs.NewSFSObject()
 		p.PutLong("uuid", t.uuid)
@@ -366,14 +407,14 @@ func runRailwayPlunder(conn *session.GameConn, in *Init) error {
 		if best.chip >= 1 && best.chip <= 4 {
 			p.PutInt("chipEquipGroup", best.chip)
 		}
-		if !attack(feature+" truck", "train.attack", p, t) {
+		if !attack(feature+" truck", "train.attack", "", p, t) {
 			return errors.Join(errs...)
 		}
 	}
 
-	cmd := "alliance.train.attack"
+	cmd, winKey := "alliance.train.attack", "win"
 	if railwayBool(in.Object("allianceTrainStartInfo"), "isFunctionOn") {
-		cmd = "alliance.train.attack.kof"
+		cmd, winKey = "alliance.train.attack.kof", "isWin"
 	}
 	// The train list is filtered with the best possible lineup first; each train is then checked
 	// again against the lineup actually sent.
@@ -401,9 +442,10 @@ func runRailwayPlunder(conn *session.GameConn, in *Init) error {
 		if err != nil || reply == nil {
 			return errors.Join(append(errs, err)...)
 		}
-		teams, ok := railwayLineup(reply.Params)
+		teams, state := railwayLineup(reply.Params)
 		var teamPower int64
-		if ok {
+		switch state {
+		case railwayLineupOK:
 			for _, sq := range teams {
 				p := power(sq)
 				if p <= 0 {
@@ -412,8 +454,11 @@ func runRailwayPlunder(conn *session.GameConn, in *Init) error {
 				}
 				teamPower += p
 			}
-		} else {
+		case railwayLineupNone:
 			teams, teamPower = fallback, fallbackPower
+		default:
+			slog.Info(feature + ": the saved train lineup has a team without a hero, a hero in two teams or a repeated team buff; trains left alone")
+			return errors.Join(errs...)
 		}
 		if len(teams) != 3 || teamPower <= 0 {
 			slog.Info(feature + ": no three attack teams with known power; trains left alone")
@@ -438,7 +483,7 @@ func runRailwayPlunder(conn *session.GameConn, in *Init) error {
 		p.PutLong("uuid", t.uuid)
 		p.PutInt("serverId", int32(t.serverID))
 		p.PutSFSArray("teamInfos", arr)
-		if !attack(feature+" train", cmd, p, t) {
+		if !attack(feature+" train", cmd, winKey, p, t) {
 			break
 		}
 	}
