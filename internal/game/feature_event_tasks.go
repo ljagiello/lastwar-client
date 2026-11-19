@@ -24,12 +24,14 @@ import (
 //     has_rewards (LWDoomsdayManager.lua:98-136). The claim-all button sends
 //     activity.doomsday.quest.reward {uuid: UtfString "all"} (UIDoomsdayAchievePage.lua:99-103;
 //     ActivityDoomsdayQuestRewardMessage.lua:4-7).
+//
 //   - parkour-tasks (G28, cov-ui-activity F6): Multiple Parkour (type 301). hero.event.info.get
 //     (ActivityListDataManager.lua:497-501) answers taskArr[{taskId, state}]
 //     (MultipleParkourActivityManager.lua:3-15, via :1171-1172); the claim-all button is
 //     interactable while a task has state 1 and sends multiply.task.reward {activityId: Int,
 //     taskId: UtfString "0"} (UIActivityMultipleParkourRewardsView.lua:146-161;
 //     MultipleParkourTaskRewardMessage.lua:5-9).
+//
 //   - front-break-tasks (G28): Front Break Sunday (type 312). hero.event.info.get (:674-678)
 //     answers taskArr[{taskId, state}] and soldierBox[{id, state, target}]
 //     (ActFrontBreakSundayData.lua:53-74). The claim-all button works like Parkour's and sends
@@ -40,15 +42,18 @@ import (
 //     every box click sends (FrontBreakoutSunday.lua:423-445;
 //     FrontBreakSundaySaveSoliderRewardMessage.lua:5-9). Never the stage fights, which report
 //     client results.
+//
 //   - leading-quest-tasks (G28): Leading Quest V2 (type 219, EnumType.lua:6353). hero.event.info.get
 //     (:579-583) answers taskArr[{taskId, state}] (LWLeadingQuestV2Manager.lua:14-23); each task in
 //     state 1 sends power.up.task.reward {activityId: Int, taskId: UtfString}
 //     (LeadingQuestItemV2.lua:156-160; PowerUpTaskRewardMessage.lua:4-8).
+//
 //   - hero-trial-stage (G28): Hero Trial (type 133, EnumType.lua:6374). hero.event.info.get (:377-379)
 //     answers cur_stage and stageArr[{id, state, reward}] (ActivityEventInfo.lua:361); the stage
 //     whose id is cur_stage is claimable in state 1 (UIHeroTrial.GetEventCanRewardCount,
 //     UIHeroTrial.lua:511-526), and the button sends hero.experiment.reward {activityId: Int}
 //     (:447-449; HeroExperimentRewardMessage.lua:5-8).
+//
 //   - crazy-rock-tasks (G29, cov-dc-events F3 and its verdict): Crazy Rock (type 186,
 //     EnumType.lua:6483). music.game.activity.info {activityId: Int} (ActivityListDataManager.lua:
 //     764-767; MusicGameActivityInfoMessage.lua:4-7) answers taskArr[{taskId or id, state}]
@@ -57,6 +62,7 @@ import (
 //     {activityId: Int, taskId: Int 0} (UIActCrazyRockTaskView.lua:129-139; :124-126;
 //     MusicReceiveTaskRewardMessage.lua:4-8). The claim reply carries taskArr[{taskId, state}] and
 //     reward (:38-60). Never music.game.start / music.game.over (client-reported score).
+//
 //   - theme-prenotice (G52, cov-dc-events F6 and its verdict): a theme activity (type 30,
 //     ActivitySummary, EnumType.lua:6319) asks for its pre-notice rewards before it starts
 //     (ThemeActivityManager.lua:24-41; the type-30 branch skips CheckIsSend,
@@ -70,11 +76,16 @@ import (
 //     40413 have no type-30 row, so the sweep (which needs the type from table activity) sees none
 //     until a regenerated table has one.
 //
+//   - sand-worm-tasks (G28): Sand Worm Hunt (type 240, EnumType.lua:6396). With the activity in the
+//     list the client sends sandworm.task.info {} (ActivityListDataManager.lua:189-192;
+//     SandWormHuntDataManager.lua:144-153), whose achievement[] and daily[] hold {id, state}; a task in
+//     state 1 is claimable (GetCanReceive, :219-242) and its button sends sandworm.task.claim.reward
+//     {taskId: UtfString} (SandWormTaskItem.lua:173-178; SandWormTaskClaimRewardMessage.lua:4-7).
+//
 // Not automated here (G28): Kill Zombie (107) per-level rewards need the difficulty rows and the
-// monster.challenge.get.info extra data (ActionRewardItem.lua:81-160); Sand Worm Hunt (240), Bingo
-// (171), Easter Egg (185) and the season wasteland chests keep their state in managers this package
-// has not read line by line; week.card.special.reward stays a documented deferral
-// (feature_card_dailies.go).
+// monster.challenge.get.info extra data (ActionRewardItem.lua:81-160); Bingo (171), Easter Egg
+// (185) and the season wasteland chests keep their state in managers this package has not read
+// line by line; week.card.special.reward stays a documented deferral (feature_card_dailies.go).
 const (
 	doomsdayQuestsFeature   = "doomsday-quests"
 	doomsdayActType         = 157
@@ -101,6 +112,10 @@ const (
 	themeNoticeActType      = 30
 	themeNoticeInfoCmd      = "get.theme.activity.info"
 	themeNoticeRewardCmd    = "receive.theme.activity.reward"
+	sandWormFeature         = "sand-worm-tasks"
+	sandWormActType         = 240
+	sandWormTaskInfoCmd     = "sandworm.task.info"
+	sandWormTaskRewardCmd   = "sandworm.task.claim.reward"
 	themeNoticeDays         = 3        // ThemeActivityNoticeDays
 	themeNoticeDayMs        = 86400000 // OneDayTime * 1000
 	eventTaskStateClaimable = 1        // TaskState.CanReceive, and the boxes' CanGet
@@ -121,6 +136,8 @@ func init() {
 			Summary: "OPT-IN: claim the Hero Trial current stage's reward once it is complete (static-only, not validated live)"},
 		{Name: crazyRockFeature, Run: runCrazyRockTasks,
 			Summary: "OPT-IN: claim Crazy Rock (music festival) task rewards with the client's claim-all (static-only, not validated live)"},
+		{Name: sandWormFeature, Run: runSandWormTasks,
+			Summary: "OPT-IN: claim completed Sand Worm Hunt achievement and daily tasks one by one (static-only, not validated live)"},
 		{Name: themeNoticeFeature, Run: runThemeNotice,
 			Summary: "OPT-IN: claim a theme activity's pre-notice day rewards before it starts; no type-30 row in tables 40413 (static-only, not validated live)"},
 	} {
@@ -362,6 +379,43 @@ func runCrazyRockTasks(conn *session.GameConn, in *Init) error {
 		c.PutInt("activityId", a.ID)
 		c.PutInt("taskId", 0)
 		evTaskSend(b, crazyRockFeature+": claim all", crazyRockRewardCmd, c, "activity", a.ID, "claimable", len(due))
+	}
+	return b.err()
+}
+
+func runSandWormTasks(conn *session.GameConn, in *Init) error {
+	if in == nil || in.Raw == nil {
+		return nil
+	}
+	s := Activities(conn, in)
+	b := &evBatch{conn: conn}
+	acts := s.Open(sandWormActType)
+	if len(acts) == 0 {
+		return nil
+	}
+	// The task info carries no activity id: one read covers the event.
+	info, err := s.Info(sandWormFeature+" task info", sandWormTaskInfoCmd, acts[0], sfs.NewSFSObject())
+	if err != nil {
+		b.add(err)
+		return b.err()
+	}
+	var due []string
+	for _, list := range []string{"achievement", "daily"} {
+		for _, t := range claimObjectsOrMap(info, list) {
+			if st, ok := evNum(t, "state"); ok && st == eventTaskStateClaimable {
+				if id := evString(t, "id"); id != "" {
+					due = append(due, id)
+				}
+			}
+		}
+	}
+	slog.Info(sandWormFeature+": task info", "activity", acts[0].ID, "claimable", due)
+	for _, id := range due {
+		p := sfs.NewSFSObject()
+		p.PutUtfString("taskId", id)
+		if !evTaskSend(b, sandWormFeature+": task "+id, sandWormTaskRewardCmd, p) {
+			break // the first refusal stops the claims
+		}
 	}
 	return b.err()
 }

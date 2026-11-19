@@ -12,8 +12,42 @@ import (
 // wp9Features are the opt-in claims added for the 1.0.370 audit's work package 9.
 var wp9Features = []string{
 	doomsdayQuestsFeature, parkourTasksFeature, frontBreakTasksFeature, leadingQuestFeature, heroTrialFeature,
-	crazyRockFeature, themeNoticeFeature, offSeasonTasksFeature, tacticalBoxPointsFeature, tacticalCollectionFeature, lettersFeature, survivorPackFeature, expiredItemsFeature,
-	skyBattleBoxesFeature, newbieArenaFeature, birthdaySetFeature,
+	crazyRockFeature, themeNoticeFeature, offSeasonTasksFeature, tacticalBoxPointsFeature, tacticalCollectionFeature,
+	lettersFeature, survivorPackFeature, expiredItemsFeature, skyBattleBoxesFeature, newbieArenaFeature,
+	birthdaySetFeature, masteryNewbieFeature, counterAttackFeature, sandWormFeature,
+}
+
+func TestSandWormTasksClaimEachDoneTask(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		r := evOK()
+		if cmd == sandWormTaskInfoCmd {
+			r.PutSFSArray("achievement", evTasks("id", map[string]int32{"301": 1, "302": 2}))
+			r.PutSFSArray("daily", evTasks("id", map[string]int32{"401": 0, "402": 1}))
+		}
+		return r
+	})
+	if err := runSandWormTasks(conn, evInit(30, evActivity(1000069))); err != nil {
+		t.Fatal(err)
+	}
+	var sent []string
+	for _, r := range fake.only(sandWormTaskRewardCmd) {
+		if v, _ := r.Params.Get("taskId"); v.Type != sfs.SFSUtfString {
+			t.Errorf("taskId type = %d, want UtfString", v.Type)
+		}
+		sent = append(sent, r.Params.GetString("taskId"))
+	}
+	if !slices.Equal(sent, []string{"301", "402"}) {
+		t.Errorf("claimed %v, want 301 and 402", sent)
+	}
+
+	conn, fake = startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+	if err := runSandWormTasks(conn, evInit(30, evActivity(99152))); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.cmds(); len(got) != 0 {
+		t.Errorf("sent %v without a Sand Worm Hunt", got)
+	}
 }
 
 // TestWP9FeaturesAreOptInAndStaticOnly: every new claim is registered, off by default, and says it

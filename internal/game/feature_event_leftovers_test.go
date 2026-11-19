@@ -145,10 +145,10 @@ func TestBirthdaySetReward(t *testing.T) {
 		rewarded any
 		claim    bool
 	}{
-		{"set, never rewarded", "1990-05-04", nil, true},
-		{"set, rewarded false", "1990-05-04", false, true},
-		{"set, rewarded true", "1990-05-04", true, false},
-		{"set, rewarded 0 is truthy in Lua", "1990-05-04", int32(0), false},
+		{"set, never rewarded", "5-4", nil, true}, // month-day (BirthdayDataManager.lua:246-253)
+		{"set, rewarded false", "5-4", false, true},
+		{"set, rewarded true", "5-4", true, false},
+		{"set, rewarded 0 is truthy in Lua", "5-4", int32(0), false},
 		{"not set", "", nil, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -170,5 +170,97 @@ func TestBirthdaySetReward(t *testing.T) {
 				t.Errorf("claimed %v, want %v", got, c.claim)
 			}
 		})
+	}
+}
+
+func TestMasteryNewbieReward(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		status, level int32
+		claim         bool
+	}{
+		{"status 1 at level 10", 1, 10, true},
+		{"status 1 below level 10", 1, 9, false},
+		{"already claimed (2)", 2, 15, false},
+		{"no status", 0, 15, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			in := evInit(30)
+			m := sfs.NewSFSObject()
+			m.PutInt("level", c.level)
+			if c.status != 0 {
+				m.PutInt("newbieRewardStatus", c.status)
+			}
+			in.Raw.PutSFSObject("desertTalent", m)
+			conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+			if err := runMasteryNewbieReward(conn, in); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(fake.only(masteryNewbieClaimCmd)) == 1; got != c.claim {
+				t.Errorf("claimed %v, want %v", got, c.claim)
+			}
+		})
+	}
+}
+
+// counterAttackInit is an Init in an alliance (or not) with the Counter Attack activity 1000016
+// (type 226) open.
+func counterAttackInit(inAlliance bool) *Init {
+	in := evInit(30, evActivity(1000016))
+	if inAlliance {
+		u := sfs.NewSFSObject()
+		u.PutUtfString("allianceId", "fake-alliance")
+		in.Raw.PutSFSObject("user", u)
+	}
+	return in
+}
+
+func TestCounterAttackRoundsClaimAll(t *testing.T) {
+	withEvNow(t, evTestNow)
+	rounds := func(states ...int32) func(string, *sfs.SFSObject) *sfs.SFSObject {
+		return func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+			r := evOK()
+			if cmd == counterAttackInfoCmd {
+				a := sfs.NewSFSArray()
+				for i, st := range states {
+					e := sfs.NewSFSObject()
+					e.PutInt("round", int32(i+1))
+					e.PutInt("state", st)
+					a.AddSFSObject(e)
+				}
+				r.PutSFSArray("allianceRoundReward", a)
+			}
+			return r
+		}
+	}
+	conn, fake := startEvFake(t, rounds(2, 1, 0))
+	if err := runCounterAttackRounds(conn, counterAttackInit(true)); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.cmds(); !slices.Equal(got, []string{counterAttackInfoCmd, counterAttackClaimCmd}) {
+		t.Fatalf("sent %v", got)
+	}
+	info, claim := fake.requests()[0].Params, fake.requests()[1].Params
+	if info.GetInt("aid") != 1000016 || info.GetInt("type") != 1 {
+		t.Errorf("info params = %v, want {aid: 1000016, type: 1}", info)
+	}
+	if v, _ := claim.Get("all"); v.Type != sfs.SFSBool || v.Val != true || claim.GetInt("round") != 1 || claim.GetInt("aid") != 1000016 {
+		t.Errorf("claim params = %v, want {aid: 1000016, round: 1, all: true}", claim)
+	}
+
+	conn, fake = startEvFake(t, rounds(2, 0))
+	if err := runCounterAttackRounds(conn, counterAttackInit(true)); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.only(counterAttackClaimCmd); len(got) != 0 {
+		t.Errorf("claimed %v with no round in state 1", got)
+	}
+
+	conn, fake = startEvFake(t, rounds(1))
+	if err := runCounterAttackRounds(conn, counterAttackInit(false)); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.cmds(); len(got) != 0 {
+		t.Errorf("sent %v outside an alliance", got)
 	}
 }
