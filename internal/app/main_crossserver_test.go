@@ -1517,7 +1517,7 @@ func TestCrossServerTestOptsStringGoStringRedact(t *testing.T) {
 // deviceprofile/v4 POST must not go out at all (and a WARN says why); without it, the same run does
 // make that POST, which proves the request counter below actually sees it.
 func TestRunCrossServerTestShumeiGenSkippedInIOSMode(t *testing.T) {
-	run := func(t *testing.T, iosMode bool) (log string, profilePosts int32) {
+	run := func(t *testing.T, iosMode bool, switches string) (log string, profilePosts int32) {
 		t.Setenv("HOME", t.TempDir())
 
 		client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{
@@ -1527,6 +1527,7 @@ func TestRunCrossServerTestShumeiGenSkippedInIOSMode(t *testing.T) {
 			},
 			At: &gsl.LoginToken{Token: "fresh-token"},
 		})
+		withCheckVersionFields(t, client, map[string]any{"client_config": switches})
 		var posts atomic.Int32
 		base := client.Transport
 		client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -1553,7 +1554,7 @@ func TestRunCrossServerTestShumeiGenSkippedInIOSMode(t *testing.T) {
 	}
 
 	t.Run("iOS mode -> no deviceprofile POST, WARN", func(t *testing.T) {
-		log, posts := run(t, true)
+		log, posts := run(t, true, clientConfig(25))
 		if posts != 0 {
 			t.Errorf("deviceprofile/v4 POSTs = %d, want 0 in iOS mode", posts)
 		}
@@ -1563,12 +1564,24 @@ func TestRunCrossServerTestShumeiGenSkippedInIOSMode(t *testing.T) {
 	})
 
 	t.Run("Android mode -> deviceprofile POST goes out", func(t *testing.T) {
-		log, posts := run(t, false)
+		log, posts := run(t, false, clientConfig(25))
 		if posts != 1 {
 			t.Errorf("deviceprofile/v4 POSTs = %d, want 1 outside iOS mode", posts)
 		}
 		if strings.Contains(log, "ignoring -cs-shumei-gen in iOS mode") {
 			t.Errorf("log = %s\nwant no iOS-mode skip WARN outside iOS mode", log)
+		}
+	})
+
+	// ClientSwitch 25 off: the client never asks the ShuMei SDK (Assembly-CSharp.decompiled.cs:59937,
+	// 60044-60058), so nothing is minted (1.0.370 audit B41).
+	t.Run("Android mode, ClientSwitch 25 off -> no deviceprofile POST", func(t *testing.T) {
+		log, posts := run(t, false, clientConfig())
+		if posts != 0 {
+			t.Errorf("deviceprofile/v4 POSTs = %d, want 0 with switch 25 off", posts)
+		}
+		if !strings.Contains(log, "ClientSwitch 25 (ShuMei SDK) off") {
+			t.Errorf("log = %s\nwant the switch-25 skip line", log)
 		}
 	})
 }

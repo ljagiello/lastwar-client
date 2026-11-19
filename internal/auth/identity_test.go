@@ -125,8 +125,8 @@ func TestBuildLoginParamsConditionalFields(t *testing.T) {
 				wantPackageName = iosPackageName
 				wantPlatform = "0"
 				wantPf = "AppStore"
-				wantAppVersion = "1.0.344"
-				wantVersionCode = "786"
+				wantAppVersion = "1.0.370"
+				wantVersionCode = "918"
 			}
 			if got := p.GetString("packageName"); got != wantPackageName {
 				t.Errorf("PackageName = %q, want %q", got, wantPackageName)

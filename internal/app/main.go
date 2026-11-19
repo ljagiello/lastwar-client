@@ -198,6 +198,7 @@ func Run() {
 		}
 		if err := writeOwnDeviceSession(gsl.DefaultHTTPClient(), *ownDeviceSession, *csIOS); err != nil {
 			slog.Error("own-device bootstrap failed", "error", err)
+			exitIfForcedUpdate(err, nil)
 			exitIfReauthNeeded(err)
 			os.Exit(1)
 		}
@@ -313,13 +314,14 @@ func Run() {
 		cfg, cfgSource = loadEffectiveConfig(*configPath)
 	}
 	var cfgAppVersion, cfgVersionCode string
+	var cfgDevice auth.CapturedDevice
 	var cfgFeatures map[string]bool
 	var cfgDuelPolicy map[string]string
 	var cfgShumeiInstall shumei.Install
 	var cfgRefreshTok string
 	var cfgAccessTokTime, cfgRefreshTokTime int64
 	if cfg != nil {
-		cfgAppVersion, cfgVersionCode, cfgFeatures = cfg.AppVersion, cfg.VersionCode, cfg.Features
+		cfgAppVersion, cfgVersionCode, cfgFeatures, cfgDevice = cfg.AppVersion, cfg.VersionCode, cfg.Features, cfg.Device
 		cfgDuelPolicy, cfgShumeiInstall = cfg.DuelPolicy, cfg.ShumeiInstall
 		// The config's token times describe the config's own tokens: at.time means nothing for a
 		// -cs-at token. The refresh token is taken after the deviceId merge below.
@@ -415,10 +417,11 @@ func Run() {
 			slog.Error("invalid -cs-shumei-* flag", "error", err)
 			os.Exit(1)
 		}
+		appVersion, versionCode := reconnectBuild(cfg != nil, *csIOS, cfgAppVersion, cfgVersionCode)
 		o := crossServerTestOpts{
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
-			iosMode: *csIOS, appVersion: cfgAppVersion, versionCode: cfgVersionCode,
+			iosMode: *csIOS, appVersion: appVersion, versionCode: versionCode, device: cfgDevice,
 			features: cfgFeatures, duelPolicy: cfgDuelPolicy, runFeature: *runFeature, runAnyway: *runAnyway,
 			interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
@@ -526,12 +529,29 @@ func accessTokenStale(gameUid, accessTok string, accessTokTime int64, refreshTok
 	return gsl.ChooseOpt(gsl.OptState{GameUid: gameUid, AccessTok: accessTok, AccessTokTime: accessTokTime, RefreshTok: refreshTok}, time.Now()).Opt == "refresh"
 }
 
-// exitLoginFailed logs a failed auth.Login and exits: 4 for a blocked account, role, device or IP
-// (ErrAccountBlocked), 2 for any other confirmed server-side auth rejection (ErrAuthRejected, or
-// GSL 211/212), 1 for anything else.
+// reconnectBuild is the build a cross-server reconnect claims. A session config that names no
+// appVersion/versionCode was made, and its token issued, under the builds the defaults named before
+// they moved to 1.0.370 (auth.LegacyConfigBuild), so a reconnect from one keeps claiming those, with
+// a Warn to add the fields: a token is bound to its build. A config that names a build, and a
+// reconnect from bare flags, claim what they name or the current defaults.
+func reconnectBuild(fromConfig, iosMode bool, appVersion, versionCode string) (string, string) {
+	if !fromConfig || appVersion != "" || versionCode != "" {
+		return appVersion, versionCode
+	}
+	appVersion, versionCode = auth.LegacyConfigBuild(iosMode)
+	slog.Warn("the session config names no appVersion/versionCode; claiming the build such configs always have, not the current release. "+
+		"Add the build the token was issued under to the config (cmd/pcap -session-out records it)",
+		"appVersion", appVersion, "versionCode", versionCode, "iosMode", iosMode)
+	return appVersion, versionCode
+}
+
+// exitLoginFailed logs a failed auth.Login and exits: 5 for a forced update (gsl.ErrForcedUpdate),
+// 4 for a blocked account, role, device or IP (ErrAccountBlocked), 2 for any other confirmed
+// server-side auth rejection (ErrAuthRejected, or GSL 211/212), 1 for anything else.
 func exitLoginFailed(err error) {
 	slog.Error("login failed", "error", err)
 	exitIfSessionEnded(err, nil)
+	exitIfForcedUpdate(err, nil)
 	exitIfAccountBlocked(err)
 	exitIfReauthNeeded(err)
 	// Exit code 2 (rather than the generic 1) specifically marks a
@@ -670,6 +690,29 @@ const exitCodeSessionEnded = 3
 // distinct from 2 because a fresh capture or a token refresh can't fix it, so a cron wrapper
 // should stop the scheduled runs.
 const exitCodeAccountBlocked = 4
+
+// exitCodeForcedUpdate is the exit code for a run the server stopped with a forced update
+// (gsl.ErrForcedUpdate: updateType 2 from check-version or a Login reply). The real client loads
+// nothing until the app is updated, so this run makes no GSL call or Login after it. It is distinct
+// from 1-4 so a cron wrapper can alert "move appVersion/versionCode to the current release" without
+// parsing the log.
+const exitCodeForcedUpdate = 5
+
+// exitIfForcedUpdate exits with exitCodeForcedUpdate when err carries gsl.ErrForcedUpdate, and
+// returns otherwise. conn may be nil.
+func exitIfForcedUpdate(err error, conn *session.GameConn) {
+	if !errors.Is(err, gsl.ErrForcedUpdate) {
+		return
+	}
+	slog.Error("the server demands a forced update of the build this run claims; the real client stops here. "+
+		"Move the session config's appVersion/versionCode to the current release (recapture with cmd/pcap -session-out), "+
+		"or update the built-in defaults",
+		"error", err, "exitCode", exitCodeForcedUpdate)
+	if conn != nil {
+		_ = conn.Close()
+	}
+	os.Exit(exitCodeForcedUpdate)
+}
 
 // exitIfAccountBlocked exits with exitCodeAccountBlocked when err carries
 // session.ErrAccountBlocked, and returns otherwise. The caller has already logged err, which
@@ -1131,11 +1174,12 @@ func printVersion() {
 
 type crossServerTestOpts struct {
 	ip, zone, gameUid, deviceID, shumeiBoxId, rt, at, interactive string
-	appVersion, versionCode                                       string            // session config only; see SessionConfig.AppVersion
-	features                                                      map[string]bool   // session config only; see SessionConfig.Features
-	duelPolicy                                                    map[string]string // session config only; see SessionConfig.DuelPolicy
-	runFeature                                                    string            // -run: run just this feature, then exit
-	runAnyway                                                     bool              // -run-anyway
+	appVersion, versionCode                                       string              // session config only; see SessionConfig.AppVersion
+	device                                                        auth.CapturedDevice // session config only; see SessionConfig.Device
+	features                                                      map[string]bool     // session config only; see SessionConfig.Features
+	duelPolicy                                                    map[string]string   // session config only; see SessionConfig.DuelPolicy
+	runFeature                                                    string              // -run: run just this feature, then exit
+	runAnyway                                                     bool                // -run-anyway
 	port                                                          int
 	handshake, iosMode, collect, listBuildings, shumeiGen         bool
 	shumeiDevice                                                  shumei.Device  // -cs-shumei-ssid/-bssid/-boot, for -cs-shumei-gen
@@ -1203,6 +1247,24 @@ func (o crossServerTestOpts) GoString() string { return o.String() }
 // rationale, shared across every credential-bearing type in this codebase.
 func (o crossServerTestOpts) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
+// loginShumeiBoxID is the shumeiBoxId the Login carries for the configured one (-cs-shumei or the
+// session config's). The client sends the ShuMei id only while ClientSwitch 25 is on, and ""
+// otherwise (ShumeiSdkManager.GetLoginSmsdkId, Assembly-CSharp.decompiled.cs:59937, 60044-60058,
+// 1.0.370), so a configured value is replayed only then; without a check-version reply it is
+// replayed as before. Either way the session config keeps it.
+func loginShumeiBoxID(cv *gsl.CheckVersionResponse, configured string) string {
+	if configured == "" {
+		return ""
+	}
+	if !cv.ShumeiSDKOn() {
+		slog.Info("not sending the configured shumeiBoxId: check-version has ClientSwitch 25 (ShuMei SDK) off, so the real client's Login carries shumeiBoxId \"\"",
+			"configuredLen", len(configured))
+		return ""
+	}
+	slog.Info("replaying the configured shumeiBoxId in the Login", "configuredLen", len(configured), "switch25Known", cv != nil)
+	return configured
+}
+
 // mintsShumeiBoxID reports whether runCrossServerTest registers with ShuMei: -cs-shumei-gen is set,
 // no shumeiBoxId was given, and the Login isn't iOS (the fingerprint is an Android profile). Run
 // checks the session config's shumeiInstall only then, so a bad one can't stop a run that never
@@ -1262,7 +1324,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 	var cv *gsl.CheckVersionResponse
 	var gslRSAPub *rsa.PublicKey
 	var gslGateHost string
-	if reply, gateHost, err := auth.CheckVersionFor(httpClient, o.iosMode, o.appVersion, o.versionCode, zone); err != nil {
+	if reply, gateHost, err := auth.CheckVersionFor(httpClient, o.iosMode, o.appVersion, o.versionCode, zone, deviceID); err != nil {
+		// A forced update is an answer, not a failure: the client stops before GSL and the Login.
+		exitIfForcedUpdate(err, nil)
 		if o.rt != "" {
 			slog.Error("check-version failed", "error", err)
 			os.Exit(1)
@@ -1283,8 +1347,10 @@ func runCrossServerTest(o crossServerTestOpts) {
 
 	if o.rt != "" {
 		platform := auth.PlatformName(o.iosMode)
-		slog.Info("GSL getserverlist (opt=refresh)", "platform", platform)
-		lsr, err := gsl.GetServerListAs(httpClient, gslGateHost, gslRSAPub, platform, deviceID, gsl.GSLOpt{Opt: "refresh", Rt: o.rt}, "", o.gameUid)
+		slog.Info("GSL getserverlist (opt=refresh)", "platform", platform, "zone", zone)
+		// zone is the session's, as the client sends its cached SERVER_ZONE with every opt
+		// (GetServerListRequest, Assembly-CSharp.decompiled.cs:77411, 77437).
+		lsr, err := gsl.GetServerListAs(httpClient, gslGateHost, gslRSAPub, platform, deviceID, gsl.GSLOpt{Opt: "refresh", Rt: o.rt}, zone, o.gameUid)
 		if err != nil {
 			// Unlike the ErrAuthRejected-gated os.Exit(2) sites elsewhere in this file (the
 			// plain-login failure in main(), and the SFS2X cross-server-login failure further
@@ -1415,6 +1481,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		t, err := auth.RefreshTokens(auth.TokenRefresh{
 			HTTPClient: httpClient, GateHost: gslGateHost, RSAPub: gslRSAPub,
 			DeviceID: deviceID, IOSMode: o.iosMode, Zone: zone, GameUid: gameUid, RefreshTok: refreshTok,
+			Device: o.device,
 		})
 		if err != nil {
 			return err
@@ -1455,21 +1522,44 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 
 	// Without -cs-rt (whose refresh reply already lists the servers), GSL getserverlist looks the
-	// game server up, as the real client does on every cold start: before dialing when no address
-	// was given, and once more if the given one can't be reached. The lookup needs check-version's
-	// gate host and RSA key, a gameUid (without one GSL would treat this device as new) and an
-	// access token (without one the Login fails anyway).
+	// game server up, as the real client does on every cold start (ClearServerNetworkInfo, then
+	// GetServerList: Assembly-CSharp.decompiled.cs:9332, 7210-7225, 1.0.370): before every Login,
+	// and once more if the address it gave can't be reached. The lookup needs check-version's gate
+	// host and RSA key, a gameUid (without one GSL would treat this device as new) and an access
+	// token (without one the Login fails anyway).
 	var lookup func() (auth.GameServer, error)
 	if o.rt == "" && gslRSAPub != nil && gameUid != "" && accessTok != "" {
 		lookup = func() (auth.GameServer, error) {
 			return auth.LookupGameServer(auth.ServerLookup{
 				HTTPClient: httpClient, GateHost: gslGateHost, RSAPub: gslRSAPub,
 				DeviceID: deviceID, IOSMode: o.iosMode, Zone: zone, GameUid: gameUid, AccessTok: accessTok,
+				Device: o.device,
 			})
 		}
 	}
+	// adoptLookup takes a lookup's address and, as the client's SaveGameLoginToken does
+	// (Assembly-CSharp.decompiled.cs:12777, 7482-7492), any non-empty token it carried. The tokens
+	// reach the session config through the save-back after a successful Login, not before it. An
+	// access token typed as -cs-at is the operator's choice and stays.
+	adoptLookup := func(srv auth.GameServer) {
+		ip, port, zone = srv.IP, srv.Port, srv.Zone
+		switch {
+		case srv.AccessTok == "" || srv.AccessTok == accessTok:
+		case o.atExplicit:
+			slog.Warn("the GSL lookup reply carries another access token; keeping the -cs-at given on the command line")
+		default:
+			accessTok, accessTokTime = srv.AccessTok, srv.AccessTokTime
+		}
+		if srv.RefreshTok != "" {
+			refreshTok, refreshTokTime = srv.RefreshTok, srv.RefreshTokTime
+		}
+	}
 	lookedUp := false
-	if lookup != nil && (gsl.FirstHost(ip) == "" || port <= 0) && !o.ipExplicit && !o.portExplicit {
+	addressGiven := gsl.FirstHost(ip) != "" && port > 0
+	switch {
+	case lookup == nil || o.ipExplicit || o.portExplicit:
+		// An address typed on the command line is used as given.
+	case !addressGiven:
 		slog.Info("no game server address given; looking it up with GSL getserverlist")
 		srv, err := lookup()
 		if err != nil {
@@ -1477,8 +1567,26 @@ func runCrossServerTest(o crossServerTestOpts) {
 			exitIfReauthNeeded(err)
 			os.Exit(1)
 		}
-		ip, port, zone = srv.IP, srv.Port, srv.Zone
+		adoptLookup(srv)
 		lookedUp = true
+	case refreshed:
+		// This run's GSL call was the refresh: the client makes one per cold start, and its
+		// opt=refresh reply is the one it takes the server list from.
+	default:
+		// A configured address is the fallback. The lookup failing in any way, a 211/212 included,
+		// keeps it and changes nothing else (1.0.370 audit B40; what a 211/212 should stop is the
+		// user's call, MASTER §6.1 #6).
+		slog.Info("looking the game server up with GSL getserverlist before the Login, as the real client does on every cold start; the configured address is the fallback")
+		if srv, err := lookup(); err != nil {
+			slog.Warn("GSL server lookup failed; logging in at the configured address", "error", err)
+		} else {
+			if !sameGameServer(srv, ip, port, zone) {
+				slog.Info("GSL lists a different game server than the configured one; logging in there", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone,
+					"configuredIP", ip, "configuredPort", port, "configuredZone", zone)
+			}
+			adoptLookup(srv)
+			lookedUp = true
+		}
 	}
 
 	// Symmetric to the port <= 0 check just below, but arguably more important to catch here
@@ -1567,15 +1675,19 @@ func runCrossServerTest(o crossServerTestOpts) {
 
 	resVersion := auth.ResVersionFrom(cv, o.iosMode, o.appVersion, o.versionCode)
 
-	shumeiBoxId, shumeiInstall := o.shumeiBoxId, o.shumeiInstall
+	shumeiBoxId, shumeiInstall := loginShumeiBoxID(cv, o.shumeiBoxId), o.shumeiInstall
 	if !o.shumeiGen && (o.shumeiDevice.WiFi != nil || !o.shumeiDevice.BootTime.IsZero()) {
 		slog.Warn("ignoring -cs-shumei-ssid/-cs-shumei-bssid/-cs-shumei-boot without -cs-shumei-gen: they only shape a generated shumeiBoxId")
 	}
-	if o.shumeiGen && shumeiBoxId == "" && o.iosMode {
+	if o.shumeiGen && o.shumeiBoxId == "" && o.iosMode {
 		// shumei.BoxID registers an Android device profile (os "android", package
 		// com.fun.lastwar.gp), while an iOS-mode Login claims com.lastwar.ios -- a pairing the real
 		// client can never produce. Stay on the empty shumeiBoxId the server already accepts.
 		slog.Warn("ignoring -cs-shumei-gen in iOS mode: it mints an Android device fingerprint, which an iOS Login never carries; continuing with an empty shumeiBoxId (the server accepts it)")
+	} else if o.mintsShumeiBoxID() && !cv.ShumeiSDKOn() {
+		// With switch 25 off the client never asks the ShuMei SDK and its Login carries
+		// shumeiBoxId "" (Assembly-CSharp.decompiled.cs:59937, 60044-60058).
+		slog.Info("not generating a shumeiBoxId: check-version has ClientSwitch 25 (ShuMei SDK) off, so the real client sends shumeiBoxId \"\"")
 	} else if o.mintsShumeiBoxID() {
 		// Register this device with ShuMei's deviceprofile/v4 endpoint to obtain a real
 		// device-fingerprint token (the backend-assigned `smid`), instead of sending an empty
@@ -1596,7 +1708,13 @@ func runCrossServerTest(o crossServerTestOpts) {
 		Handshake: o.handshake, IOSMode: o.iosMode,
 		AppVersion: o.appVersion, VersionCode: o.versionCode,
 		ResVersion: resVersion,
+		NoZstd:     !cv.NewPacketZstd(),
+		Device:     o.device,
 		DialGame:   o.dialGame,
+	}
+	if o.iosMode && o.device.PhoneModel == "" {
+		slog.Warn("the session config has no captured device (phone_model, osVersion, mt, idfv, ...), so the iOS Login sends this client's placeholders, " +
+			"phone_model \"GoClient\" among them; recapture the real app with cmd/pcap -session-out to replay its own")
 	}
 	result, err := auth.DoCrossServerLogin(params)
 	if err != nil && lookup != nil && !lookedUp && connectFailed(err) {
@@ -1606,8 +1724,8 @@ func runCrossServerTest(o crossServerTestOpts) {
 		} else if sameGameServer(srv, ip, port, zone) {
 			slog.Warn("GSL lists the game server that just failed; not retrying")
 		} else {
-			ip, port, zone = srv.IP, srv.Port, srv.Zone
-			params.IP, params.Port, params.Zone = ip, port, zone
+			adoptLookup(srv)
+			params.IP, params.Port, params.Zone, params.AccessTok = ip, port, zone, accessTok
 			result, err = auth.DoCrossServerLogin(params)
 		}
 	}
@@ -1629,6 +1747,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	if err != nil {
 		slog.Error("cross-server login failed", "error", err)
 		exitIfSessionEnded(err, nil)
+		exitIfForcedUpdate(err, nil)
 		exitIfAccountBlocked(err)
 		if errors.Is(err, session.ErrTokenRejected) {
 			if !refreshed {
@@ -1662,7 +1781,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 	if o.configSavePath != "" {
 		if newHost, newPortStr, splitErr := net.SplitHostPort(result.Addr); splitErr == nil {
 			if newPort, atoiErr := strconv.Atoi(newPortStr); atoiErr == nil {
-				if crossServerSaveBackNeeded(newHost, newPort, result.Zone, result.AccessTok, result.GameUid, origIP, origPort, origZone, origAccessTok, origGameUid) {
+				// A refresh token a GSL lookup handed back (adoptLookup) is saved too.
+				if crossServerSaveBackNeeded(newHost, newPort, result.Zone, result.AccessTok, result.GameUid, origIP, origPort, origZone, origAccessTok, origGameUid) ||
+					refreshTok != o.refreshTok {
 					savedIP := newHost
 					if newPort == port && slices.Contains(strings.Split(ip, "|"), newHost) {
 						savedIP = ip // keep the gateway fallback list the connection came from
@@ -1681,6 +1802,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
 						AccessTokenTime: accessTokTime, RefreshToken: refreshTok, RefreshTokenTime: refreshTokTime,
 						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
+						Device:   o.device,
 						Features: o.features, DuelPolicy: o.duelPolicy, ShumeiInstall: savedInstall,
 					}
 					if err := SaveSessionConfig(updated, o.configSavePath); err != nil {

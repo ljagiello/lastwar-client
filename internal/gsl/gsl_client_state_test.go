@@ -77,7 +77,7 @@ func TestCheckVersionSendsTableEnvAndZone(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, _, err := CheckVersion(DefaultHTTPClient(), "APS783")
+	cv, _, err := CheckVersion(DefaultHTTPClient(), "APS783", "")
 	if err != nil {
 		t.Fatalf("CheckVersion: %v", err)
 	}

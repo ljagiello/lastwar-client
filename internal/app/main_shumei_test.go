@@ -313,6 +313,8 @@ func runSaveBackWith(t *testing.T, o crossServerTestOpts, server func(*session.G
 		ServerList: []gsl.LoginServerInfo{{IP: "10.9.8.7", Port: testutil.FlexPort(20443), Zone: "APS-REAL", GameUid: "uid-real"}},
 		At:         &gsl.LoginToken{Token: "fresh-access-token"},
 	})
+	// ClientSwitch 25 on: the client asks the ShuMei SDK only then (1.0.370 audit B41).
+	withCheckVersionFields(t, gslClient, map[string]any{"client_config": clientConfig(25)})
 	inner := gslClient.Transport
 	o.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if strings.HasSuffix(r.URL.Path, "/deviceprofile/v4") {

@@ -36,6 +36,10 @@ type SessionConfig struct {
 	// bound to it); empty means the built-in defaults. cmd/pcap -session-out fills both in.
 	AppVersion  string `json:"appVersion,omitempty"`
 	VersionCode string `json:"versionCode,omitempty"`
+	// Device is what the captured iOS Login said about its device (phone_model, osVersion, mt,
+	// idfv, ...; auth.CapturedDevice). cmd/pcap -session-out records it from an iOS capture, and an
+	// iOS-mode Login replays it instead of placeholders. Ignored in Android mode.
+	Device auth.CapturedDevice `json:"device,omitzero"`
 	// RefreshToken (with GSL's at.time/rt.time, unix seconds of issue) is present for the client's
 	// own device (-own-device-session), or after a -cs-rt run. As in the real client, a run refreshes
 	// with it (GSL opt=refresh) when the access token is missing or 30 days old, and once after a

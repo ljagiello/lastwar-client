@@ -52,8 +52,8 @@ func dumpLoginParams(p *sfs.SFSObject) string {
 func TestProductionIOSLoginParamsGolden(t *testing.T) {
 	got := dumpLoginParams(BuildLoginParams(productionIOSLoginInput()))
 	const want = `_id 4 [1]
-netType 4 [2]
-ta 8 [{"#os":"iOS","#disk":"50.0/100.0","#device_id":"00000000-0000-0000-0000-000000000000","#os_version":"0.0","#system_language":"en","#bundle_id":"com.lastwar.ios","#carrier":"","#app_version":"1.0.370","#fps":0,"#ram":"0.0/0.0","#simulator":false,"#zone_offset":0,"#manufacturer":"Apple","#screen_height":0,"#network_type":"WIFI","#device_model":"unknown","#screen_width":0,"#install_time":"2000-01-01 00:00:00.000","lw_net":"wifi","lw_res_version":"2172.1514_836F_40460.23686","lw_buildcode":"918","lw_line":"","pd_dl":0,"lw_ab":"0","lw_platform":"AppStore","lw_game_session_id":"00000000-0000-0000-0000-000000000000","lw_first_launch":false,"lw_alliance_id":"00000000000000000000000000000000","lw_device_id":"","lw_device_level":0,"lw_main_level":0,"lw_shumei_id":"","lw_airKey":"","lw_version":"0.0.0","lw_power":0,"lw_zone":"APS783"}]
+netType 4 [1]
+ta 8 [{"#os":"iOS","#disk":"50.0/100.0","#device_id":"00000000-0000-0000-0000-000000000000","#os_version":"0.0","#system_language":"en","#bundle_id":"com.lastwar.ios","#carrier":"","#app_version":"1.0.370","#fps":0,"#ram":"0.0/0.0","#simulator":false,"#zone_offset":0,"#manufacturer":"Apple","#screen_height":0,"#network_type":"WIFI","#device_model":"unknown","#screen_width":0,"#install_time":"2000-01-01 00:00:00.000","lw_net":"wifi","lw_res_version":"2172.1514_836F_40460.23686","lw_buildcode":"918","lw_line":"","pd_dl":0,"lw_ab":"0","lw_platform":"AppStore","lw_game_session_id":"00000000-0000-0000-0000-000000000000","lw_first_launch":false,"lw_alliance_id":"00000000000000000000000000000000","lw_device_id":"","lw_device_level":0,"lw_main_level":0,"lw_shumei_id":"","lw_airKey":"","lw_version":"1.0.370","lw_power":0,"lw_zone":"APS783"}]
 distinct_id 8 []
 phone_screen 8 [1920*1080]
 configVersion 18 [object(0 keys)]

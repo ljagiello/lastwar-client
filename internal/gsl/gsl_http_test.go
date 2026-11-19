@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"lastwar-client/internal/crypto"
 	"log/slog"
@@ -33,7 +34,7 @@ func TestCheckVersionAgainstFakeServer(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, host, err := CheckVersion(DefaultHTTPClient(), "")
+	cv, host, err := CheckVersion(DefaultHTTPClient(), "", "")
 	if err != nil {
 		t.Fatalf("CheckVersion: %v", err)
 	}
@@ -64,7 +65,7 @@ func TestCheckVersionResponseFieldsAcceptStringOrNumber(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, _, err := CheckVersion(DefaultHTTPClient(), "")
+	cv, _, err := CheckVersion(DefaultHTTPClient(), "", "")
 	if err != nil {
 		t.Fatalf("CheckVersion: %v", err)
 	}
@@ -104,7 +105,7 @@ func TestCheckVersionFallsBackToNextHostOnConnectionFailure(t *testing.T) {
 	CheckVersionHosts = []string{"http://127.0.0.1:1", server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, host, err := CheckVersion(DefaultHTTPClient(), "")
+	cv, host, err := CheckVersion(DefaultHTTPClient(), "", "")
 	if err != nil {
 		t.Fatalf("CheckVersion: %v, want it to fall back to the second, working host", err)
 	}
@@ -144,7 +145,7 @@ func TestCheckVersionLogsEachHostFailureBeforeFallingBackToNext(t *testing.T) {
 	var buf bytes.Buffer
 	orig := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	cv, host, err := CheckVersion(DefaultHTTPClient(), "")
+	cv, host, err := CheckVersion(DefaultHTTPClient(), "", "")
 	slog.SetDefault(orig)
 
 	if err != nil {
@@ -181,7 +182,7 @@ func TestCheckVersionRejectsServerErrorCode(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, _, err := CheckVersion(DefaultHTTPClient(), "")
+	cv, _, err := CheckVersion(DefaultHTTPClient(), "", "")
 	if err == nil {
 		t.Fatalf("CheckVersion: expected an error for a non-empty rejection code, got nil (cv=%+v)", cv)
 	}
@@ -206,7 +207,7 @@ func TestCheckVersionRejectsOversizedResponse(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	_, _, err := CheckVersion(DefaultHTTPClient(), "")
+	_, _, err := CheckVersion(DefaultHTTPClient(), "", "")
 	if err == nil {
 		t.Fatal("CheckVersion: expected an error for an oversized response, got nil")
 	}
@@ -242,7 +243,7 @@ func TestCheckVersionAcceptsExactlyMaxSizeResponse(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	cv, host, err := CheckVersion(DefaultHTTPClient(), "")
+	cv, host, err := CheckVersion(DefaultHTTPClient(), "", "")
 	if err != nil {
 		t.Fatalf("CheckVersion() error = %v, want nil for a response body of exactly MaxGSLResponseSize bytes (the boundary value, not over the cap)", err)
 	}
@@ -271,7 +272,7 @@ func TestCheckVersionRejectsNon200Status(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	_, _, err := CheckVersion(DefaultHTTPClient(), "")
+	_, _, err := CheckVersion(DefaultHTTPClient(), "", "")
 	if err == nil {
 		t.Fatal("CheckVersion: expected an error for a non-200 HTTP status, got nil")
 	}
@@ -298,7 +299,7 @@ func TestCheckVersionRejectsMalformedJSON(t *testing.T) {
 	CheckVersionHosts = []string{server.URL}
 	defer func() { CheckVersionHosts = origHosts }()
 
-	_, _, err := CheckVersion(DefaultHTTPClient(), "")
+	_, _, err := CheckVersion(DefaultHTTPClient(), "", "")
 	if err == nil {
 		t.Fatal("CheckVersion: expected an error for a malformed JSON body, got nil")
 	}
@@ -339,7 +340,7 @@ func TestGetServerListAgainstFakeServer(t *testing.T) {
 // TestGetServerListSuccessfulEncryptedRoundTrip is the round-51 regression test for the MAJOR
 // finding that GetServerList's actual production code path -- a "bin" field present, non-empty,
 // and successfully AES-decrypted and JSON-decoded -- had zero test coverage (gsl.go's
-// "ApplyLoginServerFallback(&lsr, opt); return &lsr, nil" success return, reached only from inside
+// "return &lsr, nil" success return, reached only from inside
 // the bin-present-and-decodable branch). TestGetServerListAgainstFakeServer above deliberately
 // tests the PLAINTEXT-fallback path (no "bin" field at all); every "bin"-field test in
 // TestGetServerListDecodeFailuresDoNotLeakRawResponse below deliberately injects a decode/decrypt
@@ -404,23 +405,17 @@ func TestGetServerListSuccessfulEncryptedRoundTrip(t *testing.T) {
 	}
 }
 
-// TestGetServerListFallsBackToLoginServerWhenServerListEmpty covers the opt=new fallback added to
-// ApplyLoginServerFallback (gsl.go): a fake GSL server returns an empty ServerList but a populated
-// LoginServer -- the field AccountServerInfo's own doc comment says exists specifically for a
-// brand-new device with no account/state yet (opt=new). Before this fallback, login.go's caller
-// unconditionally treated an empty ServerList as "no servers returned" for every opt, including
-// this exact opt=new case the field documents itself as covering. This does not assert anything
-// about real server behavior (no live capture of this scenario exists in this repo yet) -- it only
-// confirms GetServerList's own, conservative, additive fallback logic behaves as coded.
-func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
+// TestGetServerListEmptyServerListIsE120EvenWithLoginServer: a reply with code 0, no server entries
+// and a loginServer is E120 to the 1.0.370 client (Assembly-CSharp.decompiled.cs:12690-12704);
+// loginServer is the account-select server, never a game server (:12797-12802). Go used to turn it
+// into a server list entry for opt=new and send a game Login to the account server (1.0.370 audit
+// B79). The entry list must stay empty for every opt, and Err must report ErrEmptyServerList.
+func TestGetServerListEmptyServerListIsE120EvenWithLoginServer(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate RSA key: %v", err)
 	}
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Same plaintext-fallback shape as TestGetServerListAgainstFakeServer, but with an empty
-		// ServerList and a populated LoginServer instead.
 		resp := LoginServerListRespon{
 			Code:       "0",
 			ServerList: []LoginServerInfo{},
@@ -435,41 +430,20 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 	}))
 	defer server.Close()
 
-	lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "new"}, "", "")
-	if err != nil {
-		t.Fatalf("GetServerList: %v", err)
-	}
-	if len(lsr.ServerList) != 1 {
-		t.Fatalf("ServerList = %+v, want a single synthesized entry from LoginServer", lsr.ServerList)
-	}
-	got := lsr.ServerList[0]
-	if got.IP != "9.9.9.9" || got.Port != flexPort(12345) || got.WsIP != "9.9.9.9" {
-		t.Errorf("synthesized ServerList[0] = %+v, want IP/Port/WsIP from LoginServer", got)
-	}
-
-	// Same scenario but for a non-"new" opt: the fallback must NOT fire, so callers like
-	// crossserver.go's opt=fix redirect-refresh and main.go's opt=refresh see zero behavior
-	// change -- an empty ServerList must still surface as empty, letting the existing "no
-	// servers returned" handling in those callers behave exactly as it did before this fix.
-	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := LoginServerListRespon{
-			Code:       "0",
-			ServerList: []LoginServerInfo{},
-			LoginServer: &AccountServerInfo{
-				IP:   "9.9.9.9",
-				Port: flexPort(12345),
-			},
+	for _, opt := range []GSLOpt{{Opt: "new"}, {Opt: "fix"}, {}} {
+		lsr, err := GetServerList(DefaultHTTPClient(), server.URL, &priv.PublicKey, "test-device", opt, "", "")
+		if err != nil {
+			t.Fatalf("opt=%q: GetServerList: %v", opt.Opt, err)
 		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer server2.Close()
-
-	lsrFix, err := GetServerList(DefaultHTTPClient(), server2.URL, &priv.PublicKey, "test-device", GSLOpt{Opt: "fix"}, "", "")
-	if err != nil {
-		t.Fatalf("GetServerList: %v", err)
-	}
-	if len(lsrFix.ServerList) != 0 {
-		t.Errorf("ServerList = %+v, want it to stay empty for opt=fix (fallback is scoped to opt=new only)", lsrFix.ServerList)
+		if len(lsr.ServerList) != 0 {
+			t.Errorf("opt=%q: ServerList = %+v, want it empty (loginServer is not a game server)", opt.Opt, lsr.ServerList)
+		}
+		if lsr.LoginServer == nil || lsr.LoginServer.IP != "9.9.9.9" {
+			t.Errorf("opt=%q: LoginServer = %+v, want it decoded as sent", opt.Opt, lsr.LoginServer)
+		}
+		if err := lsr.Err(); !errors.Is(err, ErrEmptyServerList) {
+			t.Errorf("opt=%q: Err() = %v, want ErrEmptyServerList (E120)", opt.Opt, err)
+		}
 	}
 }
 
@@ -480,8 +454,7 @@ func TestGetServerListFallsBackToLoginServerWhenServerListEmpty(t *testing.T) {
 // ENTIRE GetServerList response. Sends a response with loginServer/at/rt all as `[]` instead of
 // `{}`/absent, and confirms GetServerList still succeeds, with ServerList/Code/LastLoggedServer
 // intact and LoginServer/At/Rt all nil -- the same "absent" behavior every consumer already
-// expects (ApplyLoginServerFallback's `lsr.LoginServer == nil` check, login.go's/crossserver.go's/
-// main.go's `lsr.At != nil` checks).
+// expects (login.go's/crossserver.go's/main.go's `lsr.At != nil` checks).
 func TestGetServerListLoginServerAtRtAcceptEmptyArrayShape(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -522,8 +495,7 @@ func TestGetServerListLoginServerAtRtAcceptEmptyArrayShape(t *testing.T) {
 // json.Unmarshal for the ENTIRE GetServerList response with no recovery path anywhere (Login()
 // returns the error immediately). Sends a response with serverList as `{}` instead of `[]`/absent,
 // and confirms GetServerList still succeeds, with ServerList degrading to empty (the same "no
-// servers returned" case Login()'s own len(lsr.ServerList)==0 check and ApplyLoginServerFallback's
-// opt=new synthesis already handle) and Code/LastLoggedServer still intact.
+// servers returned" case Err already reports as E120) and Code/LastLoggedServer still intact.
 func TestGetServerListServerListAcceptsObjectShape(t *testing.T) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -1273,9 +1245,7 @@ func TestGetServerListNameIPWsIPZoneAcceptsStringOrNumber(t *testing.T) {
 }
 
 // TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber is
-// TestGetServerListPortIDAcceptsStringOrNumber's sibling for AccountServerInfo.Port/WsPort,
-// exercised through the opt=new ApplyLoginServerFallback path that actually reads them (see
-// TestGetServerListFallsBackToLoginServerWhenServerListEmpty).
+// TestGetServerListPortIDAcceptsStringOrNumber's sibling for AccountServerInfo.Port/WsPort.
 func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1300,11 +1270,8 @@ func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testin
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
-			if len(lsr.ServerList) != 1 {
-				t.Fatalf("ServerList = %+v, want a single synthesized entry from LoginServer", lsr.ServerList)
-			}
-			if got := lsr.ServerList[0].Port.Int("port"); got != 8443 {
-				t.Errorf("synthesized ServerList[0].Port.Int() = %d, want 8443", got)
+			if got := lsr.LoginServer.Port.Int("port"); got != 8443 {
+				t.Errorf("LoginServer.Port.Int() = %d, want 8443", got)
 			}
 			if got := lsr.LoginServer.WsPort.Int("ws_port"); got != 8443 {
 				t.Errorf("LoginServer.WsPort.Int() = %d, want 8443", got)
@@ -1317,9 +1284,7 @@ func TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber(t *testin
 // TestGetServerListAccountServerInfoPortWsPortAcceptsStringOrNumber's sibling for
 // AccountServerInfo.IP/WsIP -- round-42 regression test for the MAJOR finding that these two
 // fields were still bare string while Port/WsPort on the same struct were already FlexString.
-// ApplyLoginServerFallback copies AccountServerInfo.IP directly into the synthesized
-// LoginServerInfo.IP (also FlexString as of this round), so this proves the value round-trips
-// intact through both structs with no conversion loss.
+// This proves the value decodes intact with no conversion loss.
 func TestGetServerListAccountServerInfoIPWsIPAcceptsStringOrNumber(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1344,11 +1309,8 @@ func TestGetServerListAccountServerInfoIPWsIPAcceptsStringOrNumber(t *testing.T)
 			if err != nil {
 				t.Fatalf("GetServerList: %v", err)
 			}
-			if len(lsr.ServerList) != 1 {
-				t.Fatalf("ServerList = %+v, want a single synthesized entry from LoginServer", lsr.ServerList)
-			}
-			if got := lsr.ServerList[0].IP.String(); got != "1001" {
-				t.Errorf("synthesized ServerList[0].IP.String() = %q, want %q", got, "1001")
+			if got := lsr.LoginServer.IP.String(); got != "1001" {
+				t.Errorf("LoginServer.IP.String() = %q, want %q", got, "1001")
 			}
 			if got := lsr.LoginServer.WsIP.String(); got != "1001" {
 				t.Errorf("LoginServer.WsIP.String() = %q, want %q", got, "1001")

@@ -8,10 +8,11 @@ import (
 
 // CheckVersionFor fetches check-version as the build a Login will claim: the iOS build under
 // -cs-ios, otherwise the Android build. zone is the session's zone ("APS783"), or "" when it is
-// not known yet. The reply's host is the gate for the GSL calls that follow, and its resMsg is
-// their RSA key.
-func CheckVersionFor(httpClient *http.Client, iosMode bool, appVersion, versionCode, zone string) (*gsl.CheckVersionResponse, string, error) {
-	return gsl.CheckVersionAs(httpClient, loginBuild(iosMode, appVersion, versionCode), zone)
+// not known yet. deviceID, the Login's, picks the gate host list (it is never sent). The reply's
+// host is the gate for the GSL calls that follow, and its resMsg is their RSA key. An error
+// wrapping gsl.ErrForcedUpdate ends the run.
+func CheckVersionFor(httpClient *http.Client, iosMode bool, appVersion, versionCode, zone, deviceID string) (*gsl.CheckVersionResponse, string, error) {
+	return gsl.CheckVersionAs(httpClient, loginBuild(iosMode, appVersion, versionCode), zone, deviceID)
 }
 
 // ResVersionFrom returns the Login resVersion for a check-version reply already fetched as the

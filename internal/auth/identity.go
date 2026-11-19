@@ -549,29 +549,56 @@ type LoginParamsInput struct {
 	IOSMode bool
 
 	// AppVersion/VersionCode, when non-empty, replace the build identity BuildLoginParams would
-	// otherwise send (gsl.AppVersion/gsl.VersionCode, or the iOS capture's 1.0.344/786 under
-	// IOSMode). A token is bound to the build it was issued under (confirmed live, see IOSMode's
-	// comment), so once the real app updates, a token captured from it only works if these carry
-	// that capture's appVersion/versionCode -- cmd/pcap -session-out records both.
+	// otherwise send (gsl.AppVersion/gsl.VersionCode, or iosDefaultAppVersion/iosDefaultVersionCode
+	// under IOSMode). A token is bound to the build it was issued under (confirmed live, see
+	// IOSMode's comment), so once the real app updates, a token captured from it only works if these
+	// carry that capture's appVersion/versionCode -- cmd/pcap -session-out records both.
 	AppVersion  string
 	VersionCode string
 
 	// ResVersion is the hot-update state to report (see ResVersionFrom); "" sends "0", the value
 	// this client sent for months. It also fills ta's lw_res_version.
 	ResVersion string
+
+	// NoZstd leaves isUseLz4 out of the Login, as the client does once check-version turns
+	// ClientSwitch 4 or 5 on (gsl.CheckVersionResponse.NewPacketZstd). The zero value sends it.
+	NoZstd bool
+
+	// Device, under IOSMode, replaces the placeholder device fields with the ones a capture of
+	// the real iOS app recorded (see CapturedDevice). Ignored on Android, whose device fields come
+	// from the hardware profile the deviceId selects.
+	Device CapturedDevice
 }
 
-// The iOS build the 2026 captured iOS session presented. A GSL-issued `at` access token is bound
-// to the exact AppVersion/VersionCode it was obtained under, same as PackageName/Platform --
-// confirmed live: our hardcoded Android 1.0.351/1835 build numbers, sent alongside a real captured
-// iOS token issued to 1.0.344/786, still got ec=28/E005 even after PackageName/Platform/pf matched.
-// There is no known way to derive these generically the way packageSign derives from PackageName,
-// so a session config carries the capture's own appVersion/versionCode once the real app moves on.
+// The audited iOS build, 1.0.370/918 (Info.plist). A GSL-issued `at` access token is bound to the
+// exact AppVersion/VersionCode it was obtained under, same as PackageName/Platform -- confirmed
+// live: our hardcoded Android 1.0.351/1835 build numbers, sent alongside a real captured iOS token
+// issued to 1.0.344/786, still got ec=28/E005 even after PackageName/Platform/pf matched. There is
+// no known way to derive these generically the way packageSign derives from PackageName, so a
+// session config carries the capture's own appVersion/versionCode once the real app moves on.
 const (
-	iosDefaultAppVersion  = "1.0.344"
-	iosDefaultVersionCode = "786"
+	iosDefaultAppVersion  = "1.0.370"
+	iosDefaultVersionCode = "918"
 	iosPlatformName       = "iOS" // GameUtility.GetPlatformName() on iOS (BU:1945-1961)
 )
+
+// The builds a reconnect claimed before the defaults moved to 1.0.370: Android 1.0.364/1892 and the
+// first captured iOS session's 1.0.344/786. A session config that names no appVersion/versionCode
+// was made, and its token issued, under these, so a reconnect from one keeps claiming them
+// (LegacyConfigBuild); every fresh bind claims the current defaults.
+const (
+	legacyAndroidAppVersion, legacyAndroidVersionCode = "1.0.364", "1892"
+	legacyIOSAppVersion, legacyIOSVersionCode         = "1.0.344", "786"
+)
+
+// LegacyConfigBuild is the build a reconnect from a session config without appVersion/versionCode
+// claims: the defaults that config's token was issued under before 1.0.370.
+func LegacyConfigBuild(iosMode bool) (appVersion, versionCode string) {
+	if iosMode {
+		return legacyIOSAppVersion, legacyIOSVersionCode
+	}
+	return legacyAndroidAppVersion, legacyAndroidVersionCode
+}
 
 // PlatformName is the GSL form's `platform` for this identity: "iOS" under -cs-ios, otherwise
 // "Android". An access token is bound to it.
@@ -579,8 +606,8 @@ func PlatformName(iosMode bool) string {
 	return loginBuild(iosMode, "", "").Platform
 }
 
-// loginBuild is the client build a Login claims: gsl.AndroidBuild, or the iOS capture's build under
-// iosMode, with a session config's appVersion/versionCode (when non-empty) replacing the defaults.
+// loginBuild is the client build a Login claims: gsl.AndroidBuild, or the iOS build under iosMode,
+// with a session config's appVersion/versionCode (when non-empty) replacing the defaults.
 func loginBuild(iosMode bool, appVersion, versionCode string) gsl.ClientBuild {
 	b := gsl.AndroidBuild
 	if iosMode {
@@ -674,7 +701,10 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 
 	p := sfs.NewSFSObject()
 	p.PutInt("_id", in.FutureID)
-	p.PutInt("netType", 2) // 2 = wifi, matches the common case
+	// DeviceManager.GetNetworkStatus (Assembly-CSharp.decompiled.cs:73295-73303, 1.0.370): 1 is
+	// ReachableViaLocalAreaNetwork (wifi), 2 carrier data. ta (lw_net "wifi") and Android mt
+	// (NetWork:Wifi) describe wifi, so netType does too.
+	p.PutInt("netType", 1)
 	build := loginBuild(in.IOSMode, in.AppVersion, in.VersionCode)
 	effectiveAppVersion, effectiveVersionCode := build.AppVersion, build.VersionCode
 	// The Android device model the Login's device fields describe, matched to
@@ -692,15 +722,21 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	if in.ResVersion != "" {
 		resVersion, lwResVersion = in.ResVersion, in.ResVersion
 	}
-	// The ta blob's per-platform values. A real Android ta reports the app version as lw_version,
-	// and the device model/manufacturer/screen/RAM/OS from Build; the iOS blob keeps the
-	// "0.0.0"/"unknown"/"0.0"/"0.0/0.0" the cron's iOS session has logged in with since August 2026.
+	// The ta blob's per-platform values. lw_version is GameEntry.Sdk.Version, the claimed
+	// appVersion, on both platforms (the super properties, Assembly-CSharp.decompiled.cs:59189-59193,
+	// 1.0.370); the iOS blob used to send "0.0.0". A real Android ta reports the device
+	// model/manufacturer/screen/RAM/OS from Build; the iOS blob keeps the "unknown"/"0.0"/"0.0/0.0"
+	// the cron's iOS session has logged in with since August 2026 (no 1.0.370 source gives the iOS
+	// ThinkingData preset values).
 	osName, lwVersion := "Android", effectiveAppVersion
 	var manufacturer, deviceModel string
 	blobOSVersion, blobRAM, blobInstallTime, blobDeviceID := "0.0", "0.0/0.0", "2000-01-01 00:00:00.000", "00000000-0000-0000-0000-000000000000"
 	blobFPS, screenWidth, screenHeight := 0, 0, 0
+	// dev is the captured iOS device (CapturedDevice); Android takes its device from hw.
+	var dev CapturedDevice
 	if in.IOSMode {
-		osName, manufacturer, deviceModel, lwVersion = "iOS", "Apple", "unknown", "0.0.0"
+		osName, manufacturer, deviceModel = "iOS", "Apple", "unknown"
+		dev = in.Device.encodable()
 	} else {
 		manufacturer = hw.Build["manufacturer"]
 		deviceModel = hw.Model()
@@ -757,11 +793,11 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 			"len", len(b), "max", sfs.MaxUtfStringBytes, "zoneLen", len(in.ServerID))
 	}
 	p.PutUtfString("ta", ta)
-	p.PutUtfString("distinct_id", "")
+	p.PutUtfString("distinct_id", dev.DistinctID)
 	// phone_screen is Screen.width*Screen.height. The game's activity is locked
 	// to portrait, so that's width*height. Android reports the selected device's
-	// screen; iOS keeps the 1920*1080 the captured session sent.
-	phoneScreen := "1920*1080"
+	// screen; iOS sends the captured one, else the 1920*1080 the first captured session sent.
+	phoneScreen := orDefault(dev.PhoneScreen, "1920*1080")
 	if !in.IOSMode {
 		phoneScreen = fmt.Sprintf("%d*%d", screenWidth, screenHeight)
 	}
@@ -791,7 +827,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		p.PutUtfString("IMEI", hw.DeviceInfo())
 	}
 	p.PutUtfString("psh", pshField(in.IOSMode, cmdBaseTime))
-	mt := ""
+	mt := dev.HandSetInfo
 	if !in.IOSMode {
 		mt = hw.HandSetInfo()
 	}
@@ -814,7 +850,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	if !in.IOSMode {
 		p.PutInt("google_available", 0) // Google Play Services is Android-only; a real iOS capture omits this key
 	}
-	p.PutUtfString("fromCountry", "US")
+	p.PutUtfString("fromCountry", orDefault(dev.FromCountry, "US"))
 	// Confirmed via live packet capture against production (real Last War
 	// app, iOS/Mac Catalyst build): this field was entirely absent from
 	// our Login request before -- not just empty, the key itself was
@@ -831,10 +867,10 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	if in.IOSMode {
 		platformCode = "0"
 		// iOS-only identifiers a real client always sends; captured live
-		// with real (non-secret, ad-tracking-scoped) values, sent empty
-		// here since we have none of our own.
+		// with real (non-secret, ad-tracking-scoped) values. idfv is the
+		// captured one when the session config has it; idfa is never replayed.
 		p.PutUtfString("idfa", "")
-		p.PutUtfString("idfv", "")
+		p.PutUtfString("idfv", dev.Idfv)
 		p.PutUtfString("phone_native_screen", "720*1280")
 	}
 	p.PutUtfString("packageName", effectivePackageName)
@@ -848,16 +884,19 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		p.PutUtfString("device_string", hw.DeviceString())
 	}
 	p.PutUtfString("pf", pf)
-	p.PutUtfString("firebaseId", "")
-	p.PutUtfString("afuid", "")
-	phoneModel := "GoClient"
+	p.PutUtfString("firebaseId", dev.FirebaseID)
+	p.PutUtfString("afuid", dev.Afuid)
+	// Without a captured device, iOS keeps the placeholders the cron's session has logged in with
+	// since August 2026: no 1.0.370 source gives an iOS SystemInfo.deviceModel/operatingSystem to
+	// put in their place, and runCrossServerTest warns to recapture.
+	phoneModel := orDefault(dev.PhoneModel, "GoClient")
 	if !in.IOSMode {
 		phoneModel = hw.Model()
 	}
 	p.PutUtfString("phone_model", phoneModel)
 	p.PutInt("configNumber", 0)
 	p.PutUtfString("gaid", "")
-	osVersion := "GoClient/1.0"
+	osVersion := orDefault(dev.OSVersion, "GoClient/1.0")
 	if !in.IOSMode {
 		osVersion = hw.OSVersionString()
 	}
@@ -867,7 +906,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p.PutUtfString("appVersion", effectiveAppVersion)
 	p.PutUtfString("resVersion", resVersion)
 	p.PutUtfString("versionCode", effectiveVersionCode)
-	p.PutUtfString("lang", "en")
+	p.PutUtfString("lang", orDefault(dev.Lang, "en"))
 	p.PutUtfString("serverId", in.ServerID)
 	p.PutInt("gmLogin", 0)
 	p.PutUtfString("KCPMode", "0")
@@ -877,8 +916,11 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p.PutUtfString("simOpName", "")
 	p.PutInt("delete_account_status", 0)
 	// Real client sent true; we now actually implement Zstd decode
-	// (packet.go), so this is both truthful and matches production.
-	p.PutBool("isUseLz4", true)
+	// (packet.go), so this is both truthful and matches production. The client sends it only
+	// while the new packet class and Zstd are both on (Assembly-CSharp.decompiled.cs:83176-83179).
+	if !in.NoZstd {
+		p.PutBool("isUseLz4", true)
+	}
 	if in.AccessTok != "" {
 		p.PutUtfString("at", in.AccessTok)
 	}

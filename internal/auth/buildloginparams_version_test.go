@@ -17,7 +17,7 @@ func TestBuildLoginParamsBuildIdentity(t *testing.T) {
 		wantApp, wantCode string
 	}{
 		{"android default", LoginParamsInput{}, gsl.AppVersion, gsl.VersionCode},
-		{"ios default", LoginParamsInput{IOSMode: true}, "1.0.344", "786"},
+		{"ios default", LoginParamsInput{IOSMode: true}, "1.0.370", "918"},
 		{"ios captured build", LoginParamsInput{IOSMode: true, AppVersion: "1.0.350", VersionCode: "801"}, "1.0.350", "801"},
 		{"android captured build", LoginParamsInput{AppVersion: "1.0.364", VersionCode: "1892"}, "1.0.364", "1892"},
 	}

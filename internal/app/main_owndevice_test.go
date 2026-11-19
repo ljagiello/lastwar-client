@@ -261,8 +261,8 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 				if cfg.DeviceID == "" || (c.wantDeviceID != "" && cfg.DeviceID != c.wantDeviceID) || cfg.IOSMode != c.wantIOS {
 					t.Errorf("session config: deviceId=%q iosMode=%v, want this device (%q), iosMode=%v", cfg.DeviceID, cfg.IOSMode, c.wantDeviceID, c.wantIOS)
 				}
-				if c.wantIOS && (cfg.AppVersion != "1.0.344" || cfg.VersionCode != "786") {
-					t.Errorf("session config build = %s/%s, want the iOS 1.0.344/786", cfg.AppVersion, cfg.VersionCode)
+				if c.wantIOS && (cfg.AppVersion != "1.0.370" || cfg.VersionCode != "918") {
+					t.Errorf("session config build = %s/%s, want the iOS 1.0.370/918", cfg.AppVersion, cfg.VersionCode)
 				}
 			}
 			for _, secret := range []string{"lk-account", "lk-role-783", "at-own", "rt-own"} {

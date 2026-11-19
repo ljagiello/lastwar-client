@@ -185,19 +185,107 @@ func TestRunCrossServerTestIOSLookupUsesTheIOSCheckVersion(t *testing.T) {
 	}
 }
 
-// TestRunCrossServerTestDoesNotLookUpAWorkingAddress: a configured address that answers needs no
-// GSL call, so a working cron run sends exactly what it sent before the lookup existed.
-func TestRunCrossServerTestDoesNotLookUpAWorkingAddress(t *testing.T) {
+// TestRunCrossServerTestLooksUpBeforeEveryLogin: the real client clears its cached address and runs
+// GetServerList on every cold start (Assembly-CSharp.decompiled.cs:9332, 7210-7225, 1.0.370), so a
+// configured address is looked up before the Login too, and the Login goes to the server GSL lists
+// (1.0.370 audit B40). A lookup that fails in any way, a 211 included, falls back to the configured
+// address and changes nothing.
+func TestRunCrossServerTestLooksUpBeforeEveryLogin(t *testing.T) {
+	cases := []struct {
+		name       string
+		reply      gsl.LoginServerListRespon
+		wantDial   string
+		wantSaveIP string // "" = the session config isn't written
+	}{
+		{"GSL lists another server", lookupReply(), "gw-a.example:10783", lookupGateways},
+		{"GSL refuses (211)", gsl.LoginServerListRespon{Code: "211"}, "10.0.0.1:17783", ""},
+		{"GSL lists no server (E120)", gsl.LoginServerListRespon{Code: "0"}, "10.0.0.1:17783", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			client := testutil.UseInMemoryGSL(t, c.reply)
+			lookups := countGetServerList(client)
+			dial, dialed := recordingDial(nil)
+			cfgPath := t.TempDir() + "/session.json"
+
+			synctest.Test(t, func(t *testing.T) {
+				runCrossServerTest(crossServerTestOpts{
+					ip: "10.0.0.1", port: 17783, zone: lookupZone, gameUid: lookupGameUid, at: "at-1",
+					configSavePath: cfgPath, httpClient: client, dialGame: dial,
+				})
+				synctest.Wait()
+			})
+
+			if n := lookups(); n != 1 {
+				t.Errorf("getserverlist requests = %d, want 1 (the pre-Login lookup)", n)
+			}
+			if got := dialed(); len(got) != 1 || got[0] != c.wantDial {
+				t.Errorf("dialed %v, want [%s]", got, c.wantDial)
+			}
+			if c.wantSaveIP == "" {
+				if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+					t.Errorf("session config written although nothing changed (stat err = %v)", err)
+				}
+				return
+			}
+			if cfg := readSessionConfig(t, cfgPath); cfg.IP != c.wantSaveIP || cfg.Port != lookupPort || cfg.AccessToken != "at-1" {
+				t.Errorf("persisted %s:%d (tokenLen %d), want %s:%d with the session's token", cfg.IP, cfg.Port, len(cfg.AccessToken), c.wantSaveIP, lookupPort)
+			}
+		})
+	}
+}
+
+// TestRunCrossServerTestAdoptsLookupTokens: a token the lookup reply carries is the one the Login
+// sends, and it reaches the session config only after the Login succeeds, as the client's
+// SaveGameLoginToken stores any non-empty at/rt a GSL reply hands it (Assembly-CSharp.decompiled.cs:
+// 12777, 7482-7492). A lookup that lists no other server keeps the configured address.
+func TestRunCrossServerTestAdoptsLookupTokens(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	client := testutil.UseInMemoryGSL(t, lookupReply())
-	lookups := countGetServerList(client)
-	dial, dialed := recordingDial(nil)
-	cfgPath := t.TempDir() + "/session.json"
+	reply := gsl.LoginServerListRespon{
+		Code:       "0",
+		ServerList: []gsl.LoginServerInfo{{ID: "783", IP: "10.0.0.1", Port: testutil.FlexPort(17783), Zone: lookupZone, GameUid: lookupGameUid}},
+		At:         &gsl.LoginToken{Token: "at-gsl", Time: "1791900000"},
+		Rt:         &gsl.LoginToken{Token: "rt-gsl", Time: "1791900001"},
+	}
+	client := testutil.UseInMemoryGSL(t, reply)
+	var seen loginAts
+	dial, dialed := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:17783": tokenCheckingServer("at-gsl", &seen)})
+	cfgPath := writeSessionConfig(t, SessionConfig{IP: "10.0.0.1", Port: 17783, Zone: lookupZone, GameUid: lookupGameUid, AccessToken: "at-1"})
 
 	synctest.Test(t, func(t *testing.T) {
 		runCrossServerTest(crossServerTestOpts{
 			ip: "10.0.0.1", port: 17783, zone: lookupZone, gameUid: lookupGameUid, at: "at-1",
 			configSavePath: cfgPath, httpClient: client, dialGame: dial,
+		})
+		synctest.Wait()
+	})
+
+	if got := seen.get(); fmt.Sprint(got) != "[at-gsl]" {
+		t.Errorf("Login access tokens = %v, want [at-gsl]", got)
+	}
+	if got := dialed(); fmt.Sprint(got) != "[10.0.0.1:17783]" {
+		t.Errorf("dialed %v, want [10.0.0.1:17783]", got)
+	}
+	cfg := readSessionConfig(t, cfgPath)
+	if cfg.AccessToken != "at-gsl" || cfg.AccessTokenTime != 1791900000 || cfg.RefreshToken != "rt-gsl" || cfg.RefreshTokenTime != 1791900001 || cfg.IP != "10.0.0.1" {
+		t.Errorf("persisted at=%q (%d) rt=%q (%d) ip=%q, want the lookup's tokens and the configured address",
+			cfg.AccessToken, cfg.AccessTokenTime, cfg.RefreshToken, cfg.RefreshTokenTime, cfg.IP)
+	}
+}
+
+// TestRunCrossServerTestNoLookupWithExplicitAddress: an address typed on the command line is used
+// as given, with no lookup before the Login.
+func TestRunCrossServerTestNoLookupWithExplicitAddress(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	client := testutil.UseInMemoryGSL(t, lookupReply())
+	lookups := countGetServerList(client)
+	dial, dialed := recordingDial(nil)
+
+	synctest.Test(t, func(t *testing.T) {
+		runCrossServerTest(crossServerTestOpts{
+			ip: "10.0.0.1", port: 17783, zone: lookupZone, gameUid: lookupGameUid, at: "at-1", ipExplicit: true,
+			httpClient: client, dialGame: dial,
 		})
 		synctest.Wait()
 	})
@@ -208,14 +296,12 @@ func TestRunCrossServerTestDoesNotLookUpAWorkingAddress(t *testing.T) {
 	if got := dialed(); len(got) != 1 || got[0] != "10.0.0.1:17783" {
 		t.Errorf("dialed %v, want [10.0.0.1:17783]", got)
 	}
-	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
-		t.Errorf("session config written although nothing changed (stat err = %v)", err)
-	}
 }
 
 // TestRunCrossServerTestLooksUpAfterUnreachableAddress: when the configured address refuses every
-// dial, or accepts the connection but never answers the Login (the August 2026 port move), one GSL
-// lookup finds the current server, the Login is retried there, and the new address is persisted.
+// dial, or accepts the connection but never answers the Login (the August 2026 port move), and the
+// pre-Login lookup had failed, one more GSL lookup finds the current server, the Login is retried
+// there, and the new address is persisted.
 func TestRunCrossServerTestLooksUpAfterUnreachableAddress(t *testing.T) {
 	cases := map[string]func(*session.GameConn){
 		"dial refused":     nil,
@@ -224,7 +310,7 @@ func TestRunCrossServerTestLooksUpAfterUnreachableAddress(t *testing.T) {
 	for name, stale := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
-			client := testutil.UseInMemoryGSL(t, lookupReply())
+			client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{Code: "500"}, lookupReply())
 			lookups := countGetServerList(client)
 			dial, dialed := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:17783": stale})
 			cfgPath := t.TempDir() + "/session.json"
@@ -237,8 +323,8 @@ func TestRunCrossServerTestLooksUpAfterUnreachableAddress(t *testing.T) {
 				synctest.Wait()
 			})
 
-			if n := lookups(); n != 1 {
-				t.Errorf("getserverlist requests = %d, want 1", n)
+			if n := lookups(); n != 2 {
+				t.Errorf("getserverlist requests = %d, want 2 (the failed pre-Login lookup, then the retry)", n)
 			}
 			want := []string{"10.0.0.1:17783", "gw-a.example:10783"}
 			if got := dialed(); fmt.Sprint(got) != fmt.Sprint(want) {
@@ -254,12 +340,16 @@ func TestRunCrossServerTestLooksUpAfterUnreachableAddress(t *testing.T) {
 
 // TestRunCrossServerTestNoLookupOnTokenRejection: an E011 rejection comes from a server that
 // answered, so another address can't help, and a GSL call is the last thing a token problem should
-// trigger. The run exits 2 without looking anything up. Re-executes the test binary because
+// trigger. The run exits 2 without looking anything up after the Login (the one lookup is the
+// pre-Login one, which lists the configured server). Re-executes the test binary because
 // runCrossServerTest exits the process on this path.
 func TestRunCrossServerTestNoLookupOnTokenRejection(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
-		client := testutil.UseInMemoryGSL(t, lookupReply())
+		client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{
+			Code:       "0",
+			ServerList: []gsl.LoginServerInfo{{ID: "783", IP: "10.0.0.1", Port: testutil.FlexPort(17783), Zone: lookupZone, GameUid: lookupGameUid}},
+		})
 		reject := func(server *session.GameConn) {
 			if _, err := server.ReadEnvelope(); err != nil {
 				return
@@ -290,18 +380,19 @@ func TestRunCrossServerTestNoLookupOnTokenRejection(t *testing.T) {
 	if exitErr.ExitCode() != 2 {
 		t.Errorf("subprocess exit code = %d, want 2; stderr=%s", exitErr.ExitCode(), stderr.String())
 	}
-	if strings.Contains(stderr.String(), "GSL getserverlist") {
-		t.Errorf("an E011 rejection triggered a GSL lookup; stderr=%s", stderr.String())
+	if n := strings.Count(stderr.String(), "GSL getserverlist: looking up the game server"); n != 1 {
+		t.Errorf("GSL lookups = %d, want only the pre-Login one (an E011 must not trigger another); stderr=%s", n, stderr.String())
 	}
 }
 
 // TestRunCrossServerTestNoRetryWhenLookupNamesTheSameServer: when GSL lists the very address that
 // just failed, a second dial can't help, so the run reports the original error and exits 1 after
-// one dial. Re-executes the test binary because runCrossServerTest exits the process on this path.
+// one dial. The pre-Login lookup fails here, so the retry lookup is the one that lists it.
+// Re-executes the test binary because runCrossServerTest exits the process on this path.
 func TestRunCrossServerTestNoRetryWhenLookupNamesTheSameServer(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
-		client := testutil.UseInMemoryGSL(t, lookupReply())
+		client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{Code: "500"}, lookupReply())
 		// The configured gateways are the looked-up ones in another order, and all refuse.
 		runCrossServerTest(crossServerTestOpts{
 			ip: "gw-c.example|gw-b.example|gw-a.example", port: lookupPort, zone: lookupZone, gameUid: lookupGameUid, at: "at-1",

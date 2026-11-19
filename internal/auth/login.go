@@ -270,11 +270,18 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	httpClient := gsl.DefaultHTTPClient()
 
+	// The identity first: its deviceId picks check-version's gate host list, as the client's
+	// device uid does (gsl.CheckVersionAs).
+	ident, err := LoadOrCreateDeviceIdentity()
+	if err != nil {
+		return nil, err
+	}
+
 	slog.Info("check-version: fetch RSA pubkey and pick gate host", "iosMode", opts.IOSMode)
 	// No zone yet: the persisted identity doesn't record one, so `server` stays empty, as on a
 	// real client's first launch. The request claims the same build the Login will.
 	build := loginBuild(opts.IOSMode, opts.AppVersion, opts.VersionCode)
-	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "")
+	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "", ident.DeviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -287,10 +294,6 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	slog.Info("RSA pubkey", "bits", crypto.RSAModulusBitLen(pub))
 
-	ident, err := LoadOrCreateDeviceIdentity()
-	if err != nil {
-		return nil, err
-	}
 	slog.Info("device identity", "deviceIdLen", len(ident.DeviceID), "iosMode", opts.IOSMode)
 	slog.Info("air key", "airKeyLen", len(ident.AirKey()))
 	// Not "username": ident.Username -- that would print the operator's real persisted account
@@ -302,7 +305,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	// The access token GSL issues is bound to this platform. An iOS Login with an Android-issued
 	// token is refused (ec=28/E005), so -cs-ios has to start here, not only at BuildLoginParams.
 	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt, "platform", build.Platform)
-	lsr, err := gsl.GetServerListAs(httpClient, gateHost, pub, build.Platform, ident.DeviceID, opt, "", ident.GameUid)
+	lsr, err := gsl.GetServerListFor(httpClient, gateHost, pub, formDevice(opts.IOSMode, ident.DeviceID, CapturedDevice{}), ident.DeviceID, opt, "", ident.GameUid)
 	if err != nil {
 		return nil, err
 	}
@@ -438,6 +441,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			IOSMode:     opts.IOSMode,
 			AppVersion:  opts.AppVersion,
 			VersionCode: opts.VersionCode,
+			NoZstd:      !cv.NewPacketZstd(),
 		})
 		loginPF = loginParams.GetString("pf")
 		loginContent := sfs.NewSFSObject()
@@ -478,7 +482,10 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		un := env.Content.GetString("un")
 		slog.Info("login OK", "usernameLen", len(un))
 		claimed := loginParams.GetString("appVersion")
-		logLoginUpdateGate(env.Content, "base-zone Login", claimed)
+		if err := checkLoginUpdateGate(env.Content, "base-zone Login", claimed); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
 		conn.SetAppVersion(claimed)
 		if un != "" && un != ident.Username {
 			if err := ident.SaveUsername(un); err != nil {

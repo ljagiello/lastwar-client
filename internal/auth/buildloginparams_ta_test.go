@@ -14,10 +14,11 @@ import (
 
 // TestBuildLoginParamsTaIOSUnchanged pins the iOS ta blob byte for byte: the cron's captured iOS
 // session has logged in with exactly this shape since August 2026, so any change to it has to be
-// deliberate.
+// deliberate. The one change since: lw_version is the claimed appVersion, not "0.0.0"
+// (GameEntry.Sdk.Version, Assembly-CSharp.decompiled.cs:59189-59193; 1.0.370 audit B15).
 func TestBuildLoginParamsTaIOSUnchanged(t *testing.T) {
 	p := BuildLoginParams(LoginParamsInput{IOSMode: true, ServerID: "783", AppVersion: "1.0.364", VersionCode: "1892", ResVersion: "1.0.364.42"})
-	const want = `{"#os":"iOS","#disk":"50.0/100.0","#device_id":"00000000-0000-0000-0000-000000000000","#os_version":"0.0","#system_language":"en","#bundle_id":"com.lastwar.ios","#carrier":"","#app_version":"1.0.364","#fps":0,"#ram":"0.0/0.0","#simulator":false,"#zone_offset":0,"#manufacturer":"Apple","#screen_height":0,"#network_type":"WIFI","#device_model":"unknown","#screen_width":0,"#install_time":"2000-01-01 00:00:00.000","lw_net":"wifi","lw_res_version":"1.0.364.42","lw_buildcode":"1892","lw_line":"","pd_dl":0,"lw_ab":"0","lw_platform":"AppStore","lw_game_session_id":"00000000-0000-0000-0000-000000000000","lw_first_launch":false,"lw_alliance_id":"00000000000000000000000000000000","lw_device_id":"","lw_device_level":0,"lw_main_level":0,"lw_shumei_id":"","lw_airKey":"","lw_version":"0.0.0","lw_power":0,"lw_zone":"APS783"}`
+	const want = `{"#os":"iOS","#disk":"50.0/100.0","#device_id":"00000000-0000-0000-0000-000000000000","#os_version":"0.0","#system_language":"en","#bundle_id":"com.lastwar.ios","#carrier":"","#app_version":"1.0.364","#fps":0,"#ram":"0.0/0.0","#simulator":false,"#zone_offset":0,"#manufacturer":"Apple","#screen_height":0,"#network_type":"WIFI","#device_model":"unknown","#screen_width":0,"#install_time":"2000-01-01 00:00:00.000","lw_net":"wifi","lw_res_version":"1.0.364.42","lw_buildcode":"1892","lw_line":"","pd_dl":0,"lw_ab":"0","lw_platform":"AppStore","lw_game_session_id":"00000000-0000-0000-0000-000000000000","lw_first_launch":false,"lw_alliance_id":"00000000000000000000000000000000","lw_device_id":"","lw_device_level":0,"lw_main_level":0,"lw_shumei_id":"","lw_airKey":"","lw_version":"1.0.364","lw_power":0,"lw_zone":"APS783"}`
 	if got := p.GetString("ta"); got != want {
 		t.Errorf("iOS ta changed:\n got %s\nwant %s", got, want)
 	}

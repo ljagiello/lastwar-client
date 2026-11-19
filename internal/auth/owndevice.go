@@ -55,7 +55,7 @@ func BootstrapOwnDevice(httpClient *http.Client, iosMode bool) (*OwnDeviceSessio
 	// bound to that platform, and the session config records the identity so the next reconnect
 	// matches.
 	build := loginBuild(iosMode, "", "")
-	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "")
+	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "", ident.DeviceID)
 	if err != nil {
 		return nil, err
 	}
