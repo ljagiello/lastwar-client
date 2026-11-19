@@ -33,7 +33,9 @@
 //
 //  3. The profile JSON is POSTed to /deviceprofile/v4 as
 //     Content-Type: application/octet-stream. The body is
-//     {organization, os, appId, encode:2, compress:3, data, tn, ep}.
+//     {organization, os, appId, encode:2, compress:3, data, tn, ep}. Each
+//     start first POSTs /v3/cloudconf (see cloudconf.go), whose reply sets
+//     which slot groups the next start leaves out; Register sends both.
 //
 //  4. The reply is {"code":<int>,"detail":{"deviceId":...},
 //     "requestId":"..."}. code 1100 success, 1902 the server's generic
@@ -64,6 +66,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log/slog"
 	"math/big"
 	mrand "math/rand/v2"
 	"net/http"
@@ -332,12 +335,13 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // input-method list, is left out entirely: SmSdkManager puts "input" in the
 // SDK's notCollect set, and the collector skips a63 when that set holds
 // "input" (l111l1111llIl), so Last War never sends it. a85 is that set itself,
-// which the collector reports unless the set holds "a85". The SDK merges the
-// cloud config's exclusions into it, and until a cloudconf reply has been
-// cached, that config is the SDK's built-in default (l11l111l1lll), which
-// excludes "gps" and "tel". So a fresh install most likely sends {"input",
-// "tel", "gps", "protect"}, in Java's HashSet order. A later server reply could
-// change the cloud half; this client doesn't fetch the cloud config.
+// which the collector reports unless the set holds "a85"; deviceData adds it
+// (exclusionSet). The SDK merges the cloud config's exclusions into it, and
+// until a cloudconf reply has been cached, that config is the SDK's built-in
+// default (l11l111l1lll), which excludes "gps" and "tel". So a fresh install
+// sends {"input", "tel", "gps", "protect"}, in Java's HashSet order. Register
+// fetches the cloud config and caches it in the install, so a later start
+// reports the server's exclusions.
 //
 // a88 is left as it was: the SDK reports the class names of the "location" and
 // "phone" service binders (l1111l111111Il.java:389-403), whose runtime value is
@@ -361,7 +365,7 @@ const baseTemplate = `{
   "a172": {}, "a173": 0, "a174": 1, "a15": "false",
   "a73": 0, "a74": 0, "a75": 0, "a76": "", "a77": {}, "a78": [], "a79": "",
   "a83": "0001100",
-  "a85": [ "input", "tel", "gps", "protect" ], "a86": "1101110",
+  "a86": "1101110",
   "a88": "locateServiceName:android.location.ILocationManager$Stub$Proxy|phoneServiceName:com.android.internal.telephony.ITelephony$Stub$Proxy",
   "a93": 1,
   "a102": [], "a103": "", "a107": {}, "a108": "", "a110": "", "a114": [], "a115": [],
@@ -553,6 +557,7 @@ func deviceData(deviceID string, d Device) (string, error) {
 	m["a133"] = d.CollectTime.Milliseconds()
 	m["a38"] = d.AppVersion
 	m["a90"] = TargetSDKVersion
+	m["a85"] = exclusionSet(in.cloudExcluded())
 	m["a56"], m["a57"] = appCertSubject, appCertHash
 
 	// The device-specific half, from the catalog entry this deviceId selects.
@@ -761,15 +766,20 @@ func BoxID(client Client, deviceID string, dev Device) (string, error) {
 	return boxID(client, pub, deviceID, dev.withHostDefaults())
 }
 
-// Register does what one start of the SDK on dev's install does: it collects
-// the device data and uploads it to /deviceprofile/v4. It returns the box ID
-// ("B" + smid, "" when the upload failed), the install as that start leaves
-// it, and the upload's error. The install counts the start and the collection
-// (a4, a130, and a127 when the phone rebooted) even when the upload fails, as
-// the SDK counts before it uploads, and caches the box ID that came back
-// (Install.Registered). Saving it whenever it differs from dev.Install keeps
-// the counters moving from run to run. An install deviceData refuses comes
-// back unchanged, with nothing sent.
+// Register does what one start of the SDK on dev's install does
+// (SmAntiFraud.java:384-396): it collects the device data, POSTs the cloud
+// config request to /v3/cloudconf with the same session ID as a80, then
+// uploads the device data to /deviceprofile/v4. It returns the box ID ("B" +
+// smid, "" when the upload failed), the install as that start leaves it, and
+// the upload's error. The install counts the start and the collection (a4,
+// a130, and a127 when the phone rebooted) even when the upload fails, as the
+// SDK counts before it uploads; caches the cloud config the reply carried
+// (the next start sends its md5 back and its exclusions in a85); and caches
+// the box ID that came back (Install.Registered). A failed or undecodable
+// cloudconf reply is logged and changes nothing else, as the SDK's handler
+// for it is empty. Saving the install whenever it differs from dev.Install
+// keeps the counters and the config moving from run to run. An install
+// deviceData refuses comes back unchanged, with nothing sent.
 func Register(client Client, deviceID string, dev Device) (string, Install, error) {
 	pub, err := publicKey()
 	if err != nil {
@@ -787,6 +797,14 @@ func register(client Client, pub *rsa.PublicKey, deviceID string, dev Device, no
 		return "", dev.Install, err
 	}
 	in := dev.Install.collected(dev.BootTime)
+	// Collected before the reply, so a85 above names the config already in
+	// force, as on a real start where both requests race the collection.
+	if conf, err := fetchCloudConf(client, pub, dev.Install, sessionID(dev.Now)); err != nil {
+		slog.Info("shumei cloudconf failed; keeping the cloud config in force", "error", err)
+	} else {
+		slog.Info("shumei cloudconf reply", "md5", conf.MD5, "excluded", conf.Excluded, "changed", conf.MD5 != dev.Install.CloudConfMD5)
+		in = in.withCloudConf(conf)
+	}
 	id, err := upload(client, pub, inner)
 	if err != nil {
 		return "", in, err

@@ -156,6 +156,8 @@ func TestInstallValidate(t *testing.T) {
 		"negative collections":   func(in *Install) { in.Collections = -1 },
 		"negative app starts":    func(in *Install) { in.AppStarts = -1 },
 		"negative boot count":    func(in *Install) { in.BootCount = -1 },
+		"cloudConfMd5 not md5":   func(in *Install) { in.CloudConfMD5 = "not-an-md5" },
+		"excluded without md5":   func(in *Install) { in.CloudConfExcluded = "gps" },
 	} {
 		in := testInstall
 		mutate(&in)

@@ -72,6 +72,33 @@ type Install struct {
 	// more; zero means none reported yet.
 	BootCount int       `json:"bootCount,omitempty"`
 	LastBoot  time.Time `json:"lastBoot,omitzero"`
+
+	// CloudConfMD5 and CloudConfExcluded describe the cloud config the SDK
+	// cached from its last /v3/cloudconf reply ("cloudms.conf" prefs,
+	// l11l111l1Il.java): the md5 of its text, which the next request sends
+	// back, and the names its "sensitive" switches turn off, comma-separated
+	// in document order, which join notCollect in a85. An empty CloudConfMD5
+	// means nothing is cached, so the SDK's built-in config is in force.
+	CloudConfMD5      string `json:"cloudConfMd5,omitempty"`
+	CloudConfExcluded string `json:"cloudConfExcluded,omitempty"`
+}
+
+// cloudExcluded returns the names the cloud config in force turns off: the
+// cached one's, or the built-in config's when none is cached.
+func (in Install) cloudExcluded() []string {
+	switch {
+	case in.CloudConfMD5 == "":
+		return builtinCloudConfExcluded
+	case in.CloudConfExcluded == "":
+		return nil
+	}
+	return strings.Split(in.CloudConfExcluded, ",")
+}
+
+// withCloudConf returns in with c cached as the cloud config in force.
+func (in Install) withCloudConf(c cloudConf) Install {
+	in.CloudConfMD5, in.CloudConfExcluded = c.MD5, strings.Join(c.Excluded, ",")
+	return in
 }
 
 // rebootGap is how much later than LastBoot a boot time must be to count as a
@@ -176,6 +203,7 @@ func (in Install) Registered(boxID string, t time.Time) (Install, bool) {
 var (
 	puuidRe  = regexp.MustCompile(`^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$`)
 	appUIDRe = regexp.MustCompile(`^u0_a[0-9]+$`)
+	md5HexRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 // Validate reports the first set value a real install couldn't hold. Empty
@@ -210,6 +238,12 @@ func (in Install) Validate() error {
 	}
 	if in.Collections < 0 || in.AppStarts < 0 || in.BootCount < 0 {
 		return errors.New("collections, appStarts and bootCount can't be negative")
+	}
+	if in.CloudConfMD5 != "" && !md5HexRe.MatchString(in.CloudConfMD5) {
+		return fmt.Errorf("cloudConfMd5 (%d characters) is not an MD5 as 32 lowercase hex digits", len(in.CloudConfMD5))
+	}
+	if in.CloudConfMD5 == "" && in.CloudConfExcluded != "" {
+		return errors.New("cloudConfExcluded needs the cloudConfMd5 of the config it came from")
 	}
 	return nil
 }
