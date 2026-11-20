@@ -3,6 +3,7 @@ package game
 import (
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,10 +62,21 @@ func plTestTemplates() []*sfs.SFSObject {
 	}
 }
 
+// plTruckActivityID is a TruckActivity (type 110) row of table activity, needMainCityLevel 8.
+const plTruckActivityID = 94201
+
 // plTestInit is an open station (stage past the fog, opening reward taken) with world squads 1-3
-// unlocked, plTestTemplates, trucks in myTrainList, and a user on server 812. fill runs last.
+// unlocked, plTestTemplates, trucks in myTrainList, a user on server 812, an HQ at 30 and an open
+// truck activity (the guard in front of train.data). fill runs last.
 func plTestInit(fill func(raw *sfs.SFSObject), dailySends, dailyRobs int32, trucks ...*sfs.SFSObject) *Init {
-	return rewardInitWithDay(20, func(raw *sfs.SFSObject) {
+	in := rewardInitWithDay(20, func(raw *sfs.SFSObject) {
+		acts := sfs.NewSFSObject()
+		a := sfs.NewSFSObject()
+		a.PutInt("id", plTruckActivityID)
+		a.PutLong("startTime", time.Now().Add(-48*time.Hour).UnixMilli())
+		a.PutLong("endTime", time.Now().Add(48*time.Hour).UnixMilli())
+		acts.PutSFSObject(strconv.Itoa(plTruckActivityID), a)
+		raw.PutSFSObject("activity", acts)
 		railwayStage(raw, railwayFogStage)
 		u := sfs.NewSFSObject()
 		u.PutUtfString("uid", "77")
@@ -100,6 +112,8 @@ func plTestInit(fill func(raw *sfs.SFSObject), dailySends, dailyRobs int32, truc
 		raw.PutUtfString("trainServers", "640,700,812,900")
 		fill(raw)
 	})
+	in.Buildings = []Building{NewTestBuilding(9001, activityHQBuildingID, 30)}
+	return in
 }
 
 // plTestWorldSquads unlocks world squads 1..n in army_formation, each with one hero 3000+i.
@@ -703,5 +717,328 @@ func TestRailwayUR(t *testing.T) {
 		if got := railwayTruckQuality(id); got != want {
 			t.Errorf("railwayTruckQuality(%d) = %d, want %d", id, got, want)
 		}
+	}
+}
+
+// plCampInit is an init whose military camp (level 1) trains up to 3005, so an absent soldierType
+// falls back to that unit.
+func plCampInit() *Init {
+	return rewardInit(func(raw *sfs.SFSObject) { plAddCamp(raw) })
+}
+
+// plAddCamp adds a level-1 military camp to init building_new.
+func plAddCamp(raw *sfs.SFSObject) {
+	arr := sfs.NewSFSArray()
+	for _, o := range evObjects(raw, "building_new") {
+		arr.AddSFSObject(o)
+	}
+	b := sfs.NewSFSObject()
+	b.PutLong("uuid", 1)
+	b.PutInt("bId", railwayMilitaryCamp)
+	b.PutInt("lv", 1)
+	arr.AddSFSObject(b)
+	raw.PutSFSArray("building_new", arr)
+}
+
+// B22: ArenaArmyFormationInfo:ParseData keeps a present soldierType as is, 0 included (0 is true
+// in Lua), and ConscriptSoldier then finds no lw_soldier row and adds no soldiers
+// (ArenaArmyFormationInfo.lua:30-36, 128-133). Only an absent soldierType takes the top unit.
+// The KOF train lineup has no later recalculation, so a team sent with 0 has no soldier power.
+func TestRailwayLineupPresentSoldierTypeIsKept(t *testing.T) {
+	in := plCampInit()
+	reply := plLineup([]int64{1}, []int64{2}, []int64{3})
+	f := evObject(reply, "formation")
+	evObject(f, "armyUnit1").PutInt("soldierType", 0)
+	evObject(f, "armyUnit3").PutInt("soldierType", 3014)
+	teams, _ := railwayLineup(reply)
+	if len(teams) != 3 {
+		t.Fatalf("railwayLineup = %v; want three teams", teams)
+	}
+	stats := map[int64]railwayHeroStat{1: {power: 100, lead: 10}, 2: {power: 100, lead: 10}, 3: {power: 100, lead: 10}}
+	if got := railwayPower(in, teams[0], stats, true); got != 100 {
+		t.Errorf("team with soldierType 0: power %d, want 100 (heroes only, no soldiers)", got)
+	}
+	if got := railwayPower(in, teams[1], stats, true); got <= 100 {
+		t.Errorf("team without soldierType: power %d, want the hero plus the camp's top unit", got)
+	}
+	if got, want := railwayPower(in, teams[2], stats, true), int64(100+10*1647); got != want {
+		t.Errorf("team with soldierType 3014: power %d, want %d", got, want)
+	}
+}
+
+// B22 (templates): the same parse applies to formation_template. A truck squad saved with
+// soldierType 0 adds no soldiers, which is the client's parse and never above its rob panel.
+func TestRailwaySquadsPresentSoldierTypeIsKept(t *testing.T) {
+	zero := plTestSquad(9, 1, 1000, 1, 1)
+	zero.PutInt("soldierType", 0)
+	absent := plTestSquad(10, 2, 1100, 1, 1)
+	in := plTestInit(func(raw *sfs.SFSObject) {
+		ft := sfs.NewSFSArray()
+		ft.AddSFSObject(zero)
+		ft.AddSFSObject(absent)
+		raw.PutSFSArray("formation_template", ft)
+		plAddCamp(raw)
+	}, 0, 0)
+	sq := railwaySquads(in, railwayAttackAction)
+	if len(sq) != 2 {
+		t.Fatalf("parsed %d squads, want 2", len(sq))
+	}
+	stats := map[int64]railwayHeroStat{1000: {power: 100, lead: 10}, 1100: {power: 100, lead: 10}}
+	if got := railwayPower(in, sq[0], stats, true); got != 100 {
+		t.Errorf("template with soldierType 0: power %d, want 100", got)
+	}
+	if got := railwayPower(in, sq[1], stats, true); got <= 100 {
+		t.Errorf("template without soldierType: power %d, want the camp's top unit added", got)
+	}
+}
+
+// B23: InitArmyFormationListData walks formation_template in wire order and runs
+// InitTeamUsingBuff before inserting each unlocked squad, so a missing squadNo only avoids the
+// buffs of squads already inserted (LWMyStationDataManager.lua:509-536, 1155-1166, 1181-1194).
+// CheckIfHasMultiHero then keeps a shared hero in the first squad of that list (:493-507).
+func TestRailwaySquadsFillInWireOrder(t *testing.T) {
+	unsaved := plTestSquad(9, 0, 1000, 1, 1) // slot 1, no squadNo, first on the wire
+	saved := plTestSquad(10, 1, 1100, 2, 1)  // slot 2, squadNo 1, second
+	evObjects(saved, "heroes")[1].PutLong("heroUuid", 1000)
+	in := plTestInit(func(raw *sfs.SFSObject) {
+		ft := sfs.NewSFSArray()
+		ft.AddSFSObject(unsaved)
+		ft.AddSFSObject(saved)
+		raw.PutSFSArray("formation_template", ft)
+	}, 0, 0)
+	got := railwaySquads(in, railwayAttackAction)
+	if len(got) != 2 || got[0].slot != 1 || got[1].slot != 2 {
+		t.Fatalf("squads %+v, want slots 1 and 2 in slot order", got)
+	}
+	if got[0].squadNo != 1 || got[1].squadNo != 1 {
+		t.Errorf("squadNo %d/%d, want 1/1: slot 1 is filled before slot 2's own 1 is seen", got[0].squadNo, got[1].squadNo)
+	}
+
+	// Slot 2 first on the wire: it keeps the shared hero 1000, and slot 1 loses it.
+	in = plTestInit(func(raw *sfs.SFSObject) {
+		ft := sfs.NewSFSArray()
+		ft.AddSFSObject(saved)
+		ft.AddSFSObject(unsaved)
+		raw.PutSFSArray("formation_template", ft)
+	}, 0, 0)
+	got = railwaySquads(in, railwayAttackAction)
+	if len(got) != 2 || got[0].slot != 1 || got[1].slot != 2 {
+		t.Fatalf("squads %+v, want slots 1 and 2 in slot order", got)
+	}
+	if len(got[0].heroes) != 0 || len(got[1].heroes) != 2 {
+		t.Errorf("heroes %v / %v, want hero 1000 kept by slot 2, the first on the wire", got[0].heroes, got[1].heroes)
+	}
+	if got[0].squadNo != 2 || got[1].squadNo != 1 {
+		t.Errorf("squadNo %d/%d, want 2/1: slot 1 comes after slot 2's 1", got[0].squadNo, got[1].squadNo)
+	}
+
+	// A locked slot's template is never inserted, so its squadNo doesn't block a later fill.
+	locked := plTestSquad(12, 1, 1300, 1, 1)
+	in = plTestInit(func(raw *sfs.SFSObject) {
+		ft := sfs.NewSFSArray()
+		ft.AddSFSObject(locked)
+		ft.AddSFSObject(unsaved)
+		raw.PutSFSArray("formation_template", ft)
+	}, 0, 0)
+	if got := railwaySquads(in, railwayAttackAction); len(got) != 1 || got[0].squadNo != 1 {
+		t.Errorf("squads %+v, want slot 1 alone with squadNo 1", got)
+	}
+}
+
+// B83: train.list goes out with isRefresh false, a Bool (GetTrainListMessage.lua:5-8). The
+// client's first-of-day true comes from device-local PlayerPrefs, which a short run doesn't keep.
+func TestRailwayPlunderListIsNotARefresh(t *testing.T) {
+	trucks := []*sfs.SFSObject{plTestTarget(4, trainTypeTruck, 130, plTestOther, 1_000_000, 0, "")}
+	f := plOK(t, plInit(), plTestFake{trucks: trucks})
+	reqs := f.requests()
+	i := slices.IndexFunc(reqs, func(r rewardFakeReq) bool { return r.Cmd == "train.list" })
+	if i < 0 {
+		t.Fatalf("sent %v, want train.list", f.cmds())
+	}
+	v, ok := reqs[i].Params.Get("isRefresh")
+	if !ok || v.Type != sfs.SFSBool || v.Val != false {
+		t.Errorf("isRefresh = %+v (present %v), want Bool false", v, ok)
+	}
+}
+
+// B84: the client saves the attack squad right before every train.attack
+// (UIHeroFakePVPFormationPanelView.lua:434-436).
+func TestRailwayPlunderSavesBeforeEveryTruckAttack(t *testing.T) {
+	trucks := []*sfs.SFSObject{
+		plTestTarget(4, trainTypeTruck, 130, plTestOther, 1_000_000, 0, ""),
+		plTestTarget(5, trainTypeTruck, 131, plTestOther, 2_000_000, 0, ""),
+	}
+	f := plOK(t, plInit(), plTestFake{trucks: trucks})
+	reqs := f.requests()
+	attacks := 0
+	for i, r := range reqs {
+		if r.Cmd != "train.attack" {
+			continue
+		}
+		attacks++
+		if i == 0 || reqs[i-1].Cmd != "formation.save.template" {
+			t.Errorf("attack %d wasn't preceded by formation.save.template: %v", attacks, f.cmds())
+		} else if idx, _ := claimInt(reqs[i-1].Params, "index"); idx != 9 {
+			t.Errorf("attack %d: saved template %d, want 9", attacks, idx)
+		}
+	}
+	if attacks != 2 {
+		t.Errorf("sent %d truck attacks, want 2", attacks)
+	}
+}
+
+// B85: TryGetMyStationData sends train.data only out of the fog and with an open TruckActivity
+// (type 110) (LWMyStationDataManager.lua:207-214). Otherwise the client has only init trainData.
+func TestRailwayStationDataGuard(t *testing.T) {
+	trucks := []*sfs.SFSObject{plTestTarget(4, trainTypeTruck, 130, plTestOther, 1_000_000, 0, "")}
+	fogged := plTestInit(func(raw *sfs.SFSObject) { railwayStage(raw, railwayFogStage-2) }, 0, 0)
+	if got := plOK(t, fogged, plTestFake{trucks: trucks}).cmds(); len(got) != 0 {
+		t.Errorf("plunder sent %v while the station is fogged; want nothing", got)
+	}
+	foggedDeploy := plTestInit(func(raw *sfs.SFSObject) { railwayStage(raw, railwayFogStage-2) }, 0, 0,
+		tdTestTruck(11, 130, 1, false, 0))
+	if d := tdTestRun(t, foggedDeploy); len(d.cmds()) != 0 {
+		t.Errorf("deploy sent %v while the station is fogged; want nothing", d.cmds())
+	}
+
+	// No open truck activity: train.data isn't asked for and init trainData decides. Here the
+	// fresh reply would say the day's plunders are used up, init says none are.
+	st := sfs.NewSFSObject()
+	st.PutInt("openReward", 1)
+	st.PutLong("openTime", time.Now().Add(-48*time.Hour).UnixMilli())
+	st.PutInt("dailyRobCount", railwayDailyRobs)
+	st.PutSFSArray("myTrainList", sfs.NewSFSArray())
+	noAct := plTestInit(func(raw *sfs.SFSObject) { raw.PutSFSObject("activity", sfs.NewSFSObject()) }, 0, 0)
+	f := plOK(t, noAct, plTestFake{station: st, trucks: trucks})
+	if slices.Contains(f.cmds(), "train.data") {
+		t.Errorf("sent %v without an open truck activity; want no train.data", f.cmds())
+	}
+	if got := plAttacked(f); !slices.Equal(got, []int64{4}) {
+		t.Errorf("attacked %v, want 4 on init trainData's count", got)
+	}
+	ended := plTestInit(func(raw *sfs.SFSObject) {
+		a := evObject(evObject(raw, "activity"), strconv.Itoa(plTruckActivityID))
+		a.PutLong("endTime", time.Now().Add(-time.Hour).UnixMilli())
+	}, 0, 0, tdTestTruck(11, 130, 1, false, 0))
+	if d := tdTestRun(t, ended); slices.Contains(d.cmds(), "train.data") {
+		t.Errorf("deploy sent %v with the truck activity ended; want no train.data", d.cmds())
+	}
+}
+
+// B86: RefreshMyStationData sets hasFirstReward = (openReward == 0), so an absent openReward is
+// past FirstReward (LWMyStationDataManager.lua:566, 736-741). Only a present 0 holds the station.
+func TestRailwayStationOpenWithoutOpenReward(t *testing.T) {
+	noField := func(raw *sfs.SFSObject) {
+		old := evObject(raw, "trainData")
+		n := sfs.NewSFSObject()
+		for _, k := range []string{"openTime", "dailySendCount", "dailyRobCount", "myTrainList"} {
+			v, _ := old.Get(k)
+			n.PutValue(k, v)
+		}
+		raw.PutSFSObject("trainData", n)
+	}
+	trucks := []*sfs.SFSObject{plTestTarget(4, trainTypeTruck, 130, plTestOther, 1_000_000, 0, "")}
+	if got := plAttacked(plOK(t, plTestInit(noField, 0, 0), plTestFake{trucks: trucks})); !slices.Equal(got, []int64{4}) {
+		t.Errorf("attacked %v with no openReward in trainData, want 4", got)
+	}
+	if got, _ := tdSends(t, tdTestRun(t, plTestInit(noField, 0, 0, tdTestTruck(11, 130, 1, false, 0)))); len(got) != 1 {
+		t.Errorf("deployed %v with no openReward in trainData, want the UR truck", got)
+	}
+	now := time.Now().UnixMilli()
+	station := func(fill func(o *sfs.SFSObject)) *sfs.SFSObject {
+		o := sfs.NewSFSObject()
+		o.PutLong("openTime", now-1000)
+		fill(o)
+		return o
+	}
+	noOpenTime := sfs.NewSFSObject()
+	noOpenTime.PutInt("openReward", 1)
+	in := plInit()
+	for name, tc := range map[string]struct {
+		st   *sfs.SFSObject
+		want bool
+	}{
+		"absent":       {station(func(*sfs.SFSObject) {}), true},
+		"taken":        {station(func(o *sfs.SFSObject) { o.PutInt("openReward", 1) }), true},
+		"not taken":    {station(func(o *sfs.SFSObject) { o.PutInt("openReward", 0) }), false},
+		"no openTime":  {noOpenTime, false},
+		"not open yet": {station(func(o *sfs.SFSObject) { o.PutLong("openTime", now+60_000) }), false},
+	} {
+		if got := railwayStationOpen(in, tc.st, now); got != tc.want {
+			t.Errorf("%s: railwayStationOpen = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// B87: the attack replies carry the fight's outcome: isWin on alliance.train.attack.kof
+// (UILWKOFCampaignView.lua:609-611), win on the legacy alliance.train.attack
+// (UILW3V3CampaignView.lua:597), and extraPlunder / retake / mail_id on train.attack
+// (FakePVPLogic.lua:740-762). The run logs them.
+func TestRailwayPlunderLogsTheOutcome(t *testing.T) {
+	logs := captureRewardLogs(t)
+	extra := func(int) *sfs.SFSObject {
+		r := rewardOK()
+		r.PutInt("dailyRobCount", 1)
+		arr := sfs.NewSFSArray()
+		e := sfs.NewSFSObject()
+		e.PutInt("type", 5)
+		e.PutInt("value", 7)
+		arr.AddSFSObject(e)
+		r.PutSFSArray("extraPlunder", arr)
+		r.PutLong("mail_id", 4242)
+		return r
+	}
+	trucks := []*sfs.SFSObject{plTestTarget(4, trainTypeTruck, 130, plTestOther, 1_000_000, 0, "")}
+	plOK(t, plInit(), plTestFake{trucks: trucks, attack: extra})
+	out := logs.String()
+	if !strings.Contains(out, "extraPlunder=") || !strings.Contains(out, "mailId=4242") {
+		t.Errorf("truck attack log lacks extraPlunder / mailId:\n%s", out)
+	}
+
+	trains := []*sfs.SFSObject{plTestTarget(25, trainTypeTrain, 152, plTestOther, 9_000_000, 0, "B2")}
+	for _, tc := range []struct {
+		kof        bool
+		key, wants string
+	}{{true, "isWin", "won=true"}, {false, "win", "won=false"}} {
+		logs := captureRewardLogs(t)
+		reply := func(int) *sfs.SFSObject {
+			r := rewardOK()
+			r.PutBool(tc.key, tc.kof)
+			return r
+		}
+		in := plTestInit(func(raw *sfs.SFSObject) {
+			o := sfs.NewSFSObject()
+			o.PutBool("isFunctionOn", tc.kof)
+			raw.PutSFSObject("allianceTrainStartInfo", o)
+		}, 0, 0)
+		plOK(t, in, plTestFake{trains: trains, attack: reply})
+		if !strings.Contains(logs.String(), tc.wants) {
+			t.Errorf("kof %v: train attack log lacks %s:\n%s", tc.kof, tc.wants, logs.String())
+		}
+	}
+}
+
+// B88: StartBattle refuses only a team without a hero and otherwise sends the saved KOF lineup as
+// it is (LWKOFBattleManager.lua:235-253). A lineup the client would send but this client won't
+// (a hero in two teams), or one the client refuses (a team without a hero), leaves the trains
+// alone; the truck attack squads stand in only when the reply has no lineup at all.
+func TestRailwayTrainFallbackOnlyWithoutALineup(t *testing.T) {
+	trains := []*sfs.SFSObject{plTestTarget(25, trainTypeTrain, 152, plTestOther, 9_000_000, 0, "B2")}
+	kof := plTestInit(func(raw *sfs.SFSObject) {
+		o := sfs.NewSFSObject()
+		o.PutBool("isFunctionOn", true)
+		raw.PutSFSObject("allianceTrainStartInfo", o)
+	}, 0, 0)
+	shared := plLineup([]int64{1000, 1001, 1002, 1003, 1004}, []int64{1000, 1100, 1101}, []int64{1200, 1201})
+	if got := plAttacked(plOK(t, kof, plTestFake{trains: trains, lineup: shared})); len(got) != 0 {
+		t.Errorf("attacked %v: a lineup with a hero in two teams must leave trains alone, not fall back", got)
+	}
+	partial := plLineup([]int64{1000, 1001, 1002, 1003, 1004}, []int64{1100, 1101, 1102, 1103, 1104})
+	if got := plAttacked(plOK(t, kof, plTestFake{trains: trains, lineup: partial})); len(got) != 0 {
+		t.Errorf("attacked %v: a lineup with an empty team must leave trains alone, not fall back", got)
+	}
+	empty := plLineup([]int64{}, []int64{}, []int64{})
+	if got := plAttacked(plOK(t, kof, plTestFake{trains: trains, lineup: empty})); !slices.Equal(got, []int64{25}) {
+		t.Errorf("attacked %v: with no lineup at all the strongest attack squads stand in", got)
 	}
 }
