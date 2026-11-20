@@ -179,6 +179,42 @@ func TestHandCopiedListsMatchTheDump(t *testing.T) {
 		}
 	})
 
+	// truck-reroll's "free" rests on train_para row 9, its high-goods skip on row 55 and its
+	// quality line on the type-1 train_property rows of quality 1-4 (fu-f-r1 minor 1).
+	t.Run("truckRerollTables", func(t *testing.T) {
+		quality := map[int64]int64{}
+		for id, r := range eventTableDump(t, "train_property") {
+			if num(r["type"]) == 1 {
+				quality[key(id)] = num(r["quality"])
+			}
+		}
+		for id, q := range quality {
+			want := int32(0)
+			if (q >= 1 && q <= 5) || q == 10 {
+				want = int32(q)
+			}
+			if got := truckQuality(id); got != want {
+				t.Errorf("truckQuality(%d) = %d, train_property quality %d", id, got, q)
+			}
+		}
+		for q, rs := range truckRerollQualityRanges {
+			for _, r := range rs {
+				for id := r[0]; id <= r[1]; id++ {
+					if got, ok := quality[id]; !ok || got != int64(q) {
+						t.Errorf("truck %d is in truckRerollQualityRanges[%d], type-1 train_property quality %d (row present %v)", id, q, got, ok)
+					}
+				}
+			}
+		}
+		para := eventTableDump(t, "train_para")
+		if got := eventDumpScalar(para["9"]["val"]); got != truckRerollChangeCost {
+			t.Errorf("truckRerollChangeCost = %q, train_para 9 %q", truckRerollChangeCost, got)
+		}
+		if got := eventDumpScalar(para["55"]["val"]); got != truckRerollHighGoods {
+			t.Errorf("truckRerollHighGoods = %q, train_para 55 %q", truckRerollHighGoods, got)
+		}
+	})
+
 	t.Run("duelCampCapacity", func(t *testing.T) {
 		b := eventTableDump(t, "building")
 		for lv := 1; lv < len(duelCampCapacity); lv++ {

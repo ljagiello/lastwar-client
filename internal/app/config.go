@@ -270,7 +270,7 @@ func configShumeiID(cfg *SessionConfig, runDeviceID string) string {
 // config at path, re-reading the file first so every other field stays as it is on disk, as the
 // client caches every non-empty one it gets (Net/Msgs/PushShumeiIdMessage.lua:14-18). It belongs
 // to the device it was pushed to, so it isn't saved into a config made for another one (the owner
-// rule saveSessionTokens uses), and an empty or unchanged one writes nothing. A failure is only
+// rule configShumeiID applies), and an empty or unchanged one writes nothing. A failure is only
 // logged: the next run sends the old one, as a client whose cache write failed would.
 func saveShumeiID(path, deviceID, shumeiID string) {
 	if path == "" || shumeiID == "" {

@@ -64,7 +64,7 @@ import (
 // must not drop; build and queue replies must carry an itemCostArr listing every item sent (proof
 // the items paid); a camp reply, which has no itemCostArr, must carry gold. Otherwise the feature
 // stops for the rest of the process with an ERROR naming the call, and the trip is persisted so
-// later runs refuse every duel and dig spend until it is cleared (tripwire.go). E100173 (already
+// later runs refuse every tripwire-guarded spend until it is cleared (tripwire.go). E100173 (already
 // completed, QueueDataManager.lua:507-508) and 120021 ("Not enough items.") stop just that job.
 // Remaining time is re-read from every reply (buildInfo.uT / finished, queue uT,
 // buildInfo.prodET); a reply without it ends that job. Remaining time is end minus the game time

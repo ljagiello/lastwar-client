@@ -89,6 +89,10 @@ type GameConn struct {
 	// (SetForwardServerID).
 	forwardSid atomic.Pointer[uint16]
 
+	// shumeiID is the last shumeiId a push.shumei.id on this connection carried (noteShumeiID,
+	// ShumeiID).
+	shumeiID atomic.Pointer[string]
+
 	// clock is the server time the pongs on this connection carry (clock.go, ServerNow).
 	clock serverClock
 
@@ -423,7 +427,47 @@ func (c *GameConn) readEnvelope() (*Envelope, error) {
 	c.noteReply(env)
 	c.notePong(env, recv)
 	c.logScorePush(env)
+	c.noteShumeiID(env)
 	return env, nil
+}
+
+// shumeiIDPushCmd is the server's push of the ShumeiId the client caches
+// (PushShumeiIdMessage.lua:8-21).
+const shumeiIDPushCmd = "push.shumei.id"
+
+// noteShumeiID keeps the shumeiId of a push.shumei.id that carries no errorCode, as the client
+// caches every non-empty one in PlayerPrefs LW_CacheShumeiDeviceId and sends it as ta lw_shumei_id
+// (PushShumeiIdMessage.lua:10-18). Nothing waits for the push, so it is noted here, where every
+// read passes, whichever loop reads it (FetchInit drops pushes it does not wait for).
+func (c *GameConn) noteShumeiID(env *Envelope) {
+	if env.Controller != ControllerExtension || env.Content == nil {
+		return
+	}
+	if v, ok := env.Content.Get("c"); !ok || v.Val != shumeiIDPushCmd {
+		return
+	}
+	var params *sfs.SFSObject
+	if pv, ok := env.Content.Get("p"); ok {
+		params, _ = pv.Val.(*sfs.SFSObject)
+	}
+	if params == nil || params.Has("errorCode") {
+		return
+	}
+	if id := params.GetString("shumeiId"); id != "" {
+		c.shumeiID.Store(&id)
+	}
+}
+
+// ShumeiID returns the last shumeiId the server pushed on this connection (push.shumei.id), or ""
+// when none came.
+func (c *GameConn) ShumeiID() string {
+	if c == nil {
+		return ""
+	}
+	if v := c.shumeiID.Load(); v != nil {
+		return *v
+	}
+	return ""
 }
 
 // scorePushCmd is the server's "points earned" push for score events: Arms Race and, with type

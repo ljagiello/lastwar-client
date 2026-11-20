@@ -23,9 +23,10 @@ import (
 // <config>.tripwire.json (never the session config itself), 0600, through a temp file and a
 // rename. Reply-shape failures (duel-speedups' missing itemCostArr or gold) halt only the process
 // that saw them. While that file exists, every duel spend (duel-speedups, duel-recruit-tickets,
-// duel-troop-training, secret-tasks-start), Treasure Hunt's pickaxe digs (digsSpendCmds) and
-// treasure-digs' brick opens refuse, with a Warn naming the file. Free claims, the free vault-stone
-// opens and the read-only -plan twins still run. Only the operator clears it, with
+// duel-troop-training, secret-tasks-start), Treasure Hunt's pickaxe digs (digsSpendCmds),
+// treasure-digs' brick opens, supplies-search and free-research-finish refuse, with a Warn naming
+// the file; supplies-search and free-research-finish also write it when they see the balance fall.
+// Free claims, the free vault-stone opens and the read-only -plan twins still run. Only the operator clears it, with
 // -clear-tripwire. An unreadable or malformed file counts as a trip. With no path set (tests, a
 // run without a session config) trips stay in memory only, as before.
 
@@ -46,7 +47,7 @@ var tripwireState struct {
 }
 
 // errTripwire is what a spend feature returns while the tripwire file exists.
-var errTripwire = errors.New("the diamond tripwire file is set: a duel or dig spend saw the diamond balance fall")
+var errTripwire = errors.New("the diamond tripwire file is set: a duel, dig, supplies-search or free-research-finish spend saw the diamond balance fall")
 
 // TripwireFile is the tripwire file for a session config path, or "" when there is none.
 func TripwireFile(sessionConfigPath string) string {
@@ -90,7 +91,7 @@ func tripwireTrip(feature, cmd, reason string) {
 			"path", path, "feature", feature, "error", err)
 		return
 	}
-	slog.Error("DIAMOND TRIPWIRE persisted: every duel and dig spend refuses to run until the file is removed",
+	slog.Error("DIAMOND TRIPWIRE persisted: every duel, dig, supplies-search and free-research-finish spend refuses to run until the file is removed",
 		"path", path, "feature", feature, "command", cmd, "clear", tripwireClearFlag)
 }
 
@@ -167,7 +168,7 @@ func tripwireErr(feature string) error {
 func WarnIfTripwireSet() {
 	rec, path, active, readErr := tripwireActive()
 	if active {
-		slog.Warn("the diamond tripwire file is set: duel and dig spends refuse until it is cleared",
+		slog.Warn("the diamond tripwire file is set: duel, dig, supplies-search and free-research-finish spends refuse until it is cleared",
 			tripwireLogArgs(rec, path, readErr)...)
 	}
 }
@@ -190,7 +191,7 @@ func ClearTripwire(path string) (bool, error) {
 	if err := os.Remove(path); err != nil {
 		return false, err
 	}
-	slog.Warn("cleared the diamond tripwire: duel and dig spends run again from the next run", "path", path,
+	slog.Warn("cleared the diamond tripwire: duel, dig, supplies-search and free-research-finish spends run again from the next run", "path", path,
 		"trippedAt", rec.Time.Format(time.RFC3339), "trippedBy", rec.Feature, "command", rec.Command, "reason", rec.Reason)
 	return true, nil
 }

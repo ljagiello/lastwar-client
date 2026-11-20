@@ -519,11 +519,13 @@ func fireworksScan(conn *session.GameConn, in *Init) (*fwScan, error) {
 // allianceTileScanName prefixes the shared scan's log lines.
 const allianceTileScanName = "alliance-tile-scan"
 
-// fwScanRun is one run's alliance tile scan, keyed by (conn, in) like the activity sweep.
+// fwScanRun is one run's alliance tile scan, keyed by (conn, in) like the activity sweep, with the
+// error the scan returned to its first caller.
 type fwScanRun struct {
 	conn *session.GameConn
 	in   *Init
 	sc   *fwScan
+	err  error
 }
 
 var (
@@ -539,10 +541,14 @@ func sharedAllianceTileScan(conn *session.GameConn, in *Init, who string) (*fwSc
 	fwScanMu.Lock()
 	if r := fwScanCache; r != nil && r.conn == conn && r.in == in {
 		fwScanMu.Unlock()
-		if r.sc != nil {
+		switch {
+		case r.sc != nil:
 			slog.Info(who+": reusing this run's alliance tile scan", "requests", r.sc.requests, "blocks", r.sc.blocks,
 				"failedRequests", r.sc.failed, "chests", len(r.sc.boxes), "treasurePoints", len(r.sc.treasures))
-		} else {
+		case r.err != nil:
+			slog.Info(who+": this run's alliance tile scan failed, so there is nothing to read; not scanning again",
+				"error", r.err.Error())
+		default:
 			slog.Info(who + ": this run's alliance tile scan found nothing to read")
 		}
 		return r.sc, nil
@@ -551,7 +557,7 @@ func sharedAllianceTileScan(conn *session.GameConn, in *Init, who string) (*fwSc
 	slog.Info(who+": reading the alliance members' HQ tiles", "blockRadius", atBlockRadius)
 	sc, err := allianceTileScan(conn, in, allianceTileScanName, atBlockRadius)
 	fwScanMu.Lock()
-	fwScanCache = &fwScanRun{conn: conn, in: in, sc: sc}
+	fwScanCache = &fwScanRun{conn: conn, in: in, sc: sc, err: err}
 	fwScanMu.Unlock()
 	return sc, err
 }

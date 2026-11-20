@@ -32,9 +32,9 @@ import (
 // (IsUnlock, AllyDuelScoreGachaManager.lua:267-269; init effect is a lower bound of the client's).
 // protectNum moves only in draw replies (:182-195), so this collects what the player's own draws
 // filled. The draw itself (AlDuelLotteryLotteryMessage.lua:6-7, 10,000,000 score per draw,
-// DataConfig alliance_duel_league k6) spends the balance on a random prize: it is the user's
-// decision (MASTER §6.1), so this file has no draw command; the balance is logged as the number of
-// draws it would pay for.
+// DataConfig alliance_duel_league k6) spends the balance on a random prize; the user ruled it in
+// as the separate opt-in duel-gacha-draw (feature_duel_gacha_draw.go), so this file has no draw
+// command; the balance is logged as the number of draws it would pay for.
 //
 // duel-gacha-plan sends only the info read and logs whether duel-gacha would claim. The pity
 // claim scores no duel points, so neither feature is duel-held. Static-only, not validated live.

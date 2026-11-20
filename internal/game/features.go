@@ -78,6 +78,9 @@ const (
 var featurePhases = map[string]int{
 	"finished-timers":    phaseCapacity,
 	"secret-tasks-claim": phaseCapacity,
+	// truck-reroll rerolls a parked low truck for free, so it must run before truck-deploy, which
+	// sends it if it came out UR (both would otherwise sort by name in phaseAction, deploy first).
+	"truck-reroll": phaseCapacity,
 
 	"duel-recruit-tickets": phaseAction,
 	"duel-speedups":        phaseAction,
@@ -104,7 +107,8 @@ var featurePhases = map[string]int{
 	"tower-up-first-rewards": phaseProgress,
 	"zone-mobilization":      phaseProgress,
 
-	// 1.0.370 audit: the opt-in duel gacha (G20) runs once a run after arms-race-chests, and the
+	// 1.0.370 audit: the opt-in duel gacha (G20) runs once a run after arms-race-chests (its opt-in
+	// score draw after the pity claim), and the
 	// opt-in progress claims of WP5, WP7, WP8, WP9 and WP10. A -plan feature runs where the claims it
 	// previews do. gift-box-free-draw and military-rank-up stay actions, so the score boxes and the
 	// season-dailies salary they feed come after them.
@@ -120,6 +124,7 @@ var featurePhases = map[string]int{
 	"decoration-gacha-boxes":   phaseProgress,
 	"doomsday-quests":          phaseProgress,
 	"duel-gacha":               phaseProgress,
+	"duel-gacha-draw":          phaseProgress,
 	"duel-gacha-plan":          phaseProgress,
 	"event-milestone-boxes":    phaseProgress,
 	"food-event-boxes":         phaseProgress,

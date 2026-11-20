@@ -126,7 +126,7 @@ func gameServerFrom(lsr *gsl.LoginServerListRespon, gameUid, zone, accessTok str
 // an access token is bound to it. An iOS session sends the captured device's fromCountry and lang, which its Login sends too; without a
 // capture both stay the "US"/"en" this client has always sent. An Android one sends the SIM
 // operator of the phone its deviceId selects, as its Login's simOp and mt do
-// (com/sdkmanager/AppUtilManager.java:639-652; Android Assembly-CSharp.decompiled.cs:77501).
+// (com/sdkmanager/AppUtilManager.java:639-652; Android Assembly-CSharp.decompiled.cs:77542).
 func FormDevice(iosMode bool, deviceID string, dev CapturedDevice) gsl.FormDevice {
 	f := gsl.FormDevice{Platform: loginBuild(iosMode, "", "").Platform}
 	if iosMode {

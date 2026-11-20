@@ -118,7 +118,7 @@ func TestFeaturePhasesNameRegisteredFeatures(t *testing.T) {
 		"torch-relay", "tower-up-first-rewards", "zone-mobilization",
 		// 1.0.370 audit (G20 duel gacha after arms-race-chests; WP5/WP7/WP9 progress claims)
 		"alliance-star-emoji", "city-first-occupation", "counter-attack-rounds", "crazy-rock-tasks", "doomsday-quests",
-		"duel-gacha", "duel-gacha-plan", "front-break-tasks", "hero-trial-stage", "hero-wish-claim",
+		"duel-gacha", "duel-gacha-draw", "duel-gacha-plan", "front-break-tasks", "hero-trial-stage", "hero-wish-claim",
 		"leading-quest-tasks", "newbie-arena-rewards", "offseason-tasks", "parkour-tasks", "s0-alliance-boss",
 		"sand-worm-tasks", "sky-battle-boxes", "survivor-pack", "tactical-card-box-points",
 		"tactical-card-collection", "zone-mobilization-tasks",
@@ -135,8 +135,9 @@ func TestFeaturePhasesNameRegisteredFeatures(t *testing.T) {
 }
 
 // TestAudit370ClaimsFollowTheActionsThatFeedThem: the actions of the 1.0.370 audit that feed a claim
-// run before it: the free gift-box draw before the score boxes it adds to, and the military rank-up
-// before season-dailies, so the daily is claimed at the new rank.
+// run before it: the free gift-box draw before the score boxes it adds to, the military rank-up
+// before season-dailies, so the daily is claimed at the new rank, and the free truck reroll before
+// truck-deploy, which sends a truck that came out UR in the same run.
 func TestAudit370ClaimsFollowTheActionsThatFeedThem(t *testing.T) {
 	order := featuresInRunOrder()
 	at := func(name string) int {
@@ -145,10 +146,23 @@ func TestAudit370ClaimsFollowTheActionsThatFeedThem(t *testing.T) {
 	for _, p := range [][2]string{
 		{"gift-box-free-draw", "gift-box-score-boxes"},
 		{"military-rank-up", "season-dailies"},
+		{"truck-reroll", "truck-deploy"},
 	} {
 		if a, b := at(p[0]), at(p[1]); a < 0 || b < 0 || a > b {
 			t.Errorf("%s runs at %d, %s at %d; want the first before the second", p[0], a, p[1], b)
 		}
+	}
+}
+
+// TestDuelGachaDrawFollowsThePityClaim: the score draw (FU-E) runs after duel-gacha's pity claim,
+// so a full pity counter is claimed before more draws fill it further.
+func TestDuelGachaDrawFollowsThePityClaim(t *testing.T) {
+	order := featuresInRunOrder()
+	at := func(name string) int {
+		return slices.IndexFunc(order, func(f Feature) bool { return f.Name == name })
+	}
+	if c, d := at("duel-gacha"), at("duel-gacha-draw"); c < 0 || d < 0 || c > d {
+		t.Errorf("duel-gacha runs at %d, duel-gacha-draw at %d; want the pity claim first", c, d)
 	}
 }
 

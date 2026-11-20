@@ -473,6 +473,54 @@ func TestAllianceTileScanRunsOncePerRun(t *testing.T) {
 	}
 }
 
+// TestSharedTileScanReportsAnEarlierFailure (wp7-r2 #3.7): a later feature of a run whose shared
+// scan failed (here al.rank refused, so no scan at all) says the scan failed, not that it found
+// nothing; a scan with nothing to read still says so.
+func TestSharedTileScanReportsAnEarlierFailure(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withFwPace(t)
+	logs := captureFwLogs(t)
+	errConn, _ := startEvFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "al.rank" {
+			return evErr("world_tips_1005")
+		}
+		return evErr("unexpected command")
+	})
+	in := fwTestInit()
+	if err := runAllianceTreasures(errConn, in); err == nil {
+		t.Fatal("the first feature must get the scan error")
+	}
+	if err := runFireworks(errConn, in); err != nil {
+		t.Fatalf("a later feature got the scan error again: %v", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `msg="fireworks: this run's alliance tile scan failed, so there is nothing to read; not scanning again"`) ||
+		!strings.Contains(out, "world_tips_1005") {
+		t.Errorf("the later feature does not report the failed scan:\n%s", out)
+	}
+	if strings.Contains(out, "fireworks: this run's alliance tile scan found nothing to read") {
+		t.Errorf("a failed scan is logged as one that found nothing:\n%s", out)
+	}
+
+	noAlliance := evInit(30)
+	u := sfs.NewSFSObject()
+	u.PutUtfString("uid", fwSelf)
+	u.PutInt("serverId", fwServer)
+	noAlliance.Raw.PutSFSObject("user", u)
+	conn, fake := startFwFake(t, fwBlockReply(evTestNow), nil)
+	for _, run := range []func(*session.GameConn, *Init) error{runAllianceTreasures, runFireworks} {
+		if err := run(conn, noAlliance); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(fake.cmds()); n != 0 {
+		t.Errorf("sent %v without an alliance", fake.cmds())
+	}
+	if !strings.Contains(logs.String(), "fireworks: this run's alliance tile scan found nothing to read") {
+		t.Errorf("an empty scan is no longer logged as one that found nothing:\n%s", logs.String())
+	}
+}
+
 func TestFireworksScanFindsAndJudgesChests(t *testing.T) {
 	withEvNow(t, evTestNow)
 	conn, _ := startFwFake(t, fwBlockReply(evTestNow), nil)
