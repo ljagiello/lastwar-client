@@ -34,10 +34,12 @@ import (
 // whose single cost (item "itemId;num|itemId;num", LotteryInfo.lua:152-162) is that ticket is the
 // one pulled. That is the pool the recruit view sends for its current tab. Its ticket is kept,
 // never spent on a later tab, when the recruit view would ask a wish confirmation before the pull
-// (duelRecruitWishAsk: herorecruit_alert1, alert2 or alert5), or when the pool is not in
-// officer_recruit (a pool newer than the tables) and shows the wish UI, so its wish list is unknown.
-// With the wish UI off (wishSwitch off or wishPityReceiveNum <= 0, IsShowWish, LotteryInfo.lua:
-// 468-478) the client pulls without asking whatever the list holds, and so does this.
+// (duelRecruitWishAsk: herorecruit_alert1, alert2 or alert5), or when the answer needs a table this
+// client lacks: a pool not in officer_recruit (newer than the tables) whose chosen wish hero is
+// owned at max rank, where alert2/alert5 depend on the pool's wish list. With the wish UI off
+// (wishSwitch off or wishPityReceiveNum <= 0, IsShowWish, LotteryInfo.lua:468-478), or with a
+// chosen wish hero not owned or below max rank (LotteryInfo.lua:878-884), the client pulls without
+// reading the wish list, and so does this, whether the pool is in the table or not.
 //
 // A single pull is `lottery.hero.card {id, isTen: 0, useFree: 0, aiPushStatus, itemId}`. The
 // client sends it only when the held count >= the single cost (UIHeroRecruitView.lua:963-975). A
@@ -183,7 +185,10 @@ func duelRecruitOwnedHeroes(in *Init) duelRecruitHeroes {
 // with the chosen hero also at max honor level (:1453-1455), alert5 when another owned wish-list
 // hero is below its max_honorLevel. When no init userHero entry carries honorLevel, the honor half
 // can't be told from init, so a chosen hero at max rank counts as alert5
-// (duelRecruitWishAlert5Assumed): stricter than the client, and logged as such.
+// (duelRecruitWishAlert5Assumed): stricter than the client, and logged as such. The checks run in
+// the client's order: a chosen hero not owned or below max rank returns "" before the wish list
+// is read, so a pool officer_recruit lacks is duelRecruitWishUnknown only once its chosen hero is
+// owned at max rank (or that hero can't be read from wishHero or lw_hero).
 func duelRecruitWishAsk(p *sfs.SFSObject, owned duelRecruitHeroes) string {
 	if duelRecruitWishUnset(p) {
 		return duelRecruitWishAlert1
@@ -191,9 +196,6 @@ func duelRecruitWishAsk(p *sfs.SFSObject, owned duelRecruitHeroes) string {
 	shown, known := duelRecruitWishShown(p)
 	if !shown {
 		return ""
-	}
-	if !known {
-		return duelRecruitWishUnknown
 	}
 	chosen, err := strconv.ParseInt(strings.TrimSpace(evString(p, "wishHero")), 10, 64)
 	if err != nil {
@@ -209,6 +211,9 @@ func duelRecruitWishAsk(p *sfs.SFSObject, owned duelRecruitHeroes) string {
 	}
 	if hero.rank < int64(row.maxRank) {
 		return ""
+	}
+	if !known {
+		return duelRecruitWishUnknown
 	}
 	others := func(below func(h duelRecruitHero, r duelHeroRow) bool) bool {
 		for _, id := range duelRecruitTable[evString(p, "id")].wishList {
@@ -451,9 +456,10 @@ func (r *duelRecruitRun) heroes(pools []duelRecruitPool) []error {
 		}
 		done[ticket] = true
 		// The ticket stays unspent rather than going to a later tab the player didn't pick.
-		// Holds this client decides without the client's answer (a pool or hero the tables
-		// lack with the wish UI shown, honor levels init lacks) are Warn: they keep tickets the
-		// client might pull, until the tables are regenerated or init carries the field.
+		// Holds this client decides without the client's answer (a pool the tables lack whose
+		// chosen wish hero is at max rank, a wish hero lw_hero lacks, honor levels init lacks)
+		// are Warn: they keep tickets the client might pull, until the tables are regenerated or
+		// init carries the field.
 		if pool.ask != "" {
 			log := slog.Info
 			if pool.ask == duelRecruitWishUnknown || pool.ask == duelRecruitWishAlert5Assumed {
@@ -464,7 +470,7 @@ func (r *duelRecruitRun) heroes(pools []duelRecruitPool) []error {
 			continue
 		}
 		if pool.unknown {
-			slog.Info("duel-recruit-tickets: the pool is not in officer_recruit (tables 40413); its wish UI is off, so it is pulled as the client pulls it",
+			slog.Info("duel-recruit-tickets: the pool is not in officer_recruit (tables 40413); the recruit view asks no wish confirmation (wish UI off, or the chosen wish hero not owned or below max rank), so it is pulled as the client pulls it",
 				"pool", pool.id, "ticket", ticket)
 		}
 		recruited := int64(0)

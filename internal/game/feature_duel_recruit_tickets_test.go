@@ -371,10 +371,13 @@ func TestDuelRecruitKeepsTicketsForAWishPoolWithNoWishHero(t *testing.T) {
 		"pool not in 40413":          {[]*sfs.SFSObject{wish("221799", 2, false, 0, "")}, []string{"221799:1"}},
 		"pool not in 40413, no pity": {[]*sfs.SFSObject{wish("221799", 2, true, 0, "")}, []string{"221799:1"}},
 		"pool not in 40413, no type": {[]*sfs.SFSObject{duelWithoutKey(wish("221799", 2, false, 0, ""), "type")}, []string{"221799:1"}},
-		// With the wish UI on, its wish list is unknown: kept (alert1 with no wish hero, Warn with one).
+		// With the wish UI on, the client asks alert1 when no wish hero is chosen: kept. With one
+		// chosen that is not owned (50006 here) it pulls without asking
+		// (GetWishLotterySecondConfirmKey, LotteryInfo.lua:839-893): pulled.
+		// TestDuelRecruitPullsAPoolNewerThanTheTablesUntilTheWishListDecides has the owned cases.
 		"pool not in 40413, wish UI, no wish hero": {[]*sfs.SFSObject{wish("221799", 2, true, 200, "")}, nil},
-		"pool not in 40413, wish UI, wish hero":    {[]*sfs.SFSObject{wish("221799", 2, true, 200, "50006")}, nil},
-		"pool not in 40413, wish UI, later tab":    {[]*sfs.SFSObject{wish("221799", 5, true, 200, "50006"), duelPool("221700", 2, "230006;1|230006;10")}, nil},
+		"pool not in 40413, wish UI, wish hero":    {[]*sfs.SFSObject{wish("221799", 2, true, 200, "50006")}, []string{"221799:1"}},
+		"pool not in 40413, wish UI, later tab":    {[]*sfs.SFSObject{wish("221799", 5, true, 200, "50006"), duelPool("221700", 2, "230006;1|230006;10")}, []string{"221799:1"}},
 		"wish switched off":                        {[]*sfs.SFSObject{wish("221708", 2, false, 200, "")}, []string{"221708:1"}},
 		"no wish pity to aim at":                   {[]*sfs.SFSObject{wish("221708", 2, true, 0, "")}, []string{"221708:1"}},
 		// The ticket is kept, not spent on a later tab the player didn't pick.
@@ -398,6 +401,40 @@ func TestDuelRecruitKeepsTicketsForAWishPoolWithNoWishHero(t *testing.T) {
 	}
 	if len(duelRecruitTable) != 30 || n != 10 || len(duelRecruitTable["221709"].wishList) != 15 {
 		t.Errorf("duelRecruitTable: %d rows, %d with a wish list; want 30 and 10, 221709 among them", len(duelRecruitTable), n)
+	}
+}
+
+func TestDuelRecruitPullsAPoolNewerThanTheTablesUntilTheWishListDecides(t *testing.T) {
+	// MASTER B54 / B3: 221799 is not in officer_recruit 40413 (a pool of newer live tables), wish
+	// UI on, wish hero 50006 (lw_hero 40413 max_rank 26). GetWishLotterySecondConfirmKey
+	// (LotteryInfo.lua:839-893) returns nil before it reads the wish list while the chosen hero is
+	// not owned or below max rank, and the recruit view then pulls (UIHeroRecruitView.lua:992-1005).
+	// At max rank alert2/alert5 depend on the wish list the tables lack: kept, also from a later tab.
+	pool := func(order int) *sfs.SFSObject {
+		p := duelWishPool("50006")
+		p.PutUtfString("id", "221799")
+		p.PutInt("order", int32(order))
+		return p
+	}
+	for name, c := range map[string]struct {
+		pools  []*sfs.SFSObject
+		heroes [][3]int
+		want   []string
+	}{
+		"chosen hero not owned":     {[]*sfs.SFSObject{pool(2)}, [][3]int{{50008, 26, 600}}, []string{"221799:1"}},
+		"chosen hero rank 10 of 26": {[]*sfs.SFSObject{pool(2)}, [][3]int{{50006, 10, 0}}, []string{"221799:1"}},
+		"chosen hero at max rank":   {[]*sfs.SFSObject{pool(2)}, [][3]int{{50006, 26, 600}}, nil},
+		"at max rank, later tab":    {[]*sfs.SFSObject{pool(5), duelPool("221700", 2, "230006;1|230006;10")}, [][3]int{{50006, 26, 600}}, nil},
+	} {
+		in := duelRecruitInit(1000, map[string]int{"230006": 10}, c.pools...)
+		duelUserHeroes(in, c.heroes...)
+		conn, f := startDuelSpendFake(t, duelTestDay(DuelThemeHeroes, duelTestHeroes), duelRecruitServer(1000, 0))
+		if err := runDuelRecruitTickets(conn, in); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := pullsOf(t, f); !slices.Equal(got, c.want) {
+			t.Errorf("%s: pulls %v, want %v", name, got, c.want)
+		}
 	}
 }
 
@@ -479,7 +516,10 @@ func TestDuelRecruitKeepsTicketsWhereTheClientAsksASecondWishConfirmation(t *tes
 		{duelWishPool("50006"), owned([3]int{50006, 26, 600}), ""},
 		{duelWishPool("not-a-hero"), owned(), duelRecruitWishUnknown},
 		{notIn40413("", true), owned(), duelRecruitWishAlert1},
+		{notIn40413("50006", true), owned(), ""},
+		{notIn40413("50006", true), owned([3]int{50006, 10, 0}), ""},
 		{notIn40413("50006", true), owned([3]int{50006, 26, 600}), duelRecruitWishUnknown},
+		{notIn40413("not-a-hero", true), owned(), duelRecruitWishUnknown},
 		{notIn40413("", false), owned(), ""},
 		{notIn40413("50006", false), owned([3]int{50006, 26, 600}, [3]int{50008, 25, 600}), ""},
 	} {
