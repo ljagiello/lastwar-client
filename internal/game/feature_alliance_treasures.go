@@ -84,8 +84,9 @@ import (
 //
 // Not done: digging or helping to dig (a march), the dig window, the chat card, and treasures of
 // other kinds (sandworm, flower train, ...), which have their own rules. The alliance boxes of
-// types 2, 5 and 8 (siege, invasion, alliance-boss sandbox) are the separate opt-in feature
-// alliance-treasure-boxes, which reads the same scan.
+// types 2, 5 and 8 (siege, invasion, alliance-boss sandbox; MASTER G41) are left unclaimed
+// pending the user's ruling: a claim takes one of the box's shared slots and puts the uid in
+// rewardUserList, and alliance mates see the slot count drop (CS:186599-186602, 119184-119187).
 
 const (
 	allianceTreasureClaimCmd = "detect.event.claim.treasure"

@@ -32,10 +32,26 @@ import (
 // before thanksgiving_times_expire (ActGiftGivingDataManager.lua:199-261, from init and from every
 // claim reply: an array of maps {"<activityId>": n}). The tap sends
 // `thanksgiving.receive.base.reward {activityId: Int, otherUid: UtfString, statusId: Int}`
-// (BuildingRewardBubbleEffect.lua:211-216, ThanksgivingReceiveBaseRewardMessage.lua:4-9), the
+// (BuildingRewardBubbleEffect.lua:211-219, ThanksgivingReceiveBaseRewardMessage.lua:4-9), the
 // activity being the open type-321 one (GetOneOpenActId). Go reads only alliance members' HQs,
-// the bases the scan reads, a subset of the client's. Never the type2-33 bubble: its tap is a
-// scout march (:217-218).
+// the bases the scan reads, a subset of the client's.
+//
+// GetOneOpenActId and the day cap (GetWorldRewardBubbleMaxNum) walk the activities whose
+// `thanksgiving.info {activityId: Int}` reply the client holds (ActGiftGivingDataManager.lua:199-219,
+// 263-293; RefreshActDetailData's only caller is ThanksgivingInfoMessage.lua:16). Without one the
+// client shows no type-31 bubble and sends no claim (BuildingRewardBubbleEffect.lua:131-139, 216).
+// The client sends it at activity-list load for each listed type-321 activity that
+// CheckIsSend accepts (ActivityListDataManager.lua:436-440); Go sends it once for the open
+// activity before the first Thanksgiving claim, logs the reply's keys and counts only (givePlayers
+// and receiveArr are other players' data, ActGiftGivingData.lua:20-40), and on an errorCode makes
+// no Thanksgiving claim this run. The cap stays activity_thanksgiving.day_receive_num.
+//
+// A base's type2-31 and type2-33 statuses share one bubble (CityDomeProtectEffectManager.lua:
+// 1147-1165), whose tap targets the unreceived status of the highest type2
+// (BuildingRewardBubbleEffect.lua:150-160). A 33's tap is a scout march (MarchUtil.LaunchScout,
+// :220-221), so while the base carries an unexpired, unreceived 33 (500525, 500554; activity_id
+// empty, so any listed pair counts as received) the client cannot send the 31 claim, and neither
+// does Go. Never the type2-33 scout.
 //
 // Valentine (ActValentineReceiveGift, type 332), the player's own base only. A status of type2 35
 // (BuildingRewardBubble3) on the player's own HQ, not expired, whose (own uid, status) pair is not
@@ -49,10 +65,11 @@ import (
 // Not done: the music-festival party bubble (its claim count is untraced and the bubble turns into
 // a share-to-chat button). Unverified live: whether world.get.block returns field 32 to a session
 // that never entered the world scene, the "already received" errorCode, and whether the owner sees
-// the claim. Every claim is logged at Info with the reply's keys, and the first errorCode of any
-// kind stops the run.
+// the claim. Every claim is logged at Info with the reply's keys, and the first errorCode on a
+// claim stops the run (one on thanksgiving.info stops only the Thanksgiving claims).
 const (
 	baseBubblesFeature        = "base-bubbles"
+	thanksgivingInfoCmd       = "thanksgiving.info"
 	thanksgivingClaimCmd      = "thanksgiving.receive.base.reward"
 	valentineOwnerClaimCmd    = "valentine.owner.base.reward"
 	thanksgivingActivityType  = 321 // EnumActivity.ActGiftGiving (EnumType.lua:6409)
@@ -68,6 +85,10 @@ var thanksgivingActivities = []int32{99108, 99302}
 
 // thanksgivingStatuses are lw_status's type2-31 rows (tables 40413; activity_id empty, time 86400).
 var thanksgivingStatuses = map[int32]bool{500521: true, 500522: true, 500550: true, 500551: true}
+
+// scoutBubbleStatuses are lw_status's type2-33 rows (StatusType2.BuildingRewardBubble2, tables
+// 40413; activity_id empty): their bubble's tap is a scout march, never sent.
+var scoutBubbleStatuses = map[int32]bool{500525: true, 500554: true}
 
 // valentineStatus is a lw_status type2-35 row: its activity_id and that activity's
 // activity_Valentine_Get bubble_times (day_first_status is the status itself).
@@ -171,6 +192,16 @@ type baseBubble struct {
 	own    bool // the Valentine own-base bubble
 }
 
+// scoutBubbleFirst reports whether base b carries an unexpired type2-33 status whose (owner,
+// status) pair is not in recv: the bubble's tap then targets it and launches a scout
+// (BuildingRewardBubbleEffect.lua:121-160, 220-221).
+func scoutBubbleFirst(b fwBase, recv baseReceiveDict, now time.Time) bool {
+	return slices.ContainsFunc(b.Statuses, func(s worldStatus) bool {
+		_, received := recv[receivedPair{b.OwnerUID, s.ID}]
+		return scoutBubbleStatuses[s.ID] && now.Before(evUnix(s.ExpireTime)) && !received
+	})
+}
+
 // bubbleVerdict applies the client's bubble rules for s on base b; "" is claimable.
 func (sc *fwScan) bubbleVerdict(b fwBase, s worldStatus, recv baseReceiveDict, now time.Time) string {
 	_, member := sc.roster.byUID[b.OwnerUID]
@@ -187,6 +218,8 @@ func (sc *fwScan) bubbleVerdict(b fwBase, s worldStatus, recv baseReceiveDict, n
 			return "not on its owner's home server"
 		case received:
 			return "already received"
+		case scoutBubbleFirst(b, recv, now):
+			return "a scout bubble takes the tap first"
 		}
 		return ""
 	case valentineStatuses[s.ID] != (valentineStatus{}):
@@ -265,8 +298,15 @@ func runBaseBubbles(conn *session.GameConn, in *Init) error {
 		return cmp.Or(cmp.Compare(a.status.ExpireTime, b.status.ExpireTime), cmp.Compare(a.base.PointID, b.base.PointID),
 			cmp.Compare(a.status.ID, b.status.ID))
 	})
-	got := 0
-	for i, bb := range picks {
+	got, sent := 0, 0
+	pace := func() { // a pause before every request but the first
+		if sent > 0 {
+			fwSleep(fireworksClaimPace)
+		}
+		sent++
+	}
+	tgReady, tgRefused := false, false
+	for _, bb := range picks {
 		if got >= baseBubblesMaxClaims {
 			break
 		}
@@ -274,9 +314,24 @@ func runBaseBubbles(conn *session.GameConn, in *Init) error {
 			slog.Info(baseBubblesFeature+": the day's Thanksgiving bubbles are used up", "today", count, "cap", thanksgivingDayReceiveNum)
 			continue
 		}
-		if i > 0 {
-			fwSleep(fireworksClaimPace)
+		if !bb.own && !tgReady {
+			if tgRefused {
+				continue
+			}
+			pace()
+			code, err := thanksgivingInfo(conn, bb.actID)
+			if err != nil {
+				errs = append(errs, err)
+				break
+			}
+			if code != "" {
+				errs = append(errs, fmt.Errorf("%s: %s activityId %d: errorCode=%s", baseBubblesFeature, thanksgivingInfoCmd, bb.actID, code))
+				tgRefused = true
+				continue
+			}
+			tgReady = true
 		}
+		pace()
 		p := sfs.NewSFSObject()
 		cmd := thanksgivingClaimCmd
 		p.PutInt("activityId", bb.actID)
@@ -309,8 +364,53 @@ func runBaseBubbles(conn *session.GameConn, in *Init) error {
 		slog.Info(baseBubblesFeature+": claimed a bubble", append(who, "thanksgivingToday", count, "reward", fwReward(resp),
 			"replyKeys", resp.Keys())...)
 	}
-	slog.Info(baseBubblesFeature+": claims done", "claimed", got, "eligible", len(picks))
+	slog.Info(baseBubblesFeature+": claims done", "claimed", got, "eligible", len(picks), "thanksgivingInfoRefused", tgRefused)
 	return errors.Join(errs...)
+}
+
+// thanksgivingInfo sends `thanksgiving.info {activityId: Int}` (ThanksgivingInfoMessage.lua:4-7),
+// the read that gives the client the activity GetOneOpenActId returns. It returns the reply's
+// errorCode ("" when accepted) or the send/wait error. The reply is logged at Info with its keys
+// and counts only.
+func thanksgivingInfo(conn *session.GameConn, act int32) (string, error) {
+	p := sfs.NewSFSObject()
+	p.PutInt("activityId", act)
+	// fwRequest, not SendAndWait: the reply's givePlayers and receiveArr are other players' data.
+	resp, code, err := fwRequest(conn, baseBubblesFeature+": thanksgiving info", thanksgivingInfoCmd, p)
+	if err != nil {
+		return "", err
+	}
+	if code != "" {
+		slog.Warn(baseBubblesFeature+": thanksgiving info refused; no Thanksgiving claims this run", "activityId", act,
+			"errorCode", code, "errorMsg", evString(resp, "errorMsg"))
+		return code, nil
+	}
+	slog.Info(baseBubblesFeature+": thanksgiving info", "activityId", act, "replyActivityId", evString(resp, "activityId"),
+		"totalAmount", evString(resp, "totalAmount"), "givePlayers", sfsFieldLen(resp, "givePlayers"),
+		"receiveArr", sfsFieldLen(resp, "receiveArr"), "replyKeys", resp.Keys())
+	return "", nil
+}
+
+// sfsFieldLen is the number of entries under key (an array or an object), -1 when absent or not a
+// collection: a count to log where the entries themselves must not be.
+func sfsFieldLen(o *sfs.SFSObject, key string) int {
+	v, ok := o.Get(key)
+	if !ok {
+		return -1
+	}
+	switch c := v.Val.(type) {
+	case *sfs.SFSArray:
+		return len(c.Items())
+	case *sfs.SFSObject:
+		return len(c.Keys())
+	case []int32:
+		return len(c)
+	case []int64:
+		return len(c)
+	case []string:
+		return len(c)
+	}
+	return -1
 }
 
 // valOpenFor reports whether the Valentine activity act is open in init.

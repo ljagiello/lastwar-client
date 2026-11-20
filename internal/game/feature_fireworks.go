@@ -62,7 +62,7 @@ import (
 //
 // Steps 1-3 are allianceTileScan, run once per run (sharedAllianceTileScan, MASTER B34) for every
 // feature that reads the member HQ tiles: fireworks, alliance-treasures and the opt-in
-// alliance-treasure-boxes and base-bubbles. The one scan reads every block within atBlockRadius
+// base-bubbles. The one scan reads every block within atBlockRadius
 // of each HQ, so al.rank and clearUuidSet go out once (the client sends clearUuidSet only on its
 // first request after entering the world, CS:179977-179982).
 

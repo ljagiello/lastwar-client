@@ -183,6 +183,15 @@ func startAtFake(t *testing.T, block *sfs.SFSObject, claim func(n int, p *sfs.SF
 	})
 }
 
+// TestWP7LeavesTheAllianceTreasureBoxesUnregistered: claiming a siege, invasion or alliance-boss
+// sandbox box (MASTER G41) takes one of its shared slots where alliance mates see it, so it waits
+// for the user's ruling.
+func TestWP7LeavesTheAllianceTreasureBoxesUnregistered(t *testing.T) {
+	if _, ok := featureRegistry["alliance-treasure-boxes"]; ok {
+		t.Error("alliance-treasure-boxes is registered; its claim is visible to alliance mates and waits for the user's decision")
+	}
+}
+
 func TestRadarTreasureCaps(t *testing.T) {
 	for id, want := range map[int64]int32{25001: 20, 25198: 20, 1025001: 10, 1025168: 10, 27000: 20, 27015: 50, 505601: 100} {
 		if got, ok := radarTreasureCap(id); !ok || got != want {
