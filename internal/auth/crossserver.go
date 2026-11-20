@@ -299,6 +299,9 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			return nil, err
 		}
 		conn.SetAppVersion(claimed)
+		// The deviceId the Login sent is the client's DEVICE_ID, which a push.account.device.del
+		// must name to end the session (PushAccountDeviceDelMessage.lua:8-25; 1.0.370 audit B66).
+		conn.SetDeviceID(loginParams.GetString("deviceId"))
 
 		siObj := gsl.FindServerInfo(env.Content)
 		redirectIPVal := ""

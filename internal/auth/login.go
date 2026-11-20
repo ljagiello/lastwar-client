@@ -488,6 +488,9 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			return nil, err
 		}
 		conn.SetAppVersion(claimed)
+		// The deviceId the Login sent is the client's DEVICE_ID, which a push.account.device.del
+		// must name to end the session (PushAccountDeviceDelMessage.lua:8-25; 1.0.370 audit B66).
+		conn.SetDeviceID(loginParams.GetString("deviceId"))
 		if un != "" && un != ident.Username {
 			if err := ident.SaveUsername(un); err != nil {
 				slog.Warn("failed to persist username", "error", err)
