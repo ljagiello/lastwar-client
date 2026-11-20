@@ -31,7 +31,9 @@ func (rt handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 // TestRunCrossServerTestCheckVersionAndCheckDeviceChange drives the cron path in both modes:
 // check-version goes out once, as the build the Login claims (iOS under iosMode, else Android, with
 // a session config's appVersion/versionCode when it has them), with the session zone; the Login
-// carries that platform's resVersion; and check.device.change follows init.
+// carries that platform's resVersion; and check.device.change follows init. The one getserverlist
+// call is the pre-Login lookup (1.0.370 audit B40), which this fake answers with a 404: the Login
+// still goes to the configured address.
 func TestRunCrossServerTestCheckVersionAndCheckDeviceChange(t *testing.T) {
 	for _, c := range []struct {
 		name                           string
@@ -41,7 +43,7 @@ func TestRunCrossServerTestCheckVersionAndCheckDeviceChange(t *testing.T) {
 		wantBuildID, wantResVersion    string
 	}{
 		{"Android", false, "", "", gsl.Platform, gsl.PackageName, gsl.AppVersion, gsl.VersionCode, "2343.1502_826F_39516.23570"},
-		{"iOS", true, "", "", "iOS", "com.lastwar.ios", "1.0.344", "786", "2159.1505_821F_39516.23570"},
+		{"iOS", true, "", "", "iOS", "com.lastwar.ios", "1.0.370", "918", "2159.1505_821F_39516.23570"},
 		{"iOS, config build", true, "1.0.350", "801", "iOS", "com.lastwar.ios", "1.0.350", "801", "2159.1505_821F_39516.23570"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -125,8 +127,8 @@ func TestRunCrossServerTestCheckVersionAndCheckDeviceChange(t *testing.T) {
 				q.Get("buildId") != c.wantBuildID || q.Get("server") != "APS783" || q.Get("table_env") != "table_online" || q.Get("uid") != "" || q.Get("deviceId") != "" {
 				t.Errorf("check-version = %v, want the anonymous %s %s/%s query", q, c.wantPlatform, c.wantApp, c.wantBuildID)
 			}
-			if gslCalls != 0 {
-				t.Errorf("getserverlist.php calls = %d, want 0 without -cs-rt", gslCalls)
+			if gslCalls != 1 {
+				t.Errorf("getserverlist.php calls = %d, want 1 (the pre-Login lookup) without -cs-rt", gslCalls)
 			}
 			if len(afterInit) != 1 || afterInit[0] != "check.device.change" {
 				t.Errorf("first command after init = %v, want check.device.change", afterInit)

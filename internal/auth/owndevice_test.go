@@ -96,7 +96,7 @@ func (c *checkVersionPlatforms) RoundTrip(r *http.Request) (*http.Response, erro
 // as iOS and records that build; without it both stay Android.
 func TestBootstrapOwnDeviceUsesTheFlagIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	ident, err := LoadOrCreateDeviceIdentity()
+	ident, err := LoadOrCreateDeviceIdentity(true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestBootstrapOwnDeviceUsesTheFlagIdentity(t *testing.T) {
 	for _, ios := range []bool{false, true} {
 		wantPlatform, wantApp, wantCode := gsl.Platform, gsl.AppVersion, gsl.VersionCode
 		if ios {
-			wantPlatform, wantApp, wantCode = "iOS", "1.0.344", "786"
+			wantPlatform, wantApp, wantCode = "iOS", "1.0.370", "918"
 		}
 		t.Run(wantPlatform, func(t *testing.T) {
 			client, forms := testutil.UseDecryptingGSL(t, reply)

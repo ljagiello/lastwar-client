@@ -209,7 +209,7 @@ func TestLoginPicksTheAccountsServer(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			if c.persistedUid != "" {
-				ident, err := LoadOrCreateDeviceIdentity()
+				ident, err := LoadOrCreateDeviceIdentity(true)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -295,14 +295,14 @@ func TestCheckVersionForClaimsTheLoginBuild(t *testing.T) {
 		ios                                                     bool
 	}{
 		{"android", "", "", gsl.AppVersion, gsl.VersionCode, gsl.PackageName, "Android", false},
-		{"ios default", "", "", "1.0.344", "786", "com.lastwar.ios", "iOS", true},
+		{"ios default", "", "", "1.0.370", "918", "com.lastwar.ios", "iOS", true},
 		{"ios from the session config", "1.0.350", "801", "1.0.350", "801", "com.lastwar.ios", "iOS", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFakeGSL(t, liveCheckVersionTables, gsl.LoginServerListRespon{})
 			testutil.UseFakeGSLServer(t, f.Server)
-			if _, _, err := CheckVersionFor(gsl.DefaultHTTPClient(), c.ios, c.app, c.code, "APS783"); err != nil {
+			if _, _, err := CheckVersionFor(gsl.DefaultHTTPClient(), c.ios, c.app, c.code, "APS783", "dev-1"); err != nil {
 				t.Fatal(err)
 			}
 			qs := f.checkVersionQueries()

@@ -2,8 +2,11 @@ package gsl
 
 import (
 	"bytes"
+	"cmp"
+	"crypto/md5"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,20 +16,20 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Client build identity, pulled directly from the analyzed APK
-// (jadx_out/resources/AndroidManifest.xml) so the server sees the same
-// values a real 1.0.364 install would present. 1.0.364/1892 (posted
-// 2026-09-23) is signed with the same certificate as 1.0.351, so psh and
-// packageSign are unchanged.
+// Client build identity of the audited Android build, 1.0.370/1911 (apkm info.json, posted
+// 2026-11-18), what Application.version and PM_getVersionCode return
+// (Assembly-CSharp.decompiled.cs:57831-57832). It is signed with the same certificate as 1.0.351,
+// so psh and packageSign are unchanged. A session config's appVersion/versionCode replace it.
 const (
 	PackageName = "com.fun.lastwar.gp"
-	AppVersion  = "1.0.364"
-	VersionCode = "1892"
+	AppVersion  = "1.0.370"
+	VersionCode = "1911"
 	Platform    = "Android" // Versions.PlatformName / GameUtility.GetPlatformName() -- capitalized
 	unityVer    = "440"
 )
@@ -38,12 +41,65 @@ const (
 // config responses, never expected to exceed a few KB.
 const MaxGSLResponseSize = 1 << 20 // 1 MiB
 
+// onlineCheckVersionHosts is the client's onlineCheckVersionHostList and onlineEACheckVersionHosts
+// its online_ea_CheckVersionHostList (ConstURLConfig, Assembly-CSharp.decompiled.cs:13831-13833,
+// 1.0.370).
+var (
+	onlineCheckVersionHosts = []string{
+		"https://lastwar-serverlist-cf.lastwarapp.net",
+		"https://lastwar-serverlist-us-aws-ali.lastwargame.com",
+		"https://lastwar-serverlist-us-gcp-ali.lastwargame.com",
+	}
+	onlineEACheckVersionHosts = []string{
+		"https://lastwar-serverlist-ea-us-aws.lastwargame.com",
+		"https://lastwar-serverlist-ea-us-gcp.lastwargame.com",
+	}
+)
+
 // CheckVersionHosts lists the candidate CheckVersion/GetServerList gate hosts to try in order,
-// dossier §02.
-var CheckVersionHosts = []string{
-	"https://lastwar-serverlist-cf.lastwarapp.net",
-	"https://lastwar-serverlist-us-aws-ali.lastwargame.com",
-	"https://lastwar-serverlist-us-gcp-ali.lastwargame.com",
+// dossier §02. EACheckVersionHosts is the list a device in the early-access bucket uses instead
+// (checkVersionHostsFor). Tests replace either.
+var (
+	CheckVersionHosts   = slices.Clone(onlineCheckVersionHosts)
+	EACheckVersionHosts = slices.Clone(onlineEACheckVersionHosts)
+)
+
+// eaGrayPercent is the bucket bound up to which a device asks the early-access hosts.
+const eaGrayPercent = 5
+
+// GrayPercent is GrayUtils.GetPercentageFromMd5 (Assembly-CSharp.decompiled.cs:36030-36035): the
+// first 8 bytes of MD5(input) as a little-endian uint64, mod 100, plus 1. The client feeds it the
+// device uid, "_n3d" suffix included (DeviceManager.GetDeviceUid, :73399-73435).
+func GrayPercent(input string) int {
+	sum := md5.Sum([]byte(input))
+	return int(binary.LittleEndian.Uint64(sum[:8])%100) + 1
+}
+
+// checkVersionHostsFor is NetworkURLConfig.GetHostListByCurGroupType
+// (Assembly-CSharp.decompiled.cs:14131-14141): a device whose GrayPercent is at most 5 asks the
+// early-access hosts, every other one the online list. The early-access list stands in only for the
+// built-in online list (the client's URLGroupType.Online): a caller that replaced CheckVersionHosts,
+// as tests do, keeps its own list.
+func checkVersionHostsFor(deviceID string) (hosts []string, earlyAccess bool) {
+	if deviceID != "" && slices.Equal(CheckVersionHosts, onlineCheckVersionHosts) && GrayPercent(deviceID) <= eaGrayPercent {
+		return EACheckVersionHosts, true
+	}
+	return CheckVersionHosts, false
+}
+
+// ErrForcedUpdate is a check-version or Login reply with updateType 2: the server no longer
+// accepts the build this client claims. The real client stops on both: check-version enters
+// LoadingError "error force update" before it reads any other field
+// (Assembly-CSharp.decompiled.cs:9619-9626), and a Login reply moves it to AppUpdate (:13666-13669)
+// or, on a cross-server Login, to loading error 9 (:71486-71494). It never calls GSL or logs in.
+var ErrForcedUpdate = errors.New("forced update (updateType 2): the server no longer accepts this build; " +
+	"move the session config's appVersion/versionCode (or the built-in defaults) to the current release")
+
+// ForcedUpdate reports whether an updateType value means a forced update. The client reads it as
+// a string and converts it with ToInt (Assembly-CSharp.decompiled.cs:9621), so a numeric 2 counts.
+func ForcedUpdate(updateType string) bool {
+	n, err := strconv.Atoi(strings.TrimSpace(updateType))
+	return err == nil && n == 2
 }
 
 // Msg/DownloadURL/ResMsg/HotUpdateMsg are FlexString, not bare string -- round-41 fix, the same
@@ -151,6 +207,22 @@ func (cv *CheckVersionResponse) ClientSwitchOn(id int) bool {
 	return id < len(switches) && strings.TrimSpace(switches[id]) == "1"
 }
 
+// NewPacketZstd reports whether the client frames with the new packet class and Zstd, and so puts
+// isUseLz4 true in its Login: NetPacketConst.useNewPacket && useZStd, both false once switch 4
+// (DISABLE_NEW_NET_PACKET) or 5 (DISABLE_ZSTD) is on (Assembly-CSharp.decompiled.cs:9744-9745,
+// 83176-83179). Without a reply (cv nil) it reports true, what this client sends today.
+func (cv *CheckVersionResponse) NewPacketZstd() bool {
+	return cv == nil || (!cv.ClientSwitchOn(4) && !cv.ClientSwitchOn(5))
+}
+
+// ShumeiSDKOn reports whether switch 25 (ENABLE_SHUMEI_SDK) is on. With it off the client asks the
+// ShuMei SDK for nothing and its Login carries shumeiBoxId "" (ShumeiSdkManager.IsFunctionOpen and
+// GetLoginSmsdkId, Assembly-CSharp.decompiled.cs:59937, 60044-60058). Without a reply (cv nil) it
+// reports true, so a run whose check-version failed keeps today's behaviour.
+func (cv *CheckVersionResponse) ShumeiSDKOn() bool {
+	return cv == nil || cv.ClientSwitchOn(25)
+}
+
 // FlexString accepts a JSON field that the server sometimes encodes as a
 // string and sometimes as a bare number (observed live: `code` on error
 // responses is a JSON number, e.g. 301).
@@ -224,8 +296,9 @@ const tableEnv = "table_online"
 
 // CheckVersion fetches check-version as AndroidBuild. zone is the session's zone ("APS783"), sent
 // as `server` the way the real client sends its cached SERVER_ZONE, or "" when not known yet.
-func CheckVersion(httpClient *http.Client, zone string) (*CheckVersionResponse, string, error) {
-	return CheckVersionAs(httpClient, AndroidBuild, zone)
+// deviceID picks the gate host list (checkVersionHostsFor); it is never sent.
+func CheckVersion(httpClient *http.Client, zone, deviceID string) (*CheckVersionResponse, string, error) {
+	return CheckVersionAs(httpClient, AndroidBuild, zone, deviceID)
 }
 
 // checkVersionQuery builds the getlsu3dversion.php query the 1.0.364 client sends
@@ -251,9 +324,17 @@ func checkVersionQuery(build ClientBuild, zone string) url.Values {
 // this is a plain sequential fallback: each host gets the full httpClient timeout before moving
 // to the next) and returns the first successful response along with which host answered (that
 // host becomes the base URL for every subsequent GSL call -- dossier §02.1). build is the client
-// build the request claims; zone is as for CheckVersion.
-func CheckVersionAs(httpClient *http.Client, build ClientBuild, zone string) (*CheckVersionResponse, string, error) {
+// build the request claims; zone and deviceID are as for CheckVersion.
+//
+// A reply with updateType 2 ends the search: it returns that reply, its host and an error wrapping
+// ErrForcedUpdate, which the caller must treat as the end of the run (no GSL call, no Login).
+func CheckVersionAs(httpClient *http.Client, build ClientBuild, zone, deviceID string) (*CheckVersionResponse, string, error) {
 	q := checkVersionQuery(build, zone)
+	hosts, earlyAccess := checkVersionHostsFor(deviceID)
+	if earlyAccess {
+		slog.Info("check-version: this device is in the early-access bucket; asking the early-access gate hosts, as the real client does",
+			"grayPercent", GrayPercent(deviceID), "hosts", hosts)
+	}
 
 	// Round-42 fix: every continue branch below now also logs its own host+error at Warn before
 	// moving to the next host, closing a real diagnostic gap -- previously only `lastErr` (the
@@ -265,7 +346,7 @@ func CheckVersionAs(httpClient *http.Client, build ClientBuild, zone string) (*C
 	// (still names only the last-tried host's error, for backward-compatible brevity) -- this Warn
 	// trail is the mechanism for recovering the earlier hosts' reasons, not a replacement for it.
 	var lastErr error
-	for _, host := range CheckVersionHosts {
+	for _, host := range hosts {
 		u := host + "/gameservice/getlsu3dversion.php?" + q.Encode()
 		req, err := http.NewRequest(http.MethodGet, u, nil)
 		if err != nil {
@@ -302,27 +383,39 @@ func CheckVersionAs(httpClient *http.Client, build ClientBuild, zone string) (*C
 			slog.Warn("check-version: host failed, trying next", "host", host, "error", lastErr)
 			continue
 		}
+		// updateType: 0 and 3 proceed, 1 offers an optional store update, 2 forces one. The client
+		// tests a forced update before it looks at code (CheckResVersionState.OnRequestSuccess,
+		// Assembly-CSharp.decompiled.cs:9617-9639), and a forced update is a valid answer, so no
+		// other host is asked.
+		if ForcedUpdate(cv.UpdateType.String()) {
+			slog.Error("check-version: the server demands a forced update of this build; the real client stops here, and so does this run",
+				"host", host, "packageName", build.PackageName, "appVersion", build.AppVersion, "versionCode", build.VersionCode)
+			return &cv, host, fmt.Errorf("check-version %s: %w", host, ErrForcedUpdate)
+		}
 		if cv.Code != "" {
 			lastErr = fmt.Errorf("%s: server returned code=%s msg=%s", host, cv.Code, cv.Msg)
 			slog.Warn("check-version: host failed, trying next", "host", host, "error", lastErr)
 			continue
 		}
-		// updateType: 0 and 3 proceed, 1 offers an optional store update, 2 forces one
-		// (CheckResVersionState in the 1.0.364 C#). A forced update means the server has stopped
-		// accepting this build, so Logins claiming it are likely to start failing too.
-		if cv.UpdateType == "2" {
-			slog.Warn("check-version: the server demands a forced update of this build; move to the current release (gsl.AppVersion/VersionCode, or the session config's appVersion/versionCode)",
-				"packageName", build.PackageName, "appVersion", build.AppVersion, "versionCode", build.VersionCode)
-		}
-		// Switches that change the wire protocol (ClientSwitch, A-CS:44058-44152): 4/5 turn the
-		// new packet class and Zstd off, 26 moves the game socket to WebSocket, 29 adds the
-		// forward header to every frame, 44 falls back to WebSocket on every 2nd connect retry.
-		// This client implements none of them. Logged at Info, not Warn: their live values are
-		// not known yet (29 may already be on, MASTER §5.1 #22), and Go works as it is.
+		// Switches that change the wire protocol or the Login (ClientSwitch,
+		// Assembly-CSharp.decompiled.cs:44386-44480): 4/5 turn the new packet class and Zstd off
+		// (the Login then carries no isUseLz4, see NewPacketZstd), 21 enables the account-select
+		// state, 25 the ShuMei SDK (see ShumeiSDKOn), 26 moves the game socket to WebSocket, 29 adds
+		// the forward header to every frame, 36 is the ShuMei create-account risk ban, 44 falls back
+		// to WebSocket on every 2nd connect retry, 46 is the iOS native socket. This client
+		// implements none of the transport ones. Logged at Info, not Warn: their live values are not
+		// known yet, and Go works as it is.
 		slog.Info("check-version: tables and client switches", "packageName", build.PackageName, "updateType", cv.UpdateType,
 			"hasTableVersion", cv.TableVersion != "", "hasLocale", cv.Locale != "",
 			"disableNewNetPacket4", cv.ClientSwitchOn(4), "disableZstd5", cv.ClientSwitchOn(5),
-			"serverWS26", cv.ClientSwitchOn(26), "crossForward29", cv.ClientSwitchOn(29), "wsFallback44", cv.ClientSwitchOn(44))
+			"accountSelect21", cv.ClientSwitchOn(21), "shumeiSDK25", cv.ClientSwitchOn(25),
+			"serverWS26", cv.ClientSwitchOn(26), "crossForward29", cv.ClientSwitchOn(29),
+			"shumeiRiskBan36", cv.ClientSwitchOn(36), "wsFallback44", cv.ClientSwitchOn(44), "iosNativeSocket46", cv.ClientSwitchOn(46))
+		if !cv.NewPacketZstd() {
+			slog.Warn("check-version: ClientSwitch 4 or 5 is on, so the real client frames without the new packet class or Zstd and its Login carries no isUseLz4; "+
+				"this client leaves isUseLz4 out of the Login but keeps its own framing",
+				"disableNewNetPacket4", cv.ClientSwitchOn(4), "disableZstd5", cv.ClientSwitchOn(5))
+		}
 		return &cv, host, nil
 	}
 	return nil, "", fmt.Errorf("all check-version hosts failed, last error: %w", lastErr)
@@ -426,20 +519,18 @@ type LoginServerInfo struct {
 	Status FlexString `json:"status"` // observed as a JSON string, e.g. "0"
 }
 
-// AccountServerInfo is the account/login-service endpoint (distinct from a
-// specific game-state server) -- used for the very first connection when no
-// account/state is associated with this device yet (opt=new).
+// AccountServerInfo is the reply's loginServer: the account server the 1.0.370 client opens a
+// socket to only for the account-select screen (ClientSwitch 21, a device with no gameUid;
+// Assembly-CSharp.decompiled.cs:12797-12802, 9018-9041). It is never a game server, and this
+// client never connects to it.
 type AccountServerInfo struct {
 	// IP/WsIP are FlexString, not bare string -- round-42 fix, the same reason as
 	// LoginServerInfo's own Name/IP/WsIP/Zone fix just above: a wrong-typed value on ANY field
-	// here fails json.Unmarshal for the whole response. Also lets ApplyLoginServerFallback below
-	// assign these straight into LoginServerInfo.IP/WsIP (also FlexString as of the same fix)
-	// with no conversion needed.
+	// here fails json.Unmarshal for the whole response.
 	IP FlexString `json:"ip"` // "|"-delimited fallback hostnames
 	// Port and WsPort are FlexString, not a bare int -- see LoginServerInfo's own doc comment
-	// (round-35 fix) for why. WsPort is never read anywhere in this codebase today (see
-	// ApplyLoginServerFallback's doc comment below), but a wrong-typed value on it would still
-	// fail json.Unmarshal for the whole response before that unused-ness ever mattered.
+	// (round-35 fix) for why. Neither is read anywhere in this codebase, but a wrong-typed value
+	// would still fail json.Unmarshal for the whole response.
 	Port   FlexString `json:"port"`
 	WsIP   FlexString `json:"ws_ip"`
 	WsPort FlexString `json:"ws_port"`
@@ -472,8 +563,8 @@ type LoginServerListRespon struct {
 // can't simply be widened to FlexString, so this instead pre-inspects each of the three raw values
 // via LooksLikeJSONObject and only decodes into the real struct type when it actually looks like a
 // JSON object -- any other shape leaves the field nil, the same "absent" behavior every consumer
-// already expects (ApplyLoginServerFallback's `lsr.LoginServer == nil` check below, login.go's/
-// crossserver.go's/main.go's `lsr.At != nil` checks), instead of failing json.Unmarshal for the
+// already expects (login.go's/crossserver.go's/main.go's `lsr.At != nil` checks), instead of
+// failing json.Unmarshal for the
 // ENTIRE GetServerList response. This has never been observed live -- it's the same speculative
 // defense-in-depth already applied to every sibling scalar field in this struct family, just
 // extended to the three fields a simple type-widen can't reach.
@@ -484,9 +575,8 @@ type LoginServerListRespon struct {
 // "PHP's json_encode can emit an object instead of an array for a non-sequentially-keyed
 // associative array" failure mode) still going through the plain shadow-struct field with zero
 // tolerance. If serverList ever arrives as a JSON object instead of an array, it now degrades to
-// nil (empty) -- exactly what Login()'s own "no servers returned" check and
-// ApplyLoginServerFallback's opt=new synthesis already treat as the ordinary empty-ServerList
-// case -- instead of failing json.Unmarshal for the entire response.
+// nil (empty) -- what Err already reports as ErrEmptyServerList (E120) -- instead of failing
+// json.Unmarshal for the entire response.
 //
 // The shadow struct below must be kept in sync with LoginServerListRespon's own field list by
 // hand -- a future field added to one and not the other will compile but silently stop round-
@@ -562,7 +652,8 @@ var (
 
 // Err returns nil for an accepted reply (code 0, or absent, which the client's JsonUtility also
 // reads as 0, plus a non-empty server list), and otherwise one of the errors above, wrapped with the
-// code. Call it after GetServerList, which has already applied ApplyLoginServerFallback.
+// code. An empty server list is E120 whatever else the reply carries: loginServer is the account
+// server, not a game server (Assembly-CSharp.decompiled.cs:12690-12704, 12797-12802).
 func (l *LoginServerListRespon) Err() error {
 	code := strings.TrimSpace(l.Code.String())
 	var err error
@@ -631,45 +722,6 @@ func LooksLikeJSONObject(raw json.RawMessage) bool {
 func looksLikeJSONArray(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) > 0 && trimmed[0] == '['
-}
-
-// ApplyLoginServerFallback synthesizes a single ServerList entry from LoginServer when the
-// server returned no ServerList entries at all -- exactly the scenario AccountServerInfo's own
-// doc comment describes: opt=new, i.e. the very first connection, before any account/state is
-// associated with this device. Before this fallback existed, every caller of GetServerList
-// (login.go's Login, unconditionally) treated an empty ServerList as a hard failure
-// ("no servers returned") even when the response carried a perfectly usable LoginServer --
-// the exact field its own comment says exists for this case.
-//
-// This has NOT been confirmed live: no capture exists in this repo of a genuine opt=new
-// response with an empty ServerList (populated or not). Per this project's standing rule
-// against guessing at unconfirmed server behavior, the fallback is deliberately conservative:
-//   - it only fires for opt=new, matching AccountServerInfo's own documented scope exactly --
-//     GetServerList's opt=fix/opt=refresh/opt=login callers (main.go's -cs-rt refresh,
-//     owndevice.go's opt=login, login.go's own opt=login/opt=fix paths) see zero behavior change
-//     from this function;
-//   - it only fires when ServerList is genuinely empty, so it never touches, reorders, or
-//     shadows a populated ServerList;
-//   - it never invents data AccountServerInfo doesn't carry. Notably, AccountServerInfo has no
-//     Zone field (unlike LoginServerInfo), so the synthesized entry's Zone is left "" rather
-//     than guessed -- callers that derive a zone/serverID from it (e.g. login.go's
-//     serverIDFromZone) get a best-effort, not-necessarily-correct empty zone in this fallback
-//     path, which is the honest reflection of what AccountServerInfo actually provides.
-func ApplyLoginServerFallback(lsr *LoginServerListRespon, opt GSLOpt) {
-	if opt.Opt != "new" || len(lsr.ServerList) != 0 || lsr.LoginServer == nil {
-		return
-	}
-	lsr.ServerList = []LoginServerInfo{{
-		IP:   lsr.LoginServer.IP,
-		Port: lsr.LoginServer.Port,
-		WsIP: lsr.LoginServer.WsIP,
-		// WsPort has no home in LoginServerInfo (which carries no ws_port field at all -- see
-		// its definition above) and, like LoginServerInfo.WsIP, ws_ip/ws_port aren't read
-		// anywhere in this codebase today; nothing is lost that would otherwise be used.
-		// ID, Name, Zone, GameUid, Uid, Status: left at their zero values -- AccountServerInfo
-		// carries none of them, and opt=new is precisely the case where no gameUid/account
-		// exists yet to fill them with.
-	}}
 }
 
 // FirstHost returns the first entry of a "|"-delimited fallback host list.
@@ -816,6 +868,21 @@ func GetServerList(httpClient *http.Client, gateHost string, pub *rsa.PublicKey,
 // client's GameUtility.GetPlatformName(), "Android" or "iOS" (csharp-native §2.3). A session the iOS
 // app issued sends "iOS", as that app does.
 func GetServerListAs(httpClient *http.Client, gateHost string, pub *rsa.PublicKey, platform, deviceID string, opt GSLOpt, zone, gameUid string) (*LoginServerListRespon, error) {
+	return GetServerListFor(httpClient, gateHost, pub, FormDevice{Platform: platform}, deviceID, opt, zone, gameUid)
+}
+
+// FormDevice is what a getserverlist.php form says about the device besides its id
+// (GetServerListRequest, Assembly-CSharp.decompiled.cs:77430-77441, 1.0.370). An empty Country or
+// Lang sends the "US"/"en" this client has always sent.
+type FormDevice struct {
+	Platform string // GameUtility.GetPlatformName(): "Android" or "iOS"
+	Country  string // GlobalData.fromCountry, the same value as the Login's fromCountry
+	Lang     string // Localization.GetLanguageName(), the same value as the Login's lang
+	SimOp    string // SDKManager.GetSimOperator(): the SIM's MCC+MNC on Android, "" here on iOS
+}
+
+// GetServerListFor is GetServerListAs with the device fields of dev.
+func GetServerListFor(httpClient *http.Client, gateHost string, pub *rsa.PublicKey, dev FormDevice, deviceID string, opt GSLOpt, zone, gameUid string) (*LoginServerListRespon, error) {
 	gc := crypto.NewGSLCrypto(pub)
 
 	airKey := "lwDid_" + B64OfString(deviceID)
@@ -824,11 +891,15 @@ func GetServerListAs(httpClient *http.Client, gateHost string, pub *rsa.PublicKe
 	form.Set("uuid", deviceID)
 	form.Set("airKey", airKey)
 	form.Set("loginFlag", "1")
-	form.Set("country", "US")
+	form.Set("country", cmp.Or(dev.Country, "US"))
 	form.Set("is3D", "1")
-	form.Set("lang", "en")
-	form.Set("simOp", "")
-	form.Set("platform", platform)
+	form.Set("lang", cmp.Or(dev.Lang, "en"))
+	form.Set("simOp", dev.SimOp)
+	form.Set("platform", dev.Platform)
+	// isSimulator stays "0" on both platforms. The Android client sends "1" whenever
+	// HasIllegalDeviceFeature() holds, which includes Build.SERIAL "unknown" (the AndroidID this
+	// client sends; com/sdkmanager/SdkManager.java:1005-1046), but no real 1.0.370 Android form has
+	// been captured to confirm that, so it isn't flipped on static evidence (1.0.370 audit B29).
 	form.Set("isSimulator", "0")
 	form.Set("zone", zone)
 	form.Set("gameuid", gameUid)
@@ -914,7 +985,6 @@ func GetServerListAs(httpClient *http.Client, gateHost string, pub *rsa.PublicKe
 				// carries a live at/rt session token. See the bodyLen comment above.
 				return nil, fmt.Errorf("decode decrypted GSL response: %w (plainLen=%d)", err, len(plain))
 			}
-			ApplyLoginServerFallback(&lsr, opt)
 			return &lsr, nil
 		}
 		// "bin" is present but empty. Without this branch, execution would fall through to
@@ -929,7 +999,6 @@ func GetServerListAs(httpClient *http.Client, gateHost string, pub *rsa.PublicKe
 		// Not the raw body -- same reasoning as the two decode-failure branches above.
 		return nil, fmt.Errorf("decode plaintext GSL response: %w (bodyLen=%d)", err, len(body))
 	}
-	ApplyLoginServerFallback(&lsr, opt)
 	return &lsr, nil
 }
 

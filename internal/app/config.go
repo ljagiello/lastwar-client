@@ -36,6 +36,10 @@ type SessionConfig struct {
 	// bound to it); empty means the built-in defaults. cmd/pcap -session-out fills both in.
 	AppVersion  string `json:"appVersion,omitempty"`
 	VersionCode string `json:"versionCode,omitempty"`
+	// Device is what the captured iOS Login said about its device (phone_model, osVersion, mt,
+	// idfv, ...; auth.CapturedDevice). cmd/pcap -session-out records it from an iOS capture, and an
+	// iOS-mode Login replays it instead of placeholders. Ignored in Android mode.
+	Device auth.CapturedDevice `json:"device,omitzero"`
 	// RefreshToken (with GSL's at.time/rt.time, unix seconds of issue) is present for the client's
 	// own device (-own-device-session), or after a -cs-rt run. As in the real client, a run refreshes
 	// with it (GSL opt=refresh) when the access token is missing or 30 days old, and once after a
@@ -155,13 +159,56 @@ func SaveSessionConfig(cfg *SessionConfig, path string) error {
 // rule saveShumeiInstall uses), as after a -cs-rt run under -cs-deviceid. A run without a session
 // config (path "") has nowhere to keep them. A failure is only logged: the run can still use them.
 func saveRefreshedTokens(path, deviceID string, t auth.Tokens) {
+	saveSessionTokens(path, deviceID, "GSL refresh", "refreshed", func(cfg *SessionConfig) {
+		cfg.AccessToken, cfg.AccessTokenTime = t.AccessTok, t.AccessTokTime
+		cfg.RefreshToken, cfg.RefreshTokenTime = t.RefreshTok, t.RefreshTokTime
+	})
+}
+
+// saveLookupTokens stores the tokens a GSL lookup reply carried in the session config at path right
+// away, as the client's SaveGameLoginToken does the moment the reply arrives, before it connects
+// (Assembly-CSharp.decompiled.cs:12777, 7482-7492, 1.0.370): each non-empty one replaces the stored
+// one, and an empty one leaves it. Like saveRefreshedTokens, it keeps a rotated refresh token when
+// the Login after the lookup fails, and never writes into another device's config. A reply that
+// changes nothing on disk writes nothing.
+func saveLookupTokens(path, deviceID string, srv auth.GameServer) {
+	saveSessionTokens(path, deviceID, "GSL server lookup", "looked-up", func(cfg *SessionConfig) {
+		if srv.AccessTok != "" {
+			cfg.AccessToken, cfg.AccessTokenTime = srv.AccessTok, srv.AccessTokTime
+		}
+		if srv.RefreshTok != "" {
+			cfg.RefreshToken, cfg.RefreshTokenTime = srv.RefreshTok, srv.RefreshTokTime
+		}
+	})
+}
+
+// restoreAccessToken puts the configured access token back into the session config at path when a
+// Login falls back to it, so a token the server just refused doesn't stay on disk for the next run.
+// The refresh token is left as it is: one a lookup rotated stays the newest. Without a session
+// config nothing was saved, so there is nothing to put back.
+func restoreAccessToken(path, deviceID, accessTok string, accessTokTime int64) {
 	if path == "" {
-		slog.Warn("GSL refresh: no session config to keep the refreshed tokens in; the next run starts from the old ones")
+		return
+	}
+	saveSessionTokens(path, deviceID, "GSL server lookup fallback", "configured", func(cfg *SessionConfig) {
+		cfg.AccessToken, cfg.AccessTokenTime = accessTok, accessTokTime
+	})
+}
+
+// saveSessionTokens re-reads the session config at path, applies set to its token fields and saves
+// it, so every other field stays as it is on disk. what prefixes the log lines and kind names the
+// tokens in them. Tokens belong to the device they were issued to, so they aren't saved into a
+// config made for another one (the owner rule saveShumeiInstall uses). A run without a session
+// config (path "") has nowhere to keep them. Nothing is written when set changes no token field. A
+// failure is only logged: the run can still use the tokens.
+func saveSessionTokens(path, deviceID, what, kind string, set func(*SessionConfig)) {
+	if path == "" {
+		slog.Warn(what + ": no session config to keep the " + kind + " tokens in; the next run starts from the old ones")
 		return
 	}
 	cfg, err := LoadSessionConfig(path)
 	if err != nil {
-		slog.Warn("GSL refresh: could not re-read the session config to save the refreshed tokens", "path", path, "error", err)
+		slog.Warn(what+": could not re-read the session config to save the "+kind+" tokens", "path", path, "error", err)
 		return
 	}
 	owner := cfg.DeviceID
@@ -169,19 +216,23 @@ func saveRefreshedTokens(path, deviceID string, t auth.Tokens) {
 		owner = cfg.ShumeiInstall.DeviceID
 	}
 	if owner != "" && owner != deviceID {
-		slog.Warn("GSL refresh: not saving the refreshed tokens; the session config holds another device's", "path", path,
+		slog.Warn(what+": not saving the "+kind+" tokens; the session config holds another device's", "path", path,
 			"configDeviceIdLen", len(owner), "runDeviceIdLen", len(deviceID))
 		return
 	}
-	cfg.AccessToken, cfg.AccessTokenTime = t.AccessTok, t.AccessTokTime
-	cfg.RefreshToken, cfg.RefreshTokenTime = t.RefreshTok, t.RefreshTokTime
-	if err := SaveSessionConfig(cfg, path); err != nil {
-		slog.Warn("GSL refresh: could not save the refreshed tokens to the session config", "path", path, "error", err)
+	before := auth.Tokens{AccessTok: cfg.AccessToken, RefreshTok: cfg.RefreshToken, AccessTokTime: cfg.AccessTokenTime, RefreshTokTime: cfg.RefreshTokenTime}
+	set(cfg)
+	after := auth.Tokens{AccessTok: cfg.AccessToken, RefreshTok: cfg.RefreshToken, AccessTokTime: cfg.AccessTokenTime, RefreshTokTime: cfg.RefreshTokenTime}
+	if after == before {
 		return
 	}
-	slog.Info("saved the refreshed tokens to the session config", "path", path,
-		"accessTokenLen", len(t.AccessTok), "accessTokenTime", t.AccessTokTime,
-		"refreshTokenLen", len(t.RefreshTok), "refreshTokenTime", t.RefreshTokTime)
+	if err := SaveSessionConfig(cfg, path); err != nil {
+		slog.Warn(what+": could not save the "+kind+" tokens to the session config", "path", path, "error", err)
+		return
+	}
+	slog.Info("saved the "+kind+" tokens to the session config", "path", path,
+		"accessTokenLen", len(after.AccessTok), "accessTokenTime", after.AccessTokTime,
+		"refreshTokenLen", len(after.RefreshTok), "refreshTokenTime", after.RefreshTokTime)
 }
 
 // configRefreshToken returns cfg's refresh token and its time for a run under runDeviceID (the

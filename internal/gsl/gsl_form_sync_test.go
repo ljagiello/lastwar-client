@@ -34,9 +34,10 @@ func TestEncodeFormSortedOrderMatchesGetServerListFields(t *testing.T) {
 		t.Fatalf("read gsl.go: %v", err)
 	}
 
-	// Isolate GetServerListAs's body (GetServerList only forwards to it). A non-greedy match up to
-	// the first "\n}\n" (an unindented closer) lands on its real closing brace.
-	funcRe := regexp.MustCompile(`(?s)func GetServerListAs\(.*?\n\}\n`)
+	// Isolate GetServerListFor's body (GetServerList and GetServerListAs only forward to it). A
+	// non-greedy match up to the first "\n}\n" (an unindented closer) lands on its real closing
+	// brace.
+	funcRe := regexp.MustCompile(`(?s)func GetServerListFor\(.*?\n\}\n`)
 	body := funcRe.FindString(string(src))
 	if body == "" {
 		t.Fatal("could not find GetServerList's body in gsl.go -- the regexp is likely out of sync with how the function is written there")

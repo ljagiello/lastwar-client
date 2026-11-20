@@ -318,10 +318,11 @@ func TestStringRedactedMasksSensitiveRawSFSArray(t *testing.T) {
 // flow puts under this literal SFS key, PutUtfString("mail", opts.Email)) and the device/
 // advertising-identifier PII cluster docs/live-validation.mdx documents as real fields a genuine
 // (non-Go-client) Login request carries (IMEI, AndroidID, androidDid, idfa, idfv, gaid, afuid,
-// firebaseId, distinct_id). Neither leaks from this Go client's own outgoing traffic today (which
-// only ever sends these as empty-string placeholders), but decode.go's -decode-stream tool would
-// have printed real values for these fields in cleartext when decoding a genuinely captured
-// non-Go-client login, since StringRedacted() had no way to mask a key that isn't in the map.
+// firebaseId, distinct_id). This client's own Login carries real values for some of them since the
+// 1.0.370 audit (an Android identity's afuid and distinct_id, an iOS capture's replayed ones), and
+// decode.go's -decode-stream tool would have printed real values for these fields in cleartext
+// when decoding a genuinely captured login, since StringRedacted() had no way to mask a key that
+// isn't in the map.
 func TestStringRedactedMasksMailAndDeviceIdentifierPII(t *testing.T) {
 	secrets := map[string]string{
 		"mail":        "secret-real-user-email-must-not-leak@example.com",

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"lastwar-client/internal/app"
+	"lastwar-client/internal/auth"
 	"lastwar-client/internal/pcap"
 	"lastwar-client/internal/sfs"
 )
@@ -19,9 +20,11 @@ import (
 // runSessionOut implements -session-out: it finds the real app's Login request (c=0, a=1) in a
 // capture, checks that the server accepted it, and writes the reconnect credentials it carried
 // (accessToken, shumeiBoxId, deviceId, gameUid, zone, game server ip/port, iOS-vs-Android) as the
-// session config JSON that lastwar-client auto-loads. This is the whole recovery procedure for the
-// ec=28/E011 "token rotated" failure (README, "Recognizing an expired token"): capture the real app
-// logging in, run this, copy the file into place.
+// session config JSON that lastwar-client auto-loads. From an iOS capture it also records the
+// Login's device fields (phone_model, osVersion, mt, idfv, ...), which an iOS reconnect replays.
+// This is the whole recovery procedure for the ec=28/E011 "token rotated" failure (README,
+// "Recognizing an expired token"): capture the real app logging in, run this, copy the file into
+// place.
 //
 // The credentials are never printed -- stdout only names which fields were found and their lengths,
 // so the output is safe to paste into an issue or a terminal log.
@@ -125,6 +128,9 @@ func runSessionOut(in string, stream int, clientStr, path string) error {
 		cfg.IP, cfg.Port, cfg.Zone, cfg.IOSMode, cfg.AppVersion, cfg.VersionCode)
 	fmt.Printf("  gameUid (%d chars), deviceId (%d chars), shumeiBoxId (%d chars), accessToken (%d chars) -- values not shown\n",
 		len(cfg.GameUid), len(cfg.DeviceID), len(cfg.ShumeiBoxId), len(cfg.AccessToken))
+	if cfg.IOSMode {
+		fmt.Printf("  device fields recorded for the Login to replay: %s -- values not shown\n", strings.Join(capturedDeviceFields(cfg.Device), ", "))
+	}
 	return nil
 }
 
@@ -170,6 +176,9 @@ func acceptedLogin(c2s, s2c []byte) (*app.SessionConfig, string) {
 	if cfg.GameUid == "" {
 		cfg.GameUid = req.GetString("un")
 	}
+	if cfg.IOSMode {
+		cfg.Device = capturedDevice(params)
+	}
 	// shumeiBoxId is copied when present but not required: a reconnect with it empty was accepted
 	// live (2026-10-04).
 	var missing []string
@@ -184,6 +193,42 @@ func acceptedLogin(c2s, s2c []byte) (*app.SessionConfig, string) {
 		return nil, "accepted Login is missing " + strings.Join(missing, ", ")
 	}
 	return cfg, ""
+}
+
+// capturedDevice records what an iOS Login said about its device, for the next Login to replay
+// (auth.CapturedDevice; the 1.0.370 client asks Unity and native code for each one, LoginMessage
+// .CSSetData, Assembly-CSharp.decompiled.cs:83053-83185). Only an iOS capture is recorded: an
+// Android Login's device fields come from the hardware profile its deviceId selects. The ta blob
+// is not recorded (see auth.CapturedDevice).
+func capturedDevice(params *sfs.SFSObject) auth.CapturedDevice {
+	return auth.CapturedDevice{
+		PhoneModel:  params.GetString("phone_model"),
+		OSVersion:   params.GetString("osVersion"),
+		HandSetInfo: params.GetString("mt"),
+		Idfv:        params.GetString("idfv"),
+		DistinctID:  params.GetString("distinct_id"),
+		FromCountry: params.GetString("fromCountry"),
+		Lang:        params.GetString("lang"),
+		PhoneScreen: params.GetString("phone_screen"),
+		Afuid:       params.GetString("afuid"),
+		FirebaseID:  params.GetString("firebaseId"),
+	}
+}
+
+// capturedDeviceFields names the captured device fields that are set, for the summary line; their
+// values are never printed (idfv, distinct_id, afuid and firebaseId identify the device).
+func capturedDeviceFields(d auth.CapturedDevice) []string {
+	var names []string
+	for _, f := range []struct{ name, v string }{
+		{"phone_model", d.PhoneModel}, {"osVersion", d.OSVersion}, {"mt", d.HandSetInfo}, {"idfv", d.Idfv},
+		{"distinct_id", d.DistinctID}, {"fromCountry", d.FromCountry}, {"lang", d.Lang},
+		{"phone_screen", d.PhoneScreen}, {"afuid", d.Afuid}, {"firebaseId", d.FirebaseID},
+	} {
+		if f.v != "" {
+			names = append(names, f.name)
+		}
+	}
+	return names
 }
 
 func isLogin(obj *sfs.SFSObject) bool {
