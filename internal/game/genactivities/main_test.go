@@ -7,9 +7,10 @@ import (
 )
 
 // fixtureIndex is the 40413 activity index for the columns the generator reads (positions 1-based,
-// 137 columns; para and para_1 are interned, the dump resolves them).
+// 137 columns; para, para_1, para_3 and para_5 are interned, the dump resolves them).
 const fixtureIndex = `"id":[1,"number"],"name":[2,"string"],"showUiType":[10,"string"],"type":[15,"number"],` +
 	`"condition":[19,"string"],"tableInfoType":[33,"string"],"para":[70,"string",true],"para_1":[71,"string",true],` +
+	`"para_3":[73,"string",true],"para_5":[75,"string",true],` +
 	`"needMainCityLevel":[81,"string"],"group_number":[125,"string"],"group_priority":[126,"string"],` +
 	`"condition_giftbag":[135,"string"]`
 
@@ -28,6 +29,7 @@ var fixtureRows = []fixtureRow{
 	{"13", map[int]string{15: "27", 10: `"2"`, 33: `"2"`, 70: `"7610001;7610002;7610003;7610004;7610005;7610006;7610007"`, 19: `"1|4"`}},
 	{"29", map[int]string{15: "125", 33: `"4"`, 70: `"1"`, 19: `"1|7"`, 125: `"100"`, 126: `"40"`}},
 	{"3009", map[int]string{15: "130", 33: `"1"`, 19: `"1|1"`}},
+	{"5038", map[int]string{15: "142", 10: `"1"`, 33: `"102"`, 73: `"420000"`, 75: `"620011"`, 19: `"1|4"`, 81: `"0"`}},
 	{"7001", map[int]string{15: "134", 33: `"1"`, 19: `"1|1"`}},
 	{"40038", map[int]string{15: "201", 81: `"15"`}},
 	{"40039", map[int]string{15: "218", 81: `"10"`}},
@@ -40,6 +42,7 @@ var fixtureRows = []fixtureRow{
 	{"1000021", map[int]string{15: "228", 10: `"7"`, 70: `"10002"`, 71: `"640063|640062|640061"`, 19: `"1|4"`, 81: `"4"`, 135: `"2026-7-29|10008"`}},
 	{"1200101", map[int]string{15: "389", 70: `"650053"`, 71: `"49"`, 19: `"1|10"`}},
 	{"1200102", map[int]string{15: "105", 10: `"ActivityDailyRank"`}},
+	{"2300018", map[int]string{15: "261", 70: `"37|38|39"`, 71: `"40|41|42"`, 73: `"771051"`, 75: `"50|1"`, 19: `"1|6"`}},
 }
 
 // mkFixture renders rows as an activity.json dump.
@@ -98,6 +101,8 @@ func TestParseAndRender(t *testing.T) {
 		29:      {id: 29, typ: 125, subType: 4, para: "1", condition: "1|7", groupNumber: 100, groupPriority: 40},
 		1000021: {id: 1000021, typ: 228, needHQ: 4, showUI: 7, para: "10002", para1: "640063|640062|640061", condition: "1|4", conditionGiftbag: "2026-7-29|10008"},
 		1200102: {id: 1200102, typ: 105}, // showUiType "ActivityDailyRank": tonumber gives nil, the client 0
+		5038:    {id: 5038, typ: 142, subType: 102, showUI: 1, para3: "420000", para5: "620011", condition: "1|4"},
+		2300018: {id: 2300018, typ: 261, para: "37|38|39", para1: "40|41|42", para3: "771051", para5: "50|1", condition: "1|6"},
 	}
 	for id, want := range wantRows {
 		if byID[id] != want {
@@ -119,6 +124,8 @@ func TestParseAndRender(t *testing.T) {
 		"29:      {typ: 125, subType: 4, groupNumber: 100, groupPriority: 40, para: \"1\", condition: \"1|7\"},",
 		"1000021: {typ: 228, needHQ: 4, showUIType: 7, para: \"10002\", para1: \"640063|640062|640061\", condition: \"1|4\", conditionGiftbag: \"2026-7-29|10008\"},",
 		"1200101: {typ: 389, para: \"650053\", para1: \"49\", condition: \"1|10\"},",
+		"5038:    {typ: 142, subType: 102, showUIType: 1, para3: \"420000\", para5: \"620011\", condition: \"1|4\"},",
+		"2300018: {typ: 261, para: \"37|38|39\", para1: \"40|41|42\", para3: \"771051\", para5: \"50|1\", condition: \"1|6\"},",
 	} {
 		if !strings.Contains(string(code), want) {
 			t.Errorf("generated code missing %q:\n%s", want, code)
@@ -135,6 +142,10 @@ func TestParseRejectsWrongTable(t *testing.T) {
 		"a level column one cell off":         strings.Replace(fixture, `"needMainCityLevel":[81,`, `"needMainCityLevel":[80,`, 1),
 		"a missing type column":               strings.Replace(fixture, `"type":[15,"number"],`, ``, 1),
 		"a missing para_1 column":             strings.Replace(fixture, `"para_1":[71,"string",true],`, ``, 1),
+		"a missing para_5 column":             strings.Replace(fixture, `"para_5":[75,"string",true],`, ``, 1),
+		"a known para_3 changed":              withCell("2300018", 73, `"771050"`),
+		"a known para_5 changed":              withCell("5038", 75, `"620010"`),
+		"an unresolved interned para_5":       withCell("5038", 75, "17"),
 		"a linked type column":                strings.Replace(fixture, `"type":[15,"number"]`, `"type":[15,"number",true]`, 1),
 		"a non-numeric level":                 withCell("11", 81, `"x"`),
 		"a fractional level":                  withCell("11", 81, `"1.5"`),

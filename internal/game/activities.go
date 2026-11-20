@@ -139,6 +139,14 @@ func (a Activity) Para() string { return a.row().para }
 // Para1 is the row's raw para_1 cell, the client's obj.para_1 (ActivityInfoData.lua:358).
 func (a Activity) Para1() string { return a.row().para1 }
 
+// Para3 is the row's raw para_3 cell, the client's obj.para_3 (ActivityInfoData.lua:360): e.g. the
+// vault chest track's score item (DigTreasureBoxRewardManager.lua:53-62).
+func (a Activity) Para3() string { return a.row().para3 }
+
+// Para5 is the row's raw para_5 cell, the client's obj.para_5 (ActivityInfoData.lua:362): e.g. a
+// BattlePass_new pass's score item (ActBattlePassInfo.lua:244-249).
+func (a Activity) Para5() string { return a.row().para5 }
+
 // Condition is the row's raw condition cell ("1|20" etc.), which FetchActivityConfigData does not
 // parse; each manager that gates on it reads it itself (e.g. CrystalBossDataManager.lua:402).
 func (a Activity) Condition() string { return a.row().condition }
@@ -586,8 +594,9 @@ func evInitEffect(in *Init, id int) int64 {
 // activityRow is one row of table `activity` as the client reads it in
 // ActivityInfoData.FetchActivityConfigData (ActivityInfoData.lua:224-409). activityTable
 // (activity_tables_gen.go) holds every row, whatever its type. Features read the columns through
-// Activity's accessors (SubType, ShowUIType, Para, Para1, Condition, ConditionGiftbag, Group) or
-// activityRowOf, so a per-type list copied from the table can be a lookup instead.
+// Activity's accessors (SubType, ShowUIType, Para, Para1, Para3, Para5, Condition,
+// ConditionGiftbag, Group) or activityRowOf, so a per-type list copied from the table can be a
+// lookup instead.
 type activityRow struct {
 	typ           int32 // obj.type = tonumber(tabData.type) (:228)
 	needHQ        int32 // obj.needMainCityLevel = tonumber(tabData.needMainCityLevel) or 0 (:247)
@@ -595,10 +604,12 @@ type activityRow struct {
 	showUIType    int32 // showUiType: obj.subViewType = tonumber(tabData.showUiType) or 0 (:232)
 	groupNumber   int32 // group_number: checknumber(tabData.group_number) (:408)
 	groupPriority int32 // group_priority: checknumber(tabData.group_priority) (:409)
-	// The raw string cells: para (:351), para_1 (:358), condition (read per feature) and
-	// condition_giftbag (the SeasonPeriodicCard swap, :352-356).
+	// The raw string cells: para (:351), para_1 (:358), para_3 (:360), para_5 (:362), condition
+	// (read per feature) and condition_giftbag (the SeasonPeriodicCard swap, :352-356).
 	para             string
 	para1            string
+	para3            string
+	para5            string
 	condition        string
 	conditionGiftbag string
 }

@@ -111,8 +111,9 @@ const (
 
 	digVaultHammer = "771030" // Dig Hammer (Treasure_map_hummer k1)
 	digRuinHammer  = "771050" // Explorer's Hammer (early_digging_hummer k1)
-	// digTrackScore is the chest track's score item, the open type-261 activity's para_3
-	// (DigTreasureBoxRewardManager.lua:53-69): 771051 in all eight type-261 rows of tables 40413.
+	// digTrackScore is the chest track's score item when the open type-261 activity's row has no
+	// para_3 (DigTreasureBoxRewardManager.lua:53-62 reads it from there): 771051 in all eight
+	// type-261 rows of tables 40413.
 	digTrackScore   = "771051"
 	digCityBuilding = 10226000 // BuildingTypes.LW_BUILD_DIG_GAME (EnumType.lua:3764)
 	// detect_event.type of the radar ruins (image Detect_Event_DigGame): 30, and 39 for ids
@@ -1035,7 +1036,8 @@ func (r *digRun) vault() {
 
 // chestTrack claims the vault chest track's reached chests.
 func (r *digRun) chestTrack() {
-	if !r.digActivityOpen(actTypeDigTreasureV2) {
+	open := Activities(r.conn, r.in).Open(actTypeDigTreasureV2)
+	if len(open) == 0 {
 		slog.Info(r.name + ": vault chest track not open")
 		return
 	}
@@ -1043,7 +1045,10 @@ func (r *digRun) chestTrack() {
 	if info == nil {
 		return
 	}
-	score := r.items[digTrackScore]
+	// The score item is the first open type-261 activity's para_3 (GetActId and
+	// GetBoxRewardItemCount, DigTreasureBoxRewardManager.lua:42-62).
+	scoreItem := cmp.Or(strings.TrimSpace(open[0].Para3()), digTrackScore)
+	score := r.items[scoreItem]
 	reached := func(list []*sfs.SFSObject) int {
 		n := 0
 		for _, e := range list {
@@ -1056,7 +1061,7 @@ func (r *digRun) chestTrack() {
 		return n
 	}
 	list := claimObjects(info, "rewardList")
-	slog.Info(r.name+": vault chest track", "score", score, "chests", len(list), "reached", reached(list))
+	slog.Info(r.name+": vault chest track", "scoreItem", scoreItem, "score", score, "chests", len(list), "reached", reached(list))
 	for i := 0; i <= len(list) && reached(list) > 0 && !r.dead; i++ {
 		reply, ok := r.claim("vault chest track chest", digTrackChestCmd, sfs.NewSFSObject())
 		if !ok || !reply.Has("rewardList") {

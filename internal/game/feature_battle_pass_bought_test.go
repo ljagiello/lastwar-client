@@ -177,21 +177,42 @@ func TestBattlePassHighTierRows(t *testing.T) {
 	}
 }
 
-// TestBattlePassScoreItemsCoverTheActivityTable: every BattlePass_new row of the generated activity
-// table has a score item, and the map names no other id.
-func TestBattlePassScoreItemsCoverTheActivityTable(t *testing.T) {
-	n := 0
-	for id, r := range activityTable {
-		if r.typ != actTypeBattlePassNew {
-			continue
-		}
-		n++
-		if battlePassScoreItems[id] == 0 {
-			t.Errorf("type-142 activity %d has no battlePassScoreItems entry (table activity para_5)", id)
-		}
-	}
-	if len(battlePassScoreItems) != n {
-		t.Errorf("battlePassScoreItems has %d ids, the activity table %d type-142 rows", len(battlePassScoreItems), n)
+// TestBattlePassScoreItemFollowsTheTablesPara5: the score item is the activity row's para_5, so a
+// type-142 row the old hand-copied list never had (777142, para_5 620099) claims its premium-exp
+// task, and a row without a numeric para_5 claims nothing (ActBattlePassInfo.lua:244-249).
+func TestBattlePassScoreItemFollowsTheTablesPara5(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for _, c := range []struct {
+		name      string
+		para5     string
+		wantClaim bool
+	}{
+		{"para_5 names the score item", "620099", true},
+		{"no para_5", "", false},
+		{"para_5 is no number", "620099|1", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			const id = 777142
+			withActivityRows(t, map[int32]activityRow{id: {typ: actTypeBattlePassNew, para5: c.para5}})
+			if got := battlePassScoreItem(id) != 0; got != c.wantClaim {
+				t.Errorf("battlePassScoreItem(%d) = %d", id, battlePassScoreItem(id))
+			}
+			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				if cmd == "hero.event.info.get" {
+					info := bpBoughtInfo(1, 0, bpBoughtTask("t1", 2, -1, 620099, 3))
+					info.PutInt("activityType", actTypeBattlePassNew)
+					info.PutInt("activityId", id)
+					return info
+				}
+				return evOK()
+			})
+			if err := runBattlePass(conn, evInit(30, evActivity(id))); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(fake.only(battlePassV2TaskCmd)) == 1; got != c.wantClaim {
+				t.Errorf("bp.task.reward sent: %v, want %v", got, c.wantClaim)
+			}
+		})
 	}
 }
 
@@ -247,30 +268,4 @@ func eventDumpScalar(v any) string {
 	}
 	b, _ := json.Marshal(v)
 	return string(b)
-}
-
-func TestBattlePassScoreItemsMatchTheDump(t *testing.T) {
-	rows := eventTableDump(t, "activity")
-	n := 0
-	for key, r := range rows {
-		if eventDumpScalar(r["type"]) != "142" {
-			continue
-		}
-		n++
-		id, err := strconv.ParseInt(key, 10, 32)
-		if err != nil {
-			t.Fatalf("activity key %q", key)
-		}
-		want, err := strconv.ParseInt(eventDumpScalar(r["para_5"]), 10, 64)
-		if err != nil {
-			t.Errorf("activity %d para_5 %v is not an item id", id, r["para_5"])
-			continue
-		}
-		if got := battlePassScoreItems[int32(id)]; got != want {
-			t.Errorf("activity %d: battlePassScoreItems %d, para_5 %d", id, got, want)
-		}
-	}
-	if n != len(battlePassScoreItems) {
-		t.Errorf("dump has %d type-142 rows, battlePassScoreItems %d", n, len(battlePassScoreItems))
-	}
 }

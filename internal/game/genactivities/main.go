@@ -54,10 +54,13 @@ type row struct {
 	// (:408-409), 0 when empty.
 	groupNumber   int64
 	groupPriority int64
-	// para, para1 (para_1), condition and conditionGiftbag (condition_giftbag) are the raw cells
-	// (:351-358; condition is read per feature, e.g. CrystalBossDataManager.lua:402).
+	// para, para1 (para_1), para3 (para_3), para5 (para_5), condition and conditionGiftbag
+	// (condition_giftbag) are the raw cells (:351-362; condition is read per feature, e.g.
+	// CrystalBossDataManager.lua:402).
 	para             string
 	para1            string
+	para3            string
+	para5            string
 	condition        string
 	conditionGiftbag string
 }
@@ -118,6 +121,8 @@ var knownCells = []knownCell{
 	{1200101, "para_1", "49"},                         // seasonMilitaryNormalDays (feature_season_dailies.go)
 	{1000021, "para", "10002"},                        // seasonWeekCards (feature_season_week_card.go)
 	{1000021, "condition_giftbag", "2026-7-29|10008"}, // seasonWeekCards
+	{5038, "para_5", "620011"},                        // the battle pass score item (feature_battle_pass.go)
+	{2300018, "para_3", "771051"},                     // digTrackScore (feature_treasure_digs.go)
 }
 
 // value is the row's cell in column col as the dump spells it; an empty number column is "".
@@ -141,6 +146,10 @@ func (r row) value(col string) string {
 		return r.para
 	case "para_1":
 		return r.para1
+	case "para_3":
+		return r.para3
+	case "para_5":
+		return r.para5
 	case "condition":
 		return r.condition
 	case "condition_giftbag":
@@ -151,7 +160,7 @@ func (r row) value(col string) string {
 
 // stringCols are the raw string columns. Interned (linked) columns are allowed only here, and their
 // cells must be JSON strings or null: a number in one is an index the dump didn't resolve.
-var stringCols = []string{"para", "para_1", "condition", "condition_giftbag"}
+var stringCols = []string{"para", "para_1", "para_3", "para_5", "condition", "condition_giftbag"}
 
 func parse(src []byte) ([]row, error) {
 	dec := json.NewDecoder(bytes.NewReader(src))
@@ -231,6 +240,8 @@ func parse(src []byte) ([]row, error) {
 		}{
 			{"para", &out.para},
 			{"para_1", &out.para1},
+			{"para_3", &out.para3},
+			{"para_5", &out.para5},
 			{"condition", &out.condition},
 			{"condition_giftbag", &out.conditionGiftbag},
 		} {
@@ -385,7 +396,8 @@ func (r row) literal() string {
 		}
 	}
 	for _, f := range []struct{ name, v string }{
-		{"para", r.para}, {"para1", r.para1}, {"condition", r.condition}, {"conditionGiftbag", r.conditionGiftbag},
+		{"para", r.para}, {"para1", r.para1}, {"para3", r.para3}, {"para5", r.para5}, {"condition", r.condition},
+		{"conditionGiftbag", r.conditionGiftbag},
 	} {
 		if f.v != "" {
 			parts = append(parts, fmt.Sprintf("%s: %s", f.name, strconv.Quote(f.v)))

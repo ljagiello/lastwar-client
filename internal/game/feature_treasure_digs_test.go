@@ -879,9 +879,47 @@ func TestTreasureDigsSeason7OffSeasonActivities(t *testing.T) {
 	}
 }
 
-// TestDigTrackScoreIsEveryChestTrackRowsPara3 pins digTrackScore against the table dump: the
-// client reads the chest track's score item from the open type-261 activity's para_3
-// (DigTreasureBoxRewardManager.lua:53-69), which the generated activity table does not carry.
+// TestDigTrackScoreFollowsTheOpenActivitysPara3: the chest track counts the item the open type-261
+// activity's para_3 names (777261 -> 771099 here), not the fallback 771051
+// (DigTreasureBoxRewardManager.lua:42-62).
+func TestDigTrackScoreFollowsTheOpenActivitysPara3(t *testing.T) {
+	withActivityRows(t, map[int32]activityRow{777261: {typ: actTypeDigTreasureV2, para3: "771099"}})
+	for _, tc := range []struct {
+		name      string
+		items     map[string]int32
+		wantClaim bool
+	}{
+		{"para_3 item reached", map[string]int32{"771099": 60, digTrackScore: 0}, true},
+		{"only the fallback item held", map[string]int32{"771099": 0, digTrackScore: 60}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, f := startDigFake(t, radarScoringDay(), nil, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				switch cmd {
+				case digTrackInfoCmd, digTrackChestCmd:
+					e := sfs.NewSFSObject()
+					e.PutInt("target", 50)
+					e.PutInt("isReward", map[bool]int32{true: 1}[cmd == digTrackChestCmd])
+					list := sfs.NewSFSArray()
+					list.AddSFSObject(e)
+					r := sfs.NewSFSObject()
+					r.PutSFSArray("rewardList", list)
+					return r
+				}
+				return nil
+			})
+			if err := runTreasureDigs(conn, digTestInit(tc.items, evActivity(777261))); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(f.only(digTrackChestCmd)) == 1; got != tc.wantClaim {
+				t.Errorf("chest claimed: %v, want %v (sent %v)", got, tc.wantClaim, f.cmds())
+			}
+		})
+	}
+}
+
+// TestDigTrackScoreIsEveryChestTrackRowsPara3 pins the fallback digTrackScore against the table
+// dump: the client reads the chest track's score item from the open type-261 activity's para_3
+// (DigTreasureBoxRewardManager.lua:53-62), and chestTrack does too, through Activity.Para3.
 // Skipped without LASTWAR_TABLES.
 func TestDigTrackScoreIsEveryChestTrackRowsPara3(t *testing.T) {
 	dir := os.Getenv("LASTWAR_TABLES")
