@@ -395,6 +395,11 @@ func TestDuelGachaDrawView(t *testing.T) {
 			[]string{infoCmd, eventCmd}, ""},
 		"init finish false": {monday, duel(func(e *sfs.SFSObject) { e.PutBool("finish", false) }), event,
 			[]string{infoCmd, eventCmd, drawCmd}, ""},
+		// An SFS null is nil in Lua: no finish, and no replacement of the init entry's.
+		"init finish null": {monday, duel(func(e *sfs.SFSObject) { e.PutValue("finish", sfs.SFSValue{Type: sfs.SFSNull}) }), event,
+			[]string{infoCmd, eventCmd, drawCmd}, ""},
+		"reply finish null keeps init finish true": {monday, duel(func(e *sfs.SFSObject) { e.PutBool("finish", true) }),
+			duelGachaDrawEvent(func(r *sfs.SFSObject) { r.PutValue("finish", sfs.SFSValue{Type: sfs.SFSNull}) }), []string{infoCmd, eventCmd}, ""},
 		"reply finish true": {monday, duel(nil), duelGachaDrawEvent(func(r *sfs.SFSObject) { r.PutBool("finish", true) }),
 			[]string{infoCmd, eventCmd}, ""},
 		"reply finish false replaces init finish true": {monday, duel(func(e *sfs.SFSObject) { e.PutBool("finish", true) }),
