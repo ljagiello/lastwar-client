@@ -1,7 +1,9 @@
 package game
 
 import (
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -70,6 +72,104 @@ func TestSkyBattleBoxesClaimUntilTheReachedBoxesAreTaken(t *testing.T) {
 	stages := fake.only(skyBattleStageCmd)
 	if len(stages) != 2 || stages[0].Params.GetInt("chapter") != -1 || stages[1].Params.GetInt("stageType") != 1 {
 		t.Errorf("stage reads = %+v, want chapter -1 for stageType 0 and 1", stages)
+	}
+}
+
+// TestSkyBattleBoxesClaimTheGrowthChapters: a stageType-1 reply's reached chapters, chapter 4
+// included, send {chapter, stageType: 1} claims until each reached box is taken.
+func TestSkyBattleBoxesClaimTheGrowthChapters(t *testing.T) {
+	rewarded := map[int32][]int32{1: {6, 12, 18, 24}, 3: {6}}
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		r := evOK()
+		switch cmd {
+		case skyBattleStageCmd:
+			a := sfs.NewSFSArray()
+			if p.GetInt("stageType") == 1 {
+				a.AddSFSObject(skyChapter(1, rewarded[1], 3, 3, 3, 3, 3, 3, 3, 3)) // 24 stars, all taken
+				a.AddSFSObject(skyChapter(3, rewarded[3], 3, 3, 3, 3, 0, 0))       // 12 stars: 12 is due
+				a.AddSFSObject(skyChapter(4, nil, 3, 3, 3, 3, 3, 3, 3, 3))         // 24 stars: 6, 12, 18, 24 due
+			}
+			r.PutSFSArray("chapterInfo", a)
+		case skyBattleBoxCmd:
+			ch := p.GetInt("chapter")
+			for _, th := range []int32{6, 12, 18, 24} { // the server grants one box per claim
+				if !slices.Contains(rewarded[ch], th) {
+					rewarded[ch] = append(rewarded[ch], th)
+					break
+				}
+			}
+			r.PutInt("chapter", ch)
+			r.PutIntArray("rewardedTarget", rewarded[ch])
+		}
+		return r
+	})
+	if err := runSkyBattleBoxes(conn, evInit(14)); err != nil {
+		t.Fatal(err)
+	}
+	var sent []int32
+	for _, r := range fake.only(skyBattleBoxCmd) {
+		for _, k := range []string{"chapter", "stageType"} {
+			if v, _ := r.Params.Get(k); v.Type != sfs.SFSInt {
+				t.Errorf("%s type = %d, want Int", k, v.Type)
+			}
+		}
+		if st := r.Params.GetInt("stageType"); st != 1 {
+			t.Errorf("chapter %d claim stageType = %d, want 1", r.Params.GetInt("chapter"), st)
+		}
+		sent = append(sent, r.Params.GetInt("chapter"))
+	}
+	if !slices.Equal(sent, []int32{3, 4, 4, 4, 4}) {
+		t.Errorf("claimed growth chapters %v, want 3 once and 4 four times", sent)
+	}
+	if !slices.Equal(rewarded[4], []int32{6, 12, 18, 24}) {
+		t.Errorf("chapter 4 boxes taken %v, want all four", rewarded[4])
+	}
+}
+
+// TestSkyBattleModesMatchTheChapterTables pins the embedded thresholds and HQ gates to tables
+// 40413: lw_sky_battle_chapter (7 rows) and lw_sky_battle_chapter_upgrade (4 rows), column
+// chapter_box "stars|reward;..." and main_building_level, which the client walks row by row
+// (LWSkyBattleChapterManager.lua:99-154; LWSkyBattleGrowthChapterManager.lua:144-185).
+func TestSkyBattleModesMatchTheChapterTables(t *testing.T) {
+	type row struct {
+		id, hq int64
+		box    string
+	}
+	const normal = "6|212000341;12|212000342;18|212000343"
+	const growth = "6|110101;12|110102;18|110103;24|110104"
+	tables := map[int32][]row{
+		0: {{1, 6, "6|212000301;12|212000302;18|212000303"}, {2, 7, "6|212000311;12|212000312;18|212000313"},
+			{3, 8, "6|212000321;12|212000322;18|212000323"}, {4, 9, "6|212000331;12|212000332;18|212000333"},
+			{5, 10, normal}, {6, 10, normal}, {7, 10, normal}},
+		1: {{1, 8, growth}, {2, 10, growth}, {3, 12, growth}, {4, 14, growth}},
+	}
+	if len(skyBattleModes) != len(tables) {
+		t.Fatalf("%d modes, want %d", len(skyBattleModes), len(tables))
+	}
+	for _, m := range skyBattleModes {
+		rows, ok := tables[m.stageType]
+		if !ok {
+			t.Errorf("stageType %d has no chapter table", m.stageType)
+			continue
+		}
+		want := map[int64][]int64{}
+		minHQ := rows[0].hq
+		for _, r := range rows {
+			for _, box := range strings.Split(r.box, ";") {
+				n, err := strconv.ParseInt(strings.SplitN(box, "|", 2)[0], 10, 64)
+				if err != nil {
+					t.Fatalf("chapter_box %q: %v", r.box, err)
+				}
+				want[r.id] = append(want[r.id], n)
+			}
+			minHQ = min(minHQ, r.hq)
+		}
+		if !maps.EqualFunc(m.thresholds, want, slices.Equal[[]int64]) {
+			t.Errorf("stageType %d thresholds = %v, want %v", m.stageType, m.thresholds, want)
+		}
+		if int64(m.minHQ) != minHQ {
+			t.Errorf("stageType %d minHQ = %d, want %d (lowest main_building_level)", m.stageType, m.minHQ, minHQ)
+		}
 	}
 }
 

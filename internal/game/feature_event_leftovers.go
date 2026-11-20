@@ -89,8 +89,9 @@ const (
 	counterAttackCanClaim = 1 // TaskState.CanReceive
 )
 
-// skyBattleModes are the two chapter tables (40413): every chapter's chapter_box thresholds, and
-// the lowest main_building_level a chapter asks.
+// skyBattleModes are the two chapter tables (40413): every chapter's chapter_box thresholds (7
+// rows of lw_sky_battle_chapter, 4 of lw_sky_battle_chapter_upgrade), and the lowest
+// main_building_level a chapter asks.
 var skyBattleModes = []struct {
 	stageType  int32
 	name       string
@@ -101,7 +102,7 @@ var skyBattleModes = []struct {
 		1: {6, 12, 18}, 2: {6, 12, 18}, 3: {6, 12, 18}, 4: {6, 12, 18}, 5: {6, 12, 18}, 6: {6, 12, 18}, 7: {6, 12, 18},
 	}},
 	{1, "growth chapters", 8, map[int64][]int64{
-		1: {6, 12, 18, 24}, 2: {6, 12, 18, 24}, 3: {6, 12, 18, 24},
+		1: {6, 12, 18, 24}, 2: {6, 12, 18, 24}, 3: {6, 12, 18, 24}, 4: {6, 12, 18, 24},
 	}},
 }
 

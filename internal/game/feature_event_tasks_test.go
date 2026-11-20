@@ -13,8 +13,17 @@ import (
 var wp9Features = []string{
 	doomsdayQuestsFeature, parkourTasksFeature, frontBreakTasksFeature, leadingQuestFeature, heroTrialFeature,
 	crazyRockFeature, themeNoticeFeature, offSeasonTasksFeature, tacticalBoxPointsFeature, tacticalCollectionFeature,
-	lettersFeature, survivorPackFeature, expiredItemsFeature, skyBattleBoxesFeature, newbieArenaFeature,
+	lettersFeature, survivorPackFeature, skyBattleBoxesFeature, newbieArenaFeature,
 	birthdaySetFeature, masteryNewbieFeature, counterAttackFeature, sandWormFeature,
+}
+
+// TestWP9LeavesTheExpiredItemExchangeUnregistered: MASTER G45's activity.goods.recovery {goodsId,
+// num} converts (uses up) the whole owned stack (ItemExchangeManager.lua:42-53), so it is no claim
+// (IMPLEMENT rule 9) and stays unregistered until the user rules on converting expired items.
+func TestWP9LeavesTheExpiredItemExchangeUnregistered(t *testing.T) {
+	if _, ok := featureRegistry["expired-items"]; ok {
+		t.Error("expired-items is registered; it spends items and waits for the user's decision")
+	}
 }
 
 func TestSandWormTasksClaimEachDoneTask(t *testing.T) {
