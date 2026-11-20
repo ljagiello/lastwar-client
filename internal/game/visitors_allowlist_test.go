@@ -71,14 +71,20 @@ func newTimedTestVisitor(uid int64, eventId int32, startTime time.Time) Visitor 
 }
 
 func TestVisitorEventTypesMatchKnownPairs(t *testing.T) {
-	if len(visitorEventTypes) != 398 {
-		t.Errorf("visitorEventTypes has %d rows, want the table's 398", len(visitorEventTypes))
+	if len(visitorEventTypes) != 455 {
+		t.Errorf("visitorEventTypes has %d rows, want the 455 of tables 40413", len(visitorEventTypes))
 	}
-	want := map[int32]int32{1001: 1, 1002: 1, 3115: 3, 3116: 3, 9001: 9, 21001: 30, 16001: 16, 16101: 17, 20950: 19, 4006: 11}
+	want := map[int32]int32{1001: 1, 1002: 1, 3115: 3, 3116: 3, 9001: 9, 21001: 30, 16001: 16, 16101: 17, 20950: 19, 4006: 11,
+		9002: 13, 14001: 14, 22001: 40}
 	for id := int32(2001); id <= 2006; id++ {
 		want[id] = 2
 	}
 	for id := int32(20840); id <= 20849; id++ {
+		want[id] = 10
+	}
+	// The 56 Season 7 day-gift visitors tables 40413 added (type 10, a reward para, no
+	// choose_treasure): the 39879 snapshot lacked them, so GreetVisitors skipped every one.
+	for id := int32(21101); id <= 21156; id++ {
 		want[id] = 10
 	}
 	for id, typ := range want {
@@ -105,7 +111,7 @@ func TestGreetAllowlistCoversOnlyRewardTypes(t *testing.T) {
 	}
 }
 
-// TestVisitorChoiceEventsAreTheSeason5Rows pins the generated choice set to tables 39879: the 11
+// TestVisitorChoiceEventsAreTheSeason5Rows pins the generated choice set to tables 40413: the 11
 // Season-5 SeasonDayGift rows with a choose_treasure (and an empty para), so a regeneration
 // cannot silently shrink it.
 func TestVisitorChoiceEventsAreTheSeason5Rows(t *testing.T) {
@@ -135,6 +141,9 @@ func TestVisitorSkipReason(t *testing.T) {
 		{"gift arrived", 2001, now.Add(-time.Minute), "", 2},
 		{"recruit arrived", 3115, now.Add(-time.Minute), "", 3},
 		{"season gift arrived", 20840, now.Add(-time.Minute), "", 10},
+		{"season 7 day gift arrived", 21101, now.Add(-time.Minute), "", 10},
+		{"last season 7 day gift arrived", 21156, now.Add(-time.Minute), "", 10},
+		{"battle plan captive (opt-in captive-visitors)", 22001, now.Add(-time.Minute), "behaviour type not on the greet allowlist", 40},
 		{"season choice visitor", 20703, now.Add(-time.Minute), "choice visitor, left for the player", 10},
 		{"season choice still arriving", 20746, now.Add(time.Minute), "choice visitor, left for the player", 10},
 		{"dominator arrived", 9001, now.Add(-time.Minute), "", 9},

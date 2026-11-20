@@ -128,6 +128,12 @@ const (
 // unconfirmed live: the account tested so far is in Season 6, which owns only the Spore Factory
 // family above. Each week-card building is the farm the season week card unlocks (see
 // seasonWeekCardBuildings).
+//
+// 1.0.370 adds the Season 7 family, 853000-857000 (EnumType.lua:3770-3774,
+// LW_BUILDING_SEASON7_BLESSING_FOUNTAIN_1..5). It is in no ProductLineBuilds entry; the client
+// collects it because GetAllBuildIds (DataCenter/ProductLine/ProductLineManager.lua:57-80) adds the
+// current season_weekcard row's buildings, and row 10014 (tables 40413) has farm_building
+// "853000|854000|855000|856000" and farm_building_weekcard "857000".
 const (
 	BuildingSeason1Farm1       int32 = 761000 // LW_BUILDING_SEASON_FARMLAND_CTIY_1
 	BuildingSeason1Farm2       int32 = 762000 // LW_BUILDING_SEASON_FARMLAND_CTIY_2
@@ -154,11 +160,17 @@ const (
 	BuildingSeason5City3       int32 = 824000 // LW_BUILDING_SEASON5_CTIY_3
 	BuildingSeason5City4       int32 = 825000 // LW_BUILDING_SEASON5_CTIY_4
 	BuildingSeason5CityCard    int32 = 826000 // LW_BUILDING_SEASON5_CTIY_5 -- Season 5 week-card farm (season_weekcard 10006)
+	BuildingSeason7Fountain1   int32 = 853000 // LW_BUILDING_SEASON7_BLESSING_FOUNTAIN_1
+	BuildingSeason7Fountain2   int32 = 854000 // LW_BUILDING_SEASON7_BLESSING_FOUNTAIN_2
+	BuildingSeason7Fountain3   int32 = 855000 // LW_BUILDING_SEASON7_BLESSING_FOUNTAIN_3
+	BuildingSeason7Fountain4   int32 = 856000 // LW_BUILDING_SEASON7_BLESSING_FOUNTAIN_4
+	BuildingSeason7FountainWC  int32 = 857000 // LW_BUILDING_SEASON7_BLESSING_FOUNTAIN_5 -- Season 7 week-card farm (season_weekcard 10014)
 )
 
-// seasonWeekCardBuildings is the client's SeasonWeekCardCityBuildingMap (Util/BuildingUtils.lua:355-362),
-// which matches every season_weekcard row's farm_building_weekcard. The client refuses to collect
-// these once the season has settled (ProductLineManager.lua:545-552); see weekCardSettled.
+// seasonWeekCardBuildings is the client's SeasonWeekCardCityBuildingMap (Util/BuildingUtils.lua:379-387
+// in 1.0.370, which added the Season 7 farm 857000), which matches every season_weekcard row's
+// farm_building_weekcard. The client refuses to collect these once the season has settled
+// (ProductLineManager.lua:585-592); see weekCardSettleTime.
 var seasonWeekCardBuildings = map[int32]bool{
 	BuildingSeason1FarmCard:    true,
 	BuildingSeason2FarmCard:    true,
@@ -166,6 +178,7 @@ var seasonWeekCardBuildings = map[int32]bool{
 	BuildingSeason4QuartzCard:  true,
 	BuildingSeason5CityCard:    true,
 	BuildingSporeFactoryCard:   true,
+	BuildingSeason7FountainWC:  true,
 }
 
 var buildingNames = map[int32]string{
@@ -230,6 +243,11 @@ var buildingNames = map[int32]string{
 	BuildingSeason5City3:       "Season 5 Farm III",
 	BuildingSeason5City4:       "Season 5 Farm IV",
 	BuildingSeason5CityCard:    "Season 5 Farm (Week Card)",
+	BuildingSeason7Fountain1:   "Season 7 Blessing Fountain I",
+	BuildingSeason7Fountain2:   "Season 7 Blessing Fountain II",
+	BuildingSeason7Fountain3:   "Season 7 Blessing Fountain III",
+	BuildingSeason7Fountain4:   "Season 7 Blessing Fountain IV",
+	BuildingSeason7FountainWC:  "Season 7 Blessing Fountain (Week Card)",
 }
 
 // BuildingNameOf returns a friendly name for a known base type id, or the
@@ -775,8 +793,8 @@ func PrintBuildings(buildings []Building) {
 //
 // Tactical Institute has since collected live too. Crystal Factory, the
 // Spore Factory week-card building and the other seasons' farm families
-// (S1, S2, the S3 Blessing Fountain, S4 and S5) are unconfirmed (1.0.364 Lua
-// only; static).
+// (S1, S2, the S3 Blessing Fountain, S4, S5 and, from 1.0.370, the S7
+// Blessing Fountain) are unconfirmed (client Lua only; static).
 // Tactical Center, Armament Institute and the four Truck Station tiers are
 // deliberately absent: they are not production lines (see the const block).
 func collectCmdFor(bId int32) (cmd string, ok bool) {
@@ -789,7 +807,8 @@ func collectCmdFor(bId int32) (cmd string, ok bool) {
 		BuildingSeason2Farm1, BuildingSeason2Farm2, BuildingSeason2Farm3, BuildingSeason2Farm4, BuildingSeason2FarmCard,
 		BuildingBlessingFountain1, BuildingBlessingFountain2, BuildingBlessingFountain3, BuildingBlessingFountain4, BuildingBlessingFountainWC,
 		BuildingSeason4Quartz1, BuildingSeason4Quartz2, BuildingSeason4Quartz3, BuildingSeason4Quartz4, BuildingSeason4QuartzCard,
-		BuildingSeason5City1, BuildingSeason5City2, BuildingSeason5City3, BuildingSeason5City4, BuildingSeason5CityCard:
+		BuildingSeason5City1, BuildingSeason5City2, BuildingSeason5City3, BuildingSeason5City4, BuildingSeason5CityCard,
+		BuildingSeason7Fountain1, BuildingSeason7Fountain2, BuildingSeason7Fountain3, BuildingSeason7Fountain4, BuildingSeason7FountainWC:
 		return "building.production.collect", true
 	default:
 		return "", false
@@ -819,12 +838,23 @@ func collectCmdFor(bId int32) (cmd string, ok bool) {
 // (static, from the data tables), so a run must happen at least every 8 h
 // or output is lost. The deployed cron runs every 3 h, well inside that, so
 // the peek-then-claim on every run needs no extra gating.
+//
+// The claim is skipped when the peek shows both pools empty (idleRewardPoolsEmpty): the panel's
+// Receive button claims only a non-empty pool (UIZombieBattleHangUpRewardView.lua:101-106; the pools
+// are the peek reply's reward and dominatorReward, HangUpRewardMessage.lua:20-21). The client also
+// has unguarded claims (UIMainShakeCollectRes.lua:267-270), so this only saves a request, and any
+// peek reply it cannot read as empty pools still gets the claim.
 func CollectIdleReward(conn *session.GameConn) error {
 	const cmd = "lw.pve.idle.reward"
 	peek := sfs.NewSFSObject()
 	peek.PutInt("action", 0)
-	if _, err := session.SendAndWait(conn, "idle reward available", cmd, peek); err != nil {
+	reply, err := session.SendAndWait(conn, "idle reward available", cmd, peek)
+	if err != nil {
 		return err
+	}
+	if reply != nil && idleRewardPoolsEmpty(reply.Params) {
+		slog.Info("idle reward: both pools are empty; not claiming")
+		return nil
 	}
 
 	claim := sfs.NewSFSObject()
@@ -833,6 +863,26 @@ func CollectIdleReward(conn *session.GameConn) error {
 		return err
 	}
 	return nil
+}
+
+// idleRewardPoolsEmpty reports whether a lw.pve.idle.reward peek reply shows nothing to claim: a
+// reward array that is present and empty, and a dominatorReward that is absent (the Overlord track
+// not unlocked: the client's pool is then nil) or an empty array. A missing reward, or either field
+// of another type, is not read as empty, so the claim still goes out.
+func idleRewardPoolsEmpty(p *sfs.SFSObject) bool {
+	emptyArray := func(key string) (empty, present bool) {
+		v, ok := p.Get(key)
+		if !ok {
+			return false, false
+		}
+		arr, isArr := v.Val.(*sfs.SFSArray)
+		return isArr && len(arr.Items()) == 0, true
+	}
+	if empty, present := emptyArray("reward"); !present || !empty {
+		return false
+	}
+	empty, present := emptyArray("dominatorReward")
+	return !present || empty
 }
 
 // maxCollectibleBuildingsPerRun is a defensive, non-protocol-guessing sanity ceiling on how many
@@ -1002,9 +1052,9 @@ func collectibleBuildings(buildings []Building) []Building {
 //go:generate go run ./genproduction -in ${LASTWAR_TABLES}/building.json -version ${LASTWAR_TABLE_VERSION} -out production_gen.go
 
 // productionLevel is one building table row's production columns (see productionTable in
-// production_gen.go, generated from the 1.0.364 APK's table 39432; `building` is byte-identical in
-// the live table 39516, and building_B, the AB-test copy some accounts read, has the same
-// produce_time and para1 in all 1,505 production rows).
+// production_gen.go, generated from the 1.0.370 APK's tables 40413: 1,665 rows with a produce_time,
+// the 1,505 of tables 39879 plus the Season 7 farms 853000-857030 and Crystal Factory levels 21-25;
+// building_B, the AB-test copy some accounts read, has the same produce_time and para1 in all 1,665).
 type productionLevel struct {
 	tickMs int64 // produce_time: milliseconds per output tick
 	capS   int64 // para1: the line's max production time in seconds; it stops filling at prodET
@@ -1041,19 +1091,23 @@ func readyBuildings(buildings []Building, in *Init, now time.Time) []Building {
 }
 
 // productionReady reports whether b has output stored at now, mirroring ProductLineManager.lua
-// (OnCollectClick :537-567 sends a collect only when TryCollectRes's stored amount is above 0):
+// (1.0.370 lines; OnCollectClick :577-608 sends a collect only when TryCollectRes's stored amount
+// is above 0):
 //
 //	stored = prodExtend + perTick * floor((min(prodET, now) - prodT) / produce_time)
 //
 // perTick is always positive, so stored > 0 exactly when prodExtend > 0 or a full tick has
-// completed. Before counting, GetNextCollectTime (:287-314) aligns prodT down onto the tick grid
+// completed. Before counting, GetNextCollectTime (:314-341) aligns prodT down onto the tick grid
 // from prodST while the line is running; that is mirrored too, since it can only make a building
 // ready sooner. Once now is past prodET (the line is full), the client also counts a partial last
-// tick (:355-357, num*(prodET-prodT)//produce_time), so a full line with prodT < prodET counts as
-// ready. Anything unknown -- a building or level missing from productionTable, an absent or
-// non-numeric prodT/prodET, an unreadable prodExtend -- counts as ready, the behaviour before this
-// gate. nextTick is when the next tick completes, set only when ready is false. All times are unix
-// milliseconds.
+// tick (:385-387, num*(prodET-prodT)//produce_time), so a full line with prodT < prodET counts as
+// ready. Go has no num (it needs the worker and tech bonuses), so when that integer division
+// rounds to 0 (a small per-tick amount, a short remainder) the client shows 602026 instead and Go
+// sends a collect that draws one benign 602026; requiring prodET - prodT >= produce_time instead
+// would skip full lines the client does collect. Anything unknown -- a building or level missing
+// from productionTable, an absent or non-numeric prodT/prodET, an unreadable prodExtend -- counts
+// as ready, the behaviour before this gate. nextTick is when the next tick completes, set only when
+// ready is false. All times are unix milliseconds.
 func productionReady(b Building, now time.Time) (ready bool, nextTick time.Time) {
 	lvl, known := productionTable[b.BId()+b.Level()]
 	if !known || lvl.tickMs <= 0 {

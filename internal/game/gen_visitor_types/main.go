@@ -1,14 +1,14 @@
 // Command gen_visitor_types writes internal/game/visitor_types_gen.go: the eventId -> behaviour
 // type map GreetVisitors keys its allowlist on, and the set of "choose a treasure" eventIds it
 // skips, generated from the client data table lw_base_visitor_event (TableName.City_Visitor,
-// Global/EnumType.lua:2751).
+// Global/EnumType.lua:2756 in 1.0.370).
 //
 // The table is not in this repository. It comes from a decompiled client build's
 // tables/json/lw_base_visitor_event.json, whose rows are positional: rows[i] is [key, cols], and
 // the "index" object gives each named column's 1-based position in cols.
 //
 //	go run ./internal/game/gen_visitor_types -table <dir>/lw_base_visitor_event.json \
-//	    -version 39879 -out internal/game/visitor_types_gen.go
+//	    -version 40413 -out internal/game/visitor_types_gen.go
 package main
 
 import (
@@ -195,7 +195,7 @@ var knownPairs = func() map[int32]int32 {
 	return m
 }()
 
-// knownChoices are eventIds whose choose_treasure is set in tables 39432 and 39879: the first and
+// knownChoices are eventIds whose choose_treasure is set in tables 39432, 39879 and 40413: the first and
 // last of the 11 Season-5 SeasonDayGift choice visitors (20703 "1;601002|2;601001"). A wrong
 // choose_treasure column would drop them.
 var knownChoices = []int32{20703, 20746}
@@ -229,8 +229,8 @@ func render(tab visitorTable, version, live string) ([]byte, error) {
 	b.WriteString(".\n\n")
 	b.WriteString("package game\n\n")
 	b.WriteString("// visitorEventTypes maps a visitor's eventId (lw_base_visitor_event.id) to the table's type\n")
-	b.WriteString("// column: the behaviour type (VisitorType, Global/EnumType.lua:11985) the client picks the\n")
-	b.WriteString("// visitor's class by (CityVisitorManager.lua:108-139).\n")
+	b.WriteString("// column: the behaviour type (VisitorType, Global/EnumType.lua:12039) the client picks the\n")
+	b.WriteString("// visitor's class by (CityVisitorManager.lua:109-142).\n")
 	b.WriteString("var visitorEventTypes = map[int32]int32{\n")
 	for _, id := range slices.Sorted(maps.Keys(tab.types)) {
 		fmt.Fprintf(&b, "\t%d: %d,\n", id, tab.types[id])
