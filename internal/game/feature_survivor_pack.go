@@ -229,18 +229,12 @@ func survivorScoresDue(scores []int64, count int64, claimed []int64) []int64 {
 }
 
 // survivorItemCount is the bag count of item id in init items: the largest stack (one ItemInfo per
-// id), whose count is its last present count, num or itemLeftCnt field (ItemInfo.lua:52-66).
+// id), with its id and count read as ItemInfo:UpdateInfo sets them (duelItemFields).
 func survivorItemCount(in *Init, id string) int64 {
 	var n int64
 	for _, it := range claimObjectsOrMap(in.Raw, "items") {
-		got := evString(it, "itemId")
-		if got == "" {
-			got = evString(it, "goodsId")
-		}
-		if got != id {
-			continue
-		}
-		if c, ok := claimFirstInt(it, "itemLeftCnt", "num", "count"); ok {
+		got, c, ok := duelItemFields(it)
+		if got == id && ok {
 			n = max(n, c)
 		}
 	}

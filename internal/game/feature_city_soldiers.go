@@ -3,6 +3,7 @@ package game
 import (
 	"errors"
 	"log/slog"
+	"strconv"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -131,12 +132,12 @@ func citySoldiersSparkUpgradable(in *Init) (level, item int64, upgradable bool) 
 		return level, 0, false
 	}
 	for _, it := range claimObjectsOrMap(in.Raw, "items") {
-		if id, _ := claimFirstInt(it, "itemId", "goodsId"); id != item {
+		// The stack's id and count as ItemInfo:UpdateInfo sets them (duelItemFields).
+		id, n, ok := duelItemFields(it)
+		if id != strconv.FormatInt(item, 10) {
 			continue
 		}
-		// ItemInfo:UpdateInfo applies count, then num, then itemLeftCnt, so the last one present is
-		// the stack's count (ItemInfo.lua:52-66).
-		if n, ok := claimFirstInt(it, "itemLeftCnt", "num", "count"); ok && n >= 1 {
+		if ok && n >= 1 {
 			return level, item, true
 		}
 	}

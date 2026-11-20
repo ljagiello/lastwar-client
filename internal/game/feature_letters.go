@@ -66,16 +66,13 @@ func lettersDue(in *Init) []string {
 	seen := map[string]bool{}
 	var due []string
 	for _, it := range claimObjectsOrMap(in.Raw, "items") {
-		id := evString(it, "itemId")
-		if id == "" {
-			id = evString(it, "goodsId")
-		}
+		// The stack's id and count as ItemInfo:UpdateInfo sets them (duelItemFields). A stack
+		// without a count keeps ItemInfo's 0 and is never in the bag (ItemData.lua:230-246).
+		id, n, ok := duelItemFields(it)
 		if id == letterVIP18ID || !slices.Contains(letterItemIDs, id) || seen[id] {
 			continue
 		}
-		// ItemInfo:UpdateInfo applies count, num, then itemLeftCnt: the last present one is the
-		// stack's count (ItemInfo.lua:52-66).
-		if n, ok := claimFirstInt(it, "itemLeftCnt", "num", "count"); ok && n <= 0 {
+		if !ok || n <= 0 {
 			continue
 		}
 		if letterRewardShown(evString(it, "otherPara")) {
