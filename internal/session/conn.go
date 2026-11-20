@@ -90,8 +90,9 @@ type GameConn struct {
 	forwardSid atomic.Pointer[uint16]
 
 	// shumeiID is the last shumeiId a push.shumei.id on this connection carried (noteShumeiID,
-	// ShumeiID).
-	shumeiID atomic.Pointer[string]
+	// ShumeiID), and onShumeiID is called with each new one (OnShumeiID).
+	shumeiID   atomic.Pointer[string]
+	onShumeiID atomic.Pointer[func(string)]
 
 	// clock is the server time the pongs on this connection carry (clock.go, ServerNow).
 	clock serverClock
@@ -438,7 +439,9 @@ const shumeiIDPushCmd = "push.shumei.id"
 // noteShumeiID keeps the shumeiId of a push.shumei.id that carries no errorCode, as the client
 // caches every non-empty one in PlayerPrefs LW_CacheShumeiDeviceId and sends it as ta lw_shumei_id
 // (PushShumeiIdMessage.lua:10-18). Nothing waits for the push, so it is noted here, where every
-// read passes, whichever loop reads it (FetchInit drops pushes it does not wait for).
+// read passes, whichever loop reads it (FetchInit drops pushes it does not wait for). A new id goes
+// to the OnShumeiID callback at once, as the client saves it in the handler
+// (PushShumeiIdMessage.lua:16-17, Setting:SetString then Setting:Save()).
 func (c *GameConn) noteShumeiID(env *Envelope) {
 	if env.Controller != ControllerExtension || env.Content == nil {
 		return
@@ -454,7 +457,24 @@ func (c *GameConn) noteShumeiID(env *Envelope) {
 		return
 	}
 	if id := params.GetString("shumeiId"); id != "" {
-		c.shumeiID.Store(&id)
+		prev := c.shumeiID.Swap(&id)
+		if fn := c.onShumeiID.Load(); fn != nil && (prev == nil || *prev != id) {
+			(*fn)(id)
+		}
+	}
+}
+
+// OnShumeiID sets fn to be called with every new shumeiId a push.shumei.id brings on this
+// connection from now on, on the goroutine that reads the push, and calls it at once with one
+// already noted (a push read before fn was set, e.g. during the Login). A nil fn clears it.
+func (c *GameConn) OnShumeiID(fn func(string)) {
+	if fn == nil {
+		c.onShumeiID.Store(nil)
+		return
+	}
+	c.onShumeiID.Store(&fn)
+	if id := c.ShumeiID(); id != "" {
+		fn(id)
 	}
 }
 

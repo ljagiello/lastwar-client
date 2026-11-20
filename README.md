@@ -44,8 +44,9 @@ code 4, see "Running unattended (cron)".
   carries the `Login`'s `deviceId` and `airKey` and the session config's `shumeiId`, as the 1.0.370
   app does, and a session config with a captured `ta` replays that `ta` with its build keys, the
   `Login`'s zone and those three ids taken from the run (static analysis only; a live config-copy
-  test of two runs is needed before the cron uses it: the first saves the pushed `shumeiId`, the
-  second sends it). Still open: the *minimal* required
+  test of two runs is needed before the cron uses it: the first saves the pushed `shumeiId` and
+  logs `saved the pushed shumeiId`, which must appear before the second run, and the second sends
+  it). Still open: the *minimal* required
   `ta` content hasn't been isolated. An Android from-scratch login is live-confirmed.
   See `docs/live-validation.mdx` for the full methodology.
 - The earlier "reconnect blocked" / "init push never arrives" problems were never protocol-level
@@ -203,8 +204,9 @@ placeholder `GoClient` model and the run warns to recapture; a captured device w
 other), drops `accessTokenTime` when the token changed and the refresh token when the `deviceId`
 changed, and refuses a file that isn't a JSON object. So a recapture can go straight onto the live
 config, with no hand merge. A run also saves the `shumeiId` a `push.shumei.id` brings into the
-config, for its own `deviceId` only, and the next iOS `Login` sends it as `ta` `lw_shumei_id`, as
-the app does. Recording the build matters: a token is bound to it, so once the real app updates, a
+config as the push arrives, as the app does, so a run that then fails or is kicked keeps it; it is
+saved for the run's own `deviceId` only, and the next iOS `Login` sends it as `ta` `lw_shumei_id`.
+Recording the build matters: a token is bound to it, so once the real app updates, a
 fresh token only works if the Login claims that same build. A config without these two fields
 keeps claiming the build such configs always had, 1.0.344/786 on iOS or 1.0.364/1892 on Android,
 and the run warns to add them. Fresh binds, `-own-device-session` and runs without a config claim
@@ -334,7 +336,7 @@ gated on the HQ level.
 | `duel-recruit-tickets` | Spends held hero or survivor recruit tickets (`lottery.hero.card` / `lottery.worker.card`, `useFree: 0`) on days whose entry lists recruit types 42 / 120. It keeps the tickets of a pool where the recruit window would first ask about the wish hero (no wish hero chosen, or the chosen one owned at max rank or max honor while another wish-list hero isn't) |
 | `duel-troop-training` | Starts `building.camp.training` in idle Military Camps, at the highest unlocked tier and a count the food and iron in `init` cover, on Total Mobilization / Enemy Buster days. On Enemy Buster a batch starts only with a training speed-up item held and a later run left in the day. T11 trains in season 4 from day 64 on |
 | `duel-gacha` / `-plan` | OPT-IN, 1.0.370: reads the duel score gacha (`al.duel.lottery.get.info`) and claims its full pity reward; never draws (see `duel-gacha-draw`). The plan only reads |
-| `duel-gacha-draw` | OPT-IN, 1.0.370 (user carve-out): draws the duel score gacha one at a time (`al.duel.lottery.lottery`, `num` 1) while its own score balance pays 10,000,000 a draw, at most 50 a run, 1 s apart, and only on a Sunday (server time) or while an Alliance Duel runs, where the client shows its draw buttons. It doesn't read the init switch `alliance_duel` that gates the client's duel window. Spends only that score, never diamonds or items. Stops on any error code. Runs after `duel-gacha` |
+| `duel-gacha-draw` | OPT-IN, 1.0.370 (user carve-out): draws the duel score gacha one at a time (`al.duel.lottery.lottery`, `num` 1) while its own score balance pays 10,000,000 a draw, at most 50 a run, 1 s apart, and only with the init switch `alliance_duel` on (it gates the client's duel window) and on a Sunday (server time) or while an Alliance Duel runs, where the client shows its draw buttons. Spends only that score, never diamonds or items. Stops on any error code. Runs after `duel-gacha` |
 | `secret-task-assist` | OPT-IN, 1.0.370: assists up to 5 allies' finished Secret Tasks a day from the alliance tab (`hero.dispatch.assist`, free); the helped ally sees it; never steals and never dispatches heroes. Scores no duel row, so it is not held |
 | `secret-task-assist-plan` | Read-only, 1.0.370: logs the allies' finished Secret Tasks `secret-task-assist` would assist and today's assist count; never assists |
 | `explorer-treasure-plan` | Read-only, 1.0.370: logs the held Explorer Treasure keys and key boxes; sends nothing |

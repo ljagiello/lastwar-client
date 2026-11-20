@@ -1995,6 +1995,13 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 
+	// The shumeiId a push.shumei.id carries (about 0.5 s after the Login) is saved as it arrives, for
+	// the next iOS Login's ta, as the client saves it in the push handler
+	// (PushShumeiIdMessage.lua:14-18: Setting:SetString, then Setting:Save()). So every way this run
+	// ends after it keeps it, an exit 1, 2 or 3 included. Set after the save-back above, which
+	// writes the configured shumeiId; one pushed during the Login is saved at once.
+	conn.OnShumeiID(func(id string) { saveShumeiID(o.configSavePath, deviceID, id) })
+
 	slog.Info("fetching building list (push.init.build)")
 	initPush, err := game.FetchInit(conn, 15*time.Second)
 	buildings := initPush.Buildings
@@ -2025,7 +2032,6 @@ func runCrossServerTest(o crossServerTestOpts) {
 			_ = conn.Close()
 			os.Exit(1)
 		}
-		saveShumeiID(o.configSavePath, deviceID, conn.ShumeiID())
 		slog.Info("client exiting")
 		return
 	}
@@ -2049,8 +2055,5 @@ func runCrossServerTest(o crossServerTestOpts) {
 	if o.interactive != "" {
 		RunInteractive(conn, o.interactive)
 	}
-	// The shumeiId a push.shumei.id carried on this connection (session.GameConn.ShumeiID), kept
-	// as the client keeps it (PushShumeiIdMessage.lua:14-18) for the next iOS Login's ta.
-	saveShumeiID(o.configSavePath, deviceID, conn.ShumeiID())
 	slog.Info("client exiting")
 }

@@ -100,6 +100,7 @@ func TestReadJoinsTheAllianceRoomReadsHistoryAndKeepsOnlyTargetPosts(t *testing.
 		t.Fatal(err)
 	}
 	s := <-servers
+	s.wait(t)
 
 	if len(hosts) != 1 || hosts[0] != "lastwar-chat-cf.lastwarapp.net" {
 		t.Errorf("discovery hosts %v, want the first links URL only", hosts)

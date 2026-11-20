@@ -67,6 +67,10 @@ type fakeServer struct {
 	raw     [][]byte
 	pongs   int
 	closed  bool
+
+	// done is closed once the server's script and drain have returned (fakeDial), so what it
+	// recorded is final; see wait.
+	done chan struct{}
 }
 
 // fakeDial returns a DialFunc whose connection is served by script after the handshake; the
@@ -76,8 +80,9 @@ func fakeDial(t *testing.T, script func(s *fakeServer)) (DialFunc, <-chan *fakeS
 	ch := make(chan *fakeServer, 1)
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		client, server := net.Pipe()
-		s := &fakeServer{c: server, br: bufio.NewReader(server), headers: map[string]string{}}
+		s := &fakeServer{c: server, br: bufio.NewReader(server), headers: map[string]string{}, done: make(chan struct{})}
 		go func() {
+			defer close(s.done)
 			defer func() { _ = server.Close() }()
 			if err := s.handshake(); err != nil {
 				t.Errorf("fake handshake: %v", err)
@@ -205,6 +210,18 @@ func (s *fakeServer) recv() map[string]json.RawMessage {
 // drain reads until the client closes.
 func (s *fakeServer) drain() {
 	for s.recv() != nil {
+	}
+}
+
+// wait blocks until the server served by fakeDial has read the client's close (its script and
+// drain returned). The client's close frame write returns once the pipe hands the bytes to the
+// server's bufio.Reader, before recv records it, so pongs and closed are final only after this.
+func (s *fakeServer) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fake chat server did not see the client close within 5 s")
 	}
 }
 

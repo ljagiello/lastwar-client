@@ -171,7 +171,9 @@ func TestRedPacketsOpensEligiblePacketsExpiringFirst(t *testing.T) {
 		if s, ok := uuid.Val.(string); !ok || s != want.uuid {
 			t.Errorf("open %d uuid %#v, want UtfString %s", i, uuid.Val, want.uuid)
 		}
-		for key, v := range map[string]int32{"cfgId": want.cfg, "chatType": rpChatTypeAlliance, "serverId": want.server} {
+		// chatType 2 is RedPacketManager.ChannelType.Alliance (RedPacketManager.lua:3-8), sent as is
+		// (OpenRedPacketMessage.lua:5-11).
+		for key, v := range map[string]int32{"cfgId": want.cfg, "chatType": 2, "serverId": want.server} {
 			got, _ := p.Get(key)
 			if n, ok := got.Val.(int32); !ok || n != v {
 				t.Errorf("open %d %s %#v, want Int %d", i, key, got.Val, v)
@@ -204,7 +206,8 @@ func TestRedPacketsDailyCapStopsWithoutError(t *testing.T) {
 		rpPost(1, "u2", rpCustom("a", 1, soon, ""), ""),
 		rpPost(2, "u2", rpCustom("b", 1, soon.Add(time.Minute), ""), ""),
 	}}, nil)
-	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evErr(rpDailyCapCode) })
+	// 400600 is the code the client's open handler reads as the daily cap (OpenRedPacketMessage.lua:15).
+	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evErr("400600") })
 	if err := runRedPackets(conn, rpInit(nil)); err != nil {
 		t.Errorf("the daily cap is an expected stop, got %v", err)
 	}
@@ -241,8 +244,10 @@ func TestRedPacketsCapPerRun(t *testing.T) {
 	if err := runRedPackets(conn, rpInit(nil)); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(fake.cmds()); n != rpMaxClaimsPerRun {
-		t.Errorf("sent %d opens, want the daily cap %d", n, rpMaxClaimsPerRun)
+	// 10 is DataConfig red_pocket_config k1 (table item 40413), the daily cap the client's tip names
+	// (OpenRedPacketMessage.lua:15-17).
+	if n := len(fake.cmds()); n != 10 {
+		t.Errorf("sent %d opens, want the daily cap 10", n)
 	}
 }
 

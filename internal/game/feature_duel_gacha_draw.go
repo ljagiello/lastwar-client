@@ -21,7 +21,14 @@ import (
 //
 // A draw also needs a draw view the client can open now (duelGachaDrawView). Every draw button
 // sits in one of two views, and each opens only from a tab of the duel window, which never shows
-// a hidden tab (UIAllyDuelView.lua:296-345):
+// a hidden tab (UIAllyDuelView.lua:296-345). Every opener of that window first checks
+// CheckIfAllianceCompeteOpen, which is false while the init switch alliance_duel is off
+// (AllianceCompeteDataManager.lua:281-285; its callers UIMainAllyDuelBtn.lua:66, 151,
+// UIMainAllianceCompeteBtn.lua:64, CanOpenAllyDuelUI/TryOpenAllyDuelUI :547-561, GoToUtil.lua:1308,
+// 3592, ActivityTipsManager.lua:861, LWResourceLackCell.lua:2701-2703, LWResourceLackUtil.lua:572-577).
+// Table item 40413 has no alliance_duel row, so the init dataConfig alone decides (DataConfig:
+// CheckSwitch, DataConfig.lua:76-88). With the switch on, IsUnlock, which a draw needs anyway
+// (below), opens the window (:286-289). Its two tabs with a draw view:
 //   - the Sunday tab (UIAllyDuelScoreGachaSunday): server weekday 7, IsScienceOpen, IsUnlock and
 //     the switch (UIAllyDuelCtrl.lua:21-26). The weekday is GetNowWeekdayIndex, the date of UTC
 //     plus changeDeltaTime, Monday 1 to Sunday 7 (UITimeManager.lua:638-646, 667-690); the client
@@ -37,8 +44,9 @@ import (
 // Submitting (LeagueMatchManager:CheckIsSubmitting, LeagueMatchManager.lua:410-421) is a clock
 // check: weekday 7 and the server day's first hour. It hides the Activity tab only on a Sunday,
 // when the Sunday tab already opens a draw view, so the union of the two tabs does not depend on
-// it. The other conditions both views share are the gate above and duelGachaDrawDue. So from
-// Monday to Saturday outside a running duel no 1.0.370 UI sends a draw, and neither does this.
+// it. The other conditions both views share are the gate above and duelGachaDrawDue. So with the
+// switch off, or from Monday to Saturday outside a running duel, no 1.0.370 UI sends a draw, and
+// neither does this.
 //
 // A draw is `al.duel.lottery.lottery {configId: Int, num: Int}` (AlDuelLotteryLotteryMessage.lua:
 // 4-8: those two keys only; no currency or item in the request). Every send is a button of the two
@@ -81,6 +89,9 @@ const (
 	duelGachaDrawMaxPerRun = 50
 	duelGachaDrawSunday    = 7     // GetWeekdayIndex of a Sunday (UITimeManager.lua:638-646)
 	duelGachaDrawDuelActID = 55000 // EnumActivity.AllianceCompete.ActId "55000" (EnumType.lua:6301-6305)
+	// duelGachaDrawWindowSwitch is the init switch every opener of the duel window checks
+	// (AllianceCompeteDataManager.lua:282).
+	duelGachaDrawWindowSwitch = "alliance_duel"
 )
 
 // duelGachaDrawPace is the gap between draws, a human tap rate.
@@ -93,8 +104,8 @@ func init() {
 	registerFeature(Feature{
 		Name: duelGachaDrawFeature,
 		Summary: "OPT-IN: draw the Alliance Duel score gacha one at a time (al.duel.lottery.lottery, num 1) while its own " +
-			"score balance pays 10,000,000 a draw, on a Sunday or while an Alliance Duel runs (the client's draw views); spends only " +
-			"that score, never diamonds or items (static-only, not validated live)",
+			"score balance pays 10,000,000 a draw, with the init switch alliance_duel on and on a Sunday or while an Alliance Duel " +
+			"runs (the client's draw views); spends only that score, never diamonds or items (static-only, not validated live)",
 		DefaultOn: false,
 		Run:       runDuelGachaDraw,
 	})
@@ -169,9 +180,13 @@ func duelGachaActivityTab(a Activity, info *sfs.SFSObject) string {
 }
 
 // duelGachaDrawView returns the duel tab a draw view opens from now ("Sunday" or "Activity"), or
-// why neither does. err is a failed read of the duel's event info: no draw. The Sunday tab is
-// checked first, so it needs no request.
+// why neither does. err is a failed read of the duel's event info: no draw. The window switch and
+// the Sunday tab are checked first, so they need no request.
 func duelGachaDrawView(conn *session.GameConn, in *Init, now time.Time) (tab, why string, err error) {
+	if !claimSwitchOn(in, duelGachaDrawWindowSwitch) {
+		return "", "the init switch " + duelGachaDrawWindowSwitch + " is off, so the duel window does not open " +
+			"(AllianceCompeteDataManager.lua:281-285)", nil
+	}
 	weekday := "unknown (init has no tomorrow)"
 	if dayStart, ok := in.ServerDayStart(now); ok {
 		wd := goldTreeWeekday(now, dayStart)
