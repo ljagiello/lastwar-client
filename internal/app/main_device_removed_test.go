@@ -74,7 +74,7 @@ func TestRunCrossServerTestExitsCode2WhenTheDeviceIsRemoved(t *testing.T) {
 		wantCode int
 		wantLog  string
 	}{
-		{"own", exitCodeDeviceRemoved, "removed from the account"},
+		{"own", 2, "removed from the account"}, // the documented code, not the constant
 		{"other", 0, ""},
 	} {
 		t.Run(c.mode, func(t *testing.T) {
@@ -98,6 +98,24 @@ func TestRunCrossServerTestExitsCode2WhenTheDeviceIsRemoved(t *testing.T) {
 				t.Errorf("stderr = %s\nwant %q", stderr.String(), c.wantLog)
 			}
 		})
+	}
+}
+
+// TestExitCodesMatchTheREADME pins each exit code to the number README.md ("Exit code 2" to "Exit
+// code 5") gives cron wrappers, so a changed constant fails here and not only in the docs.
+func TestExitCodesMatchTheREADME(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		got, want int
+	}{
+		{"device removed (bind again or recapture)", exitCodeDeviceRemoved, 2},
+		{"session ended by the server", exitCodeSessionEnded, 3},
+		{"account, role, device or IP blocked", exitCodeAccountBlocked, 4},
+		{"forced update", exitCodeForcedUpdate, 5},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s: exit code %d, README documents %d", c.name, c.got, c.want)
+		}
 	}
 }
 

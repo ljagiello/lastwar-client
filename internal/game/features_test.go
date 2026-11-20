@@ -121,9 +121,33 @@ func TestFeaturePhasesNameRegisteredFeatures(t *testing.T) {
 		"duel-gacha", "duel-gacha-plan", "front-break-tasks", "hero-trial-stage", "hero-wish-claim",
 		"leading-quest-tasks", "newbie-arena-rewards", "offseason-tasks", "parkour-tasks", "s0-alliance-boss",
 		"sand-worm-tasks", "sky-battle-boxes", "survivor-pack", "tactical-card-box-points",
-		"tactical-card-collection", "zone-mobilization-tasks"} {
+		"tactical-card-collection", "zone-mobilization-tasks",
+		// 1.0.370 audit: WP8's and WP10's progress claims, and the two -plan previews of food events
+		"banquet-v2-claims", "banquet-v2-claims-plan", "bounty-hunter-milestones", "decoration-gacha-boxes",
+		"event-milestone-boxes", "food-event-boxes", "food-event-boxes-plan", "gift-box-score-boxes",
+		"sunrise-foundation", "world-boss-kill-rewards", "season-achievements", "season-trends",
+		"season-outpost-boxes", "cross-throne-rewards", "bloody-night-tasks", "jungle-trial-rewards",
+		"mastery-newbie-reward", "theme-prenotice"} {
 		if featurePhase(name) != phaseProgress {
 			t.Errorf("%s must run last: it claims the progress this run's actions earn", name)
+		}
+	}
+}
+
+// TestAudit370ClaimsFollowTheActionsThatFeedThem: the actions of the 1.0.370 audit that feed a claim
+// run before it: the free gift-box draw before the score boxes it adds to, and the military rank-up
+// before season-dailies, so the daily is claimed at the new rank.
+func TestAudit370ClaimsFollowTheActionsThatFeedThem(t *testing.T) {
+	order := featuresInRunOrder()
+	at := func(name string) int {
+		return slices.IndexFunc(order, func(f Feature) bool { return f.Name == name })
+	}
+	for _, p := range [][2]string{
+		{"gift-box-free-draw", "gift-box-score-boxes"},
+		{"military-rank-up", "season-dailies"},
+	} {
+		if a, b := at(p[0]), at(p[1]); a < 0 || b < 0 || a > b {
+			t.Errorf("%s runs at %d, %s at %d; want the first before the second", p[0], a, p[1], b)
 		}
 	}
 }

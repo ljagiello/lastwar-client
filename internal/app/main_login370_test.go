@@ -353,8 +353,8 @@ func TestRunCrossServerTestForcedUpdateExits5(t *testing.T) {
 	} {
 		t.Run(c.where, func(t *testing.T) {
 			code, stderr := runRefreshHelper(t, "TestRunCrossServerTestForcedUpdateExits5", "LASTWAR_TEST_FORCED_UPDATE="+c.where)
-			if code != exitCodeForcedUpdate {
-				t.Errorf("exit code = %d, want %d; stderr=%s", code, exitCodeForcedUpdate, stderr)
+			if code != 5 { // the documented code a cron wrapper reads (README "Exit code 5")
+				t.Errorf("exit code = %d, want 5; stderr=%s", code, stderr)
 			}
 			if got := strings.Contains(stderr, "getserverlist called"); got != c.wantGSL {
 				t.Errorf("GSL called = %v, want %v; stderr=%s", got, c.wantGSL, stderr)
@@ -376,8 +376,8 @@ func TestExitLoginFailedForcedUpdateExits5(t *testing.T) {
 		return
 	}
 	code, stderr := runRefreshHelper(t, "TestExitLoginFailedForcedUpdateExits5")
-	if code != exitCodeForcedUpdate {
-		t.Errorf("exit code = %d, want %d; stderr=%s", code, exitCodeForcedUpdate, stderr)
+	if code != 5 {
+		t.Errorf("exit code = %d, want 5; stderr=%s", code, stderr)
 	}
 }
 
