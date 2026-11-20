@@ -1,6 +1,7 @@
 package game
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -148,5 +149,46 @@ func TestSeasonOutputBenignRefreshAndFailure(t *testing.T) {
 	}
 	if n := len(fake.only(seasonStrongholdCmd)); n != 3 {
 		t.Errorf("sent %d stronghold claims, want 3", n)
+	}
+}
+
+// TestSeasonOutputStrongholdSourceServer pins B63: in S2, S3, S4 and S7 the client claims a
+// stronghold for the source server (init user.serverId here), so an entry without serverId is
+// still claimed; in S5/S6 the item sends the entry's serverId, so one without it is skipped.
+func TestSeasonOutputStrongholdSourceServer(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for name, c := range map[string]struct {
+		season int32
+		want   []int32 // serverId of each get.stronghold.output, in order
+	}{
+		"S7": {7, []int32{790, 812}},
+		"S3": {3, []int32{790, 812}},
+		"S6": {6, []int32{790}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				if cmd != seasonStrongholdInfoCmd {
+					return evOK()
+				}
+				noServer := obj("id", 13, "leftNum", 1)
+				return obj("rewardInfo", []*sfs.SFSObject{obj("id", 12, "serverId", 790, "leftNum", 2), noServer})
+			})
+			in := seasonOutputInit(c.season)
+			in.Object("user").PutInt("serverId", 812)
+			if err := runSeasonOutput(conn, in); err != nil {
+				t.Fatal(err)
+			}
+			var got []int32
+			for _, r := range fake.only(seasonStrongholdCmd) {
+				seasonParamIs(t, r.Params, "serverId", sfs.SFSInt, r.Params.GetInt("serverId"))
+				got = append(got, r.Params.GetInt("serverId"))
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("claimed for servers %v, want %v", got, c.want)
+			}
+			if n := len(fake.only("batch.get.stronghold.output")); n != 0 {
+				t.Errorf("sent the batch command %d times; this ON feature never sends it", n)
+			}
+		})
 	}
 }
