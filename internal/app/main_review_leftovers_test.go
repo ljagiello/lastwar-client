@@ -231,6 +231,8 @@ func TestRunCrossServerTestSeasonWindowExits1(t *testing.T) {
 // -cs-at is this run's choice, so a save-back keeps the session config's own access token and its
 // time: the one it had, after a looked-up address, and the one a GSL lookup saved there, after a
 // rotated refresh token. Run passes accessTokTime 0 with a typed -cs-at (main.go), and so does this.
+// A config made for another device keeps nothing of its own next to the run's deviceId: the save-back
+// writes the run's device with the typed token that logged in, as before.
 func TestRunCrossServerTestTypedAccessTokenIsNotSaved(t *testing.T) {
 	const atTime = int64(1791000000)
 	for _, tc := range []struct {
@@ -241,10 +243,13 @@ func TestRunCrossServerTestTypedAccessTokenIsNotSaved(t *testing.T) {
 		wantRt         string
 		wantSavedAddr  bool
 		configuredAddr string
+		runDevice      string // the run's deviceId; the config's is dev-1
+		runRt          string // the refresh token Run takes from the config for runDevice
 	}{
-		{"a looked-up address", lookupReply(), "at-1", atTime, "rt-1", true, "10.0.0.1"},
+		{"a looked-up address", lookupReply(), "at-1", atTime, "rt-1", true, "10.0.0.1", "dev-1", "rt-1"},
 		{"a rotated refresh token", gwAOnly(&gsl.LoginToken{Token: "at-gsl", Time: "1791900000"}, &gsl.LoginToken{Token: "rt-gsl", Time: "1791900001"}),
-			"at-gsl", 1791900000, "rt-gsl", false, "gw-a.example"},
+			"at-gsl", 1791900000, "rt-gsl", false, "gw-a.example", "dev-1", "rt-1"},
+		{"another device's config", lookupReply(), "at-typed", 0, "", true, "10.0.0.1", "dev-2", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
@@ -255,8 +260,8 @@ func TestRunCrossServerTestTypedAccessTokenIsNotSaved(t *testing.T) {
 				DeviceID: "dev-1", AccessToken: "at-1", AccessTokenTime: atTime, RefreshToken: "rt-1"})
 			synctest.Test(t, func(t *testing.T) {
 				runCrossServerTest(crossServerTestOpts{
-					ip: tc.configuredAddr, port: lookupPort, zone: lookupZone, gameUid: lookupGameUid, deviceID: "dev-1",
-					at: "at-typed", atExplicit: true, refreshTok: "rt-1",
+					ip: tc.configuredAddr, port: lookupPort, zone: lookupZone, gameUid: lookupGameUid, deviceID: tc.runDevice,
+					at: "at-typed", atExplicit: true, refreshTok: tc.runRt,
 					configSavePath: path, httpClient: client, dialGame: dial,
 				})
 				synctest.Wait()
@@ -265,8 +270,9 @@ func TestRunCrossServerTestTypedAccessTokenIsNotSaved(t *testing.T) {
 				t.Fatalf("Logins %v, want one with the typed at-typed", got)
 			}
 			cfg := readSessionConfig(t, path)
-			if cfg.AccessToken != tc.wantAt || cfg.AccessTokenTime != tc.wantAtTime || cfg.RefreshToken != tc.wantRt {
-				t.Errorf("saved at=%q (%d) rt=%q, want %q (%d) %q", cfg.AccessToken, cfg.AccessTokenTime, cfg.RefreshToken, tc.wantAt, tc.wantAtTime, tc.wantRt)
+			if cfg.DeviceID != tc.runDevice || cfg.AccessToken != tc.wantAt || cfg.AccessTokenTime != tc.wantAtTime || cfg.RefreshToken != tc.wantRt {
+				t.Errorf("saved deviceId=%q at=%q (%d) rt=%q, want %q %q (%d) %q", cfg.DeviceID, cfg.AccessToken, cfg.AccessTokenTime, cfg.RefreshToken,
+					tc.runDevice, tc.wantAt, tc.wantAtTime, tc.wantRt)
 			}
 			if saved := cfg.IP == lookupGateways; saved != tc.wantSavedAddr {
 				t.Errorf("saved ip %q; want the looked-up address saved = %v", cfg.IP, tc.wantSavedAddr)

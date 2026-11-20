@@ -1961,11 +1961,17 @@ func runCrossServerTest(o crossServerTestOpts) {
 					}
 					// An access token typed as -cs-at is this run's, not the session's: the config
 					// keeps its own and its time, or the one a GSL lookup saved there
-					// (saveLookupTokens). A refresh's token is the session's and is saved.
+					// (saveLookupTokens). A refresh's token is the session's and is saved. A config
+					// made for another device (the owner rule of saveSessionTokens) holds that
+					// device's token, which doesn't go next to this run's deviceId, so the typed
+					// one is written as before.
 					savedAt, savedAtTime := result.AccessTok, accessTokTime
 					if o.atExplicit && result.AccessTok == o.at {
 						if onDisk, err := LoadSessionConfig(o.configSavePath); err == nil {
-							savedAt, savedAtTime = onDisk.AccessToken, onDisk.AccessTokenTime
+							owner := cmp.Or(onDisk.DeviceID, onDisk.ShumeiInstall.DeviceID)
+							if owner == "" || owner == deviceID {
+								savedAt, savedAtTime = onDisk.AccessToken, onDisk.AccessTokenTime
+							}
 						}
 					}
 					updated := &SessionConfig{
