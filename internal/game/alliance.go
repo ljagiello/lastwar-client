@@ -332,15 +332,11 @@ const (
 )
 
 // allianceDonateStops are the donate answers that end this run's donations without an error.
+// Both are benign for al.science.donate in session's benignErrorCodes (MASTER B33, WP-Z touch
+// point 3), so a SendAndWait of them is logged at Warn and not counted as a run failure.
 var allianceDonateStops = map[string]string{
 	allianceChargesUsedUpCode:     "donation charges used up",
 	allianceDonateUnavailableCode: "donation unavailable right after the day reset (live observation; no client text)",
-}
-
-func init() {
-	// MASTER B33: 120471 is registered in conn.go; 120836 is registered here, scoped to the
-	// donation, so a SendAndWait of it is logged at Warn and not counted as a run failure.
-	session.RegisterBenignErrorCode(allianceDonateUnavailableCode, allianceDonateCmd)
 }
 
 //go:generate go run ./genalscience -tab ${LASTWAR_TABLES}/lw_alliance_science_tab.json -detail ${LASTWAR_TABLES}/lw_alliance_science_detail.json -version ${LASTWAR_TABLE_VERSION} -out alliance_science_gen.go
