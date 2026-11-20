@@ -306,6 +306,66 @@ func TestCoreDonationSharesTheRunWithDonateAll(t *testing.T) {
 	}
 }
 
+// TestDonationOverADeadConnectionEndsTheRunsDonations is the dead-connection branch of
+// allianceScienceRun.failed (final-r3 prod N2): the server goes away at the core's first
+// al.science.donate, so the wait fails with a non-timeout net.Error (sfs.DeadConnError). That is
+// not a timeout (waitTimedOut), so the run's donations stop with "donation failed", and
+// alliance-donate-all neither reads the charges again nor tries to send.
+func TestDonationOverADeadConnectionEndsTheRunsDonations(t *testing.T) {
+	const id = 10011900
+	synctest.Test(t, func(t *testing.T) {
+		client, server := session.NewPipeGameConnPair(t)
+		srv := &scriptedServer{}
+		go func() {
+			for {
+				msg, err := session.ReadNextExtension(server)
+				if err != nil {
+					return
+				}
+				srv.mu.Lock()
+				srv.reqs = append(srv.reqs, msg)
+				srv.mu.Unlock()
+				var out *sfs.SFSObject
+				switch msg.Cmd {
+				case "science.data.refresh":
+					out = allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", int64(8000000), "level", 3))
+				case "al.science.refreshNum":
+					out = obj("scienceId", id, "useNum", 5, "maxNum", 30)
+				default: // al.science.donate: the connection dies instead of answering
+					_ = server.Close()
+					return
+				}
+				if v, ok := msg.Params.Get("_id"); ok {
+					out.PutValue("_id", v)
+				}
+				if err := server.SendExtension(msg.Cmd, out); err != nil {
+					return
+				}
+			}
+		}()
+		in := inAllianceInit()
+		errCore := donateRecommendedAllianceTech(client, in)
+		if !session.ContainsNonTimeoutNetError(errCore) {
+			t.Fatalf("core donation error = %v, want a dead connection", errCore)
+		}
+		run := cachedAllianceScience(client, in)
+		if run == nil || run.stop != "donation failed" {
+			t.Fatalf("run state = %+v, want donations stopped with \"donation failed\"", run)
+		}
+		if err := donateAllAllianceTech(client, in); err != nil {
+			t.Errorf("donateAllAllianceTech() = %v, want nil: the run's donations already ended", err)
+		}
+		if run.stop != "donation failed" || !run.chargesRead {
+			t.Errorf("after alliance-donate-all: stop %q, chargesRead %v; want the stop kept and no charge re-read",
+				run.stop, run.chargesRead)
+		}
+		want := []string{"science.data.refresh", "al.science.refreshNum", "al.science.donate"}
+		if got := srv.cmds(); !slices.Equal(got, want) {
+			t.Errorf("requests = %v, want %v", got, want)
+		}
+	})
+}
+
 // TestDonateAllRecoversFromATimeoutInTheCore is the -collect sequence when the server leaves one
 // request of the core donation unanswered: a timed-out charge read or donation does not end the
 // run's donations, so alliance-donate-all reads the charges again (a timed-out donation may have

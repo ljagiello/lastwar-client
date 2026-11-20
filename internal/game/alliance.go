@@ -332,8 +332,9 @@ const (
 )
 
 // allianceDonateStops are the donate answers that end this run's donations without an error.
-// Both are benign for al.science.donate in session's benignErrorCodes (MASTER B33, WP-Z touch
-// point 3), so a SendAndWait of them is logged at Warn and not counted as a run failure.
+// donate treats them as a stop itself (120471 logged at Info, 120836 at Warn): the donation is
+// sent by sendAllianceDonation, a hand-paired wait that never goes through SendAndWait, so the
+// session's benignErrorCodes entries for al.science.donate (MASTER B33) are not consulted here.
 var allianceDonateStops = map[string]string{
 	allianceChargesUsedUpCode:     "donation charges used up",
 	allianceDonateUnavailableCode: "donation unavailable right after the day reset (live observation; no client text)",

@@ -78,6 +78,9 @@ func TestCaptiveVisitorsMarksEveryRemovedUid(t *testing.T) {
 			if op := r.params.GetInt("operate"); op != 1 {
 				t.Errorf("operate = %d, want 1", op)
 			}
+			// VisitorOperateMessage.lua:5-9: PutLong uid, PutInt operate.
+			seasonParamIs(t, r.params, "uid", sfs.SFSLong, r.params.GetLong("uid"))
+			seasonParamIs(t, r.params, "operate", sfs.SFSInt, int32(1))
 		}
 	}
 	if want := []string{"visitor.operate", "visitor.fresh"}; !slices.Equal(cmds, want) {

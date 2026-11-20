@@ -230,10 +230,10 @@ this repo or commit it anywhere).
 # -run of a held feature on a day that doesn't list its types is refused; -run-anyway runs it.
 ./lastwar-client -run radar-claims -run-anyway
 
-# A duel or dig spend that sees the diamond balance fall writes <session config>.tripwire.json.
-# While that file exists every duel spend, the Treasure Hunt pickaxe digs and treasure-digs' brick
-# opens refuse to run, in later runs too (each run warns at startup; a -collect run exits 1). Free
-# dig claims still run. Check the account, then remove the file (for -config, or the default
+# A duel or dig spend (or supplies-search) that sees the diamond balance fall writes
+# <session config>.tripwire.json. While that file exists every duel spend, the Treasure Hunt
+# pickaxe digs, treasure-digs' brick opens and supplies-search refuse to run, in later runs too
+# (each run warns at startup; a -collect run exits 1). Free dig claims still run. Check the account, then remove the file (for -config, or the default
 # session config) and exit:
 ./lastwar-client -clear-tripwire
 
@@ -248,7 +248,7 @@ this repo or commit it anywhere).
 # {"uuid:l":42} (the command catalog names each param's type):
 mkfifo /tmp/lw_cmd_pipe
 ./lastwar-client -interactive /tmp/lw_cmd_pipe &
-echo 'building.production.collect {"uuid":123}' > /tmp/lw_cmd_pipe
+echo 'building.production.collect {"uuid:l":123}' > /tmp/lw_cmd_pipe
 
 # Override specific config fields for a one-off test (e.g. a different captured token):
 ./lastwar-client -collect -cs-at <a-different-access-token>
@@ -436,9 +436,14 @@ Two things worth checking after setup, not just once but as ongoing habits:
   a ban, whether it is permanent and its reason code. For a ban or a deletion, the real app on that
   account shows why.
 - **Exit code 5 means the server demands a forced update.** Check-version or the `Login` reply
-  said `updateType` 2, so the run stopped before the GSL lookup or `init`, as the real client
-  does. Move the session config's `appVersion`/`versionCode` to the current release (recapture
-  with `pcap -session-out`).
+  said `updateType` 2: check-version stops the run before the GSL lookup, a `Login` reply before
+  `init`, as the real client does. Move the session config's `appVersion`/`versionCode` to the
+  current release (recapture with `pcap -session-out`).
+- **Whatever wraps the cron must know these codes.** Since the 1.0.370 fixes a run can exit `5`
+  (forced update: stop and update the build, don't retry), `2` on a `push.account.device.del`
+  for this device, `1` on `E015`/`E016` (it used to be `2`), and `3` on `push.user.gm.off` and
+  `push.refund.restart`. A wrapper that treats every non-zero exit alike, or only `2` as "recapture",
+  needs updating before the cron runs this build.
 - **`-log-level` controls the JSON log verbosity** (`debug`, `warn`, or its alias `warning`, or `error`; default `info`) --
   handy for trimming a noisy cron log down to warnings/errors only, or turning on `debug` output
   while chasing down a problem run.

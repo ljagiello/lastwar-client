@@ -196,7 +196,7 @@ The 1.0.364 timers (static-analysis-only):
 | `init` push | 13 s, then reconnect and re-send `Login` with the same `at`, up to 3 times |
 | GSL HTTP | 5 s, 4 tries, alternating UnityWebRequest and BestHTTP |
 
-`goclient` sends its first heartbeat as soon as it connects, waits up to 45 s for `init`, and makes a single attempt. That's more conservative than the real client, and the server accepts it. Since the 1.0.370 fixes, once the server has answered a ping, 12 s in which no frame at all arrives ends the run as a dead connection, as the client's receive timeout does (`BaseUtils.decompiled.cs:35935, 36017-36031`; static-analysis-only).
+`goclient` sends its first heartbeat as soon as it connects, waits up to 45 s for `init`, and makes a single attempt. That's more conservative than the real client, and the server accepts it. Since the 1.0.370 fixes, once the server has answered a ping, waits that end with no frame at all end the run as a dead connection when their silence adds up to more than 12 s (the end of the second silent 8 s wait in a row, about 16 s; a single longer wait, such as the one for `init`, can pass it alone), after the client's receive timeout (`BaseUtils.decompiled.cs:35935, 36017-36031`; static-analysis-only).
 
 ## Error conventions
 

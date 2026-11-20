@@ -359,7 +359,7 @@ func TestBaseBubblesDayCapAndGates(t *testing.T) {
 // fake99108Activity checks openActivityOf picks the lowest open id.
 func fake99108Activity(t *testing.T) int32 {
 	t.Helper()
-	id, _ := openActivityOf(bbInit(0, 99302, 99108), thanksgivingActivities, thanksgivingActivityType)
+	id, _ := openActivityOf(bbInit(0, 99302, 99108), thanksgivingActivities(), thanksgivingActivityType)
 	return id
 }
 
@@ -391,5 +391,10 @@ func TestBaseBubblesFeature(t *testing.T) {
 	}
 	if len(thanksgivingStatuses) != 4 || valentineStatuses[520533].activityID != 99192 {
 		t.Error("lw_status constants")
+	}
+	// Table activity 40413's type-321 (ActGiftGiving) rows are 99108 and 99302; both are in the
+	// generated table, which the lookup reads.
+	if got := thanksgivingActivities(); !slices.Equal(got, []int32{99108, 99302}) {
+		t.Errorf("thanksgivingActivities() = %v, want [99108 99302]", got)
 	}
 }

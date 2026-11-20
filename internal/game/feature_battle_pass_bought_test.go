@@ -125,6 +125,39 @@ func TestBattlePassNewStateTwoTaskUsesTheScoreItem(t *testing.T) {
 	}
 }
 
+// B59 on a view that has a high tier (final-r3 prod m6, wp8-r1 m4): activity 99021 is a
+// BattlePass_new (142) row with showUiType 5 and para_5 653008 in tables 40413, a
+// UIBattlePassNewYear-family view whose task cell claims a state-2 task when either track is bought
+// (UIBattlePassTaskCellNewYear.lua:248: the purchase popup only for unlock == 0 and high_unlock ==
+// 0). Only the high track bought: the task is claimed. Neither bought: it is not.
+func TestBattlePassHighTrackOnAHighTierView(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for _, c := range []struct {
+		name               string
+		unlock, highUnlock int32
+		want               bool
+	}{
+		{"high track bought", 0, 1, true},
+		{"nothing bought", 0, 0, false},
+	} {
+		conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+			if cmd == "hero.event.info.get" {
+				info := bpBoughtInfo(c.unlock, c.highUnlock, bpBoughtTask("t1", 2, -1, 653008, 4))
+				info.PutInt("activityType", 142)
+				info.PutInt("activityId", 99021)
+				return info
+			}
+			return evOK()
+		})
+		if err := runBattlePass(conn, evInit(30, evActivity(99021))); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := fake.only("bp.task.reward"); (len(got) == 1) != c.want {
+			t.Errorf("%s: bp.task.reward sent %d times, want claimed=%v", c.name, len(got), c.want)
+		}
+	}
+}
+
 // B59: a bought high tier's reached row with special2State present and 0 sends claim-all, only for a
 // pass with a high tier (highExchangeId set, HaveHighPayStage, ActBattlePassInfo.lua:398-400,
 // 622-624) on a general view; a missing special2State, no high tier, no high_unlock, or a login

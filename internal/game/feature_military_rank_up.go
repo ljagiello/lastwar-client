@@ -36,7 +36,7 @@ func init() {
 // militaryLevel, totalMilitaryScore and dailyRewardNum (SeasonMilitaryInfoData.lua:53-64). The
 // thresholds are cumulative, so the client shows no cost; that the request spends nothing is still
 // not provable statically, so each rank-up logs the score before and after and the loop stops if
-// the score drops, the level does not rise, or anything fails.
+// the reply has no score, the score drops, the level does not rise, or anything fails.
 func runSeasonMilitaryRankUp(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil || evSeasonID(in) <= 0 {
 		return nil
@@ -89,7 +89,15 @@ func runSeasonMilitaryRankUp(conn *session.GameConn, in *Init) error {
 		newScore, hasScore := evNum(r.Params, "totalMilitaryScore")
 		slog.Info(seasonMilitaryRankFeature+": ranked up", "activity", a.ID, "levelBefore", level, "levelAfter", newLevel,
 			"scoreBefore", score, "scoreAfter", newScore, "dailyRewardNum", evString(r.Params, "dailyRewardNum"))
-		if hasScore && newScore < score {
+		if !hasScore {
+			// HandleLevelUp takes checknumber(totalMilitaryScore), 0 for a missing field
+			// (SeasonMilitaryInfoData.lua:53-64; FuncUtil.lua:1-3), so the client offers no further
+			// rank-up, and without the score the drop check below can't run.
+			slog.Warn(seasonMilitaryRankFeature+": the rank-up reply carries no totalMilitaryScore; stopping",
+				"levelAfter", newLevel)
+			break
+		}
+		if newScore < score {
 			slog.Warn(seasonMilitaryRankFeature+": totalMilitaryScore dropped after a rank-up, so it is not free; stopping",
 				"scoreBefore", score, "scoreAfter", newScore)
 			break
@@ -98,9 +106,7 @@ func runSeasonMilitaryRankUp(conn *session.GameConn, in *Init) error {
 			break
 		}
 		level = newLevel
-		if hasScore {
-			score = newScore
-		}
+		score = newScore
 	}
 	return b.err()
 }

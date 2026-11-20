@@ -470,3 +470,40 @@ func TestThemeNoticeClaimsBeforeTheStart(t *testing.T) {
 		t.Errorf("sent %v below the HQ level", got)
 	}
 }
+
+// TestThemeNoticeEntryWithoutStateIsClaimed: the client keys stageArr by day and counts a day as
+// claimable only with no entry or an entry whose state is 0 (ThemeActivityManager.lua:43-60,
+// 96-104; UIActivitySummaryPreviewView.lua:161-168: state ~= 0 is claimed). On day 3 of the notice,
+// day 1 has state 1, day 2 an entry with no state, day 3 state 0: only day 3 is claimed.
+func TestThemeNoticeEntryWithoutStateIsClaimed(t *testing.T) {
+	withEvNow(t, evTestNow)
+	const id int32 = 777031
+	activityTable[id] = activityRow{typ: 30, needHQ: 10} // EnumActivity.ActivitySummary 30 (EnumType.lua:6319)
+	t.Cleanup(func() { delete(activityTable, id) })
+	a := evActivity(id)
+	a.PutLong("preTime", evTestNow.Add(-50*time.Hour).UnixMilli())
+	a.PutLong("startTime", evTestNow.Add(time.Hour).UnixMilli())
+	a.PutLong("endTime", evTestNow.Add(7*24*time.Hour).UnixMilli())
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		r := evOK()
+		if cmd == "get.theme.activity.info" {
+			r.PutInt("activityId", p.GetInt("activityId"))
+			arr := sfs.NewSFSArray()
+			arr.AddSFSObject(obj("day", 1, "state", 1))
+			arr.AddSFSObject(obj("day", 2, "reward", "box"))
+			arr.AddSFSObject(obj("day", 3, "state", 0))
+			r.PutSFSArray("stageArr", arr)
+		}
+		return r
+	})
+	if err := runThemeNotice(conn, evInit(10, a)); err != nil {
+		t.Fatal(err)
+	}
+	var days []int32
+	for _, r := range fake.only("receive.theme.activity.reward") {
+		days = append(days, r.Params.GetInt("day"))
+	}
+	if !slices.Equal(days, []int32{3}) {
+		t.Errorf("claimed days %v, want only 3 (day 2's entry has no state: claimed, as the client reads it)", days)
+	}
+}

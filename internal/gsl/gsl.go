@@ -95,8 +95,11 @@ func checkVersionHostsFor(deviceID string) (hosts []string, earlyAccess bool) {
 var ErrForcedUpdate = errors.New("forced update (updateType 2): the server no longer accepts this build; " +
 	"move the session config's appVersion/versionCode (or the built-in defaults) to the current release")
 
-// ForcedUpdate reports whether an updateType value means a forced update. The client reads it as
-// a string and converts it with ToInt (Assembly-CSharp.decompiled.cs:9621), so a numeric 2 counts.
+// ForcedUpdate reports whether an updateType value means a forced update. The client's
+// check-version casts the JSON value with (string) and then ToInt
+// (Assembly-CSharp.decompiled.cs:9619-9631): a string "2" stops it, while a numeric 2 makes the
+// cast throw, which it logs and then reads the rest of the reply. Go also stops on a numeric 2,
+// the safe side for a server that no longer takes this build.
 func ForcedUpdate(updateType string) bool {
 	n, err := strconv.Atoi(strings.TrimSpace(updateType))
 	return err == nil && n == 2

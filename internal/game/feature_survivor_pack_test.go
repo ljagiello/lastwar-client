@@ -83,8 +83,12 @@ func TestSurvivorPackClaimsFreeThenBubbleAndScoreStages(t *testing.T) {
 			got = append(got, r.Cmd)
 		case survivorScoreCmd:
 			got = append(got, fmt.Sprintf("%s %d", r.Cmd, r.Params.GetInt("index")))
+			// SurvivorVisitorReceiveScoreMessage.lua:7: PutInt index.
+			seasonParamIs(t, r.Params, "index", sfs.SFSInt, r.Params.GetInt("index"))
 		default:
 			got = append(got, fmt.Sprintf("%s %d", r.Cmd, r.Params.GetInt("id")))
+			// SurvivorVisitorReceiveFreeMessage.lua:7, SurvivorVisitorReceiveBubbleMessage.lua:7: PutInt id.
+			seasonParamIs(t, r.Params, "id", sfs.SFSInt, r.Params.GetInt("id"))
 		}
 	}
 	want := []string{

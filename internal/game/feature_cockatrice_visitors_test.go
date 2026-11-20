@@ -4,6 +4,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"lastwar-client/internal/sfs"
 )
 
 func TestCockatriceVisitorsIsOptIn(t *testing.T) { assertCityGapFeature(t, cockatriceVisitorsFeature) }
@@ -29,6 +31,9 @@ func TestCockatriceVisitorsAcceptsOnlyType13(t *testing.T) {
 			t.Errorf("sent %s %s, want visitor.operate operate 1", r.cmd, r.params.StringRedacted())
 		}
 		uids = append(uids, r.params.GetLong("uid"))
+		// VisitorOperateMessage.lua:5-9: PutLong uid, PutInt operate.
+		seasonParamIs(t, r.params, "uid", sfs.SFSLong, r.params.GetLong("uid"))
+		seasonParamIs(t, r.params, "operate", sfs.SFSInt, int32(1))
 	}
 	if !slices.Equal(uids, []int64{1}) {
 		t.Errorf("accepted uids %v, want [1]", uids)

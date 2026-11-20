@@ -15,8 +15,8 @@ import "lastwar-client/internal/sfs"
 // (BuildingDate.lua:453-456). Lua's `if q.uT` is true for 0 as well, so a present uT of 0 also
 // overrides. The two values normally agree; no divergence has been seen live.
 //
-// buildingUpgradeTime is the one reader for it; finished-timers uses it, and the other building
-// uT readers (alliance-call-help, duel-speedups) are meant to adopt it.
+// buildingUpgradeTime is the one reader for it; finished-timers, alliance-call-help and
+// duel-speedups use it.
 
 const (
 	buildQueueNormal  = 0   // LWBuildQueueType.NORMAL

@@ -192,23 +192,29 @@ func runTacticalCollection(conn *session.GameConn, in *Init) error {
 	return b.err()
 }
 
-// tacticalActiveCards counts the activated card ids per card type in a collect.list reply.
+// tacticalActiveCards counts the activated card ids per card type in a collect.list reply. Like
+// UpdateCardBookData it merges every collectCards entry of a type into one set keyed by the
+// numeric card id (cardBookData[cardType][tonumber(card)], TacticalCardDataManager.lua:156-176),
+// so a card listed twice, in one entry or in two entries of the same type, counts once.
 func tacticalActiveCards(reply *sfs.SFSObject) map[int64]int64 {
-	out := map[int64]int64{}
+	seen := map[int64]map[int64]bool{}
 	for _, c := range evObjects(reply, "collectCards") {
 		typ, ok := evNum(c, "cardType")
 		if !ok {
 			continue
 		}
-		seen := map[string]bool{}
+		if seen[typ] == nil {
+			seen[typ] = map[int64]bool{}
+		}
 		for _, id := range strings.Split(evString(c, "cards"), ";") {
-			if id = strings.TrimSpace(id); id != "" {
-				if _, err := strconv.ParseInt(id, 10, 64); err == nil {
-					seen[id] = true
-				}
+			if n, err := strconv.ParseInt(strings.TrimSpace(id), 10, 64); err == nil {
+				seen[typ][n] = true
 			}
 		}
-		out[typ] += int64(len(seen))
+	}
+	out := map[int64]int64{}
+	for typ, ids := range seen {
+		out[typ] = int64(len(ids))
 	}
 	return out
 }

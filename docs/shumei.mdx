@@ -412,8 +412,16 @@ may report a different set. The parser reads two formats. A `ver: 1` config,
 like the default, has flat `sensitive.<name>` keys, and a value that isn't
 `true` excludes the name. Any other version has a nested `sensitive` object,
 where `true` excludes it. Either way the server can switch off a whole category
-or a single `aNN` field. `Register` fetches the cloud config and caches it in
-`shumeiInstall` (its md5 and exclusions). The next start sends that md5 back, reports the
+or a single `aNN` field. A flat key's name is its second dot-separated part, as
+Java's `split` gives it (`sensitive.wifi.scan` names `wifi`; a bare `sensitive.`
+is skipped), and each name counts once. `Register` fetches the cloud config and caches it in
+`shumeiInstall` (its md5 and exclusions), and logs the reply's `code` and `requestId`. A
+failed request, or a reply with no `detail.data`, keeps the cached config, as the SDK's
+error handler is empty. A reply whose `detail` has `data` that doesn't decode (no numeric
+`length`, bad base64, the wrong key) clears the cache instead: the SDK's success handler
+takes such a reply, so its built-in config is in force from then on. The decoder takes
+`data` the way `Base64.decode(…, DEFAULT)` does, line breaks and missing `=` padding
+included. The next start sends that md5 back, reports the
 cached set in `a85`, and leaves out every slot the set gates, by the slot's own key or a group
 name; one key of a coupled gate such as `a45`/`a131`/`a132` drops the group, and a primitive
 slot is sent as 0. No live reply has been decrypted, so which keys Last War's server sends is

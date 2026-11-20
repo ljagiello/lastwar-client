@@ -47,9 +47,10 @@
 // `data`/`tn`/`ep` returns 1902. The 1.0.370 slot corrections (app certificate,
 // stored smid, counters, readings, the US catalog) and the cloudconf request
 // are static-only: no registration has been sent with them yet, and a template
-// the server dislikes only shows up live as a 1902. The device-data template is a spoofed Android device profile
-// (the client runs on a desktop, not a phone), so the smid it mints is for a
-// device that does not exist — see the note in BoxID.
+// the server dislikes only shows up live as a 1902. The device-data template
+// is a spoofed Android device profile (the client runs on a desktop, not a
+// phone), so the smid it mints is for a device that does not exist — see the
+// note in BoxID.
 package shumei
 
 import (
@@ -319,9 +320,9 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 //   - a83 is seven checkSelfPermission digits (l1111l111111Il.java:583-589):
 //     READ_PHONE_STATE, WRITE_EXTERNAL_STORAGE, WRITE_SETTINGS,
 //     ACCESS_WIFI_STATE, ACCESS_NETWORK_STATE, ACCESS_FINE_LOCATION,
-//     ACCESS_COARSE_LOCATION. The manifest declares only the fourth and fifth
-//     of those that can be granted (WRITE_EXTERNAL_STORAGE is declared but not
-//     granted to a target-36 app), so "0001100".
+//     ACCESS_COARSE_LOCATION. Only the fourth and fifth are granted:
+//     WRITE_EXTERNAL_STORAGE is declared but not requested at runtime by the
+//     game (the digit is 0 either way), so "0001100".
 //   - a86 is the option status string (SmAntiFraud.java:233-243): transport,
 //     cloudConf, usingMD5, usingHttps, a callback, a non-empty notCollect,
 //     checkCrt. SmSdkManager keeps the defaults, sets HTTPS, registers a
@@ -784,11 +785,14 @@ func BoxID(client Client, deviceID string, dev Device) (string, error) {
 // a130, and a127 when the phone rebooted) even when the upload fails, as the
 // SDK counts before it uploads; caches the cloud config the reply carried
 // (the next start sends its md5 back and its exclusions in a85); and caches
-// the box ID that came back (Install.Registered). A failed or undecodable
-// cloudconf reply is logged and changes nothing else, as the SDK's handler
-// for it is empty. Saving the install whenever it differs from dev.Install
-// keeps the counters and the config moving from run to run. An install
-// deviceData refuses comes back unchanged, with nothing sent.
+// the box ID that came back (Install.Registered). A failed cloudconf, or a
+// reply without a config, is logged and changes nothing else, as the SDK's
+// error handler is empty; a reply whose config does not decode clears the
+// cache, so the built-in config is in force, as the SDK's success handler
+// leaves it (errCloudConfUndecodable). Saving the install whenever it
+// differs from dev.Install keeps the counters and the config moving from run
+// to run. An install deviceData refuses comes back unchanged, with nothing
+// sent.
 func Register(client Client, deviceID string, dev Device) (string, Install, error) {
 	pub, err := publicKey()
 	if err != nil {
@@ -808,10 +812,18 @@ func register(client Client, pub *rsa.PublicKey, deviceID string, dev Device, no
 	in := dev.Install.collected(dev.BootTime)
 	// Collected before the reply, so a85 above names the config already in
 	// force, as on a real start where both requests race the collection.
-	if conf, err := fetchCloudConf(client, pub, dev.Install, sessionID(dev.Now)); err != nil {
-		slog.Info("shumei cloudconf failed; keeping the cloud config in force", "error", err)
-	} else {
-		slog.Info("shumei cloudconf reply", "md5", conf.MD5, "excluded", conf.Excluded, "changed", conf.MD5 != dev.Install.CloudConfMD5)
+	conf, reply, err := fetchCloudConf(client, pub, dev.Install, sessionID(dev.Now))
+	switch {
+	case errors.Is(err, errCloudConfUndecodable):
+		slog.Warn("shumei cloudconf reply carries a config that does not decode; the SDK then uses its built-in config",
+			"error", err, "code", reply.Code, "requestId", reply.RequestID)
+		in = in.withCloudConf(cloudConf{})
+	case err != nil:
+		slog.Info("shumei cloudconf failed; keeping the cloud config in force", "error", err,
+			"code", reply.Code, "requestId", reply.RequestID)
+	default:
+		slog.Info("shumei cloudconf reply", "code", reply.Code, "requestId", reply.RequestID, "md5", conf.MD5,
+			"excluded", conf.Excluded, "changed", conf.MD5 != dev.Install.CloudConfMD5)
 		in = in.withCloudConf(conf)
 	}
 	id, err := upload(client, pub, inner)

@@ -443,14 +443,7 @@ func runThemeNotice(conn *session.GameConn, in *Init) error {
 			b.add(err)
 			continue
 		}
-		claimed := map[int64]bool{}
-		for _, st := range evObjects(info, "stageArr") {
-			day, ok := evNum(st, "day")
-			if state, sok := evNum(st, "state"); ok && sok && state != 0 {
-				claimed[day] = true
-			}
-		}
-		due := themeNoticeDueDays(pre, now, claimed)
+		due := themeNoticeDueDays(pre, now, themeNoticeClaimedDays(info))
 		slog.Info(themeNoticeFeature+": notice info", "activity", a.ID, "preTime", pre, "startTime", a.StartTime(), "due", due)
 		for _, day := range due {
 			c := sfs.NewSFSObject()
@@ -468,6 +461,25 @@ func runThemeNotice(conn *session.GameConn, in *Init) error {
 // startTime (ThemeActivityManager.lua:79-81).
 func themeNoticeWindow(preTime, startTime, now int64) bool {
 	return preTime > 0 && preTime <= now && now < startTime
+}
+
+// themeNoticeClaimedDays reads the info reply's stageArr the way UpdateNoticeRewardInfo stores it,
+// by day (ThemeActivityManager.lua:43-60): a day with an entry is claimed unless the entry's state
+// is 0, so an entry without a state counts as claimed, as in GetThemeActivityRedCount's
+// `not noticeInfo[i] or noticeInfo[i].state == 0` (:96-104) and the preview's `state ~= 0`
+// (UIActivitySummaryPreviewView.lua:161-168). A day with no entry stays claimable.
+func themeNoticeClaimedDays(info *sfs.SFSObject) map[int64]bool {
+	claimed := map[int64]bool{}
+	for _, st := range evObjects(info, "stageArr") {
+		day, ok := evNum(st, "day")
+		if !ok {
+			continue
+		}
+		if state, sok := evNum(st, "state"); !sok || state != 0 {
+			claimed[day] = true
+		}
+	}
+	return claimed
 }
 
 // themeNoticeDueDays lists the pre-notice days GetThemeActivityRedCount counts: i in 1..3 with i <=
