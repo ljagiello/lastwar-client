@@ -116,7 +116,7 @@ func runSeasonWeekCard(conn *session.GameConn, in *Init) error {
 	cardID, ok := seasonWeekCardID(a, dayStart)
 	if !ok {
 		slog.Info(seasonWeekCardFeature+": activity has no card id in table activity; skipping",
-			"activity", a.ID, "para", a.Para(), "tableVersion", activityTableVersion)
+			"activity", a.ID, "para", a.Para(), "tableVersion", tableVersion)
 		return nil
 	}
 	b := &evBatch{conn: conn}

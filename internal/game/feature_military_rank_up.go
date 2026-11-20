@@ -54,7 +54,7 @@ func runSeasonMilitaryRankUp(conn *session.GameConn, in *Init) error {
 	levels := seasonMilitaryLevels[group]
 	if !ok || len(levels) == 0 {
 		slog.Info(seasonMilitaryRankFeature+": the activity's para_2 group is not in the generated tables; skipping",
-			"activity", a.ID, "group", group, "tableVersion", seasonTablesVersion)
+			"activity", a.ID, "group", group, "tableVersion", tableVersion)
 		return nil
 	}
 	b := &evBatch{conn: conn}

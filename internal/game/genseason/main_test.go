@@ -73,7 +73,6 @@ func TestParseAndRender(t *testing.T) {
 	}
 	for _, want := range []string{
 		"(table version 40413)",
-		`const seasonTablesVersion = "40413"`,
 		"all 5 rows of table lw_season",
 		"3:       {season: 1, typ: 1, trends: 10},",
 		"85:      {season: 4, typ: 5, achievements: 5000, trends: 40, goldenTree: 10001},",

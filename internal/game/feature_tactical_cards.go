@@ -52,9 +52,8 @@ const (
 	tacticalOpenSeasonDay      = 2
 	tacticalStageUnavailable   = 0
 	tacticalStageAvailable     = 1 // state 2 (received) is never claimed
-	tacticalCardsTableVersion  = "40413"
 	tacticalSeasonDayMs        = int64(24 * time.Hour / time.Millisecond)
-	tacticalStateUnknownCfgLog = "cfgId not in battle_card_reward " + tacticalCardsTableVersion + "; only state-1 stages are claimed"
+	tacticalStateUnknownCfgLog = "cfgId not in battle_card_reward " + tableVersion + "; only state-1 stages are claimed"
 )
 
 // tacticalBoxRewards is table battle_card_box_reward 40413: row id -> season and point.

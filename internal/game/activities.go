@@ -263,7 +263,7 @@ func parseActivities(in *Init) []Activity {
 			missing++
 			a := Activity{ID: id, Raw: e.obj}
 			slog.Warn("activity sweep: id not in table activity; skipped until the table is regenerated",
-				"id", id, "startTime", a.StartTime(), "endTime", a.EndTime(), "tableVersion", activityTableVersion)
+				"id", id, "startTime", a.StartTime(), "endTime", a.EndTime(), "tableVersion", tableVersion)
 			continue
 		}
 		out = append(out, Activity{ID: id, Type: typ, NeedHQ: activityNeedHQ(id), Raw: e.obj})

@@ -695,7 +695,7 @@ func (t *allianceTech) logAttrs() []any {
 	_, inTable := allianceScienceMaxLevel[t.id]
 	return []any{"scienceId", t.id, "currentPro", t.currentPro, "target", need, "targetKnown", needKnown,
 		"level", t.level, "levelKnown", t.hasLevel, "maxLevel", allianceScienceMaxLevel[t.id], "tab", allianceScienceTab[t.id], "inTable", inTable,
-		"tableVersion", allianceScienceTableVersion, "finishTime", t.finishTime, "lowRes", t.lowRes, "lowNum", t.lowNum}
+		"tableVersion", tableVersion, "finishTime", t.finishTime, "lowRes", t.lowRes, "lowNum", t.lowNum}
 }
 
 // allianceResourceKeys maps a ResourceType (Global/EnumType.lua:47-69) to its init resource{} key

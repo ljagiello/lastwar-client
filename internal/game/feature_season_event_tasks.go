@@ -98,7 +98,7 @@ func runBloodyNightTasks(conn *session.GameConn, in *Init) error {
 		"groupId", group, "planInTable", known)
 	if server != source || !hasPlan || !known || int64(flag) != group {
 		slog.Info(bloodyNightFeature+": no Bloody Night stage of the source server the table knows; nothing to claim",
-			"tableVersion", seasonTablesVersion)
+			"tableVersion", tableVersion)
 		return nil
 	}
 	tp := sfs.NewSFSObject()

@@ -279,3 +279,28 @@ func TestGoGenerateDirectivesAndExpand(t *testing.T) {
 		t.Errorf("lineDiff = %q", d)
 	}
 }
+
+// TestGeneratedTablesShareTableVersion holds the header stamp of every file a //go:generate line
+// writes to tableVersion (cov-tables/F14 part 4). A go generate that skips a generator (the mail
+// groups also need LASTWAR_LUA and keep their file without it, so table mail_group's newer types
+// and their rewards would be left out) or a version bump that forgets the constant fails here,
+// without a dump.
+func TestGeneratedTablesShareTableVersion(t *testing.T) {
+	ds, err := goGenerateDirectives(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ds) == 0 {
+		t.Fatal("no //go:generate directives found")
+	}
+	for _, d := range ds {
+		src, err := os.ReadFile(d.out)
+		if err != nil {
+			t.Errorf("%s: %v", d.out, err)
+			continue
+		}
+		if got := headerVersion(src, tableVersionRE); got != tableVersion {
+			t.Errorf("%s is stamped table version %q, tableVersion is %q: regenerate every table (see tables.go)", d.out, got, tableVersion)
+		}
+	}
+}

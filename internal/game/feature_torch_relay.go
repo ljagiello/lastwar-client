@@ -114,7 +114,7 @@ func claimTorchRelay(s *ActivitySweep, b *evBatch, a Activity) {
 	row, okRow := torchRelayRows[rowID]
 	if !ok || !okRow {
 		slog.Info(torchRelayFeature+": activity has no embedded activity_torch_relay row; skipped until the rows are regenerated",
-			"activity", a.ID, "tableVersion", activityTableVersion)
+			"activity", a.ID, "tableVersion", tableVersion)
 		return
 	}
 	info, err := s.EventInfo(a)

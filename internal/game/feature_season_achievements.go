@@ -67,7 +67,7 @@ func runSeasonAchievements(conn *session.GameConn, in *Init) error {
 	cfg, cfgID, ok := evSeasonConfig(in)
 	if !ok {
 		slog.Warn(seasonAchievementsFeature+": init playerServerSeasonInfo.seasonConfigId is missing or not in table lw_season; skipping",
-			"season", season, "seasonConfigId", cfgID, "tableVersion", seasonTablesVersion)
+			"season", season, "seasonConfigId", cfgID, "tableVersion", tableVersion)
 		return nil
 	}
 	group := cfg.achievements

@@ -2,9 +2,6 @@
 
 package game
 
-// allianceScienceTableVersion is the table version the maps below were generated from.
-const allianceScienceTableVersion = "40413"
-
 // allianceScienceMaxLevel holds all 46 rows of table lw_alliance_science_tab as tech id -> max_lv
 // (AllianceScienceDataManager.lua:39).
 var allianceScienceMaxLevel = map[int32]int32{

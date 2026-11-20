@@ -200,7 +200,7 @@ func TestParseActivitiesLogsIDsMissingFromTable(t *testing.T) {
 		"id=424242",
 		"startTime=" + strconv.FormatInt(unknown.GetLong("startTime"), 10),
 		"endTime=" + strconv.FormatInt(unknown.GetLong("endTime"), 10),
-		"tableVersion=" + activityTableVersion,
+		"tableVersion=" + tableVersion,
 	} {
 		if !strings.Contains(warn[0], want) {
 			t.Errorf("WARN line %q lacks %q", warn[0], want)
@@ -325,8 +325,8 @@ var table40413Added = map[int32][]int32{
 }
 
 func TestActivityTableHas40413Rows(t *testing.T) {
-	if activityTableVersion != "40413" {
-		t.Fatalf("activityTableVersion = %q; these expectations are for 40413", activityTableVersion)
+	if tableVersion != "40413" {
+		t.Fatalf("tableVersion = %q; these expectations are for 40413", tableVersion)
 	}
 	if len(activityTable) != 1451 {
 		t.Errorf("activityTable has %d rows, table activity 40413 has 1451", len(activityTable))

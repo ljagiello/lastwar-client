@@ -2,9 +2,6 @@
 
 package game
 
-// activityTableVersion is the table version activityTable was generated from.
-const activityTableVersion = "40413"
-
 // activityTable holds all 1451 rows of table activity, keyed by activity id, with the columns
 // activityRow describes (ActivityInfoData.FetchActivityConfigData, ActivityInfoData.lua:224-409).
 var activityTable = map[int32]activityRow{

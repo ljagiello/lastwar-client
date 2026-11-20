@@ -65,7 +65,7 @@ func runSeasonTrends(conn *session.GameConn, in *Init) error {
 	if off, _ := evNum(info, "off_seaon"); off > 0 || !hasGroup || !seasonTrendGroupKnown(int32(group)) {
 		slog.Info(seasonTrendsFeature+": the reply is no season trend list the table knows; claiming nothing",
 			"season", season, "season_group", group, "hasGroup", hasGroup, "off_seaon", off, "trends", len(trends),
-			"tableVersion", seasonTablesVersion)
+			"tableVersion", tableVersion)
 		return nil
 	}
 	now := evNow().UnixMilli()

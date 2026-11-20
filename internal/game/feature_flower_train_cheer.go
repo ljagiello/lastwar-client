@@ -35,13 +35,10 @@ const (
 
 	flowerTrainCheerCollectType = 21 // CollectRewardType.DISCOVER_SUPPLIES
 	flowerTrainCheerSupplyType  = 7  // WorldSuppliesType.FlowerTrainCheerBoxType
-
-	// flowerTrainCheerTableVersion is the table flowerTrainCheerSupplyTypes was taken from.
-	flowerTrainCheerTableVersion = "40413"
 )
 
-// flowerTrainCheerSupplyTypes is table ice_supplies (tables flowerTrainCheerTableVersion, all 73
-// rows): id -> type. The whole type column is kept, not only the type-7 ids, so a supply id newer
+// flowerTrainCheerSupplyTypes is table ice_supplies (tables tableVersion, all 73 rows): id ->
+// type. The whole type column is kept, not only the type-7 ids, so a supply id newer
 // than the table is told apart from a known non-cheer one and logged.
 var flowerTrainCheerSupplyTypes = map[int64]int64{
 	1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1, 9: 1, 10: 1, 11: 1, 12: 1, 13: 1, 14: 1, 21: 2,
@@ -97,7 +94,7 @@ func runFlowerTrainCheer(conn *session.GameConn, in *Init) error {
 	boxes, unknown := flowerTrainCheerBoxes(in, evNow().UnixMilli())
 	if len(unknown) > 0 {
 		slog.Warn(flowerTrainCheerFeature+": supply collect entries whose ice_supplies id is not in the table; "+
-			"they wait for a table update", "ids", unknown, "tableVersion", flowerTrainCheerTableVersion)
+			"they wait for a table update", "ids", unknown, "tableVersion", tableVersion)
 	}
 	if len(boxes) == 0 {
 		slog.Info(flowerTrainCheerFeature + ": no Flower Train cheer box in the Collect Rewards panel")

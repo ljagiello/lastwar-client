@@ -42,7 +42,6 @@ func TestParseAndRender(t *testing.T) {
 	}
 	for _, want := range []string{
 		"table version 40413",
-		`const allianceScienceTableVersion = "40413"`,
 		"all 4 rows of table lw_alliance_science_tab as tech id -> max_lv",
 		"10011100: 1,",
 		"10011200: 10,",

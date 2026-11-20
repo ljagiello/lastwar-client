@@ -28,9 +28,8 @@ import (
 // PersonalTargetView.lua:92-96), and lists only that activity's own stage: its subType, which is
 // the table's tableInfoType (ActivityInfoData.lua:231; LockhartActivityMain.lua:189-197,
 // StrongestCommanderDataManager.lua:139-145, TaskActivity.lua:157-164). So an id is claimed only
-// while an activity whose stage lists it is valid. An activity id newer than tables
-// stageQuestTableVersion has no known stage and claims nothing. The first refusal that is not
-// benign stops the run.
+// while an activity whose stage lists it is valid. An activity id newer than tables tableVersion
+// has no known stage and claims nothing. The first refusal that is not benign stops the run.
 //
 // Left out on purpose: Growth Foundation (127, stage types 3 and 5: 8000001-8000010,
 // 8000101-8000112) pays only after the foundation was bought (UILWGrowFoundationTargetItem.lua:
@@ -38,11 +37,6 @@ import (
 // claims its stages with hero.experiment.reward, never task.reward.get (UIHeroTrial.lua:447-453).
 // Follow-up quests in a reply's tasks[] are not chased: those belong to the quests feature.
 const stageQuestsFeature = "stage-quests"
-
-// stageQuestTableVersion is the table dump stageQuestRanges, stageQuestActivityStage and the quests
-// feature's questStageRanges were derived from (activity_stage.stage_quest and the activity rows of
-// types 105, 106, 129, 135 and 200 with their tableInfoType).
-const stageQuestTableVersion = "40413"
 
 // The activity types (EnumActivity, Global/EnumType.lua:6290-6343) whose stage quests are claimed.
 const (
@@ -60,7 +54,7 @@ type stageQuestRange struct {
 	stages []int64
 }
 
-// stageQuestRanges are the claimable stage quests in tables stageQuestTableVersion, exactly as
+// stageQuestRanges are the claimable stage quests in tables tableVersion, exactly as
 // activity_stage lists them (the gaps between runs are not stage quests).
 var stageQuestRanges = []stageQuestRange{
 	// Strongest Commander (105), stages 1 and 101.
@@ -86,7 +80,7 @@ var stageQuestRanges = []stageQuestRange{
 	{9010201, 9010207, []int64{7002}},
 }
 
-// stageQuestActivityStage is every table activity row (tables stageQuestTableVersion) of the five
+// stageQuestActivityStage is every table activity row (tables tableVersion) of the five
 // types: id -> its tableInfoType (tableInfo activity_stage for all of them), the stage its panel
 // lists (ActivityInfoData.lua:231).
 var stageQuestActivityStage = map[int32]int64{
@@ -175,7 +169,7 @@ func runStageQuests(conn *session.GameConn, in *Init) error {
 		stage, ok := stageQuestActivityStage[a.ID]
 		if !ok {
 			slog.Info(stageQuestsFeature+": running activity not in the stage map; its stage quests wait for a table update",
-				"activityId", a.ID, "activityType", a.Type, "tableVersion", stageQuestTableVersion)
+				"activityId", a.ID, "activityType", a.Type, "tableVersion", tableVersion)
 			continue
 		}
 		valid[stage] = true

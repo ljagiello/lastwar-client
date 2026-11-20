@@ -183,7 +183,7 @@ func claimSeasonPowerMilestones(b *evBatch, in *Init, season int64) {
 	if !ok {
 		slog.Warn("season-dailies: init playerServerSeasonInfo.seasonConfigId is missing or not in table lw_season; "+
 			"the season type is unknown, so no power-milestone claim", "season", season, "seasonConfigId", cfgID,
-			"tableVersion", seasonTablesVersion)
+			"tableVersion", tableVersion)
 		return
 	}
 	slog.Info("season-dailies: season config", "season", season, "seasonConfigId", cfgID, "type", cfg.typ,

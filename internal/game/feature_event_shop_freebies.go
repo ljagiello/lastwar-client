@@ -166,7 +166,7 @@ func runEventShopFreebies(conn *session.GameConn, in *Init) error {
 			// claimTorchRelay skips it (1.0.370 audit B61).
 			if f.typ == actTypeTorchRelay && !torchRelayKnown(a) {
 				slog.Info("event-shop-freebies: Torch Relay activity has no known activity_torch_relay row; skipped",
-					"activity", a.ID, "tableVersion", activityTableVersion)
+					"activity", a.ID, "tableVersion", tableVersion)
 				continue
 			}
 			fetch := f.info

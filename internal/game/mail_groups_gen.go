@@ -2,12 +2,9 @@
 
 package game
 
-// mailGroupsVersion and mailGroupsTableVersion are the app and table versions mailTypeGroup was
-// generated from.
-const (
-	mailGroupsVersion      = "1.0.370"
-	mailGroupsTableVersion = "40413"
-)
+// mailGroupsVersion is the app version mailTypeGroup was generated from; the table version is
+// the header's, which TestGeneratedTablesShareTableVersion holds to tableVersion.
+const mailGroupsVersion = "1.0.370"
 
 // mailTypeGroup is the client's MailTypeToInternalGroup: MailEnum.lua's map with every table
 // mail_group row applied over it (MailDataManager.lua:30-36). It gives the internal group, the

@@ -115,7 +115,6 @@ func TestParseAndRender(t *testing.T) {
 	}
 	for _, want := range []string{
 		"table version 40413",
-		`const activityTableVersion = "40413"`,
 		"all " + strconv.Itoa(len(fixtureRows)) + " rows",
 		"11:      {typ: 105},",
 		"55000:   {typ: 14, needHQ: 10, condition: \"1|10\"},",

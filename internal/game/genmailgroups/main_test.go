@@ -87,8 +87,8 @@ func TestParseFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, s := range []string{
-		`mailGroupsVersion      = "1.0.367"`,
-		`mailGroupsTableVersion = "39879"`,
+		`const mailGroupsVersion = "1.0.367"`,
+		"(table version 39879)",
 		"\t9:   2, // MAIL_SCOUT_ALERT: MAIL_IN_report",
 		"var mailShowGroups = []int64{2, 3, 4, 9, 5, 6, 7, 8}",
 		"const mailFavorGroup = 8",

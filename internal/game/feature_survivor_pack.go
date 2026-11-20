@@ -38,14 +38,13 @@ import (
 // comes only with the paid packs, so that step pays nothing to a non-paying account. Never the pay
 // half (receivePayArr, PayManager:CallPayment).
 const (
-	survivorPackFeature   = "survivor-pack"
-	survivorPackActType   = 188
-	survivorInfoCmd       = "survivor.visitor.info"
-	survivorFreeCmd       = "survivor.visitor.receive.free"
-	survivorBubbleCmd     = "survivor.visitor.receive.bubble"
-	survivorScoreCmd      = "survivor.visitor.receive.score"
-	survivorScoreItem     = "993113" // activity_survivor score_item, both rows, tables 40413
-	survivorPackTableVers = "40413"
+	survivorPackFeature = "survivor-pack"
+	survivorPackActType = 188
+	survivorInfoCmd     = "survivor.visitor.info"
+	survivorFreeCmd     = "survivor.visitor.receive.free"
+	survivorBubbleCmd   = "survivor.visitor.receive.bubble"
+	survivorScoreCmd    = "survivor.visitor.receive.score"
+	survivorScoreItem   = "993113" // activity_survivor score_item, both rows, tables 40413
 )
 
 // survivorConfigs is table activity_survivor 40413: list_group and the bar_reward scores, sorted.
@@ -120,7 +119,7 @@ func runSurvivorPack(conn *session.GameConn, in *Init) error {
 		cfg, known := survivorConfigs[cfgID]
 		if !ok || !known {
 			slog.Info(survivorPackFeature+": no activity_survivor row for the activity; skipped",
-				"activity", a.ID, "cfgId", cfgID, "tableVersion", survivorPackTableVers)
+				"activity", a.ID, "cfgId", cfgID, "tableVersion", tableVersion)
 			continue
 		}
 		day, ok := survivorOpenDay(in, a.StartTime(), now)

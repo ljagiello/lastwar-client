@@ -68,9 +68,9 @@ func TestAllianceTechBlocked(t *testing.T) {
 // 10031100-10032600) is refused out of season (AlScienceDonateInfo.lua:426-430); tabs 1 and 2 and
 // unknown ids are not.
 func TestAllianceTechSeasonTab(t *testing.T) {
-	if allianceScienceTableVersion != "40413" || allianceScienceTab[10031100] != 3 || allianceScienceTab[10032600] != 3 ||
+	if tableVersion != "40413" || allianceScienceTab[10031100] != 3 || allianceScienceTab[10032600] != 3 ||
 		allianceScienceTab[10011100] != 1 || allianceScienceTab[10021100] != 2 {
-		t.Fatalf("generated tab column: version %s, %d %d %d %d", allianceScienceTableVersion, allianceScienceTab[10031100],
+		t.Fatalf("generated tab column: version %s, %d %d %d %d", tableVersion, allianceScienceTab[10031100],
 			allianceScienceTab[10032600], allianceScienceTab[10011100], allianceScienceTab[10021100])
 	}
 	n := 0

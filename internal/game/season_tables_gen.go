@@ -2,9 +2,6 @@
 
 package game
 
-// seasonTablesVersion is the table version the season tables below were generated from.
-const seasonTablesVersion = "40413"
-
 // seasonConfigRow is one row of table lw_season, the season config init
 // playerServerSeasonInfo.seasonConfigId names (SeasonInfoTemplate.lua:18, 69-72): season is the
 // season number, typ and type1 the SeasonMapType and its subdivision (SeasonInfoTemplate.lua:

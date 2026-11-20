@@ -218,8 +218,8 @@ func TestStageQuestMapsMatchTables40413(t *testing.T) {
 	}
 }
 
-// withActivityRows adds rows to the generated activityTable for one test when it lacks them (it is
-// at 39879 until the WP0 regeneration lands), and removes what it added afterwards.
+// withActivityRows adds rows the generated activityTable lacks for one test, and removes what it
+// added afterwards.
 func withActivityRows(t *testing.T, rows map[int32]activityRow) {
 	t.Helper()
 	var added []int32
@@ -263,11 +263,9 @@ func TestStageQuestsClaimsTheTables40413Stages(t *testing.T) {
 // TestStageQuestActivityStageCoversTheActivityTable: every table activity row of the five types has
 // a stage and the map lists no other id, so a table bump that adds or drops rows fails here until
 // the map is updated; every stage a range names is some activity's. The stage values themselves
-// come from tableInfoType, which the generated table doesn't carry, so they are checked by hand.
-// While the generated activityTable is older than stageQuestTableVersion, the four rows 40413 added
-// (stageQuestNewIn40413) may be missing from it; once it is regenerated the check is exact again.
+// come from tableInfoType; TestHandCopiedActivityListsMatchTheTable checks them against the
+// generated table's.
 func TestStageQuestActivityStageCoversTheActivityTable(t *testing.T) {
-	stageQuestNewIn40413 := map[int32]bool{1071011: true, 1201016: true, 1201017: true, 1201025: true}
 	types := []int32{stageQuestTypeStrongestCommander, stageQuestTypeLockhart, stageQuestTypeTaskActivity,
 		stageQuestTypeTaskActivity2, stageQuestTypeKing}
 	stages := map[int64]bool{}
@@ -281,12 +279,8 @@ func TestStageQuestActivityStageCoversTheActivityTable(t *testing.T) {
 		}
 		stages[stage] = true
 	}
-	for id, stage := range stageQuestActivityStage {
+	for id := range stageQuestActivityStage {
 		row, ok := activityTable[id]
-		if !ok && activityTableVersion != stageQuestTableVersion && stageQuestNewIn40413[id] {
-			stages[stage] = true // a 40413 row the older generated table lacks
-			continue
-		}
 		if !ok || !slices.Contains(types, row.typ) {
 			t.Errorf("stage map lists %d, which is no activity of the five types", id)
 		}
