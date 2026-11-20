@@ -80,3 +80,55 @@ func TestLoginRecordsTheDeviceID(t *testing.T) {
 		t.Errorf("Conn.DeviceID() = %q, the Login sent deviceId %q; want the same, non-empty", got, sent)
 	}
 }
+
+// TestLoginSendsTheAndroidInstall: an Android email/guest Login sends the identity's AndroidInstall
+// values (distinct_id, afuid), as every real Android install has them; without them the Login
+// would pair the device with blank SDK ids.
+func TestLoginSendsTheAndroidInstall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	seen := make(chan *sfs.SFSObject, 1)
+	addr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+		env, err := server.ReadEnvelope()
+		if err != nil {
+			return
+		}
+		var p *sfs.SFSObject
+		if pv, ok := env.Content.Get("p"); ok {
+			p, _ = pv.Val.(*sfs.SFSObject)
+		}
+		seen <- p
+		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, loginReplyWithUpdate(3, "1.0.370", false)); err != nil {
+			return
+		}
+		_ = server.SendExtension("init", sfs.NewSFSObject())
+	})
+	host, port := testutil.SplitHostPortInt(t, addr)
+	testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
+		Code:       "0",
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
+	}))
+
+	result, err := Login(LoginOptions{})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	defer func() { _ = result.Conn.Close() }()
+	p := <-seen
+	if p == nil {
+		t.Fatal("the Login carried no params")
+	}
+	ident, err := LoadOrCreateDeviceIdentity(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ident.Android.DistinctID == "" || ident.Android.Afuid == "" {
+		t.Fatalf("the identity has no AndroidInstall (distinct_id %q, afuid %q)", ident.Android.DistinctID, ident.Android.Afuid)
+	}
+	if got := p.GetString("distinct_id"); got != ident.Android.DistinctID {
+		t.Errorf("Login distinct_id = %q, want the install's %q", got, ident.Android.DistinctID)
+	}
+	if got := p.GetString("afuid"); got != ident.Android.Afuid {
+		t.Errorf("Login afuid = %q, want the install's %q", got, ident.Android.Afuid)
+	}
+}
