@@ -58,12 +58,44 @@ func xorCrypt(data []byte) []byte {
 	return out
 }
 
+// MaxRequestBodySize is the client's send limit on one message's serialized body, before
+// compression: NetPacket.onBeforeSend throws "Message size is too big" above it
+// (BaseUtils.decompiled.cs:33548-33551). EncodeRequestPacket enforces it; EncodePacket does not,
+// so tests can still frame oversized server frames with it.
+const MaxRequestBodySize = 1000000
+
+// shortLengthMax is the largest body that gets the 2-byte length field (SFSIOHandler.SHORT_BYTE_SIZE).
+const shortLengthMax = 65535
+
 // EncodePacket wraps a serialized SFSObject body (the outer {c,a,p}
-// envelope) into the on-wire framed packet.
+// envelope) into the on-wire framed packet, without the forward-server-id header and without the
+// client's MaxRequestBodySize limit. A request goes out through EncodeRequestPacket.
 func EncodePacket(body []byte) ([]byte, error) {
-	compressed := false
+	return encodePacket(body, false, 0)
+}
+
+// EncodeRequestPacket frames a request the way the client's NetPacket.onBeforeSend does
+// (BaseUtils.decompiled.cs:33544-33584): it refuses a body over MaxRequestBodySize, and with
+// forward it sets the 0x04 header bit and writes sid (the zone number, NetworkManager.InitLine's
+// "APS<n>" parse, Assembly-CSharp.decompiled.cs:76946-76950) big-endian right after the header
+// byte (33564-33567). The client sets forward when client_config switch 29 and the
+// EnableServerRangeRouting row are both on (Assembly-CSharp.decompiled.cs:10119-10123); without
+// forward the frame is EncodePacket's.
+func EncodeRequestPacket(body []byte, forward bool, sid uint16) ([]byte, error) {
+	if len(body) > MaxRequestBodySize {
+		return nil, fmt.Errorf("packet: message size is too big: %d bytes, the server limit is %d", len(body), MaxRequestBodySize)
+	}
+	return encodePacket(body, forward, sid)
+}
+
+func encodePacket(body []byte, forward bool, sid uint16) ([]byte, error) {
+	// The client decides compression and the 2- or 4-byte length on the uncompressed body, and
+	// only then compresses (BaseUtils.decompiled.cs:33546-33562); the length field then holds the
+	// compressed size.
+	compressed := len(body) > CompressionThreshold
+	bigSized := len(body) > shortLengthMax
 	payload := body
-	if len(body) > CompressionThreshold {
+	if compressed {
 		var buf bytes.Buffer
 		w, err := zlib.NewWriterLevel(&buf, zlib.BestCompression)
 		if err != nil {
@@ -76,17 +108,14 @@ func EncodePacket(body []byte) ([]byte, error) {
 			return nil, err
 		}
 		payload = buf.Bytes()
-		compressed = true
+	}
+	if !bigSized && len(payload) > shortLengthMax {
+		// An incompressible body just under the cut grows past it under zlib. The client's
+		// Convert.ToUInt16 throws there (BaseUtils.decompiled.cs:33574); a wrapped length would
+		// desync the stream.
+		return nil, fmt.Errorf("packet: a %d-byte body compressed to %d bytes, past the 2-byte length field", len(body), len(payload))
 	}
 
-	// 65535 (BitSwarmManager.WriteBinaryData / SHORT_BYTE_SIZE cutoff,
-	// Smartfox2xLw.decompiled.cs:13563), matching the actual Unity SFS2X
-	// SDK this game embeds -- NOT the official sfs2x-api JS SDK's 65335,
-	// which is an idiosyncratic quirk of that specific (different)
-	// client implementation and not what this game's server was built
-	// against. Caught and reverted after a dossier audit pass flagged
-	// the earlier "fix" as based on the wrong reference implementation.
-	bigSized := len(payload) > 65535
 	header := byte(HdrBinary | HdrEncrypted)
 	if compressed {
 		header |= HdrCompressed
@@ -94,11 +123,19 @@ func EncodePacket(body []byte) ([]byte, error) {
 	if bigSized {
 		header |= HdrBigSized
 	}
+	if forward {
+		header |= hdrForward
+	}
 
 	encrypted := xorCrypt(payload)
 
 	var out bytes.Buffer
 	out.WriteByte(header)
+	if forward {
+		var sb [2]byte
+		binary.BigEndian.PutUint16(sb[:], sid)
+		out.Write(sb[:])
+	}
 	if bigSized {
 		// Round-51 fix: len(encrypted) is an int (64-bit on every platform this codebase
 		// actually runs on), but the big-sized length field is a wire uint32 -- an unchecked

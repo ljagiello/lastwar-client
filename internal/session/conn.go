@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
@@ -34,13 +35,18 @@ type Envelope struct {
 	Controller byte
 	Action     int16
 	Content    *sfs.SFSObject
+
+	// repliesTo is the `_id` of this connection's request that the envelope was the first to
+	// echo, or 0 (see GameConn.outstanding, StaleReply).
+	repliesTo int32
 }
 
 // GameConn is a raw (plaintext, connectionType 0) SFS2X socket connection.
 type GameConn struct {
-	conn   net.Conn
-	reader *bufio.Reader
-	wmu    sync.Mutex
+	conn    net.Conn
+	reader  *bufio.Reader
+	arrival *arrivalReader // under reader: when the socket last gave bytes (nil in a bare literal)
+	wmu     sync.Mutex
 
 	// extSent counts SendExtension calls on this connection; SendExtension derives each request's
 	// `_id` from it (see loginFutureID). A fresh GameConn per dial gives the per-connection reset
@@ -61,15 +67,66 @@ type GameConn struct {
 	// "the next envelope" as Login keep working now that StartHeartbeat pings before Login.
 	skipClientPings bool
 
+	// outstanding holds the `_id`s of requests sent on this connection that no message has
+	// echoed yet. The first message to echo one takes it out and is marked as its reply
+	// (Envelope.repliesTo), which is what StaleReply checks.
+	outMu       sync.Mutex
+	outstanding map[int32]struct{}
+
+	// fakeServer marks the server end of a test pair (testsupport.go). Its SendExtension stamps
+	// no `_id` of its own: a fake answers with the request's `_id` (ReadAndReply) or with none,
+	// so its own send count never makes a reply look like an earlier request's (StaleReply).
+	fakeServer bool
+
 	// appVersion is the appVersion the Login on this connection claimed (SetAppVersion).
 	appVersion atomic.Pointer[string]
+
+	// deviceID is the deviceId the Login on this connection sent (SetDeviceID), for telling a
+	// push.account.device.del about this device from one about another.
+	deviceID atomic.Pointer[string]
+
+	// forwardSid, when set, is the zone number every frame carries after the 0x04 header bit
+	// (SetForwardServerID).
+	forwardSid atomic.Pointer[uint16]
 
 	// clock is the server time the pongs on this connection carry (clock.go, ServerNow).
 	clock serverClock
 
+	// framesRead counts the frames read off this connection, pongSeen is set by the first pong,
+	// and silentFor is how long the waits since the last frame were blocked without one arriving.
+	// WaitFor's watchdog (noteSilentWait) reads them.
+	framesRead atomic.Uint64
+	pongSeen   atomic.Bool
+	silentFor  atomic.Int64 // time.Duration
+
 	stopHeartbeat chan struct{}
 	closeOnce     sync.Once
 	closeErr      error
+}
+
+// arrivalReader sits between the socket and the bufio.Reader and stamps when a socket read last
+// returned bytes. A frame's last byte arrives in the read that completes it, so right after
+// sfs.ReadPacket returns, at is when that frame came off the socket, even if it then waited in
+// the buffer while the flow decoded an earlier frame. The client stamps each packet in its
+// receive thread (FinishRecvPacket, BaseUtils.decompiled.cs:32810-32812); Go reads on the main
+// flow, so a frame that waited in the kernel between waits is still stamped late.
+type arrivalReader struct {
+	r  io.Reader
+	at time.Time
+}
+
+func (a *arrivalReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if n > 0 {
+		a.at = time.Now()
+	}
+	return n, err
+}
+
+// newGameConn wraps c with a read buffer of bufSize over an arrivalReader.
+func newGameConn(c net.Conn, bufSize int) *GameConn {
+	a := &arrivalReader{r: c}
+	return &GameConn{conn: c, reader: bufio.NewReaderSize(a, bufSize), arrival: a}
 }
 
 // loginFutureID is the `_id` the SFS Login request carries (BuildLoginParams' FutureID, always 1).
@@ -93,10 +150,7 @@ func DialGame(addr string, timeout time.Duration) (*GameConn, error) {
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
 	}
-	return &GameConn{
-		conn:   conn,
-		reader: bufio.NewReaderSize(conn, 64*1024),
-	}, nil
+	return newGameConn(conn, 64*1024), nil
 }
 
 // Close is idempotent: the underlying net.Conn.Close() call, like the stopHeartbeat channel
@@ -115,7 +169,7 @@ func DialGame(addr string, timeout time.Duration) (*GameConn, error) {
 // other internal packages -- which cannot reach GameConn's unexported fields -- can build a
 // GameConn around a fake connection.
 func NewGameConnForTest(c net.Conn) *GameConn {
-	return &GameConn{conn: c, reader: bufio.NewReaderSize(c, 4096)}
+	return newGameConn(c, 4096)
 }
 
 // RawConn returns the underlying net.Conn. SetRawConn replaces it. Both are low-level hooks used by
@@ -141,6 +195,28 @@ func (c *GameConn) AppVersion() string {
 	}
 	return ""
 }
+
+// SetDeviceID records the deviceId the Login on this connection sent, the client's DEVICE_ID
+// setting (GetDeviceUid, Assembly-CSharp.decompiled.cs:73399-73416). A push.account.device.del
+// naming it ends the session (ErrDeviceRemoved); until it is set, no device push does.
+func (c *GameConn) SetDeviceID(id string) { c.deviceID.Store(&id) }
+
+// DeviceID returns what SetDeviceID recorded, or "".
+func (c *GameConn) DeviceID() string {
+	if c == nil {
+		return ""
+	}
+	if v := c.deviceID.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// SetForwardServerID makes every later frame on this connection, pings included, carry the
+// forward-server-id header: bit 0x04 and sid, the zone number (sfs.EncodeRequestPacket). The real
+// client does this when client_config switch 29 is on (Assembly-CSharp.decompiled.cs:10119-10123).
+// Off unless called; the server accepts frames without it.
+func (c *GameConn) SetForwardServerID(sid uint16) { c.forwardSid.Store(&sid) }
 
 func (c *GameConn) Close() error {
 	c.closeOnce.Do(func() {
@@ -176,7 +252,17 @@ func (c *GameConn) SendEnvelope(controller byte, action int16, content *sfs.SFSO
 	if err != nil {
 		return fmt.Errorf("encode envelope: %w", err)
 	}
-	packet, err := sfs.EncodePacket(body)
+	var packet []byte
+	if c.fakeServer {
+		packet, err = sfs.EncodePacket(body) // a test server's frames have no client send limit
+	} else {
+		var sid uint16
+		fwd := c.forwardSid.Load()
+		if fwd != nil {
+			sid = *fwd
+		}
+		packet, err = sfs.EncodeRequestPacket(body, fwd != nil, sid)
+	}
 	if err != nil {
 		return fmt.Errorf("encode packet: %w", err)
 	}
@@ -192,16 +278,25 @@ func (c *GameConn) SendEnvelope(controller byte, action int16, content *sfs.SFSO
 }
 
 // SendExtension sends a client->server `cmd` extension request, matching
-// SFSNetwork.SendMessage(cmd, ...) -- dossier §04/§06.
+// SFSNetwork.SendMessage(cmd, ...) -- dossier §04/§06. It is SendExtensionID without the id.
+func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
+	_, err := c.SendExtensionID(cmd, params)
+	return err
+}
+
+// SendExtensionID sends a client->server `cmd` extension request and returns the `_id` it
+// carries, for matching the reply (WaitForReply, StaleReply).
 //
 // Every request carries an Int `_id` from one per-connection sequence that continues after
 // Login's 1, as NetworkManager.SendLuaMessage and BaseMessage.CSSetData do
-// (PutInt("_id", getFutureId()), Assembly-CSharp.decompiled.cs:76702-76722, 80810-80812). The
-// server echoes `_id` and adds `_time` on the response; live, every real-client request carries
-// one except login.ext. A caller that already set `_id` keeps it (login.go's login.init fallback
-// sends 2), but the sequence still advances so the next request never reuses that number. The
-// caller's params are copied, not modified, so a params object can be reused across sends.
-func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
+// (PutInt("_id", getFutureId()), Assembly-CSharp.decompiled.cs:77022-77024, 81210-81212). The
+// server echoes `_id` and adds `_time` on the response, which the client reads off every reply
+// (MessageFactory, Assembly-CSharp.decompiled.cs:82052-82056); live, every real-client request
+// carries one except login.ext. A caller that already set `_id` keeps it (login.go's login.init
+// fallback sends 2) and gets that value back (0 if it is not an Int), but the sequence still
+// advances so the next request never reuses that number. The caller's params are copied, not
+// modified, so a params object can be reused across sends.
+func (c *GameConn) SendExtensionID(cmd string, params *sfs.SFSObject) (int32, error) {
 	id := c.extSent.Add(1) + loginFutureID
 	withID := sfs.NewSFSObject()
 	if params != nil {
@@ -210,7 +305,12 @@ func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
 			withID.PutValue(k, v)
 		}
 	}
-	if !withID.Has("_id") {
+	switch v, ok := withID.Get("_id"); {
+	case ok:
+		id, _ = v.Val.(int32)
+	case c.fakeServer:
+		id = 0
+	default:
 		withID.PutInt("_id", id)
 	}
 	extContent := sfs.NewSFSObject()
@@ -218,7 +318,39 @@ func (c *GameConn) SendExtension(cmd string, params *sfs.SFSObject) error {
 	extContent.PutInt("r", -1)
 	extContent.PutSFSObject("p", withID)
 	c.lastCmd.Store(&cmd)
-	return c.SendEnvelope(ControllerExtension, ActionCallExtension, extContent)
+	if id > 0 {
+		c.outMu.Lock()
+		if c.outstanding == nil {
+			c.outstanding = make(map[int32]struct{})
+		}
+		c.outstanding[id] = struct{}{}
+		c.outMu.Unlock()
+	}
+	return id, c.SendEnvelope(ControllerExtension, ActionCallExtension, extContent)
+}
+
+// noteReply marks env as the reply to the outstanding request whose `_id` its params echo, if
+// any, and takes that id out of outstanding, so only the first message to echo an id counts.
+func (c *GameConn) noteReply(env *Envelope) {
+	if env.Controller != ControllerExtension || env.Content == nil {
+		return
+	}
+	pv, ok := env.Content.Get("p")
+	if !ok {
+		return
+	}
+	params, _ := pv.Val.(*sfs.SFSObject)
+	v, ok := params.Get("_id")
+	if !ok || !SFSFieldKindAccepts(SFSFieldKindInt, v.Val) {
+		return
+	}
+	id := params.GetInt("_id")
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	if _, ok := c.outstanding[id]; ok {
+		delete(c.outstanding, id)
+		env.repliesTo = id
+	}
 }
 
 // ReadEnvelope blocks until the next framed packet arrives and decodes it.
@@ -246,6 +378,11 @@ func (c *GameConn) readEnvelope() (*Envelope, error) {
 		return nil, err
 	}
 	recv := time.Now() // a pong's arrival, before decoding (notePong)
+	if c.arrival != nil && !c.arrival.at.IsZero() {
+		recv = c.arrival.at
+	}
+	c.framesRead.Add(1)
+	c.silentFor.Store(0)
 	obj, err := sfs.DecodeObject(body)
 	if err != nil {
 		return nil, fmt.Errorf("decode envelope: %w", err)
@@ -283,6 +420,7 @@ func (c *GameConn) readEnvelope() (*Envelope, error) {
 	if err := c.endIfTerminalPush(env); err != nil {
 		return nil, err
 	}
+	c.noteReply(env)
 	c.notePong(env, recv)
 	c.logScorePush(env)
 	return env, nil
@@ -328,14 +466,20 @@ func (c *GameConn) endIfTerminalPush(env *Envelope) error {
 	if !ok {
 		return nil
 	}
-	sentinel, ok := terminalPushes[cmd]
-	if !ok {
-		return nil
-	}
-	ended := &SessionEndedError{Cmd: cmd, Err: sentinel}
 	var params *sfs.SFSObject
 	if pv, ok := env.Content.Get("p"); ok {
 		params, _ = pv.Val.(*sfs.SFSObject)
+	}
+	ended := terminalPush(cmd, params, c.DeviceID())
+	if ended == nil {
+		if cmd == pushDeviceDelCmd {
+			// An errorCode, another device of the account, or this one before SetDeviceID: the
+			// client then shows a tip or refreshes its device list (PushAccountDeviceDelMessage.lua:
+			// 10-12, 22).
+			slog.Warn("push.account.device.del does not name this session's device; the run goes on",
+				"ownDeviceKnown", c.DeviceID() != "", "push", params.StringRedacted())
+		}
+		return nil
 	}
 	if ec, ok := params.Get("errorCode"); ok && ec.Val != nil {
 		ended.Code = fmt.Sprintf("%v", ec.Val)
@@ -350,6 +494,8 @@ func (c *GameConn) endIfTerminalPush(env *Envelope) error {
 type ExtensionMessage struct {
 	Cmd    string
 	Params *sfs.SFSObject
+
+	repliesTo int32 // Envelope.repliesTo
 }
 
 // AsExtension interprets an Envelope as an extension message (controller=1),
@@ -386,7 +532,7 @@ func (e *Envelope) AsExtension() (*ExtensionMessage, bool) {
 	if params == nil {
 		params = sfs.NewSFSObject()
 	}
-	return &ExtensionMessage{Cmd: cmd, Params: params}, true
+	return &ExtensionMessage{Cmd: cmd, Params: params, repliesTo: e.repliesTo}, true
 }
 
 // benignErrorCodes are server errorCode values documented (in the callers' own doc comments) as
@@ -406,6 +552,10 @@ var benignErrorCodes = map[string][]string{
 	"120289":             {"vip.add.login.score", "vip.get.every.day.reward"}, // vip.go: "no score"/"no reward" -- already claimed today
 	"visitor_err_coming": {"visitor.operate"},                                 // visitors.go: visitor not yet arrived/greetable
 	"120471":             {"al.science.donate"},                               // alliance.go: donation charges used up (useNum 0); server text "Donate science CD time is not finish"
+	// alliance.go: live on every 02:00 UTC run, the day reset, when donations stop working for a
+	// while. A live observation only: 120836 is in neither Lua 835, tables 40413 nor the 1.0.370
+	// C#, whose donate handler just shows the code as a tip (AlScienceDonateMessage.lua:15-17).
+	"120836": {"al.science.donate"},
 }
 
 // RegisterBenignErrorCode marks errorCode as an expected no-op for the given cmds, with the same
@@ -550,9 +700,11 @@ func (SendStageError) Temporary() bool { return false }
 // send+wait+log block that used to be copy-pasted at (almost) every collect/claim call site
 // across this file and buildings.go/mail.go/alliance.go/vip.go/visitors.go. waitCmds defaults
 // to [sendCmd]; pass an explicit value when the response arrives under a different command name
-// (e.g. mail.go's push.chat.get.system.mails).
+// (e.g. mail.go's push.chat.get.system.mails). A late reply to an earlier request is skipped
+// (WaitForReply), so a timeout cannot shift every later reply of the same cmd by one.
 func SendAndWait(conn *GameConn, label, sendCmd string, params *sfs.SFSObject, waitCmds ...string) (*ExtensionMessage, error) {
-	if err := conn.SendExtension(sendCmd, params); err != nil {
+	id, err := conn.SendExtensionID(sendCmd, params)
+	if err != nil {
 		wrapped := SendStageError{Err: err}
 		slog.Error(label+" send failed", "cmd", sendCmd, "error", wrapped)
 		return nil, wrapped
@@ -560,7 +712,7 @@ func SendAndWait(conn *GameConn, label, sendCmd string, params *sfs.SFSObject, w
 	if len(waitCmds) == 0 {
 		waitCmds = []string{sendCmd}
 	}
-	msg, err := WaitForCmd(conn, DefaultCmdTimeout, waitCmds...)
+	msg, err := WaitForReply(conn, DefaultCmdTimeout, id, waitCmds...)
 	if err != nil {
 		slog.Error(label+" no response", "cmd", sendCmd, "error", err)
 		return nil, err

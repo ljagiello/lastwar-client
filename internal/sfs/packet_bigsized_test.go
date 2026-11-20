@@ -38,51 +38,36 @@ func TestPacketRoundTripBigSized(t *testing.T) {
 	}
 }
 
-// TestEncodePacketBigSizedThresholdExactBoundary is the round-45 regression test for the MINOR
-// finding that EncodePacket's bigSized framing threshold (packet.go: `bigSized := len(payload) >
-// 65535`) had no exact-boundary test -- TestPacketRoundTripBigSized above only proves a
-// comfortably-over-cap payload (70000 bytes) selects the 4-byte-length framing, never that a
-// payload of exactly 65535 (post-compression) bytes still selects the 2-byte framing, nor that
-// exactly one byte more flips it. This constant has a documented history of being gotten wrong
-// once already (see the comment above bigSized's declaration in packet.go), underscoring the
-// value of pinning down its exact boundary.
-//
-// EncodePacket unconditionally zlib-compresses any body over CompressionThreshold (1024 bytes),
-// and compressed output size is data-dependent, so a body length can't directly control the
-// post-compression payload length that bigSized actually checks. Random (incompressible) input
-// data makes zlib's BestCompression output track input length almost exactly linearly (DEFLATE
-// falls back to near-stored blocks for data it can't compress), so bodyForCompressedPayload below
-// derives, at run time, the input length whose compressed payload lands on an exact target. That
-// derivation is deliberately dynamic rather than a hardcoded constant: compress/flate's exact
-// output size drifts across Go toolchains (go1.27's flate is ~13 bytes tighter on this input than
-// the build this test was first written against), so a pinned input length silently stops testing
-// the boundary the moment flate changes. Deriving it keeps the test anchored to the *compressed*
-// size the bigSized branch actually switches on.
+// TestEncodePacketBigSizedThresholdExactBoundary pins the 4-byte length cut on the uncompressed
+// body, where the client decides it (NetPacket.onBeforeSend, BaseUtils.decompiled.cs:33546-33556):
+// a 65535-byte body keeps the 2-byte length and one byte more takes the 4-byte one, however small
+// zlib makes the payload. Go used to decide on the compressed length, so a compressible body over
+// 65535 bytes went out with a 2-byte length the client would not have sent (B70).
 func TestEncodePacketBigSizedThresholdExactBoundary(t *testing.T) {
-	const payloadCap = 65535 // SHORT_BYTE_SIZE cutoff; see the bigSized comment in EncodePacket.
 	tests := []struct {
 		name        string
-		wantPayload int
+		bodyLen     int
 		wantBigSize bool
 	}{
-		{"exactly at cap", payloadCap, false},
-		{"one byte over cap", payloadCap + 1, true},
+		{"exactly at cap", shortLengthMax, false},
+		{"one byte over cap", shortLengthMax + 1, true},
+		{"compresses far below the cap", 70000, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := bodyForCompressedPayload(t, tt.wantPayload)
+			body := make([]byte, tt.bodyLen) // all zeros: zlib shrinks it to a few hundred bytes
 
 			packet, err := EncodePacket(body)
 			if err != nil {
 				t.Fatalf("EncodePacket: %v", err)
 			}
-
-			if gotPayload := packetPayloadLen(packet); gotPayload != tt.wantPayload {
-				t.Fatalf("compressed payload = %d, want %d (derivation is stale)", gotPayload, tt.wantPayload)
-			}
 			gotBigSize := packet[0]&HdrBigSized != 0
 			if gotBigSize != tt.wantBigSize {
-				t.Fatalf("HdrBigSized set = %v, want %v (header=%08b)", gotBigSize, tt.wantBigSize, packet[0])
+				t.Fatalf("HdrBigSized set = %v, want %v for a %d-byte body compressed to %d bytes (header=%08b)",
+					gotBigSize, tt.wantBigSize, tt.bodyLen, packetPayloadLen(packet), packet[0])
+			}
+			if n := packetPayloadLen(packet); n != len(packet)-packetHeaderLen(packet) {
+				t.Fatalf("length field = %d, want the compressed payload's %d bytes", n, len(packet)-packetHeaderLen(packet))
 			}
 
 			got, err := ReadPacket(bytes.NewReader(packet))
@@ -96,10 +81,23 @@ func TestEncodePacketBigSizedThresholdExactBoundary(t *testing.T) {
 	}
 }
 
-// packetPayloadLen reads the post-compression payload length back out of an EncodePacket frame:
-// a header byte, then the payload length as a big-endian uint16, or a uint32 when HdrBigSized is
-// set. (xorCrypt is length-preserving, so the encrypted-payload length this reads equals the
-// compressed-payload length bigSized switches on.)
+// TestEncodePacketRefusesShortLengthOverflow: an incompressible 65535-byte body keeps the 2-byte
+// length, but zlib's stored blocks make its payload a few bytes longer than 65535. The client's
+// Convert.ToUInt16 throws there (BaseUtils.decompiled.cs:33574); Go must error rather than wrap
+// the length and desync the stream.
+func TestEncodePacketRefusesShortLengthOverflow(t *testing.T) {
+	body := make([]byte, shortLengthMax)
+	if _, err := mathrand.New(mathrand.NewSource(42)).Read(body); err != nil {
+		t.Fatalf("rng.Read: %v", err)
+	}
+	if packet, err := EncodePacket(body); err == nil {
+		t.Fatalf("EncodePacket = %d-byte frame with a %d-byte length field, want an error", len(packet), packetPayloadLen(packet))
+	}
+}
+
+// packetPayloadLen reads the payload length field back out of an EncodePacket frame: a header
+// byte, then the payload length as a big-endian uint16, or a uint32 when HdrBigSized is set.
+// (xorCrypt is length-preserving, so this is the compressed payload's length.)
 func packetPayloadLen(packet []byte) int {
 	if packet[0]&HdrBigSized != 0 {
 		return int(binary.BigEndian.Uint32(packet[1:5]))
@@ -107,31 +105,12 @@ func packetPayloadLen(packet []byte) int {
 	return int(binary.BigEndian.Uint16(packet[1:3]))
 }
 
-// bodyForCompressedPayload returns an incompressible (fixed-seed random) body whose EncodePacket
-// compressed payload length is exactly want, by scanning input lengths just below want. Because
-// incompressible data can't be shrunk below its own size, the compressed payload always exceeds
-// the input by a small constant framing overhead, so the matching input is a little under want; a
-// short downward scan reliably finds it regardless of the exact overhead a given flate build adds.
-// Re-seeding per candidate keeps each body deterministic (a fixed seed's byte stream is a prefix
-// chain, so length n is a prefix of length n+1).
-func bodyForCompressedPayload(t *testing.T, want int) []byte {
-	t.Helper()
-	for n := want; n >= want-256 && n >= 0; n-- {
-		rng := mathrand.New(mathrand.NewSource(42))
-		body := make([]byte, n)
-		if _, err := rng.Read(body); err != nil {
-			t.Fatalf("rng.Read: %v", err)
-		}
-		packet, err := EncodePacket(body)
-		if err != nil {
-			t.Fatalf("EncodePacket: %v", err)
-		}
-		if packetPayloadLen(packet) == want {
-			return body
-		}
+// packetHeaderLen is the header byte plus the length field of an EncodePacket frame.
+func packetHeaderLen(packet []byte) int {
+	if packet[0]&HdrBigSized != 0 {
+		return 5
 	}
-	t.Fatalf("no input length in [%d,%d] produced a compressed payload of exactly %d bytes", want-256, want, want)
-	return nil
+	return 3
 }
 
 // TestEncodePacketCompressionThresholdExactBoundary is the round-46 regression test for the MINOR
