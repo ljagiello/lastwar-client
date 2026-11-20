@@ -45,7 +45,8 @@ const allianceDonateMaxPerRun = 30
 // this run's allianceScienceRun: in a -collect run this continues from the core's tree, charge read
 // and donation, so science.data.refresh and al.science.refreshNum go out once per run; -run
 // alliance-donate-all, with no core run before it, fetches both itself. A day-reset 120836 or a
-// 120471 seen by either ends the run's donations without an error.
+// 120471 seen by either ends the run's donations without an error. When the core's charge read or
+// donation timed out, this reads the charges again before donating (allianceScienceRun.failed).
 func donateAllAllianceTech(conn *session.GameConn, in *Init) error {
 	if !allianceScienceAllowed(in) {
 		return nil

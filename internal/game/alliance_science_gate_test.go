@@ -3,6 +3,7 @@ package game
 import (
 	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"lastwar-client/internal/session"
@@ -302,6 +303,82 @@ func TestCoreDonationSharesTheRunWithDonateAll(t *testing.T) {
 	}
 	if got := srv.cmds(); len(got) != len(want)+3 || got[len(want)] != "science.data.refresh" || got[len(want)+1] != "al.science.refreshNum" {
 		t.Errorf("a new init must fetch the tree and the charges again: %v", got)
+	}
+}
+
+// TestDonateAllRecoversFromATimeoutInTheCore is the -collect sequence when the server leaves one
+// request of the core donation unanswered: a timed-out charge read or donation does not end the
+// run's donations, so alliance-donate-all reads the charges again (a timed-out donation may have
+// gone through) and donates. An errorCode answer to the charge read still ends them. It runs in a
+// synctest bubble, so the 8 s DefaultCmdTimeout passes on the fake clock.
+func TestDonateAllRecoversFromATimeoutInTheCore(t *testing.T) {
+	const id = 10011900
+	for _, c := range []struct {
+		name      string
+		withhold  string // the first request of this cmd gets no reply
+		chargeErr bool   // al.science.refreshNum is answered with a genuine errorCode
+		want      []string
+	}{
+		{"charge read times out", "al.science.refreshNum", false,
+			[]string{"science.data.refresh", "al.science.refreshNum", "al.science.refreshNum", "al.science.donate"}},
+		{"first donation times out", "al.science.donate", false,
+			[]string{"science.data.refresh", "al.science.refreshNum", "al.science.donate", "al.science.refreshNum", "al.science.donate"}},
+		{"charge read refused", "", true,
+			[]string{"science.data.refresh", "al.science.refreshNum"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client, server := session.NewPipeGameConnPair(t)
+				srv := &scriptedServer{}
+				go func() {
+					held := false
+					for {
+						msg, err := session.ReadNextExtension(server)
+						if err != nil {
+							return
+						}
+						srv.mu.Lock()
+						srv.reqs = append(srv.reqs, msg)
+						srv.mu.Unlock()
+						if msg.Cmd == c.withhold && !held {
+							held = true
+							continue
+						}
+						var out *sfs.SFSObject
+						switch msg.Cmd {
+						case "science.data.refresh":
+							out = allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", int64(8000000), "level", 3))
+						case "al.science.refreshNum":
+							out = obj("scienceId", id, "useNum", 5, "maxNum", 30)
+							if c.chargeErr {
+								out = obj("errorCode", "999999")
+							}
+						case "al.science.donate":
+							out = obj("scienceId", id, "useNum", 0, "maxNum", 30)
+						default:
+							out = obj()
+						}
+						if v, ok := msg.Params.Get("_id"); ok {
+							out.PutValue("_id", v)
+						}
+						if err := server.SendExtension(msg.Cmd, out); err != nil {
+							return
+						}
+					}
+				}()
+				in := inAllianceInit()
+				errCore := donateRecommendedAllianceTech(client, in)
+				if errCore == nil || session.ContainsNonTimeoutNetError(errCore) {
+					t.Errorf("core donation error = %v, want a timeout or errorCode error", errCore)
+				}
+				if err := donateAllAllianceTech(client, in); err != nil {
+					t.Errorf("donateAllAllianceTech() = %v", err)
+				}
+				if got := srv.cmds(); !slices.Equal(got, c.want) {
+					t.Errorf("requests = %v, want %v", got, c.want)
+				}
+			})
+		})
 	}
 }
 

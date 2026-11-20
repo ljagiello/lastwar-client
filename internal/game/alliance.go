@@ -366,9 +366,10 @@ func donateRecommendedAllianceTech(conn *session.GameConn, in *Init) error {
 // donation and alliance-donate-all (MASTER B32), so a -collect run with both sends
 // science.data.refresh and al.science.refreshNum once and reads the charges before the first
 // donation: before the 1.0.370 audit the core donated blind and the feature then fetched the tree
-// and the charges again. It holds the recommended tech (nil when the tree has none), the
-// resource ledger, the charges left and why donations stopped this run. One run is cached, keyed by
-// (conn, in) like the activity sweep: a new login or init starts over.
+// and the charges again. A charge read or donation that timed out leaves the charges unread, so the
+// next donation reads them again (failed). It holds the recommended tech (nil when the tree has
+// none), the resource ledger, the charges left and why donations stopped this run. One run is
+// cached, keyed by (conn, in) like the activity sweep: a new login or init starts over.
 type allianceScienceRun struct {
 	conn         *session.GameConn
 	in           *Init
@@ -431,14 +432,15 @@ func allianceScienceOutOfSeason(in *Init) bool {
 	return in != nil && in.Raw != nil && !allianceTasksInSeason(in)
 }
 
-// readCharges sends `al.science.refreshNum {scienceId: Int}` once per run for the recommended
-// tech, as the tech window does (UIAllianceScienceInfoView.lua:16-17; the manager sends it for the
-// first tree entry, AllianceScienceDataManager.lua:130-133, and the client keeps one useNum for the
-// player, :7, 258-264, so either id reads the same pool; the recommended id is the one
-// alliance-donate-all has sent live). The reply is applied to the tech (AlScienceNumFreshMessage.lua:
-// 10-19 runs UpdateOneAllianceScience on it). Its charge fields are logged, with donateAvailable
-// and maxdonate.count, which the client never reads: logged to see the server's state around the
-// day reset, never a gate.
+// readCharges sends `al.science.refreshNum {scienceId: Int}` once per run (again only after a
+// timeout, see failed) for the recommended tech, as the tech window does
+// (UIAllianceScienceInfoView.lua:16-17; the manager sends it for the first tree entry,
+// AllianceScienceDataManager.lua:130-133, and the client keeps one useNum for the player, :7,
+// 258-264, so either id reads the same pool; the recommended id is the one alliance-donate-all has
+// sent live). The reply is applied to the tech (AlScienceNumFreshMessage.lua:10-19 runs
+// UpdateOneAllianceScience on it). Its charge fields are logged, with donateAvailable and
+// maxdonate.count, which the client never reads: logged to see the server's state around the day
+// reset, never a gate.
 func (r *allianceScienceRun) readCharges(conn *session.GameConn) error {
 	if r.chargesRead {
 		return nil
@@ -448,6 +450,7 @@ func (r *allianceScienceRun) readCharges(conn *session.GameConn) error {
 	params.PutInt("scienceId", r.tech.id)
 	msg, err := session.SendAndWait(conn, "alliance tech donation charges", allianceScienceNumCmd, params)
 	if err != nil {
+		r.failed("charge read failed", msg, err)
 		return err
 	}
 	r.charges, r.chargesKnown = donationCharges(msg.Params)
@@ -474,7 +477,8 @@ func allianceChargeAttrs(o *sfs.SFSObject) []any {
 // reply or push can fill it) and the charge read, then each donate reply, shows useNum > 0. It
 // stops at the first errorCode: one of allianceDonateStops ends this run's donations without an
 // error, anything else (for example too few resources) is returned. A reply without useNum stops
-// the next donation. who prefixes the log lines.
+// the next donation. A failed charge read or donation is returned, and ends the run's donations
+// unless the wait only timed out (failed). who prefixes the log lines.
 func (r *allianceScienceRun) donate(conn *session.GameConn, who string, limit int) error {
 	if r.stop != "" {
 		slog.Info(who+": no donation", append([]any{"reason", r.stop, "donatedThisRun", r.donated}, r.techAttrs()...)...)
@@ -494,7 +498,6 @@ func (r *allianceScienceRun) donate(conn *session.GameConn, who string, limit in
 		}
 		if !r.chargesRead {
 			if err := r.readCharges(conn); err != nil {
-				r.stop = "charge read failed"
 				return err
 			}
 			if blocked() { // the charge read's reply can fill the tech
@@ -515,8 +518,9 @@ func (r *allianceScienceRun) donate(conn *session.GameConn, who string, limit in
 		slog.Info(who+": donating to the recommended tech", "scienceId", r.tech.id, "useNum", r.charges)
 		msg, err := sendAllianceDonation(conn, r.tech)
 		if err != nil {
-			r.stop = "donation failed"
-			slog.Warn(who+": donation failed; stopping", "scienceId", r.tech.id, "donatedThisRun", r.donated)
+			r.failed("donation failed", nil, err)
+			slog.Warn(who+": donation failed; stopping", "scienceId", r.tech.id, "donatedThisRun", r.donated,
+				"stopped", r.stop, "chargesReadAgain", !r.chargesRead)
 			return err
 		}
 		if msg.Params.Has("errorCode") {
@@ -546,6 +550,28 @@ func (r *allianceScienceRun) donate(conn *session.GameConn, who string, limit in
 		r.charges, r.chargesKnown = donationCharges(msg.Params)
 	}
 	return nil
+}
+
+// failed records a charge read or donation that returned err, reply being its answer (nil when
+// none came). A dead connection or an errorCode answer ends this run's donations, with why. A wait
+// that only timed out (waitTimedOut) does not: the charges are marked unread, so the next
+// donation, alliance-donate-all's after the core's, reads them again first. That read is needed
+// after a timed-out donation, which may have gone through on the server. donate returns on the
+// error, so each caller retries at most once.
+func (r *allianceScienceRun) failed(why string, reply *session.ExtensionMessage, err error) {
+	if waitTimedOut(reply, err) {
+		r.chargesRead = false
+		return
+	}
+	r.stop = why
+}
+
+// waitTimedOut reports whether err, from a request whose answer was reply (nil when none came),
+// is a wait that ran out: neither a dead connection (a non-timeout net.Error anywhere in err,
+// which also covers the silence watchdog's DeadConnError around a timeout) nor an errorCode answer
+// (SendAndWait returns that reply with its error).
+func waitTimedOut(reply *session.ExtensionMessage, err error) bool {
+	return err != nil && reply == nil && !session.ContainsNonTimeoutNetError(err)
 }
 
 // techAttrs is the tech's log attributes, or none without a recommended tech.
