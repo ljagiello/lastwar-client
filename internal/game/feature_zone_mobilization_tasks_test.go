@@ -107,3 +107,41 @@ func TestZoneMobilizationTasksGates(t *testing.T) {
 		t.Errorf("registered %v, DefaultOn %v, summary %q", registered, f.DefaultOn, f.Summary)
 	}
 }
+
+// TestZoneMobilizationTasksTaskIDZeroAndCap: a state-1 row whose taskId is 0 is no task (the row is
+// the quest template of its taskId, LWUIZoneMobilizationDailyTaskItemRender.lua:71) and is not
+// claimed; 31 claimable tasks get 30 claims, the feature's own cap of 30 a run.
+func TestZoneMobilizationTasksTaskIDZeroAndCap(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for name, c := range map[string]struct {
+		tasks []*sfs.SFSObject
+		want  int
+	}{
+		"taskId 0": {[]*sfs.SFSObject{obj("taskId", 0, "num", 5, "state", 1), obj("taskId", "0", "num", 5, "state", 1)}, 0},
+		"31 claimable": {func() []*sfs.SFSObject {
+			var l []*sfs.SFSObject
+			for i := range 31 {
+				l = append(l, obj("taskId", 9100+i, "num", 1, "state", 1))
+			}
+			return l
+		}(), 30},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
+				switch cmd {
+				case "get.zone.mobilization.info":
+					return zoneInfo(true)
+				case "get.zone.mobilization.task.info":
+					return obj("taskArr", c.tasks)
+				}
+				return evOK()
+			})
+			if err := runZoneMobilizationTasks(conn, zoneInit(10, true)); err != nil {
+				t.Fatal(err)
+			}
+			if n := len(fake.only("task.reward.get")); n != c.want {
+				t.Errorf("sent %d claims, want %d", n, c.want)
+			}
+		})
+	}
+}

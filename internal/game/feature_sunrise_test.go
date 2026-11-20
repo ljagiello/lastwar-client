@@ -143,3 +143,33 @@ func TestSunriseInfoErrorStopsAndClosedIsSkipped(t *testing.T) {
 		t.Errorf("closed activity: err %v, sent %v", err, fake2.cmds())
 	}
 }
+
+// G1: a row is counted only with each field GetCanRewardNum compares: level against the HQ
+// (ActSunriseFoundationData.lua:51), rewardFlag == 0 (:53) and, with the track bought,
+// specialRewardFlag == 0 (:58); nil equals no number in Lua, so a row missing one is no claim.
+func TestSunriseRowsMissingAFieldAreNotClaimed(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for name, c := range map[string]struct {
+		unlock int32
+		row    *sfs.SFSObject
+	}{
+		"row without level":                     {0, obj("rewardFlag", 0, "specialRewardFlag", 0)},
+		"row without rewardFlag":                {0, obj("level", 2, "specialRewardFlag", 1)},
+		"row without specialRewardFlag, bought": {1, obj("level", 2, "rewardFlag", 1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
+				if cmd == "sunrise.info" {
+					return obj("activityId", 94310, "unlock", c.unlock, "rewardArr", []*sfs.SFSObject{c.row})
+				}
+				return evOK()
+			})
+			if err := runSunrise(conn, evInit(30, evActivity(94310))); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(fake.cmds(), ","); got != "sunrise.info" {
+				t.Errorf("sent %q, want the info read only", got)
+			}
+		})
+	}
+}
