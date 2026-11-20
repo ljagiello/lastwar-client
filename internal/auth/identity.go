@@ -358,6 +358,17 @@ func loadOrCreateAndroidID() (string, error) {
 // Assembly-CSharp.decompiled.cs:73491-73506 of the Android build), and an Android identity gets its
 // AndroidInstall. An existing deviceId is never rewritten: the server already knows it.
 func LoadOrCreateDeviceIdentity(iosMode bool) (*deviceIdentity, error) {
+	return LoadOrCreateDeviceIdentityInstalledAt(iosMode, nil)
+}
+
+// LoadOrCreateDeviceIdentityInstalledAt is LoadOrCreateDeviceIdentity with installedAt giving, for
+// the identity's deviceId, the app install time another record of this install already reports
+// (the session's ShuMei install, a125 fit). An AndroidInstall this call creates takes that time, so
+// ta #install_time, the afuid's first launch just after it and that record describe one install
+// (1.0.370 audit B31, B95). A nil installedAt, or a zero time from it, leaves a new install's time to
+// the identity's creation. An AndroidInstall that already exists is never changed: its afuid has
+// been sent.
+func LoadOrCreateDeviceIdentityInstalledAt(iosMode bool, installedAt func(deviceID string) time.Time) (*deviceIdentity, error) {
 	// created is when this identity was made: now for a new one, else when its device-id file was
 	// written (the anchor of a new AndroidInstall, see loadOrCreateAndroidInstall).
 	created := time.Now()
@@ -453,7 +464,11 @@ func LoadOrCreateDeviceIdentity(iosMode bool) (*deviceIdentity, error) {
 	}
 	var android AndroidInstall
 	if !iosMode {
-		if android, err = loadOrCreateAndroidInstall(created); err != nil {
+		var installed time.Time
+		if installedAt != nil {
+			installed = installedAt(id)
+		}
+		if android, err = loadOrCreateAndroidInstall(created, installed); err != nil {
 			slog.Warn("failed to load or create the android install state file", "path", androidInstallStatePath(), "error", err)
 			return nil, err
 		}
@@ -656,12 +671,6 @@ func LegacyConfigBuild(iosMode bool) (appVersion, versionCode string) {
 		return legacyIOSAppVersion, legacyIOSVersionCode
 	}
 	return legacyAndroidAppVersion, legacyAndroidVersionCode
-}
-
-// PlatformName is the GSL form's `platform` for this identity: "iOS" under -cs-ios, otherwise
-// "Android". An access token is bound to it.
-func PlatformName(iosMode bool) string {
-	return loginBuild(iosMode, "", "").Platform
 }
 
 // loginBuild is the client build a Login claims: gsl.AndroidBuild, or the iOS build under iosMode,

@@ -305,7 +305,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	// The access token GSL issues is bound to this platform. An iOS Login with an Android-issued
 	// token is refused (ec=28/E005), so -cs-ios has to start here, not only at BuildLoginParams.
 	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt, "platform", build.Platform)
-	lsr, err := gsl.GetServerListFor(httpClient, gateHost, pub, formDevice(opts.IOSMode, ident.DeviceID, CapturedDevice{}), ident.DeviceID, opt, "", ident.GameUid)
+	lsr, err := gsl.GetServerListFor(httpClient, gateHost, pub, FormDevice(opts.IOSMode, ident.DeviceID, CapturedDevice{}), ident.DeviceID, opt, "", ident.GameUid)
 	if err != nil {
 		return nil, err
 	}

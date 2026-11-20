@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -236,19 +237,25 @@ func TestRunCrossServerTestLooksUpBeforeEveryLogin(t *testing.T) {
 	}
 }
 
-// TestRunCrossServerTestAdoptsLookupTokens: a token the lookup reply carries is the one the Login
-// sends, and it reaches the session config only after the Login succeeds, as the client's
-// SaveGameLoginToken stores any non-empty at/rt a GSL reply hands it (Assembly-CSharp.decompiled.cs:
-// 12777, 7482-7492). A lookup that lists no other server keeps the configured address.
-func TestRunCrossServerTestAdoptsLookupTokens(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	reply := gsl.LoginServerListRespon{
+// lookupTokensReply lists the configured address and hands back a new token pair, which the client's
+// SaveGameLoginToken stores the moment the reply arrives (Assembly-CSharp.decompiled.cs:12777,
+// 7482-7492, 1.0.370).
+func lookupTokensReply() gsl.LoginServerListRespon {
+	return gsl.LoginServerListRespon{
 		Code:       "0",
 		ServerList: []gsl.LoginServerInfo{{ID: "783", IP: "10.0.0.1", Port: testutil.FlexPort(17783), Zone: lookupZone, GameUid: lookupGameUid}},
 		At:         &gsl.LoginToken{Token: "at-gsl", Time: "1791900000"},
 		Rt:         &gsl.LoginToken{Token: "rt-gsl", Time: "1791900001"},
 	}
-	client := testutil.UseInMemoryGSL(t, reply)
+}
+
+// TestRunCrossServerTestAdoptsLookupTokens: a token the lookup reply carries is the one the Login
+// sends, and the session config keeps it, as the client's SaveGameLoginToken stores any non-empty
+// at/rt a GSL reply hands it (Assembly-CSharp.decompiled.cs:12777, 7482-7492). A lookup that lists
+// no other server keeps the configured address.
+func TestRunCrossServerTestAdoptsLookupTokens(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	client := testutil.UseInMemoryGSL(t, lookupTokensReply())
 	var seen loginAts
 	dial, dialed := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:17783": tokenCheckingServer("at-gsl", &seen)})
 	cfgPath := writeSessionConfig(t, SessionConfig{IP: "10.0.0.1", Port: 17783, Zone: lookupZone, GameUid: lookupGameUid, AccessToken: "at-1"})
@@ -277,7 +284,8 @@ func TestRunCrossServerTestAdoptsLookupTokens(t *testing.T) {
 // TestRunCrossServerTestFallsBackToTheConfiguredLogin: the configured address and token stay the
 // fallback. When every gateway the pre-Login lookup listed refuses, the Login goes to the configured
 // address; when the server refuses the token the lookup handed back (E011), the configured token is
-// tried. Either way the run succeeds and the session config is left as it was.
+// tried. Either way the run succeeds and the session config is left as it was, except for a refresh
+// token the lookup rotated: that one is the newest and stays.
 func TestRunCrossServerTestFallsBackToTheConfiguredLogin(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -285,20 +293,24 @@ func TestRunCrossServerTestFallsBackToTheConfiguredLogin(t *testing.T) {
 		handlers   func(seen *loginAts) map[string]func(*session.GameConn)
 		wantDialed string
 		wantLogins string
+		wantRt     string // "" = the session config is left byte for byte as it was
 	}{
 		{"listed gateways refuse", lookupReply(), func(seen *loginAts) map[string]func(*session.GameConn) {
 			return map[string]func(*session.GameConn){
 				"gw-a.example:10783": nil, "gw-b.example:10783": nil, "gw-c.example:10783": nil,
 				"10.0.0.1:17783": tokenCheckingServer("at-1", seen),
 			}
-		}, "[gw-a.example:10783 gw-b.example:10783 gw-c.example:10783 10.0.0.1:17783]", "[at-1]"},
+		}, "[gw-a.example:10783 gw-b.example:10783 gw-c.example:10783 10.0.0.1:17783]", "[at-1]", ""},
 		{"handed-back token refused", gsl.LoginServerListRespon{
 			Code:       "0",
 			ServerList: []gsl.LoginServerInfo{{ID: "783", IP: "10.0.0.1", Port: testutil.FlexPort(17783), Zone: lookupZone, GameUid: lookupGameUid}},
 			At:         &gsl.LoginToken{Token: "at-gsl", Time: "1791900000"},
 		}, func(seen *loginAts) map[string]func(*session.GameConn) {
 			return map[string]func(*session.GameConn){"10.0.0.1:17783": tokenCheckingServer("at-1", seen)}
-		}, "[10.0.0.1:17783 10.0.0.1:17783]", "[at-gsl at-1]"},
+		}, "[10.0.0.1:17783 10.0.0.1:17783]", "[at-gsl at-1]", ""},
+		{"handed-back token refused, refresh token rotated", lookupTokensReply(), func(seen *loginAts) map[string]func(*session.GameConn) {
+			return map[string]func(*session.GameConn){"10.0.0.1:17783": tokenCheckingServer("at-1", seen)}
+		}, "[10.0.0.1:17783 10.0.0.1:17783]", "[at-gsl at-1]", "rt-gsl"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -306,7 +318,7 @@ func TestRunCrossServerTestFallsBackToTheConfiguredLogin(t *testing.T) {
 			client := testutil.UseInMemoryGSL(t, c.reply)
 			var seen loginAts
 			dial, dialed := recordingDial(c.handlers(&seen))
-			cfg := SessionConfig{IP: "10.0.0.1", Port: 17783, Zone: lookupZone, GameUid: lookupGameUid, AccessToken: "at-1"}
+			cfg := SessionConfig{IP: "10.0.0.1", Port: 17783, Zone: lookupZone, GameUid: lookupGameUid, AccessToken: "at-1", RefreshToken: "rt-1"}
 			cfgPath := writeSessionConfig(t, cfg)
 			before, err := os.ReadFile(cfgPath)
 			if err != nil {
@@ -315,7 +327,7 @@ func TestRunCrossServerTestFallsBackToTheConfiguredLogin(t *testing.T) {
 
 			synctest.Test(t, func(t *testing.T) {
 				runCrossServerTest(crossServerTestOpts{
-					ip: "10.0.0.1", port: 17783, zone: lookupZone, gameUid: lookupGameUid, at: "at-1",
+					ip: "10.0.0.1", port: 17783, zone: lookupZone, gameUid: lookupGameUid, at: "at-1", refreshTok: "rt-1",
 					configSavePath: cfgPath, httpClient: client, dialGame: dial,
 				})
 				synctest.Wait()
@@ -327,10 +339,101 @@ func TestRunCrossServerTestFallsBackToTheConfiguredLogin(t *testing.T) {
 			if got := fmt.Sprint(seen.get()); got != c.wantLogins {
 				t.Errorf("Login access tokens = %s, want %s", got, c.wantLogins)
 			}
-			if after, err := os.ReadFile(cfgPath); err != nil || !bytes.Equal(after, before) {
-				t.Errorf("session config changed (err %v):\n%s", err, after)
+			if c.wantRt == "" {
+				if after, err := os.ReadFile(cfgPath); err != nil || !bytes.Equal(after, before) {
+					t.Errorf("session config changed (err %v):\n%s", err, after)
+				}
+				return
+			}
+			saved := readSessionConfig(t, cfgPath)
+			if saved.AccessToken != "at-1" || saved.AccessTokenTime != 0 || saved.RefreshToken != c.wantRt || saved.IP != "10.0.0.1" {
+				t.Errorf("saved at=%q (%d) rt=%q ip=%q, want the configured at-1 and address with the rotated %s",
+					saved.AccessToken, saved.AccessTokenTime, saved.RefreshToken, saved.IP, c.wantRt)
 			}
 		})
+	}
+}
+
+// TestRunCrossServerTestLookupTokensSavedBeforeLogin: a lookup reply that rotates the refresh token
+// is in the session config before the Login, as the client's SaveGameLoginToken stores it the moment
+// the reply arrives (Assembly-CSharp.decompiled.cs:12777, 7482-7492, before ToConnectGame), so a
+// Login that fails afterwards (a ban here) doesn't lose it and the next run doesn't refresh with a
+// dead one. The session config's other fields stay as they were on disk, and no token is logged.
+func TestRunCrossServerTestLookupTokensSavedBeforeLogin(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		client := testutil.UseInMemoryGSL(t, lookupTokensReply())
+		dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:17783": banningServer})
+		runCrossServerTest(crossServerTestOpts{
+			ip: "10.0.0.1", port: 17783, zone: lookupZone, gameUid: lookupGameUid, at: "at-1", refreshTok: "rt-1",
+			configSavePath: os.Getenv("LASTWAR_TEST_CFG"), httpClient: client, dialGame: dial,
+		})
+		return
+	}
+	cfgPath := writeSessionConfig(t, SessionConfig{IP: "10.0.0.1", Port: 17783, Zone: lookupZone, GameUid: lookupGameUid,
+		AccessToken: "at-1", RefreshToken: "rt-1", Features: map[string]bool{"radar": true}})
+	code, stderr := runRefreshHelper(t, "TestRunCrossServerTestLookupTokensSavedBeforeLogin", "LASTWAR_TEST_CFG="+cfgPath)
+	if code != exitCodeAccountBlocked {
+		t.Errorf("exit code = %d, want %d (the Login was refused); stderr=%s", code, exitCodeAccountBlocked, stderr)
+	}
+	cfg := readSessionConfig(t, cfgPath)
+	if cfg.RefreshToken != "rt-gsl" || cfg.RefreshTokenTime != 1791900001 || cfg.AccessToken != "at-gsl" || cfg.AccessTokenTime != 1791900000 {
+		t.Errorf("saved at=%q (%d) rt=%q (%d), want the lookup's at-gsl and rotated rt-gsl",
+			cfg.AccessToken, cfg.AccessTokenTime, cfg.RefreshToken, cfg.RefreshTokenTime)
+	}
+	if !cfg.Features["radar"] || cfg.IP != "10.0.0.1" || cfg.Port != 17783 {
+		t.Errorf("the token save changed other fields: ip=%q port=%d features=%v", cfg.IP, cfg.Port, cfg.Features)
+	}
+	// The subprocess logs through slog's text handler, which doesn't quote values.
+	for _, secret := range []string{"at-gsl", "rt-gsl"} {
+		if strings.Contains(stderr, secret) {
+			t.Errorf("log contains token %q; stderr=%s", secret, stderr)
+		}
+	}
+}
+
+// TestRunCrossServerTestFallbackRestoresTheConfiguredAccessToken: when the server refuses the access
+// token a lookup handed back (E011) and the Login falls back to the configured one, the session
+// config gets the configured one back, so the next run doesn't start from a token this one saw
+// refused. The refresh token the lookup rotated stays on disk, and the refresh after the second
+// E011 sends it, not the one it replaced. That refresh fails here (GSL 500), so no save-back runs.
+func TestRunCrossServerTestFallbackRestoresTheConfiguredAccessToken(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		client, forms := testutil.UseDecryptingGSL(t, lookupTokensReply(), gsl.LoginServerListRespon{Code: "500"})
+		base := client.Transport
+		client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			resp, err := base.RoundTrip(r)
+			if f := forms(); strings.HasSuffix(r.URL.Path, "getserverlist.php") && len(f) > 0 && f[len(f)-1].Get("opt") == "refresh" {
+				fmt.Fprintf(os.Stderr, "refresh sent the rotated refresh token: %v\n", f[len(f)-1].Get("rt") == "rt-gsl")
+			}
+			return resp, err
+		})
+		var seen loginAts
+		dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:17783": tokenCheckingServer("never", &seen)})
+		atTime, _ := strconv.ParseInt(os.Getenv("LASTWAR_TEST_AT_TIME"), 10, 64)
+		runCrossServerTest(crossServerTestOpts{
+			ip: "10.0.0.1", port: 17783, zone: lookupZone, gameUid: lookupGameUid, at: "at-1", accessTokTime: atTime, refreshTok: "rt-1",
+			configSavePath: os.Getenv("LASTWAR_TEST_CFG"), httpClient: client, dialGame: dial,
+		})
+		return
+	}
+	// An hour old: not due for a refresh, so the run looks the server up first.
+	atTime := time.Now().Add(-time.Hour).Unix()
+	cfgPath := writeSessionConfig(t, SessionConfig{IP: "10.0.0.1", Port: 17783, Zone: lookupZone, GameUid: lookupGameUid,
+		AccessToken: "at-1", AccessTokenTime: atTime, RefreshToken: "rt-1"})
+	code, stderr := runRefreshHelper(t, "TestRunCrossServerTestFallbackRestoresTheConfiguredAccessToken",
+		"LASTWAR_TEST_CFG="+cfgPath, "LASTWAR_TEST_AT_TIME="+strconv.FormatInt(atTime, 10))
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (the refresh after the second E011 failed); stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "trying the configured address and token") || !strings.Contains(stderr, "refresh sent the rotated refresh token: true") {
+		t.Errorf("want the fallback Login and a refresh with the rotated refresh token; stderr=%s", stderr)
+	}
+	cfg := readSessionConfig(t, cfgPath)
+	if cfg.AccessToken != "at-1" || cfg.AccessTokenTime != atTime || cfg.RefreshToken != "rt-gsl" || cfg.RefreshTokenTime != 1791900001 {
+		t.Errorf("saved at=%q (%d) rt=%q (%d), want the configured at-1 back and the rotated rt-gsl kept",
+			cfg.AccessToken, cfg.AccessTokenTime, cfg.RefreshToken, cfg.RefreshTokenTime)
 	}
 }
 

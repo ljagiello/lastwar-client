@@ -61,6 +61,47 @@ func TestNewAndroidIdentity(t *testing.T) {
 	}
 }
 
+// TestAndroidInstallTakesTheGivenInstallTime: an AndroidInstall created by
+// LoadOrCreateDeviceIdentityInstalledAt is installed at the time another record of the install
+// reports for the identity's deviceId (the session's ShuMei install), and first launched 5-90 s
+// after it (AFb1lSDK.java:84-90; 1.0.370 audit B31, B95). One that exists already is never moved.
+func TestAndroidInstallTakesTheGivenInstallTime(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fit := time.Date(2026, 3, 1, 8, 30, 15, 123e6, time.UTC)
+	var asked []string
+	ident, err := LoadOrCreateDeviceIdentityInstalledAt(false, func(deviceID string) time.Time {
+		asked = append(asked, deviceID)
+		return fit
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 1 || asked[0] != ident.DeviceID {
+		t.Errorf("asked the install time for %v, want once for the identity's deviceId %q", asked, ident.DeviceID)
+	}
+	a := ident.Android
+	if !a.InstallTime.Equal(fit) {
+		t.Errorf("install time = %v, want the given %v", a.InstallTime, fit)
+	}
+	m := afuidRe.FindStringSubmatch(a.Afuid)
+	if m == nil {
+		t.Fatalf("afuid = %q, want <13-digit ms>-<decimal>", a.Afuid)
+	}
+	launch, _ := strconv.ParseInt(m[1], 10, 64)
+	if d := time.Duration(launch-fit.UnixMilli()) * time.Millisecond; d < 5*time.Second || d >= 90*time.Second {
+		t.Errorf("first launch is %v after the install, want 5-90 s", d)
+	}
+
+	later := fit.Add(24 * time.Hour)
+	again, err := LoadOrCreateDeviceIdentityInstalledAt(false, func(string) time.Time { return later })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Android != a {
+		t.Errorf("an existing Android install was moved: %+v -> %+v", a, again.Android)
+	}
+}
+
 // TestIOSIdentityKeepsItsShape: iOS mode creates the deviceId it always has and no Android install
 // state, and an existing deviceId is never rewritten on either platform.
 func TestIOSIdentityKeepsItsShape(t *testing.T) {
@@ -153,10 +194,10 @@ func TestBuildLoginParamsAndroid370(t *testing.T) {
 // TestFormDeviceAndroidSimOp: the Android GSL form names the same SIM operator (B91).
 func TestFormDeviceAndroidSimOp(t *testing.T) {
 	const deviceID = "0123456789abcdef_n3d"
-	if f := formDevice(false, deviceID, CapturedDevice{}); f.SimOp != shumei.HardwareFor(deviceID).SimOperator || f.Platform != "Android" {
+	if f := FormDevice(false, deviceID, CapturedDevice{}); f.SimOp != shumei.HardwareFor(deviceID).SimOperator || f.Platform != "Android" {
 		t.Errorf("Android form device = %+v, want the phone's SIM operator", f)
 	}
-	if f := formDevice(true, deviceID, CapturedDevice{}); f.SimOp != "" || f.Platform != "iOS" {
+	if f := FormDevice(true, deviceID, CapturedDevice{}); f.SimOp != "" || f.Platform != "iOS" {
 		t.Errorf("iOS form device = %+v, want no SIM operator", f)
 	}
 }

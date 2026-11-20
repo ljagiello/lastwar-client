@@ -21,7 +21,7 @@ type TokenRefresh struct {
 	GameUid    string
 	RefreshTok string
 	// Device is the captured iOS device; its fromCountry/lang fill the form's country/lang
-	// (formDevice).
+	// (FormDevice).
 	Device CapturedDevice
 }
 
@@ -55,7 +55,7 @@ func RefreshTokens(r TokenRefresh) (Tokens, error) {
 	if r.RefreshTok == "" {
 		return Tokens{}, errors.New("GSL refresh: no refresh token")
 	}
-	dev := formDevice(r.IOSMode, r.DeviceID, r.Device)
+	dev := FormDevice(r.IOSMode, r.DeviceID, r.Device)
 	slog.Info("GSL getserverlist: refreshing the access token", "opt", "refresh", "platform", dev.Platform, "zone", r.Zone, "gameUid", r.GameUid)
 	lsr, err := gsl.GetServerListFor(r.HTTPClient, r.GateHost, r.RSAPub, dev, r.DeviceID, gsl.GSLOpt{Opt: "refresh", Rt: r.RefreshTok}, r.Zone, r.GameUid)
 	if err != nil {

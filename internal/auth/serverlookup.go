@@ -22,7 +22,7 @@ type ServerLookup struct {
 	GameUid    string // the role to find; required
 	AccessTok  string // the session's access token; never sent, only compared with any token the reply carries
 	// Device is the captured iOS device; its fromCountry/lang fill the form's country/lang
-	// (formDevice).
+	// (FormDevice).
 	Device CapturedDevice
 }
 
@@ -70,7 +70,7 @@ func LookupGameServer(l ServerLookup) (GameServer, error) {
 		return GameServer{}, errors.New("GSL server lookup: no gameUid")
 	}
 	opt := gsl.GSLOpt{}
-	dev := formDevice(l.IOSMode, l.DeviceID, l.Device)
+	dev := FormDevice(l.IOSMode, l.DeviceID, l.Device)
 	slog.Info("GSL getserverlist: looking up the game server", "opt", opt.Opt, "platform", dev.Platform, "zone", l.Zone, "gameUid", l.GameUid)
 	lsr, err := gsl.GetServerListFor(l.HTTPClient, l.GateHost, l.RSAPub, dev, l.DeviceID, opt, l.Zone, l.GameUid)
 	if err != nil {
@@ -121,12 +121,13 @@ func gameServerFrom(lsr *gsl.LoginServerListRespon, gameUid, zone, accessTok str
 	return s, nil
 }
 
-// formDevice is the device part of this identity's getserverlist.php form (gsl.FormDevice). An iOS
-// session sends the captured device's fromCountry and lang, which its Login sends too; without a
+// FormDevice is the device part of this identity's getserverlist.php form (gsl.FormDevice); every
+// GSL call builds its form from it. The platform is "iOS" under -cs-ios, otherwise "Android", and
+// an access token is bound to it. An iOS session sends the captured device's fromCountry and lang, which its Login sends too; without a
 // capture both stay the "US"/"en" this client has always sent. An Android one sends the SIM
 // operator of the phone its deviceId selects, as its Login's simOp and mt do
 // (com/sdkmanager/AppUtilManager.java:639-652; Android Assembly-CSharp.decompiled.cs:77501).
-func formDevice(iosMode bool, deviceID string, dev CapturedDevice) gsl.FormDevice {
+func FormDevice(iosMode bool, deviceID string, dev CapturedDevice) gsl.FormDevice {
 	f := gsl.FormDevice{Platform: loginBuild(iosMode, "", "").Platform}
 	if iosMode {
 		dev = dev.encodable()

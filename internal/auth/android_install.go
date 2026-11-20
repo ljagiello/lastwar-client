@@ -36,10 +36,11 @@ func (a AndroidInstall) LogValue() slog.Value { return slog.StringValue(a.String
 
 func androidInstallStatePath() string { return StateFilePath(".lastwar_goclient_android_install") }
 
-// newAndroidInstall is a fresh install as of now: installed a few minutes ago and first launched
-// seconds to minutes after that, never at the same millisecond (1.0.370 audit B31, B95).
-func newAndroidInstall(now time.Time) AndroidInstall {
-	installed := now.Add(-randomDuration(2*time.Minute, 10*time.Minute)).Truncate(time.Millisecond)
+// newAndroidInstall is an install made at installed, first launched seconds to minutes after that,
+// never at the same millisecond: the AppsFlyer uid's prefix is the time of the SDK's first start,
+// right after the install (1.0.370 audit B31, B95).
+func newAndroidInstall(installed time.Time) AndroidInstall {
+	installed = installed.Truncate(time.Millisecond)
 	firstLaunch := installed.Add(randomDuration(5*time.Second, 90*time.Second))
 	n := binary.BigEndian.Uint64(randomBytes(8)) &^ (1 << 63) // Math.abs of a long: 63 bits
 	return AndroidInstall{
@@ -50,11 +51,14 @@ func newAndroidInstall(now time.Time) AndroidInstall {
 }
 
 // loadOrCreateAndroidInstall returns the persisted AndroidInstall, creating and persisting one on
-// first use as of created: the time this device's identity was created, so an identity older than
-// this state file (one made before it existed) doesn't report an install after Logins the server
-// has already seen. An unreadable or corrupt file is an error rather than a silent replacement: the
-// values describe an install the server has already seen.
-func loadOrCreateAndroidInstall(created time.Time) (AndroidInstall, error) {
+// first use. A new one is installed at installedAt when that is set: the time another record of
+// this install already reports (the session's ShuMei install, a125 fit), so both describe one
+// install. Otherwise it is installed a few minutes before created, the time this device's identity
+// was created, so an identity older than this state file (one made before it existed) doesn't
+// report an install after Logins the server has already seen. An unreadable or corrupt file is an
+// error rather than a silent replacement: the values describe an install the server has already
+// seen.
+func loadOrCreateAndroidInstall(created, installedAt time.Time) (AndroidInstall, error) {
 	raw, err := readTrimmed(androidInstallStatePath())
 	if err != nil {
 		return AndroidInstall{}, fmt.Errorf("read android install state: %w", err)
@@ -66,7 +70,10 @@ func loadOrCreateAndroidInstall(created time.Time) (AndroidInstall, error) {
 		}
 		return a, nil
 	}
-	a := newAndroidInstall(created)
+	if installedAt.IsZero() {
+		installedAt = created.Add(-randomDuration(2*time.Minute, 10*time.Minute))
+	}
+	a := newAndroidInstall(installedAt)
 	b, _ := json.Marshal(a) // a time and two strings: Marshal can't fail
 	if err := AtomicWriteStateFile(androidInstallStatePath(), string(b)); err != nil {
 		return AndroidInstall{}, fmt.Errorf("persist android install state: %w", err)

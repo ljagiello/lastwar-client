@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -254,20 +255,48 @@ func TestReconnectBuild(t *testing.T) {
 
 // TestRunCrossServerTestRtRefreshSendsZone: the -cs-rt refresh sends the session zone, as the client
 // sends its cached SERVER_ZONE with every opt (Assembly-CSharp.decompiled.cs:77411, 77437; 1.0.370
-// audit B81).
+// audit B81), and the device fields its Login sends: the phone's SIM operator on Android, the
+// captured fromCountry/lang on iOS (:77433-77436; Android :77539-77542; audit B91, B15).
 func TestRunCrossServerTestRtRefreshSendsZone(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	client, forms := testutil.UseDecryptingGSL(t, refreshReply())
-	synctest.Test(t, func(t *testing.T) {
-		runCrossServerTest(crossServerTestOpts{
-			zone: lookupZone, gameUid: lookupGameUid, rt: "rt-flag",
-			httpClient: client, dialGame: session.NewInMemoryGameDial(session.FakeInitPushServer(nil)),
+	captured := auth.CapturedDevice{PhoneModel: "iPhone15,2", FromCountry: "PL", Lang: "pl"}
+	for _, c := range []struct {
+		name   string
+		ios    bool
+		device auth.CapturedDevice
+		// An Android form's simOp is its phone's SIM operator, checked below; iOS sends "".
+		wantCountry, wantLang, wantPlatform string
+	}{
+		{"Android", false, auth.CapturedDevice{}, "US", "en", "Android"},
+		{"iOS with a captured device", true, captured, "PL", "pl", "iOS"},
+		{"iOS without a capture", true, auth.CapturedDevice{}, "US", "en", "iOS"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			client, forms := testutil.UseDecryptingGSL(t, refreshReply())
+			synctest.Test(t, func(t *testing.T) {
+				runCrossServerTest(crossServerTestOpts{
+					zone: lookupZone, gameUid: lookupGameUid, rt: "rt-flag", iosMode: c.ios, device: c.device,
+					httpClient: client, dialGame: session.NewInMemoryGameDial(session.FakeInitPushServer(nil)),
+				})
+				synctest.Wait()
+			})
+			f := forms()
+			if len(f) == 0 || f[0].Get("opt") != "refresh" || f[0].Get("zone") != lookupZone {
+				t.Fatalf("first GSL form = %v, want opt=refresh with zone=%s", f, lookupZone)
+			}
+			form := f[0]
+			wantSimOp := ""
+			if !c.ios {
+				wantSimOp = shumei.HardwareFor(form.Get("uuid")).SimOperator
+				if wantSimOp == "" {
+					t.Fatalf("the catalog phone for deviceId %q has no SIM operator; the check below would mean nothing", form.Get("uuid"))
+				}
+			}
+			if form.Get("simOp") != wantSimOp || form.Get("country") != c.wantCountry || form.Get("lang") != c.wantLang || form.Get("platform") != c.wantPlatform {
+				t.Errorf("refresh form simOp=%q country=%q lang=%q platform=%q, want %q %q %q %q", form.Get("simOp"), form.Get("country"),
+					form.Get("lang"), form.Get("platform"), wantSimOp, c.wantCountry, c.wantLang, c.wantPlatform)
+			}
 		})
-		synctest.Wait()
-	})
-	f := forms()
-	if len(f) == 0 || f[0].Get("opt") != "refresh" || f[0].Get("zone") != lookupZone {
-		t.Fatalf("first GSL form = %v, want opt=refresh with zone=%s", f, lookupZone)
 	}
 }
 
@@ -352,26 +381,113 @@ func TestExitLoginFailedForcedUpdateExits5(t *testing.T) {
 	}
 }
 
-// TestAndroidInstallFor: ta #install_time and the ShuMei fingerprint's app install time describe
-// one install when the session keeps a ShuMei install for this deviceId (1.0.370 audit B95).
+// TestAndroidInstallFor: the Login describes the identity's own Android install, whose afuid follows
+// its install time, so ta #install_time is never taken from elsewhere (1.0.370 audit B31, B95). A
+// ShuMei install of this deviceId that reports another time can't be changed any more, so the
+// difference is logged; one that agrees, belongs to another deviceId, or has no time is quiet.
 func TestAndroidInstallFor(t *testing.T) {
-	own := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	fp := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	own := time.Date(1999, 11, 1, 0, 0, 0, 0, time.UTC)
+	fp := time.Date(1999, 3, 1, 0, 0, 0, 0, time.UTC)
 	base := auth.AndroidInstall{InstallTime: own, Afuid: "1-2", DistinctID: "d"}
 	cases := []struct {
 		name    string
 		install shumei.Install
-		want    time.Time
+		warn    bool
 	}{
-		{"install bound to this device", shumei.Install{DeviceID: "dev_n3d", FirstInstallTime: fp}, fp},
-		{"install not bound yet", shumei.Install{FirstInstallTime: fp}, fp},
-		{"another device's install", shumei.Install{DeviceID: "other_n3d", FirstInstallTime: fp}, own},
-		{"no install time", shumei.Install{DeviceID: "dev_n3d"}, own},
+		{"install bound to this device, another time", shumei.Install{DeviceID: "dev_n3d", FirstInstallTime: fp}, true},
+		{"install not bound yet, another time", shumei.Install{FirstInstallTime: fp}, true},
+		{"install with the same time", shumei.Install{DeviceID: "dev_n3d", FirstInstallTime: own}, false},
+		{"another device's install", shumei.Install{DeviceID: "other_n3d", FirstInstallTime: fp}, false},
+		{"no install time", shumei.Install{DeviceID: "dev_n3d"}, false},
 	}
+	orig := slog.Default()
+	defer slog.SetDefault(orig)
 	for _, c := range cases {
-		got := androidInstallFor(base, c.install, "dev_n3d")
-		if !got.InstallTime.Equal(c.want) || got.Afuid != base.Afuid || got.DistinctID != base.DistinctID {
-			t.Errorf("%s: install time %v, want %v (other fields kept)", c.name, got.InstallTime, c.want)
+		var buf bytes.Buffer
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		if got := androidInstallFor(base, c.install, "dev_n3d"); got != base {
+			t.Errorf("%s: androidInstallFor = %+v, want the identity's install unchanged", c.name, got)
 		}
+		if warned := strings.Contains(buf.String(), "level=WARN"); warned != c.warn {
+			t.Errorf("%s: warned = %v, want %v; log=%s", c.name, warned, c.warn, buf.String())
+		}
+	}
+}
+
+// loginInstallTimes returns an Android Login's ta #install_time and its afuid's first launch.
+func loginInstallTimes(t *testing.T, p *sfs.SFSObject) (installed, firstLaunch time.Time) {
+	t.Helper()
+	var ta struct {
+		InstallTime string `json:"#install_time"`
+	}
+	if err := json.Unmarshal([]byte(p.GetString("ta")), &ta); err != nil {
+		t.Fatalf("Login ta is not JSON: %v", err)
+	}
+	installed, err := time.Parse("2006-01-02 15:04:05.000", ta.InstallTime)
+	if err != nil {
+		t.Fatalf("ta #install_time %q: %v", ta.InstallTime, err)
+	}
+	prefix, _, ok := strings.Cut(p.GetString("afuid"), "-")
+	ms, err := strconv.ParseInt(prefix, 10, 64)
+	if !ok || err != nil {
+		t.Fatalf("afuid %q is not <first-launch ms>-<n>", p.GetString("afuid"))
+	}
+	return installed, time.UnixMilli(ms).UTC()
+}
+
+// TestRunCrossServerTestOneAndroidInstallTime: an Android Login's ta #install_time, its afuid's
+// first launch and the ShuMei fingerprint's a125 fit describe one install, whichever came first
+// (1.0.370 audit B31, B95). The afuid's first launch is seconds to minutes after the install time
+// (AFb1lSDK.java:84-90), and the registered fit is that same install time.
+//   - A session config that already keeps a ShuMei install: the new Android install takes its time.
+//   - A session without one: the ShuMei install minted for it takes the Android install's time.
+func TestRunCrossServerTestOneAndroidInstallTime(t *testing.T) {
+	register := registerShumeiDevice
+	t.Cleanup(func() { registerShumeiDevice = register })
+	fit := time.Date(1999, 6, 1, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name    string
+		install shumei.Install
+		mint    bool
+		want    time.Time // the install time every report must carry; zero = the Android install's own
+	}{
+		{"ShuMei install in the session, not minting", shumei.Install{FirstInstallTime: fit}, false, fit},
+		{"ShuMei install in the session, minting", shumei.Install{FirstInstallTime: fit}, true, fit},
+		{"no ShuMei install, minting", shumei.Install{}, true, time.Time{}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var registered []time.Time
+			registerShumeiDevice = func(client shumei.Client, deviceID string, dev shumei.Device) (string, error) {
+				registered = append(registered, dev.Install.FirstInstallTime)
+				return register(client, deviceID, dev)
+			}
+			logins := make(chan *sfs.SFSObject, 8)
+			path := writeTestSessionConfig(t, &SessionConfig{ShumeiInstall: c.install})
+			saved := runSaveBackWith(t, crossServerTestOpts{shumeiGen: c.mint, shumeiInstall: c.install, configSavePath: path}, loginParamsServer(logins))
+			close(logins)
+			p := <-logins
+			if p == nil {
+				t.Fatal("the game server saw no Login")
+			}
+			installed, firstLaunch := loginInstallTimes(t, p)
+			if !c.want.IsZero() && !installed.Equal(c.want) {
+				t.Errorf("ta #install_time = %v, want the session's ShuMei install time %v", installed, c.want)
+			}
+			if d := firstLaunch.Sub(installed); d < 5*time.Second || d >= 90*time.Second {
+				t.Errorf("afuid first launch is %v after ta #install_time (%v), want seconds to minutes after it", d, installed)
+			}
+			if !c.mint {
+				if len(registered) != 0 {
+					t.Errorf("registered %d ShuMei devices without -cs-shumei-gen", len(registered))
+				}
+				return
+			}
+			if len(registered) != 1 || !registered[0].Equal(installed) {
+				t.Errorf("registered a125 fit %v, want ta #install_time %v", registered, installed)
+			}
+			if !saved.ShumeiInstall.FirstInstallTime.Equal(installed) {
+				t.Errorf("saved shumeiInstall firstInstallTime = %v, want %v", saved.ShumeiInstall.FirstInstallTime, installed)
+			}
+		})
 	}
 }

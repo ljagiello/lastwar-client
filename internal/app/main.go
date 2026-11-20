@@ -961,12 +961,23 @@ var registerShumeiDevice = shumei.BoxID
 // run registers a fresh one instead, and saving it is refused while the config holds the other
 // deviceId. A failed registration returns "" -- not fatal, since the server accepts an empty
 // shumeiBoxId -- and still keeps the values it filled.
-func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, install shumei.Install, configPath string) (string, shumei.Install) {
+//
+// installTime is the app install time the Login reports (the Android install's: ta #install_time,
+// which the afuid's first launch follows). An install without a firstInstallTime takes it as its
+// a125 fit, so the fingerprint and the Login describe one install (1.0.370 audit B31, B95); one
+// that already has a time keeps it, since ShuMei has seen it.
+func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, install shumei.Install, installTime time.Time, configPath string) (string, shumei.Install) {
 	changed := install.DeviceID != deviceID
 	install, ok := install.For(deviceID)
 	if !ok {
 		slog.Warn("the session config's shumeiInstall belongs to a different deviceId than this run's (a -cs-deviceid override, or a deviceId that changed); registering a fresh install for this one")
 		install = shumei.Install{DeviceID: deviceID}
+	}
+	// A pasted lastUpdateTime before the Login's install time would make the pair invalid; Fill
+	// then picks a firstInstallTime no later than it.
+	if install.FirstInstallTime.IsZero() && !installTime.IsZero() &&
+		(install.LastUpdateTime.IsZero() || !install.LastUpdateTime.Before(installTime)) {
+		install.FirstInstallTime, changed = installTime.Truncate(time.Millisecond), true
 	}
 	install, filled := install.Fill(time.Now())
 	changed = changed || filled
@@ -1247,27 +1258,46 @@ func (o crossServerTestOpts) GoString() string { return o.String() }
 // rationale, shared across every credential-bearing type in this codebase.
 func (o crossServerTestOpts) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
-// configuredLogin is the address and tokens a reconnect had before its pre-Login GSL lookup, and
-// what the lookup changed.
+// configuredLogin is the address and access token a reconnect had before its pre-Login GSL lookup,
+// and what the lookup changed.
 type configuredLogin struct {
-	ip, zone, accessTok, refreshTok string
-	port                            int
-	accessTokTime, refreshTokTime   int64
-	addressChanged, tokenChanged    bool
+	ip, zone, accessTok          string
+	port                         int
+	accessTokTime                int64
+	addressChanged, tokenChanged bool
 }
 
 func (c configuredLogin) String() string       { return "[REDACTED configuredLogin]" }
 func (c configuredLogin) GoString() string     { return c.String() }
 func (c configuredLogin) LogValue() slog.Value { return slog.StringValue(c.String()) }
 
-// androidInstallFor is the Android install a Login describes: the identity's, with the ShuMei
-// install's app install time when the session keeps one for this deviceId, so ta #install_time and
-// the ShuMei fingerprint (a125) report the same PackageInfo.firstInstallTime.
+// androidInstallFor is the Android install a Login describes: the identity's. Its install time is ta
+// #install_time and its afuid's first launch follows it by seconds (AFb1lSDK.java:84-90;
+// cn/thinkingdata/android/j.java:78-79), so the Login's two always describe one install (1.0.370
+// audit B31, B95). The session's ShuMei install reports the same PackageInfo.firstInstallTime as
+// a125 fit: an AndroidInstall created while the session keeps a ShuMei install for this deviceId
+// takes its time (auth.LoadOrCreateDeviceIdentityInstalledAt), and a ShuMei install created later
+// takes the AndroidInstall's (mintShumeiBoxID). Two made apart, such as an AndroidInstall a guest or
+// email Login created before a session config with an older ShuMei install was used, can't be
+// brought together without changing a value a server has already seen, so the Login keeps the
+// identity's and the difference is logged.
 func androidInstallFor(android auth.AndroidInstall, install shumei.Install, deviceID string) auth.AndroidInstall {
-	if in, ok := install.For(deviceID); ok && !in.FirstInstallTime.IsZero() {
-		android.InstallTime = in.FirstInstallTime
+	fit := shumeiInstallTime(install, deviceID)
+	if !fit.IsZero() && !android.InstallTime.IsZero() && fit.UnixMilli() != android.InstallTime.UnixMilli() {
+		slog.Warn("the session's ShuMei install reports another app install time than this device's Android install; "+
+			"the Login sends the Android install's (its afuid follows it), so ta #install_time and the ShuMei fingerprint's a125 differ",
+			"shumeiFirstInstallTime", fit.UTC(), "androidInstallTime", android.InstallTime.UTC())
 	}
 	return android
+}
+
+// shumeiInstallTime is the app install time (a125 fit) the session's ShuMei install reports for
+// deviceID, or zero when it has none or belongs to another deviceId.
+func shumeiInstallTime(install shumei.Install, deviceID string) time.Time {
+	if in, ok := install.For(deviceID); ok {
+		return in.FirstInstallTime
+	}
+	return time.Time{}
 }
 
 // loginShumeiBoxID is the shumeiBoxId the Login carries for the configured one (-cs-shumei or the
@@ -1305,7 +1335,11 @@ func (o crossServerTestOpts) mintsShumeiBoxID() bool {
 // given, first refreshes the access token via GSL opt=refresh (using that
 // device identity) before attempting the SFS reconnect.
 func runCrossServerTest(o crossServerTestOpts) {
-	ident, err := auth.LoadOrCreateDeviceIdentity(o.iosMode)
+	// A new Android install takes the app install time the session's ShuMei install already reports
+	// for the Login's deviceId (see androidInstallFor).
+	ident, err := auth.LoadOrCreateDeviceIdentityInstalledAt(o.iosMode, func(identityDeviceID string) time.Time {
+		return shumeiInstallTime(o.shumeiInstall, cmp.Or(o.deviceID, identityDeviceID))
+	})
 	if err != nil {
 		slog.Error("load device identity failed", "error", err)
 		os.Exit(1)
@@ -1369,11 +1403,13 @@ func runCrossServerTest(o crossServerTestOpts) {
 	}
 
 	if o.rt != "" {
-		platform := auth.PlatformName(o.iosMode)
-		slog.Info("GSL getserverlist (opt=refresh)", "platform", platform, "zone", zone)
-		// zone is the session's, as the client sends its cached SERVER_ZONE with every opt
-		// (GetServerListRequest, Assembly-CSharp.decompiled.cs:77411, 77437).
-		lsr, err := gsl.GetServerListAs(httpClient, gslGateHost, gslRSAPub, platform, deviceID, gsl.GSLOpt{Opt: "refresh", Rt: o.rt}, zone, o.gameUid)
+		// The form describes the device the Login describes: its SIM operator on Android, the
+		// captured fromCountry/lang on iOS (GetServerListRequest, Assembly-CSharp.decompiled.cs:
+		// 77433-77436, 1.0.370), as every other GSL call here sends them (auth.FormDevice). zone is
+		// the session's, as the client sends its cached SERVER_ZONE with every opt (:77411, 77437).
+		dev := auth.FormDevice(o.iosMode, deviceID, o.device)
+		slog.Info("GSL getserverlist (opt=refresh)", "platform", dev.Platform, "zone", zone)
+		lsr, err := gsl.GetServerListFor(httpClient, gslGateHost, gslRSAPub, dev, deviceID, gsl.GSLOpt{Opt: "refresh", Rt: o.rt}, zone, o.gameUid)
 		if err != nil {
 			// Unlike the ErrAuthRejected-gated os.Exit(2) sites elsewhere in this file (the
 			// plain-login failure in main(), and the SFS2X cross-server-login failure further
@@ -1561,9 +1597,14 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 	// adoptLookup takes a lookup's address and, as the client's SaveGameLoginToken does
-	// (Assembly-CSharp.decompiled.cs:12777, 7482-7492), any non-empty token it carried. The tokens
-	// reach the session config through the save-back after a successful Login, not before it. An
-	// access token typed as -cs-at is the operator's choice and stays.
+	// (Assembly-CSharp.decompiled.cs:12777, 7482-7492), any non-empty token it carried. An access
+	// token typed as -cs-at is the operator's choice and stays. A reply that rotates the refresh
+	// token is saved to the session config right away, before the Login, as the client stores it
+	// before it connects and as a refresh's tokens are saved above: the old refresh token may be
+	// dead already, and a Login that fails afterwards must not lose the new one. Its access token
+	// goes with it (saveLookupTokens), never a typed -cs-at. A reply with only an access token
+	// reaches the session config through the save-back after a successful Login.
+	lookupAtSaved := false
 	adoptLookup := func(srv auth.GameServer) {
 		ip, port, zone = srv.IP, srv.Port, srv.Zone
 		switch {
@@ -1574,7 +1615,12 @@ func runCrossServerTest(o crossServerTestOpts) {
 			accessTok, accessTokTime = srv.AccessTok, srv.AccessTokTime
 		}
 		if srv.RefreshTok != "" {
+			rotated := srv.RefreshTok != refreshTok
 			refreshTok, refreshTokTime = srv.RefreshTok, srv.RefreshTokTime
+			if rotated {
+				saveLookupTokens(o.configSavePath, deviceID, srv)
+				lookupAtSaved = lookupAtSaved || srv.AccessTok != ""
+			}
 		}
 	}
 	lookedUp := false
@@ -1606,8 +1652,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		if srv, err := lookup(); err != nil {
 			slog.Warn("GSL server lookup failed; logging in at the configured address", "error", err)
 		} else {
-			before := configuredLogin{ip: ip, port: port, zone: zone, accessTok: accessTok, accessTokTime: accessTokTime,
-				refreshTok: refreshTok, refreshTokTime: refreshTokTime}
+			before := configuredLogin{ip: ip, port: port, zone: zone, accessTok: accessTok, accessTokTime: accessTokTime}
 			if !sameGameServer(srv, ip, port, zone) {
 				slog.Info("GSL lists a different game server than the configured one; logging in there", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone,
 					"configuredIP", ip, "configuredPort", port, "configuredZone", zone)
@@ -1731,7 +1776,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		dev := o.shumeiDevice
 		dev.AppVersion = cmp.Or(o.appVersion, gsl.AppVersion)
 		dev.AndroidID = androidID
-		shumeiBoxId, shumeiInstall = mintShumeiBoxID(httpClient, deviceID, dev, o.shumeiInstall, o.configSavePath)
+		shumeiBoxId, shumeiInstall = mintShumeiBoxID(httpClient, deviceID, dev, o.shumeiInstall, ident.Android.InstallTime, o.configSavePath)
 	}
 	params := auth.CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
@@ -1753,12 +1798,20 @@ func runCrossServerTest(o crossServerTestOpts) {
 	result, err := auth.DoCrossServerLogin(params)
 	// The configured address and token stay the fallback (1.0.370 audit B40): a Login that the
 	// address a lookup listed couldn't take, or that refused the token it handed back, is tried once
-	// more with what the session had, before any other recovery.
+	// more with what the session had, before any other recovery. A refresh token the lookup rotated
+	// stays: it is the newest one, and already on disk. An access token the lookup handed back and
+	// adoptLookup saved is replaced on disk by the configured one again, so the next run doesn't
+	// start from a token this one has just seen refused.
 	if c := configured; err != nil && c != nil &&
 		((c.addressChanged && connectFailed(err)) || (c.tokenChanged && errors.Is(err, session.ErrTokenRejected))) {
 		slog.Warn("cross-server login: the Login with what the GSL lookup listed failed; trying the configured address and token", "error", err)
 		ip, port, zone = c.ip, c.port, c.zone
-		accessTok, accessTokTime, refreshTok, refreshTokTime = c.accessTok, c.accessTokTime, c.refreshTok, c.refreshTokTime
+		if c.tokenChanged {
+			accessTok, accessTokTime = c.accessTok, c.accessTokTime
+			if lookupAtSaved {
+				restoreAccessToken(o.configSavePath, deviceID, accessTok, accessTokTime)
+			}
+		}
 		params.IP, params.Port, params.Zone, params.AccessTok = ip, port, zone, accessTok
 		result, err = auth.DoCrossServerLogin(params)
 	}
