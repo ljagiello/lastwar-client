@@ -1,6 +1,7 @@
 package game
 
 import (
+	"errors"
 	"math"
 	"slices"
 	"strings"
@@ -274,6 +275,61 @@ func TestFreeResearchFinishGoldCheckAndErrors(t *testing.T) {
 	sent, _, err = runFreeResearch(t, now, freeResearchSetup{queues: queues, effect: 300.0, gold: int64(1000)})
 	if err != nil || !slices.Equal(sentQueues(sent), []int64{21, 22}) {
 		t.Errorf("unchanged gold: err %v, sent %v, want both", err, sentQueues(sent))
+	}
+}
+
+// A gold drop is a trip source of the shared tripwire file (tripwire.go): it is persisted to
+// <config>.tripwire.json with the feature, the command and the drop. While the file exists a
+// later run, a new cron process with nothing in memory, refuses and sends nothing, not even the
+// duel read. Once the operator clears the file, the next run sends again.
+func TestFreeResearchFinishTripwirePersistsAcrossRuns(t *testing.T) {
+	path := tripwireTemp(t)
+	now := time.Now()
+	queues := []timerQueue{{uuid: 21, qType: 6, start: now.Add(-time.Hour), end: now.Add(time.Minute)}}
+	drop := func(p *sfs.SFSObject) *sfs.SFSObject {
+		r := freeResearchOK(p)
+		evObject(r, "queue").PutLong("remainGold", 990)
+		return r
+	}
+
+	// Run 1: the reply's queue.remainGold (QueueDataManager.lua:495-513) is below init user.gold.
+	sent, _, err := runFreeResearch(t, now, freeResearchSetup{queues: queues, effect: 300.0, gold: int64(1000), reply: drop})
+	if err == nil || errors.Is(err, errTripwire) || !slices.Equal(sentQueues(sent), []int64{21}) {
+		t.Fatalf("run 1: err %v, sent %v; want the drop to stop the feature after queue 21", err, sentQueues(sent))
+	}
+	if rec := readTripwire(t, path); rec.Feature != "free-research-finish" || rec.Command != "queue.ccd.m.new" ||
+		!strings.Contains(rec.Reason, "dropped from 1000 to 990") || rec.Time.IsZero() {
+		t.Errorf("record %+v, want the feature, its command, the drop and a time", rec)
+	}
+
+	// Run 2, a new process. tripwireRestart doesn't know this feature's in-process flag, so it is
+	// cleared here too: only the file stops the run. Wednesday (110002) scores research power, so
+	// without the file the run would read the duel and send.
+	tripwireRestart()
+	freeResearchFinishTripped.Store(false)
+	wed := func(now time.Time) *sfs.SFSObject {
+		return duelInfo(duelEntry(110002, heroEventDuelScores[110002], now.Add(-time.Hour), now.Add(time.Hour)))
+	}
+	logs := captureRewardLogs(t)
+	sent, reads, err := runFreeResearch(t, now, freeResearchSetup{queues: queues, effect: 300.0, gold: int64(1000), duel: wed})
+	if !errors.Is(err, errTripwire) || !strings.Contains(err.Error(), path) {
+		t.Errorf("run 2: err = %v, want the tripwire file named", err)
+	}
+	if len(sent) != 0 || reads != 0 {
+		t.Errorf("run 2: sent %v and %d duel reads while the tripwire file exists, want nothing", sentQueues(sent), reads)
+	}
+	if !strings.Contains(logs.String(), "free-research-finish: not spending while the diamond tripwire file exists") {
+		t.Errorf("run 2 must Warn about the tripwire file:\n%s", logs.String())
+	}
+
+	// The operator clears it: the next run reads the duel and sends again.
+	if removed, err := ClearTripwire(path); !removed || err != nil {
+		t.Fatalf("clear: %v, %v", removed, err)
+	}
+	tripwireRestart()
+	sent, reads, err = runFreeResearch(t, now, freeResearchSetup{queues: queues, effect: 300.0, gold: int64(1000), duel: wed})
+	if err != nil || !slices.Equal(sentQueues(sent), []int64{21}) || reads != 1 {
+		t.Errorf("after the clear: err %v, sent %v, %d duel reads; want queue 21 after one duel read", err, sentQueues(sent), reads)
 	}
 }
 
