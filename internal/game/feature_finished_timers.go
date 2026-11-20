@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
+	"time"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -12,9 +14,10 @@ import (
 
 // Finished-timer collection (MASTER.md §4 #12): the free completion of work whose timer has already
 // run out. None of these is an instant finish: each request carries only the uuid (or nothing),
-// and the 1.0.364 client sends it only once the timer has ended (datacenter.md §(c)2; docs/
-// city-building.mdx:35 and :40 wrongly call the first two paid). The paid paths are the separate
-// `build.ccd.*` / `queue.ccd.*` speed-ups and `free.building.up.new {gold}`, never sent here.
+// and the client sends it only once the timer has ended (CheckSendBuildFinish, BuildManager.lua:
+// 3045-3118; ScienceManager.lua:131-151). The paid paths are the separate `build.ccd.*` /
+// `queue.ccd.*` speed-ups and `free.building.up.new {gold}`, never sent here (the opt-in
+// free-research-finish sends queue.ccd.m.new's free form, with no items).
 //
 //   - Upgrades: `free.building.upgrade.finish {uuid: Long}` for each init building_new entry with
 //     uT > 0 && now >= uT (ms; BuildingDate.lua:453-456; FreeBuildingUpgradeFinishMessage.lua:3-9;
@@ -55,6 +58,31 @@ import (
 // server fills the stock part-way from one camp (its reply keeps prodST) and answers the next with
 // E000000 "addNum error" (addNum:0), seen live on 2026-10-18 and 2026-10-24 when the room was
 // checked once for every camp. The hospital checks are static-only: not sent live yet.
+//
+// Alliance Duel hold (MASTER §6.1 #4, the user's decision of 2026-11-19; aud-city/V1). A finished
+// upgrade or research earns its duel points when it is completed, which is the request above, not
+// when its timer ends. The upgrade's reply carries the building at its new level, which the client
+// applies (FreeBuildingUpgradeFinishHandle, BuildManager.lua:2906-2915). Until then init shows it
+// with uT passed (BuildingDate:IsUpgradeFinish). And the duel's own "go to" for building power
+// (score 90202, type 23, gotype2 504 = QuestGoType.GotoBuildingPowerUp, EnumType.lua:5471) points
+// the player at the highest such finished, uncollected upgrade (GoToUtil.lua:1289-1290, 4343-4344,
+// 4440-4458; BuildManager:GetMaxLevelUpgradeFinishBuild, BuildManager.lua:4993-5006). Research
+// power (score 90302, type 6) opens the science queue panel (GoToUtil.lua:4339-4340, 4391-4397),
+// whose finished cells send queue.finish (UILWScienceQueueCell.lua:143-146). A finished research
+// stays in queue_new until then (live 2026-10-06: this feature completed two). The score types are
+// ScoreType.BuildPowerUp 23 and SciencePowerUp 6 (EnumType.lua:15799-15809). In tables 40413,
+// heroevent 110001 (Base Expansion) and 110004 (Total Mobilization) score 90202, and 110002 (Age of
+// Science) and 110004 score 90302.
+//
+// So each finished upgrade and research is held, per kind, the way supplies-search gates each
+// radar search. It is held only while the account is in a running duel cycle and today's entry
+// does not list the kind's type: in an alliance, the duel activity open (with its HQ level) and its
+// info read. A rest day with no current entry counts as not listing it. With no duel (no
+// alliance, no open duel activity, no type-15 entry at all) it finishes as before. When the duel
+// cannot be read, it finishes with a Warn, so a duel read bug never stalls the queues. Unreadable
+// means an error or success-only reply, no eventList, no type-15 entry with a day window, or
+// today's list naming no score id the table knows. The duel is read only when something finished
+// reaches the hold, through the run's activity sweep (one cached hero.event.info.get).
 const (
 	finishedTimersUpgradeCmd = "free.building.upgrade.finish"
 	finishedTimersRepairCmd  = "user.finish.fix.building"
@@ -79,13 +107,25 @@ const (
 	// building_finish_check k1 (table item, 40413), the HQ level from which the setting applies.
 	finishedTimersConfirmSetting = "19"
 	finishedTimersConfirmHQLevel = 16
+
+	// The duel score types a completion earns (ScoreType, EnumType.lua:15799-15809).
+	finishedTimersDuelBuildPower   int32 = 23 // BuildPowerUp: score 90202
+	finishedTimersDuelSciencePower int32 = 6  // SciencePowerUp: score 90302
 )
+
+// finishedTimersDuelThemes lists, per completion score type, the duel themes whose heroevent row
+// (tables 40413) scores it; only the hold's log line uses it.
+var finishedTimersDuelThemes = map[int32][]int32{
+	finishedTimersDuelBuildPower:   {DuelThemeBase, DuelThemeMobilization},
+	finishedTimersDuelSciencePower: {DuelThemeScience, DuelThemeMobilization},
+}
 
 func init() {
 	registerFeature(Feature{
-		Name:    "finished-timers",
-		Summary: "collect ended timers for free: finished upgrades, repairs, research/heal queues and camp output",
-		Run:     runFinishedTimers,
+		Name: "finished-timers",
+		Summary: "collect ended timers for free: finished upgrades, repairs, research/heal queues and camp output; " +
+			"finished upgrades and research wait for an Alliance Duel day that scores them",
+		Run: runFinishedTimers,
 	})
 	session.RegisterBenignErrorCode("120289", finishedTimersUpgradeCmd, finishedTimersRepairCmd,
 		finishedTimersQueueCmd, finishedTimersCampCmd, finishedTimersChipCmd)
@@ -168,6 +208,7 @@ func runFinishedTimers(conn *session.GameConn, in *Init) error {
 	soldiers, stockCap, stockKnown := finishedTimersStockRoom(in)
 	stockRoom := func() bool { return stockKnown && soldiers < stockCap }
 	confirmOn := finishedTimersConfirmOn(in)
+	hold := newCompletionHold("finished-timers", conn, in)
 
 	var actions []func() error
 	send := func(label, cmd string, uuid int64) {
@@ -201,6 +242,9 @@ func runFinishedTimers(conn *session.GameConn, in *Init) error {
 			case confirmOn:
 				slog.Info("finished-timers: leaving the finished upgrade to the player: the \"confirm finished building\" setting is on",
 					"uuid", uuid, "name", name)
+			case hold.held(finishedTimersDuelBuildPower):
+				slog.Info("finished-timers: holding the finished upgrade for an Alliance Duel day that scores building power",
+					"uuid", uuid, "name", name, "today", hold.today(), "waitsFor", completionHoldWaitsFor(finishedTimersDuelBuildPower))
 			default:
 				send("finish upgrade "+name, finishedTimersUpgradeCmd, uuid)
 			}
@@ -233,6 +277,11 @@ func runFinishedTimers(conn *session.GameConn, in *Init) error {
 		}
 		switch q.Type {
 		case finishedTimersQueueResearch:
+			if hold.held(finishedTimersDuelSciencePower) {
+				slog.Info("finished-timers: holding the finished research for an Alliance Duel day that scores research power",
+					"queue", q.UUID, "today", hold.today(), "waitsFor", completionHoldWaitsFor(finishedTimersDuelSciencePower))
+				continue
+			}
 			send(fmt.Sprintf("finish research queue %d", q.UUID), finishedTimersQueueCmd, q.UUID)
 		case finishedTimersQueueHospital, finishedTimersQueueRebirth:
 			if !stockRoom() {
@@ -295,4 +344,124 @@ func finishedTimersChip(conn *session.GameConn, uuid int64) error {
 		_, err = claimAndLog(conn, label+" (chip.collect)", finishedTimersChipCmd, sfs.NewSFSObject())
 	}
 	return err
+}
+
+// completionHold is one run's view of the Alliance Duel for the completion hold (see the comment
+// at the top of this file), read on first use. finished-timers and free-research-finish use it.
+type completionHold struct {
+	feature string
+	conn    *session.GameConn
+	in      *Init
+	read    bool
+	running bool     // in a running duel cycle whose info was read
+	day     *DuelDay // today's entry; nil on the rest day or outside a day window
+}
+
+func newCompletionHold(feature string, conn *session.GameConn, in *Init) *completionHold {
+	return &completionHold{feature: feature, conn: conn, in: in}
+}
+
+// held reports whether a completion that earns duel score type typ waits for another day: the
+// account is in a running duel cycle and today's entry (or the lack of one) doesn't list typ.
+func (h *completionHold) held(typ int32) bool {
+	if !h.read {
+		h.read = true
+		h.running, h.day = completionHoldRead(h.feature, h.conn, h.in)
+	}
+	return h.running && !h.day.Scores(typ, "")
+}
+
+// today names today's duel theme for the hold's log lines.
+func (h *completionHold) today() string {
+	if h.day == nil {
+		return "no duel day now (rest day)"
+	}
+	return h.day.ThemeName()
+}
+
+// completionHoldWaitsFor names the themes that score typ.
+func completionHoldWaitsFor(typ int32) string {
+	var names []string
+	for _, th := range finishedTimersDuelThemes[typ] {
+		names = append(names, (&DuelDay{Theme: th}).ThemeName())
+	}
+	return strings.Join(names, " or ")
+}
+
+// completionHoldRead reads the duel for the hold: running is true only when the account is in an
+// alliance, a duel activity is open for it (CheckIsSend, with its needMainCityLevel) and its info
+// reply reads; day is today's entry, nil on a day with none. Every other case returns running
+// false, so the completions go ahead: with an Info line when there is no duel, with a Warn when the
+// duel could not be read.
+func completionHoldRead(feature string, conn *session.GameConn, in *Init) (running bool, day *DuelDay) {
+	if !claimInAlliance(in) {
+		slog.Info(feature + ": not in an alliance, so no Alliance Duel hold")
+		return false, nil
+	}
+	s := Activities(conn, in)
+	acts := s.Open(actTypeAllianceCompete)
+	if len(acts) == 0 {
+		slog.Info(feature + ": no Alliance Duel activity open for this account, so no duel hold")
+		return false, nil
+	}
+	now := evNow()
+	for _, a := range acts {
+		info, err := s.EventInfo(a)
+		if err != nil {
+			slog.Warn(feature+": could not read today's Alliance Duel; finishing without the duel hold",
+				"activity", a.ID, "error", err)
+			return false, nil
+		}
+		d, entries, why := completionHoldDay(info, now)
+		switch {
+		case why != "":
+			slog.Warn(feature+": could not read today's Alliance Duel; finishing without the duel hold",
+				"activity", a.ID, "reason", why)
+			return false, nil
+		case entries == 0:
+			slog.Info(feature+": the Alliance Duel info lists no duel day, so no duel hold", "activity", a.ID)
+			return false, nil
+		case d != nil:
+			slog.Info(feature+": Alliance Duel hold: today's entry read", "activity", a.ID, "theme", d.ThemeName(),
+				"themeId", d.Theme, "dayEnds", d.End.UTC().Format(time.RFC3339))
+			return true, d
+		}
+	}
+	a := acts[0]
+	slog.Info(feature+": Alliance Duel hold: the duel is open but no day entry covers now (rest day); completions wait",
+		"activity", a.ID, "activityStart", time.UnixMilli(a.StartTime()).UTC().Format(time.RFC3339),
+		"activityEnd", time.UnixMilli(a.EndTime()).UTC().Format(time.RFC3339))
+	return true, nil
+}
+
+// completionHoldDay picks today's entry from a duel info reply (parseDuelDay). entries counts the
+// type-15 entries; why is set when the reply cannot be read: no eventList, type-15 entries none of
+// which has a day window, or a current entry whose score list names no id in duelScoreTable.
+func completionHoldDay(info *sfs.SFSObject, now time.Time) (d *DuelDay, entries int, why string) {
+	if !info.Has("eventList") {
+		return nil, 0, "the info reply has no eventList"
+	}
+	windows := 0
+	for _, e := range evObjects(info, "eventList") {
+		if t, ok := evNum(e, "t"); !ok || t != allianceDuelEventType {
+			continue
+		}
+		entries++
+		if _, _, ok := duelEntryWindow(e); ok {
+			windows++
+		}
+	}
+	if entries > 0 && windows == 0 {
+		return nil, entries, "no duel entry carries a day window (st/et or begintime/endtime)"
+	}
+	d = parseDuelDay(info, now)
+	if d == nil {
+		return nil, entries, ""
+	}
+	for _, id := range d.ScoreIDs {
+		if _, ok := duelScoreTable[id]; ok {
+			return d, entries, ""
+		}
+	}
+	return nil, entries, fmt.Sprintf("today's score list %v names no score id the table knows", d.ScoreIDs)
 }
