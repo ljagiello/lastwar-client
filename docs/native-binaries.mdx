@@ -38,7 +38,7 @@ The `.mdl` XOR scheme itself is unchanged, see [Extraction methodology](/methodo
         <em> established</em> account initially looked ShuMei-gated but turned out to be an unrelated
         <code>packageName</code>/<code>platform</code>/<code>appVersion</code> identity mismatch against the access
         token. Once that was fixed, reconnect worked, and it kept working against the shipped code after a later
-        security fix replaced part of the request with placeholders (August 2026; since the 1.0.370 follow-up the iOS <code>ta</code> fills <code>lw_device_id</code>/<code>lw_airKey</code> from the <code>Login</code> and <code>lw_shumei_id</code> from the cached <code>shumeiId</code>, or replays a captured <code>ta</code>; one live config-copy test <code>Login</code> is pending before the cron uses it). On 2026-10-04 a captured iOS session also
+        security fix replaced part of the request with placeholders (August 2026; since the 1.0.370 follow-up the iOS <code>ta</code> fills <code>lw_device_id</code>/<code>lw_airKey</code> from the <code>Login</code> and <code>lw_shumei_id</code> from the cached <code>shumeiId</code>, or replays a captured <code>ta</code>; a live config-copy test of two runs is pending before the cron uses it: the first saves the pushed <code>shumeiId</code>, the second sends it). On 2026-10-04 a captured iOS session also
         reconnected with <code>shumeiBoxId</code> sent empty, see [Live validation against production](/live-validation).
         No ShuMei-specific block was ever found. Fully decompiled (Obfuscator-LLVM strings reversed); the device-profile protocol is documented in [ShuMei device fingerprint](/shumei)
       </td>

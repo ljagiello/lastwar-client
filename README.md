@@ -43,8 +43,9 @@ code 4, see "Running unattended (cron)".
   reconnect. Since the 1.0.370 follow-up the iOS `ta` no longer sends those placeholders: it
   carries the `Login`'s `deviceId` and `airKey` and the session config's `shumeiId`, as the 1.0.370
   app does, and a session config with a captured `ta` replays that `ta` with its build keys, the
-  `Login`'s zone and those three ids taken from the run (static analysis only; one live
-  config-copy test `Login` is needed before the cron uses it). Still open: the *minimal* required
+  `Login`'s zone and those three ids taken from the run (static analysis only; a live config-copy
+  test of two runs is needed before the cron uses it: the first saves the pushed `shumeiId`, the
+  second sends it). Still open: the *minimal* required
   `ta` content hasn't been isolated. An Android from-scratch login is live-confirmed.
   See `docs/live-validation.mdx` for the full methodology.
 - The earlier "reconnect blocked" / "init push never arrives" problems were never protocol-level
@@ -362,7 +363,7 @@ All are off by default. Every dig write passes a per-command key allowlist that 
 
 ### Alliance chat reader
 
-Off by default and static-analysis-only. Since 1.0.370 the client has a read-only reader for the
+Off by default and static-analysis-only. Since 1.0.370 this client has a read-only reader for the
 alliance chat room, which runs on its own WebSocket, not the game socket (see
 [docs/alliance-chat-mail.mdx](docs/alliance-chat-mail.mdx)). It sends only `room.joinMulti` and
 `history.roomsv2`, never a message, like or share, and reads only the alliance room's newest page
@@ -516,6 +517,7 @@ internal/
   crypto/             GSL RSA-PKCS1v15 + AES-256-ECB-PKCS7 request/response envelope
   gsl/                GSL HTTP bootstrap (check-version, server list); depends on crypto, sfs
   session/            live game-server connection: dial, handshake, heartbeat, send/wait loop
+  chat/               read-only alliance chat WebSocket reader (room.joinMulti, history.roomsv2 only)
   game/               Building/Visitor/Mail domain types + actions (buildings, mail, alliance, VIP, visitors)
   auth/               login, device identity, cross-server reconnect
   app/                CLI orchestration, interactive REPL, session config
