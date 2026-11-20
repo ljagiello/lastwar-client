@@ -81,6 +81,38 @@ func TestLettersClaimEachUnclaimedLetterOnce(t *testing.T) {
 	}
 }
 
+// TestLettersNoneLeftByNumOrItemLeftCnt: ItemInfo:UpdateInfo sets the stack's count from count,
+// then num, then itemLeftCnt, the last present one winning (ItemInfo.lua:52-66). A stack whose
+// count so read is 0 holds no letter and is not claimed; one that reads 1 is.
+func TestLettersNoneLeftByNumOrItemLeftCnt(t *testing.T) {
+	in := evInit(30)
+	a := sfs.NewSFSArray()
+	for _, st := range []struct {
+		id     string
+		counts []any // key, value pairs in the item
+	}{
+		{"670007", []any{"num", 0}},
+		{"670008", []any{"itemLeftCnt", 0}},
+		{"670009", []any{"count", 1, "itemLeftCnt", 0}}, // itemLeftCnt is applied last
+		{"670010", []any{"count", 0, "num", 1}},         // num is applied after count: one left
+	} {
+		e := obj(append([]any{"uuid", "uuid-" + st.id, "itemId", st.id, "otherPara", `{"state":0}`}, st.counts...)...)
+		a.AddSFSObject(e)
+	}
+	in.Raw.PutSFSArray("items", a)
+	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+	if err := runLetters(conn, in); err != nil {
+		t.Fatal(err)
+	}
+	var sent []string
+	for _, r := range fake.requests() {
+		sent = append(sent, r.Params.GetString("itemId"))
+	}
+	if !slices.Equal(sent, []string{"670010"}) {
+		t.Errorf("claimed %v, want only 670010 (the others have none left)", sent)
+	}
+}
+
 func TestLettersStopOnRefusal(t *testing.T) {
 	in := letterInit([3]string{"670002", "1", `{}`}, [3]string{"670003", "1", `{}`})
 	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evErr("E300001") })

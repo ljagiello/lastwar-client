@@ -73,7 +73,9 @@ func lettersDue(in *Init) []string {
 		if id == letterVIP18ID || !slices.Contains(letterItemIDs, id) || seen[id] {
 			continue
 		}
-		if n, ok := claimFirstInt(it, "count", "num", "itemLeftCnt"); ok && n <= 0 {
+		// ItemInfo:UpdateInfo applies count, num, then itemLeftCnt: the last present one is the
+		// stack's count (ItemInfo.lua:52-66).
+		if n, ok := claimFirstInt(it, "itemLeftCnt", "num", "count"); ok && n <= 0 {
 			continue
 		}
 		if letterRewardShown(evString(it, "otherPara")) {

@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"lastwar-client/internal/sfs"
 )
@@ -74,9 +75,33 @@ func TestBloodyNightTasksSkips(t *testing.T) {
 			in.Raw.PutSFSObject("user", obj("serverId", 812))
 			return in
 		}(), bloodyNightReplies(812, 1002), ""},
-		"source server unknown":    {noSource, bloodyNightReplies(812, 1002), ""},
+		"source server unknown": {noSource, bloodyNightReplies(812, 1002), ""},
+		// The feature runs only in season (evSeasonID): the Darkness config of an ended season is not
+		// enough.
+		"Darkness season ended": {func() *Init {
+			in := bloodyNightInit()
+			for _, k := range []string{"playerServerSeasonInfo", "curServerSeasonInfo"} {
+				in.Object(k).PutLong("seasonEndTime", evTestNow.Add(-time.Hour).UnixMilli())
+			}
+			return in
+		}(), bloodyNightReplies(812, 1002), ""},
 		"reply for another server": {bloodyNightInit(), bloodyNightReplies(813, 1002), bloodyNightActCmd},
 		"plan not in the table":    {bloodyNightInit(), bloodyNightReplies(812, 1099), bloodyNightActCmd},
+		// The stage is the season_blood_night_plan row with id planId among the rows of flag groupId
+		// (BloodyNightData.lua:187-194); plan 1002 has flag 4 (tables 40413), so group 5 finds none.
+		"group is not the plan's flag": {bloodyNightInit(), func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+			if cmd == "view.blood.night.act" {
+				return dBloodyNightAct(812, 1002, 5)
+			}
+			return bloodyNightReplies(812, 1002)(cmd, p)
+		}, "view.blood.night.act"},
+		// An unknown plan without a groupId matches no row either.
+		"plan not in the table, no groupId": {bloodyNightInit(), func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+			if cmd == "view.blood.night.act" {
+				return dBloodyNightAct(812, 1099, -1)
+			}
+			return bloodyNightReplies(812, 1002)(cmd, p)
+		}, "view.blood.night.act"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			conn, fake := startEvFake(t, c.reply)
@@ -85,6 +110,44 @@ func TestBloodyNightTasksSkips(t *testing.T) {
 			}
 			if got := strings.Join(fake.cmds(), ","); got != c.want {
 				t.Errorf("sent %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestBloodyNightTaskClaims: a state-1 entry without a taskId is no claim (the button sends the
+// row's own data.taskId, BloodyNightTaskItem.lua:173-179), and the first refused claim stops the rest.
+func TestBloodyNightTaskClaims(t *testing.T) {
+	withEvNow(t, evTestNow)
+	tasks := obj("userBloodNightTaskArr", []*sfs.SFSObject{obj("num", 5, "state", 1), obj("taskId", 31, "num", 5, "state", 1)},
+		"allianceBloodNightTaskArr", []*sfs.SFSObject{obj("taskId", 32, "num", 9, "state", 1)})
+	for name, c := range map[string]struct {
+		claim   *sfs.SFSObject
+		want    []int32
+		wantErr bool
+	}{
+		"no taskId, no claim":     {obj("reward", []*sfs.SFSObject{}), []int32{31, 32}, false},
+		"the first refusal stops": {evErr("E5"), []int32{31}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
+				switch cmd {
+				case "view.blood.night.act":
+					return dBloodyNightAct(812, 1002, 4)
+				case "view.blood.night.task":
+					return tasks
+				}
+				return c.claim
+			})
+			if err := runBloodyNightTasks(conn, bloodyNightInit()); (err != nil) != c.wantErr {
+				t.Errorf("err = %v, want error %v", err, c.wantErr)
+			}
+			var got []int32
+			for _, r := range fake.only("blood.night.task.get.reward") {
+				got = append(got, r.Params.GetInt("taskId"))
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("claimed %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -120,7 +183,7 @@ func TestJungleTrialRewards(t *testing.T) {
 		"two boxes earned":         {5, 3, 1, 2},
 		"none earned":              {3, 3, 1, 0},
 		"receiveNum does not rise": {5, 3, 0, 1},
-		"bounded per run":          {500, 0, 1, jungleTrialMaxBoxesInRun},
+		"bounded per run":          {500, 0, 1, 100}, // the feature's own cap of 100 boxes a run
 	} {
 		t.Run(name, func(t *testing.T) {
 			conn, fake := startEvFake(t, jungleTrialReplies(c.earned, c.received, c.step))
@@ -169,6 +232,49 @@ func TestJungleTrialRewardsSkips(t *testing.T) {
 	}
 	if got := strings.Join(fake3.cmds(), ","); got != "season.monster.event.act.view,season.monster.event.open.box" {
 		t.Errorf("a refused box sent %s", got)
+	}
+}
+
+// TestJungleTrialBoxesAndTaskRefusal: GetCanOpenBoxNum is 0 without receiveNum or rewardNum
+// (JungleTrialDataManager.lua:243-248), so no box is opened; and the first refused task claim stops
+// the rest.
+func TestJungleTrialBoxesAndTaskRefusal(t *testing.T) {
+	withEvNow(t, evTestNow)
+	tasks := obj("seasonMonsterEventTaskArr", []*sfs.SFSObject{obj("taskId", 5, "num", 3, "state", 1), obj("taskId", 7, "num", 1, "state", 1)})
+	for name, c := range map[string]struct {
+		full    *sfs.SFSObject
+		claim   *sfs.SFSObject
+		want    string
+		wantErr bool
+	}{
+		"rewardNum without receiveNum": {obj("userSeasonMonsterEventActInfo", obj("startTime", int64(1)),
+			"userSeasonMonsterEventRewardRecordInfo", obj("rewardNum", 5)), obj("reward", []*sfs.SFSObject{}),
+			"season.monster.event.act.view,season.monster.event.task.view,season.monster.event.task.get.reward,season.monster.event.task.get.reward", false},
+		"no userSeasonMonsterEventActInfo": {obj("userSeasonMonsterEventRewardRecordInfo", obj("rewardNum", 5)), obj("reward", []*sfs.SFSObject{}),
+			"season.monster.event.act.view,season.monster.event.task.view,season.monster.event.task.get.reward,season.monster.event.task.get.reward", false},
+		"the first refused task stops": {obj("userSeasonMonsterEventActInfo", obj("receiveNum", 5),
+			"userSeasonMonsterEventRewardRecordInfo", obj("rewardNum", 5)), evErr("E6"),
+			"season.monster.event.act.view,season.monster.event.task.view,season.monster.event.task.get.reward", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
+				switch cmd {
+				case "season.monster.event.act.view":
+					return obj("actId", 77, "userSeasonMonsterActFullInfo", c.full)
+				case "season.monster.event.task.view":
+					return tasks
+				case "season.monster.event.open.box":
+					return obj("reward", []*sfs.SFSObject{}, "userSeasonMonsterEventActInfo", obj("receiveNum", 9))
+				}
+				return c.claim
+			})
+			if err := runJungleTrialRewards(conn, evInit(30, evActivity(1200106))); (err != nil) != c.wantErr {
+				t.Errorf("err = %v, want error %v", err, c.wantErr)
+			}
+			if got := strings.Join(fake.cmds(), ","); got != c.want {
+				t.Errorf("sent %s\nwant %s", got, c.want)
+			}
+		})
 	}
 }
 

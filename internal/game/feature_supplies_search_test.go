@@ -196,6 +196,162 @@ func TestSuppliesSearchHonoursASetTripwire(t *testing.T) {
 	}
 }
 
+// TestSuppliesSearchRefusals: inputs whose search is not the risk-free step from a fresh level 0
+// send no step, and a step that did not land on level 1 (or was refused) sends no reward. Each
+// run's whole command list is checked, so a stray radar or duel read fails too.
+func TestSuppliesSearchRefusals(t *testing.T) {
+	expiresAt := func(uuid, end int64) *sfs.SFSObject {
+		ev := suppliesEv(uuid, 0, suppliesInfo(0, 0))
+		ev.PutLong("endTime", end)
+		return ev
+	}
+	noLevel := sfs.NewSFSObject()
+	noLevel.PutInt("cfgId", 1001)
+	noLevel.PutInt("isFail", 0)
+	for name, c := range map[string]struct {
+		building *sfs.SFSObject // suppliesSearchInfo of building 301 (10150000), nil for none
+		events   []*sfs.SFSObject
+		step     *sfs.SFSObject // the building step's reply, nil for level 1
+		want     string
+		wantErr  bool
+	}{
+		// isFail 1 ends the search (UISuppliesSearchView.lua:125-200): not fresh even at level 0.
+		"failed at level 0": {building: suppliesInfo(0, 1), want: "get.detect.info"},
+		// A search without curLevel is not known to be at level 0.
+		"no curLevel": {building: noLevel, want: "get.detect.info"},
+		// A radar event is acted on by its uuid; 0 is no event.
+		"radar event uuid 0": {events: []*sfs.SFSObject{suppliesEv(0, 0, suppliesInfo(0, 0))}, want: "get.detect.info"},
+		// An event whose endTime has come is off the map.
+		"radar event ending now":     {events: []*sfs.SFSObject{expiresAt(201, evTestNow.UnixMilli())}, want: "get.detect.info"},
+		"radar event ended long ago": {events: []*sfs.SFSObject{expiresAt(201, 1)}, want: "get.detect.info"},
+		// The reward is only for a step that reached level 1 (the next reply's curLevel,
+		// SuppliesSearchManager.lua:65-79).
+		"the step stays at level 0": {building: suppliesInfo(0, 0), step: suppliesReply("buildingUuid", 301, 0, 0),
+			want: "building.supplies.search.next,get.detect.info"},
+		// An errorCode (none is benign for these commands) is a refusal whatever else the reply
+		// carries; the run reports it.
+		"a refused step": {building: suppliesInfo(0, 0), step: func() *sfs.SFSObject {
+			r := suppliesReply("buildingUuid", 301, 1, 0)
+			r.PutUtfString("errorCode", "E8")
+			return r
+		}(), want: "building.supplies.search.next,get.detect.info", wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, f := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{detectReply(20, 10, c.events...)},
+				func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+					if cmd == "building.supplies.search.next" && c.step != nil {
+						return c.step
+					}
+					return dSuppliesStep(cmd, p)
+				})
+			in := digTestInit(nil)
+			if c.building != nil {
+				in.Buildings = append(in.Buildings, suppliesBuilding(301, 10150000, c.building))
+			}
+			if err := runSuppliesSearch(conn, in); (err != nil) != c.wantErr {
+				t.Errorf("err = %v, want error %v", err, c.wantErr)
+			}
+			if got := strings.Join(f.cmds(), ","); got != c.want {
+				t.Errorf("sent %s\nwant %s", got, c.want)
+			}
+		})
+	}
+	t.Run("no init push", func(t *testing.T) {
+		conn, f := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{detectReply(20, 10)}, dSuppliesStep)
+		for _, in := range []*Init{nil, {}} {
+			if err := runSuppliesSearch(conn, in); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := f.cmds(); len(got) != 0 {
+			t.Errorf("sent %v without an init push", got)
+		}
+	})
+}
+
+// TestSuppliesSearchCapStopsTheRun: 21 fresh buildings get 20 searches (the feature's own cap of 20
+// a run), and the cap ends the run before the radar is read.
+func TestSuppliesSearchCapStopsTheRun(t *testing.T) {
+	tripwireTemp(t)
+	conn, f := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{detectReply(20, 10)}, dSuppliesStep)
+	in := digTestInit(nil)
+	for i := range int64(21) {
+		in.Buildings = append(in.Buildings, suppliesBuilding(400+i, 10150000, suppliesInfo(0, 0)))
+	}
+	if err := runSuppliesSearch(conn, in); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.only("building.supplies.search.next")); n != 20 {
+		t.Errorf("stepped %d searches, want 20", n)
+	}
+	if n := len(f.requests()); n != 40 {
+		t.Errorf("sent %d requests (%v), want the 20 steps and their 20 rewards only", n, f.cmds())
+	}
+}
+
+// TestSuppliesSearchDiamondChecks: the tripwire compares every reply's gold and remainGold with the
+// balance seen so far, init user.gold (PlayerInfo.lua:630-632) or the last reply's, and a drop ends
+// the run: no further search and no radar read.
+func TestSuppliesSearchDiamondChecks(t *testing.T) {
+	for name, c := range map[string]struct {
+		initGold    int64 // 0: init carries no gold
+		step, prize func(*sfs.SFSObject)
+		want        string
+	}{
+		"remainGold below init gold": {initGold: 500, step: func(r *sfs.SFSObject) { r.PutLong("remainGold", 400) },
+			want: "building.supplies.search.next"},
+		"a drop between replies, no init gold": {step: func(r *sfs.SFSObject) { r.PutLong("gold", 500) },
+			prize: func(r *sfs.SFSObject) { r.PutLong("gold", 400) },
+			want:  "building.supplies.search.next,building.get.supplies.search.reward"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tripwireTemp(t)
+			conn, f := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{detectReply(20, 10)},
+				func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+					r := dSuppliesStep(cmd, p)
+					switch {
+					case cmd == "building.supplies.search.next" && c.step != nil:
+						c.step(r)
+					case cmd == "building.get.supplies.search.reward" && c.prize != nil:
+						r = evOK()
+						c.prize(r)
+					}
+					return r
+				})
+			in := digTestInit(nil)
+			if c.initGold > 0 {
+				in.Raw.PutSFSObject("user", obj("gold", c.initGold))
+			}
+			in.Buildings = append(in.Buildings, suppliesBuilding(301, 10150000, suppliesInfo(0, 0)),
+				suppliesBuilding(302, 10150000, suppliesInfo(0, 0)))
+			if err := runSuppliesSearch(conn, in); err == nil {
+				t.Error("want the diamond drop reported")
+			}
+			if got := strings.Join(f.cmds(), ","); got != c.want {
+				t.Errorf("sent %s\nwant %s", got, c.want)
+			}
+		})
+	}
+}
+
+// TestSuppliesSearchRadarSoonestFirst: radar searches run soonest-ending first, an event without an
+// endTime last.
+func TestSuppliesSearchRadarSoonestFirst(t *testing.T) {
+	noEnd := suppliesEv(201, 0, suppliesInfo(0, 0))
+	noEnd.PutLong("endTime", 0)
+	soon := suppliesEv(202, 0, suppliesInfo(0, 0))
+	soon.PutLong("endTime", evTestNow.Add(3600e9).UnixMilli())
+	conn, f := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{detectReply(20, 10, noEnd, soon)}, dSuppliesStep)
+	if err := runSuppliesSearch(conn, digTestInit(nil)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"detect.event.supplies.search.next 202", "detect.event.get.supplies.search.reward 202",
+		"detect.event.supplies.search.next 201", "detect.event.get.supplies.search.reward 201"}
+	if got := suppliesSent(f); !slices.Equal(got, want) {
+		t.Errorf("sent %v\nwant %v", got, want)
+	}
+}
+
 func TestSuppliesSearchFeatureIsOptIn(t *testing.T) {
 	f, ok := featureRegistry[suppliesSearchFeature]
 	if !ok {
