@@ -165,6 +165,83 @@ func TestDoomsdayQuestsNeedAnOpenEvent(t *testing.T) {
 	}
 }
 
+// TestDoomsdayQuestsSkipAQuestWithoutAQuestID: OnGetQuestInfo sorts the quests by quest_id
+// (LWDoomsdayManager.lua:113-115), which fails on a quest without one, so the client shows nothing
+// claimable; here the only other quest is not done. No claim-all goes out.
+func TestDoomsdayQuestsSkipAQuestWithoutAQuestID(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd != "activity.doomsday.quest.info" {
+			return evOK()
+		}
+		q := sfs.NewSFSObject()
+		q.PutUtfString("has_rewards", "")
+		a := sfs.NewSFSArray()
+		a.AddSFSObject(obj("uuid", "u0", "state", 1)) // no quest_id
+		a.AddSFSObject(obj("uuid", "u1", "quest_id", 101, "state", 0))
+		q.PutSFSArray("doomsday_quests", a)
+		r := evOK()
+		r.PutSFSObject("quest_info", q)
+		return r
+	})
+	if err := runDoomsdayQuests(conn, evInit(30, evActivity(94210))); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.only("activity.doomsday.quest.reward"); len(got) != 0 {
+		t.Errorf("claimed %+v, want nothing", got)
+	}
+}
+
+// TestSandWormTasksStopOnRefusal: the first refused claim stops the rest (achievement 301 is
+// refused, so achievement 302 and daily 402 are not claimed), and a state-1 task without an id is
+// never claimed.
+func TestSandWormTasksStopOnRefusal(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for _, c := range []struct {
+		name        string
+		achievement *sfs.SFSArray
+		refuse      string
+		want        []string
+	}{
+		{"301 refused", evTasks("id", map[string]int32{"301": 1, "302": 1}), "301", []string{"301"}},
+		{"none refused", evTasks("id", map[string]int32{"301": 1, "302": 1}), "", []string{"301", "302", "402"}},
+		{"a done task without an id", func() *sfs.SFSArray {
+			a := sfs.NewSFSArray()
+			a.AddSFSObject(obj("state", 1))
+			a.AddSFSObject(obj("id", "303", "state", 1))
+			return a
+		}(), "", []string{"303", "402"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				switch cmd {
+				case "sandworm.task.info":
+					r := evOK()
+					r.PutSFSArray("achievement", c.achievement)
+					r.PutSFSArray("daily", evTasks("id", map[string]int32{"402": 1}))
+					return r
+				case "sandworm.task.claim.reward":
+					if p.GetString("taskId") == c.refuse {
+						return evErr("E240001")
+					}
+				}
+				return evOK()
+			})
+			err := runSandWormTasks(conn, evInit(30, evActivity(1000069)))
+			if (err != nil) != (c.refuse != "") {
+				t.Errorf("err = %v, want a refusal only when one is sent", err)
+			}
+			var sent []string
+			for _, r := range fake.only("sandworm.task.claim.reward") {
+				sent = append(sent, r.Params.GetString("taskId"))
+			}
+			if !slices.Equal(sent, c.want) {
+				t.Errorf("claimed %q, want %q", sent, c.want)
+			}
+		})
+	}
+}
+
 // evInfo starts a hero.event.info.get data reply. The client drops a reply that carries success
 // (Net/Msgs/Activity/ActivityEventInfoGetMessage.lua:26-29), and so does EventInfo
 // (errEventInfoNoData), so an info fixture must not start from evOK.
@@ -179,6 +256,9 @@ func TestParkourTasksClaimAll(t *testing.T) {
 			switch p.GetString("activityId") {
 			case "2000001":
 				r.PutSFSArray("taskArr", evTasks("taskId", map[string]int32{"1": 2, "2": 1, "3": 0}))
+				// A soldier box in state 1 (CanGet, EnumType.lua:18304): only Front Break (type 312)
+				// claims boxes, so Parkour must not.
+				r.PutSFSArray("soldierBox", evTasks("id", map[string]int32{"1": 1}))
 			case "2000002":
 				r.PutSFSArray("taskArr", evTasks("taskId", map[string]int32{"1": 2, "2": 0}))
 			}
@@ -252,6 +332,58 @@ func TestFrontBreakTasksAndSoldierBoxes(t *testing.T) {
 	}
 }
 
+// TestFrontBreakTaskRefusalStopsTheSoldierBoxes: the "tasks and a box" fixture with the task
+// claim refused. An errorCode stops that event's claims, so the reached box is not claimed.
+func TestFrontBreakTaskRefusalStopsTheSoldierBoxes(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		switch cmd {
+		case "hero.event.info.get":
+			r := evInfo()
+			r.PutSFSArray("taskArr", evTasks("taskId", map[string]int32{"5": 1}))
+			r.PutSFSArray("soldierBox", evTasks("id", map[string]int32{"1": 2, "2": 1}))
+			return r
+		case "activity.plane.feature.reward":
+			return evErr("E300001")
+		}
+		return evOK()
+	})
+	err := runFrontBreakTasks(conn, evInit(30, evActivity(2400001)))
+	if err == nil || !strings.Contains(err.Error(), "E300001") {
+		t.Errorf("err = %v, want the refusal reported", err)
+	}
+	if got, want := fake.cmds(), []string{"hero.event.info.get", "activity.plane.feature.reward"}; !slices.Equal(got, want) {
+		t.Errorf("sent %v, want %v (the refused task claim stops the soldier box)", got, want)
+	}
+}
+
+// TestLeadingQuestTasksSkipATaskWithoutAnID: a state-1 task with no taskId names nothing to claim,
+// so only the task with an id is claimed and no claim carries an empty taskId.
+func TestLeadingQuestTasksSkipATaskWithoutAnID(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "hero.event.info.get" {
+			r := evInfo()
+			a := sfs.NewSFSArray()
+			a.AddSFSObject(obj("state", 1)) // no taskId
+			a.AddSFSObject(obj("taskId", "11", "state", 1))
+			r.PutSFSArray("taskArr", a)
+			return r
+		}
+		return evOK()
+	})
+	if err := runLeadingQuestTasks(conn, evInit(30, evActivity(60011))); err != nil {
+		t.Fatal(err)
+	}
+	var sent []string
+	for _, r := range fake.only("power.up.task.reward") {
+		sent = append(sent, r.Params.GetString("taskId"))
+	}
+	if !slices.Equal(sent, []string{"11"}) {
+		t.Errorf("claimed %q, want only 11", sent)
+	}
+}
+
 func TestLeadingQuestTasksClaimsEachDoneTaskAndStopsOnRefusal(t *testing.T) {
 	withEvNow(t, evTestNow)
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
@@ -306,10 +438,28 @@ func TestHeroTrialStageClaimsTheCurrentStageOnly(t *testing.T) {
 		{"current stage done", stages(2, 2, 1, 0), true},
 		{"an older stage in state 1 is not the current one", stages(3, 1, 2, 0), false},
 		{"current stage claimed", stages(2, 2, 2, 0), false},
+		// GetEventCanRewardCount counts only the stageArr entry whose id is cur_stage
+		// (UIHeroTrial.lua:517-522): no entry matches, so stages in state 1 do not count.
+		{"cur_stage matches no stage", stages(4, 1, 1, 1), false},
 		{"no cur_stage", func() *sfs.SFSObject {
 			r := evInfo()
 			v, _ := stages(1, 1).Get("stageArr")
 			r.PutValue("stageArr", v)
+			return r
+		}(), false},
+		// tonumber(v.id) == nil never holds, so a stage "0" is not the current one without a cur_stage.
+		{"no cur_stage, a stage 0 in state 1", func() *sfs.SFSObject {
+			r := evInfo()
+			r.PutSFSArray("stageArr", evTasks("id", map[string]int32{"0": 1}))
+			return r
+		}(), false},
+		// tonumber(nil) == 0 never holds either, so a stage without an id is not stage 0.
+		{"cur_stage 0, a stage without an id in state 1", func() *sfs.SFSObject {
+			r := evInfo()
+			r.PutInt("cur_stage", 0)
+			a := sfs.NewSFSArray()
+			a.AddSFSObject(obj("state", 1))
+			r.PutSFSArray("stageArr", a)
 			return r
 		}(), false},
 	} {
@@ -505,5 +655,77 @@ func TestThemeNoticeEntryWithoutStateIsClaimed(t *testing.T) {
 	}
 	if !slices.Equal(days, []int32{3}) {
 		t.Errorf("claimed days %v, want only 3 (day 2's entry has no state: claimed, as the client reads it)", days)
+	}
+}
+
+// TestThemeNoticeWindowAndRefusals runs the TestThemeNoticeClaimsBeforeTheStart fixture (day 3 of
+// the notice, day 1 claimed, so days 2 and 3 are due) with one field changed each time:
+//   - the theme already started, or its preTime is still ahead: CheckIfShowEntrance hides the
+//     entrance outside preTime <= now < startTime (ThemeActivityManager.lua:79-81), so nothing is
+//     read or claimed;
+//   - the info read is refused: nothing tells which days are claimed, so nothing is claimed;
+//   - the day 2 claim is refused: an errorCode stops that activity's claims, so day 3 is not sent.
+func TestThemeNoticeWindowAndRefusals(t *testing.T) {
+	withEvNow(t, evTestNow)
+	const id int32 = 777033
+	activityTable[id] = activityRow{typ: 30, needHQ: 10} // EnumActivity.ActivitySummary 30 (EnumType.lua:6319)
+	t.Cleanup(func() { delete(activityTable, id) })
+	theme := func(preAgo, startIn time.Duration) *Init {
+		a := evActivity(id)
+		a.PutLong("preTime", evTestNow.Add(-preAgo).UnixMilli())
+		a.PutLong("startTime", evTestNow.Add(startIn).UnixMilli())
+		a.PutLong("endTime", evTestNow.Add(7*24*time.Hour).UnixMilli())
+		return evInit(10, a)
+	}
+	for _, c := range []struct {
+		name       string
+		in         *Init
+		infoErr    bool
+		refuseDay  int32
+		wantInfo   int
+		wantDays   []int32
+		wantRefuse bool
+	}{
+		{"before the start", theme(50*time.Hour, time.Hour), false, 0, 1, []int32{2, 3}, false},
+		{"started an hour ago", theme(50*time.Hour, -time.Hour), false, 0, 0, nil, false},
+		{"preTime an hour ahead", theme(-time.Hour, 2*time.Hour), false, 0, 0, nil, false},
+		{"info refused", theme(50*time.Hour, time.Hour), true, 0, 1, nil, true},
+		{"day 2 refused", theme(50*time.Hour, time.Hour), false, 2, 1, []int32{2}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				switch cmd {
+				case "get.theme.activity.info":
+					if c.infoErr {
+						return evErr("E030001")
+					}
+					r := evOK()
+					r.PutInt("activityId", p.GetInt("activityId"))
+					arr := sfs.NewSFSArray()
+					arr.AddSFSObject(obj("day", 1, "state", 1))
+					r.PutSFSArray("stageArr", arr)
+					return r
+				case "receive.theme.activity.reward":
+					if p.GetInt("day") == c.refuseDay {
+						return evErr("E030002")
+					}
+				}
+				return evOK()
+			})
+			err := runThemeNotice(conn, c.in)
+			if (err != nil) != c.wantRefuse {
+				t.Errorf("err = %v, want a refusal reported: %v", err, c.wantRefuse)
+			}
+			if n := len(fake.only("get.theme.activity.info")); n != c.wantInfo {
+				t.Errorf("info reads %d, want %d", n, c.wantInfo)
+			}
+			var days []int32
+			for _, r := range fake.only("receive.theme.activity.reward") {
+				days = append(days, r.Params.GetInt("day"))
+			}
+			if !slices.Equal(days, c.wantDays) {
+				t.Errorf("claimed days %v, want %v", days, c.wantDays)
+			}
+		})
 	}
 }

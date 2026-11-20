@@ -59,6 +59,13 @@ func TestTacticalCardsOpenGate(t *testing.T) {
 	if _, why := tacticalCardsOpen(in); why == "" {
 		t.Error("season 4 without seasonStartTime must stay closed (the client's MANY_YEARS_LATER)")
 	}
+	// A seasonStartTime of 0 stays closed too. This is stricter than the client: Lua's 0 is truthy
+	// (SeasonInfoTemplate.lua:661), so GetSeasonDay (SeasonUtil.lua:312-314) would count days from
+	// 1970 and open. Go reads a start at or before the epoch as no start and fails closed.
+	p.PutLong("seasonStartTime", 0)
+	if _, why := tacticalCardsOpen(in); why == "" {
+		t.Error("season 4 with seasonStartTime 0 must stay closed")
+	}
 }
 
 func TestTacticalBoxPointsClaimsWhenTheSeasonScoreReachesAnUnclaimedRow(t *testing.T) {
@@ -237,5 +244,84 @@ func TestTacticalCollectionClaimsAndStopsOnRefusal(t *testing.T) {
 	}
 	if got := fake.cmds(); len(got) != 0 {
 		t.Errorf("no cardCollects sent %v, want nothing", got)
+	}
+}
+
+// TestTacticalCollectionStopsAtTheFirstRefusal: the TestTacticalCollectionClaimsAndStopsOnRefusal
+// fixture with the first claim (50101 stage 0) refused instead of the last. The refusal stops the
+// claims, so 50101 stage 1 and 50301 stage 0 are not sent.
+func TestTacticalCollectionStopsAtTheFirstRefusal(t *testing.T) {
+	withEvNow(t, evTestNow)
+	in := tacticalInit(5, 10*24*time.Hour,
+		tacticalCollect(50101, 1, "0;1|1;0"), // 0 available; 1 needs 5 cards
+		tacticalCollect(50301, 3, "0;0"),     // needs 1 card
+	)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		r := evOK()
+		switch cmd {
+		case "battle.card.collect.list":
+			a := sfs.NewSFSArray()
+			a.AddSFSObject(obj("cardType", 1, "cards", "1;2;3;4;5"))
+			a.AddSFSObject(obj("cardType", 3, "cards", "9"))
+			r.PutSFSArray("collectCards", a)
+		case "battle.card.collect.reward":
+			if p.GetInt("cfgId") == 50101 && p.GetInt("index") == 0 {
+				return evErr("E200002")
+			}
+		}
+		return r
+	})
+	err := runTacticalCollection(conn, in)
+	if err == nil || !strings.Contains(err.Error(), "E200002") {
+		t.Errorf("err = %v, want the refusal reported", err)
+	}
+	if got := fake.only("battle.card.collect.reward"); len(got) != 1 {
+		t.Errorf("claims = %d, want 1 (the refused first claim stops the rest)", len(got))
+	}
+}
+
+// TestTacticalCollectionClosedSendsNothing: the same claimable collection while the system is
+// closed (TacticalCardUtil.IsFunctionOpen, TacticalCardUtil.lua:357-371) sends neither the card
+// book read nor a claim.
+func TestTacticalCollectionClosedSendsNothing(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for name, in := range map[string]*Init{
+		"season 3":       tacticalInit(3, 90*24*time.Hour, tacticalCollect(50101, 1, "0;1")),
+		"season 4 day 1": tacticalInit(4, 23*time.Hour, tacticalCollect(50101, 1, "0;1")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+			if err := runTacticalCollection(conn, in); err != nil {
+				t.Fatal(err)
+			}
+			if got := fake.cmds(); len(got) != 0 {
+				t.Errorf("sent %v while closed, want nothing", got)
+			}
+		})
+	}
+}
+
+// TestTacticalStagesDueSkipsUnreadableEntries: UpdateCardCollections files a collection under
+// cardCollections[cardType] (TacticalCardDataManager.lua:115), which fails without a cardType, and a
+// claim sends the collection's cfgId (UITCCardBookView.lua:226), which an entry without one lacks;
+// it keeps a segment only when "(%d+);(%d+)" matches (:106-113), and a stage past card_num has no
+// needCnt (:125-127). So: no stage of an entry without cfgId or cardType, no malformed segment, no
+// index too big for an int64, and stage 5 of cfg 50101 (card_num has 5 entries) is not reached however
+// many cards are active.
+func TestTacticalStagesDueSkipsUnreadableEntries(t *testing.T) {
+	noCfg := sfs.NewSFSObject()
+	noCfg.PutInt("cardType", 2)
+	noCfg.PutUtfString("rewardStr", "0;1")
+	noType := sfs.NewSFSObject()
+	noType.PutInt("cfgId", 50301)
+	noType.PutUtfString("rewardStr", "0;1")
+	collects := []*sfs.SFSObject{
+		noType, noCfg,
+		tacticalCollect(50101, 1, "junk|5;0|99999999999999999999;1|0;1"),
+	}
+	got := tacticalStagesDue(collects, map[int64]int64{0: 99, 1: 99, 2: 99})
+	want := []tacticalStage{{cfgID: 50101, cardType: 1, index: 0, state: 1}}
+	if !slices.Equal(got, want) {
+		t.Errorf("due = %+v\nwant  %+v", got, want)
 	}
 }
