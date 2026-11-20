@@ -3,7 +3,6 @@ package game
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"lastwar-client/internal/sfs"
 )
@@ -25,107 +24,58 @@ func explorerInit(open bool, items map[string]int) *Init {
 	return in
 }
 
-// explorerReply is an ExplorerTreasureOpenMessage reply: the reward, quality and the guarantee
-// counter (ExplorerTreasureOpenMessage.lua:8-19).
-func explorerReply() *sfs.SFSObject {
-	r := duelObj("quality", 3, "dispatch_explorer_treasure_guarantee", 4)
-	rw := sfs.NewSFSArray()
-	rw.AddSFSObject(duelObj("type", 7, "itemId", 200220, "num", 10))
-	r.PutSFSArray("reward", rw)
-	return r
-}
-
-func runExplorerFake(t *testing.T, in *Init, reply func(n int) *sfs.SFSObject) ([]evReq, []time.Duration, error) {
-	t.Helper()
-	withEvNow(t, evTestNow)
-	var slept []time.Duration
-	saved := explorerTreasureSleep
-	explorerTreasureSleep = func(d time.Duration) { slept = append(slept, d) }
-	t.Cleanup(func() { explorerTreasureSleep = saved })
-	n := 0
-	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
-		if cmd != explorerTreasureCmd {
-			t.Errorf("sent %s; only the chest open is allowed", cmd)
-			return evErr("999999")
-		}
-		if len(p.Keys()) > 1 {
-			t.Errorf("open params %v, want none", p)
-		}
-		n++
-		return reply(n)
-	})
-	err := runExplorerTreasure(conn, in)
-	return fake.requests(), slept, err
-}
-
 func TestExplorerTreasureRegistration(t *testing.T) {
-	for _, name := range []string{explorerTreasureFeature, explorerTreasurePlanFeature} {
-		f, ok := featureRegistry[name]
-		if !ok || f.DefaultOn || f.Hold || len(f.Duel) != 0 || !strings.HasSuffix(f.Summary, "(static-only, not validated live)") {
-			t.Errorf("%s registered as %+v; want opt-in, static-only", name, f)
-		}
+	f, ok := featureRegistry[explorerTreasurePlanFeature]
+	if !ok || f.DefaultOn || f.Hold || len(f.Duel) != 0 || !strings.HasSuffix(f.Summary, "(static-only, not validated live)") {
+		t.Errorf("%s registered as %+v; want opt-in, static-only", explorerTreasurePlanFeature, f)
+	}
+	// MASTER G57 / IMPLEMENT rule 9: opening a chest spends 5 keys (771001), so no feature sends
+	// the open until the user decides.
+	if _, ok := featureRegistry["explorer-treasure"]; ok {
+		t.Error("explorer-treasure is registered; the chest open spends items and waits for the user's decision")
 	}
 }
 
 func TestExplorerTreasurePlanSendsNothing(t *testing.T) {
 	withEvNow(t, evTestNow)
-	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return explorerReply() })
-	if err := runExplorerTreasurePlan(conn, explorerInit(true, map[string]int{"771001": 12})); err != nil {
-		t.Fatal(err)
-	}
-	if got := fake.cmds(); len(got) != 0 {
-		t.Errorf("the plan sent %v, want nothing", got)
-	}
-}
-
-func TestExplorerTreasureOpensOneChestPerFiveKeys(t *testing.T) {
-	// 12 keys: two chests, a second apart; the key box 771002 is only logged.
-	reqs, slept, err := runExplorerFake(t, explorerInit(true, map[string]int{"771001": 12, "771002": 3}),
-		func(int) *sfs.SFSObject { return explorerReply() })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(reqs) != 2 {
-		t.Errorf("sent %d opens, want 2", len(reqs))
-	}
-	if len(slept) != 1 || slept[0] < time.Second {
-		t.Errorf("slept %v, want one pause of at least a second between the opens", slept)
-	}
-}
-
-func TestExplorerTreasureGates(t *testing.T) {
 	for name, in := range map[string]*Init{
-		"activity closed": explorerInit(false, map[string]int{"771001": 50}),
-		"four keys":       explorerInit(true, map[string]int{"771001": 4}),
-		"only key boxes":  explorerInit(true, map[string]int{"771002": 50}),
-		"HQ below 5": func() *Init {
-			i := evInit(4, evActivity(94105)) // activity 94105 needMainCityLevel 5
-			items, _ := explorerInit(true, map[string]int{"771001": 50}).Raw.Get("items")
-			i.Raw.PutValue("items", items)
-			return i
-		}(),
+		"activity open, 500 keys": explorerInit(true, map[string]int{"771001": 500, "771002": 3}),
+		"activity closed":         explorerInit(false, map[string]int{"771001": 50}),
 	} {
-		reqs, _, err := runExplorerFake(t, in, func(int) *sfs.SFSObject { return explorerReply() })
-		if err != nil || len(reqs) != 0 {
-			t.Errorf("%s: sent %d opens (err %v), want none", name, len(reqs), err)
+		conn, fake := startEvFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
+			t.Errorf("%s: the plan sent %s", name, cmd)
+			return evErr("999999")
+		})
+		if err := runExplorerTreasurePlan(conn, in); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := fake.cmds(); len(got) != 0 {
+			t.Errorf("%s: the plan sent %v, want nothing", name, got)
 		}
 	}
 }
 
-func TestExplorerTreasureCapAndStopOnError(t *testing.T) {
-	reqs, _, err := runExplorerFake(t, explorerInit(true, map[string]int{"771001": 500}),
-		func(int) *sfs.SFSObject { return explorerReply() })
-	if err != nil || len(reqs) != explorerTreasureMaxPerRun {
-		t.Errorf("sent %d opens (err %v), want the cap of %d", len(reqs), err, explorerTreasureMaxPerRun)
-	}
-	// No benign codes: the first errorCode stops the run with an error.
-	reqs, _, err = runExplorerFake(t, explorerInit(true, map[string]int{"771001": 15}), func(n int) *sfs.SFSObject {
-		if n == 2 {
-			return evErr("370100")
+func TestExplorerTreasureStateFollowsTheOpenButton(t *testing.T) {
+	// UIExplorerTreasureView.lua:182-198: keys >= explorer_treasure_key k1 (5) and the type-251
+	// activity open; the key box 771002 is only counted.
+	withEvNow(t, evTestNow)
+	hq4 := evInit(4, evActivity(94105)) // activity 94105 needMainCityLevel 5
+	items, _ := explorerInit(true, map[string]int{"771001": 50}).Raw.Get("items")
+	hq4.Raw.PutValue("items", items)
+	for name, c := range map[string]struct {
+		in   *Init
+		want explorerTreasureState
+	}{
+		"12 keys, open":   {explorerInit(true, map[string]int{"771001": 12, "771002": 3}), explorerTreasureState{keys: 12, keyBoxes: 3, chests: 2, open: true}},
+		"500 keys, open":  {explorerInit(true, map[string]int{"771001": 500}), explorerTreasureState{keys: 500, chests: 100, open: true}},
+		"four keys":       {explorerInit(true, map[string]int{"771001": 4}), explorerTreasureState{keys: 4, open: true}},
+		"only key boxes":  {explorerInit(true, map[string]int{"771002": 50}), explorerTreasureState{keyBoxes: 50, open: true}},
+		"activity closed": {explorerInit(false, map[string]int{"771001": 50}), explorerTreasureState{keys: 50}},
+		"HQ below 5":      {hq4, explorerTreasureState{keys: 50}},
+	} {
+		conn, _ := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evErr("999999") })
+		if got := explorerTreasureStateOf(conn, c.in); got != c.want {
+			t.Errorf("%s: state %+v, want %+v", name, got, c.want)
 		}
-		return explorerReply()
-	})
-	if err == nil || !strings.Contains(err.Error(), "370100") || len(reqs) != 2 {
-		t.Errorf("sent %d opens, err %v; want a stop after the 370100 failure on the second", len(reqs), err)
 	}
 }

@@ -362,13 +362,21 @@ func TestDuelRecruitKeepsTicketsForAWishPoolWithNoWishHero(t *testing.T) {
 		pools []*sfs.SFSObject
 		want  []string
 	}{
-		"no wish hero":           {[]*sfs.SFSObject{wish("221708", 2, true, 200, "")}, nil},
-		"wish hero chosen":       {[]*sfs.SFSObject{wish("221708", 2, true, 200, "50006")}, []string{"221708:1"}},
-		"no wish list":           {[]*sfs.SFSObject{wish("221700", 2, true, 200, "")}, []string{"221700:1"}},
-		"pool new in 40413":      {[]*sfs.SFSObject{wish("221709", 2, true, 200, "")}, nil},
-		"pool not in 40413":      {[]*sfs.SFSObject{wish("221799", 2, false, 0, "")}, nil},
-		"wish switched off":      {[]*sfs.SFSObject{wish("221708", 2, false, 200, "")}, []string{"221708:1"}},
-		"no wish pity to aim at": {[]*sfs.SFSObject{wish("221708", 2, true, 0, "")}, []string{"221708:1"}},
+		"no wish hero":      {[]*sfs.SFSObject{wish("221708", 2, true, 200, "")}, nil},
+		"wish hero chosen":  {[]*sfs.SFSObject{wish("221708", 2, true, 200, "50006")}, []string{"221708:1"}},
+		"no wish list":      {[]*sfs.SFSObject{wish("221700", 2, true, 200, "")}, []string{"221700:1"}},
+		"pool new in 40413": {[]*sfs.SFSObject{wish("221709", 2, true, 200, "")}, nil},
+		// MASTER B54: a pool id 40413 lacks (live runs newer tables) with the wish UI off is
+		// pulled as the client pulls it, with no confirmation (IsShowWish, LotteryInfo.lua:468-478).
+		"pool not in 40413":          {[]*sfs.SFSObject{wish("221799", 2, false, 0, "")}, []string{"221799:1"}},
+		"pool not in 40413, no pity": {[]*sfs.SFSObject{wish("221799", 2, true, 0, "")}, []string{"221799:1"}},
+		"pool not in 40413, no type": {[]*sfs.SFSObject{duelWithoutKey(wish("221799", 2, false, 0, ""), "type")}, []string{"221799:1"}},
+		// With the wish UI on, its wish list is unknown: kept (alert1 with no wish hero, Warn with one).
+		"pool not in 40413, wish UI, no wish hero": {[]*sfs.SFSObject{wish("221799", 2, true, 200, "")}, nil},
+		"pool not in 40413, wish UI, wish hero":    {[]*sfs.SFSObject{wish("221799", 2, true, 200, "50006")}, nil},
+		"pool not in 40413, wish UI, later tab":    {[]*sfs.SFSObject{wish("221799", 5, true, 200, "50006"), duelPool("221700", 2, "230006;1|230006;10")}, nil},
+		"wish switched off":                        {[]*sfs.SFSObject{wish("221708", 2, false, 200, "")}, []string{"221708:1"}},
+		"no wish pity to aim at":                   {[]*sfs.SFSObject{wish("221708", 2, true, 0, "")}, []string{"221708:1"}},
 		// The ticket is kept, not spent on a later tab the player didn't pick.
 		"later tab, same ticket": {[]*sfs.SFSObject{wish("221708", 5, true, 200, ""), duelPool("221700", 2, "230006;1|230006;10")}, nil},
 	} {
@@ -452,6 +460,13 @@ func TestDuelRecruitKeepsTicketsWhereTheClientAsksASecondWishConfirmation(t *tes
 		duelUserHeroes(in, heroes...)
 		return duelRecruitOwnedHeroes(in)
 	}
+	// notIn40413 is duelWishPool under an id officer_recruit 40413 lacks, with the wish UI on or off.
+	notIn40413 := func(hero string, on bool) *sfs.SFSObject {
+		p := duelWishPool(hero)
+		p.PutUtfString("id", "221799")
+		p.PutBool("wishSwitch", on)
+		return p
+	}
 	for _, c := range []struct {
 		pool   *sfs.SFSObject
 		heroes duelRecruitHeroes
@@ -463,6 +478,10 @@ func TestDuelRecruitKeepsTicketsWhereTheClientAsksASecondWishConfirmation(t *tes
 		{duelWishPool("50006"), owned([3]int{50006, 26, -1}), duelRecruitWishAlert5Assumed},
 		{duelWishPool("50006"), owned([3]int{50006, 26, 600}), ""},
 		{duelWishPool("not-a-hero"), owned(), duelRecruitWishUnknown},
+		{notIn40413("", true), owned(), duelRecruitWishAlert1},
+		{notIn40413("50006", true), owned([3]int{50006, 26, 600}), duelRecruitWishUnknown},
+		{notIn40413("", false), owned(), ""},
+		{notIn40413("50006", false), owned([3]int{50006, 26, 600}, [3]int{50008, 25, 600}), ""},
 	} {
 		if got := duelRecruitWishAsk(c.pool, c.heroes); got != c.want {
 			t.Errorf("wishHero %q: ask %q, want %q", c.pool.GetString("wishHero"), got, c.want)
@@ -484,15 +503,16 @@ func TestDuelRecruitPoolFieldsFallBackToTheTable(t *testing.T) {
 	if got := pullsOf(t, f); !slices.Equal(got, []string{"221700:1"}) {
 		t.Errorf("pulls %v, want the ten pull on 221700 only", got)
 	}
-	// An unknown pool on an earlier tab keeps its ticket rather than passing it to a later tab.
+	// A pool 40413 lacks, with no wish fields, on an earlier tab is the ticket's tab: it is pulled
+	// as the client pulls it, and the ticket never reaches the later tab.
 	unknown := duelPool("221799", 9, "230006;1|230006;10")
 	in = duelRecruitInit(1000, map[string]int{"230006": 10}, unknown, duelPool("221700", 2, "230006;1|230006;10"))
 	conn, f = startDuelSpendFake(t, duelTestDay(DuelThemeHeroes, duelTestHeroes), duelRecruitServer(1000, 0))
 	if err := runDuelRecruitTickets(conn, in); err != nil {
 		t.Fatal(err)
 	}
-	if got := pullsOf(t, f); len(got) != 0 {
-		t.Errorf("pulls %v, want none: the unknown pool 221799 is the ticket's tab", got)
+	if got := pullsOf(t, f); !slices.Equal(got, []string{"221799:1"}) {
+		t.Errorf("pulls %v, want the ten pull on 221799 (the ticket's tab) only", got)
 	}
 }
 

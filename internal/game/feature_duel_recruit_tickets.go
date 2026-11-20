@@ -34,8 +34,10 @@ import (
 // whose single cost (item "itemId;num|itemId;num", LotteryInfo.lua:152-162) is that ticket is the
 // one pulled. That is the pool the recruit view sends for its current tab. Its ticket is kept,
 // never spent on a later tab, when the recruit view would ask a wish confirmation before the pull
-// (duelRecruitWishAsk: herorecruit_alert1, alert2 or alert5) or the pool is not in officer_recruit
-// (a pool newer than the tables, whose wish list is unknown).
+// (duelRecruitWishAsk: herorecruit_alert1, alert2 or alert5), or when the pool is not in
+// officer_recruit (a pool newer than the tables) and shows the wish UI, so its wish list is unknown.
+// With the wish UI off (wishSwitch off or wishPityReceiveNum <= 0, IsShowWish, LotteryInfo.lua:
+// 468-478) the client pulls without asking whatever the list holds, and so does this.
 //
 // A single pull is `lottery.hero.card {id, isTen: 0, useFree: 0, aiPushStatus, itemId}`. The
 // client sends it only when the held count >= the single cost (UIHeroRecruitView.lua:963-975). A
@@ -96,7 +98,7 @@ type duelRecruitPool struct {
 	ten     duelRecruitCost // num 0 when the pool has no ten pull
 	freeDue bool            // the free pull is due now, or its timer is unknown
 	ask     string          // the wish confirmation the recruit view would show (duelRecruitWishAsk)
-	unknown bool            // the pool id is not in officer_recruit
+	unknown bool            // the pool id is not in officer_recruit (only logged: ask decides)
 }
 
 // duelRecruitWishShown is IsShowWish without its duration-type start test (Go drops pools that
@@ -448,16 +450,10 @@ func (r *duelRecruitRun) heroes(pools []duelRecruitPool) []error {
 			continue
 		}
 		done[ticket] = true
-		// In both cases the ticket stays unspent rather than going to a later tab the player
-		// didn't pick.
+		// The ticket stays unspent rather than going to a later tab the player didn't pick.
 		// Holds this client decides without the client's answer (a pool or hero the tables
-		// lack, honor levels init lacks) are Warn: they keep tickets the client might pull, until
-		// the tables are regenerated or init carries the field.
-		if pool.unknown {
-			slog.Warn("duel-recruit-tickets: the pool is not in officer_recruit (tables 40413), so its wish list is unknown; tickets kept",
-				"pool", pool.id, "ticket", ticket, "held", r.g.items[ticket])
-			continue
-		}
+		// lack with the wish UI shown, honor levels init lacks) are Warn: they keep tickets the
+		// client might pull, until the tables are regenerated or init carries the field.
 		if pool.ask != "" {
 			log := slog.Info
 			if pool.ask == duelRecruitWishUnknown || pool.ask == duelRecruitWishAlert5Assumed {
@@ -466,6 +462,10 @@ func (r *duelRecruitRun) heroes(pools []duelRecruitPool) []error {
 			log("duel-recruit-tickets: the recruit view would ask a wish confirmation before pulling this pool; tickets kept",
 				"pool", pool.id, "confirmation", pool.ask, "ticket", ticket, "held", r.g.items[ticket])
 			continue
+		}
+		if pool.unknown {
+			slog.Info("duel-recruit-tickets: the pool is not in officer_recruit (tables 40413); its wish UI is off, so it is pulled as the client pulls it",
+				"pool", pool.id, "ticket", ticket)
 		}
 		recruited := int64(0)
 		for r.canPull() {
