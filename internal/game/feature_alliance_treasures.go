@@ -35,7 +35,8 @@ import (
 // the way fireworks reads HQ tiles:
 //
 //  1. al.rank, then world.get.block for every block within atBlockRadius blocks of a member HQ
-//     (allianceTileScan). The server places a radar task near its owner's HQ when it is put on the
+//     (this run's sharedAllianceTileScan, which fireworks reads too). The server places a radar
+//     task near its owner's HQ when it is put on the
 //     map (detect.event.put.point.in.world; en radar_tips_18 "not enough free space to place this
 //     radar task. Please move to a location with more available space"). The radius is a guess:
 //     the plan logs each treasure's distance from its owner's HQ to tune it.
@@ -52,8 +53,12 @@ import (
 //     A-CS:177945-177956; the client opens the dig window instead before that, UIUtil.lua:1870-1912);
 //   - now < expireTime, when set (the "Despawns in" countdown, A-CS:186837-186869);
 //   - the point's allianceId is the player's alliance (WorldTreasureObject.CheckInteractAuthority,
-//     A-CS:186605-186628). Its other branch, a point shared to the whole server after
-//     detect_event.share_para seconds, never applies to type 19, whose share_para is empty;
+//     CS:187576-187597). Its other branch, a point shared to the whole server once
+//     createTime + detect_event.share_para seconds have passed (CS:187333-187339, 187800-187803),
+//     never applies to type 19, whose share_para is empty, but does to some type-23 and type-38
+//     events (40413: 21600 or 43200 s). Go leaves those shared treasures of other alliances alone:
+//     claiming one puts the player in another alliance's claimer list, which waits for the user's
+//     ruling (MASTER G40, section 6.1 #12), and share_para is not generated yet;
 //   - the player is not in its rewardUserList, and fewer than cap * max(multiple, 1) players are
 //     (IsHaveGetReward, IsReceiveAllReward; A-CS:177905-177943), cap being para2's second field
 //     (radarTreasureCaps). IsHaveGetReward's other test, CheckTreasureReachDailyLimit, looks the
@@ -78,7 +83,10 @@ import (
 // the run.
 //
 // Not done: digging or helping to dig (a march), the dig window, the chat card, and treasures of
-// other kinds (siege, sandworm, flower train, ...), which have their own rules.
+// other kinds (sandworm, flower train, ...), which have their own rules. The alliance boxes of
+// types 2, 5 and 8 (siege, invasion, alliance-boss sandbox; MASTER G41) are left unclaimed
+// pending the user's ruling: a claim takes one of the box's shared slots and puts the uid in
+// rewardUserList, and alliance mates see the slot count drop (CS:186599-186602, 119184-119187).
 
 const (
 	allianceTreasureClaimCmd = "detect.event.claim.treasure"
@@ -240,7 +248,7 @@ func atPointTypes(m map[int32]int) string {
 // reviewTreasures logs every treasure point with its verdict and returns the claimable ones, the
 // one that despawns first first.
 func (sc *fwScan) reviewTreasures(answered map[int64]bool) []atTreasure {
-	slog.Info(sc.name+": treasure points", "treasurePointsPresent", len(sc.treasures) > 0, "treasurePoints", len(sc.treasures),
+	slog.Info("alliance-treasures: treasure points", "treasurePointsPresent", len(sc.treasures) > 0, "treasurePoints", len(sc.treasures),
 		"pointTypes", atPointTypes(sc.pointTypes["points"]), "alInfoTypes", atPointTypes(sc.pointTypes["alInfos"]))
 	var picks []atTreasure
 	for _, pt := range sc.treasures {
@@ -257,7 +265,7 @@ func (sc *fwScan) reviewTreasures(answered map[int64]bool) []atTreasure {
 		if t.ExpireTime > 0 {
 			expiresIn = int64(evUnix(t.ExpireTime).Sub(sc.now).Minutes())
 		}
-		slog.Info(sc.name+": treasure", "uuid", a.uuid, "owner", sc.ref(t.OwnerUID), "ownerRank", owner.Rank,
+		slog.Info("alliance-treasures: treasure", "uuid", a.uuid, "owner", sc.ref(t.OwnerUID), "ownerRank", owner.Rank,
 			"sameAlliance", t.AllianceID != "" && t.AllianceID == sc.allianceID, "eventId", t.EventID,
 			"treasureType", t.Type, "kind", atTreasureTypes[t.Type], "pointType", pt.PointType, "claimed", t.Claimers(),
 			"maxClaims", a.maxClaim, "multiple", t.Multiple, "complete", t.Complete, "expiresInMin", expiresIn,
@@ -274,12 +282,12 @@ func (sc *fwScan) reviewTreasures(answered map[int64]bool) []atTreasure {
 		}
 		return cmp.Or(cmp.Compare(ea, eb), cmp.Compare(a.uuid, b.uuid))
 	})
-	slog.Info(sc.name+": treasures", "found", len(sc.treasures), "eligible", len(picks))
+	slog.Info("alliance-treasures: treasures", "found", len(sc.treasures), "eligible", len(picks))
 	return picks
 }
 
 func runAllianceTreasuresPlan(conn *session.GameConn, in *Init) error {
-	sc, err := allianceTileScan(conn, in, "alliance-treasures", atBlockRadius)
+	sc, err := sharedAllianceTileScan(conn, in, "alliance-treasures-plan")
 	if sc != nil {
 		sc.reviewTreasures(nil)
 	}
@@ -287,7 +295,7 @@ func runAllianceTreasuresPlan(conn *session.GameConn, in *Init) error {
 }
 
 func runAllianceTreasures(conn *session.GameConn, in *Init) error {
-	sc, err := allianceTileScan(conn, in, "alliance-treasures", atBlockRadius)
+	sc, err := sharedAllianceTileScan(conn, in, "alliance-treasures")
 	if sc == nil || session.ContainsNonTimeoutNetError(err) {
 		return err
 	}

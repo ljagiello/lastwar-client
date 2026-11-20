@@ -13,17 +13,22 @@ import (
 // wire type:
 //
 //	WorldPointInfo { 1 id:int32 (tile index), 2 pointType:int32, 3 buildInfo:BuildInfo,
-//	                 11 treasurePointInfo:TreasurePointInfo, 100 uuid:int64, 102 serverId:int32 } (proto:429-460)
+//	                 11 treasurePointInfo:TreasurePointInfo, 100 uuid:int64, 102 serverId:int32,
+//	                 103 srcServerId:int32 } (proto:429-460; 1.0.370 CS:644493)
 //	BuildInfo      { 1 ownerUid:string, 2 uuid:int64, 3 buildId:int32, 7 allianceId:string,
-//	                 53 fireworks: repeated FireWorksInfo, 54 fireWorksGiftList: repeated FireWorksGift } (proto:3-60)
+//	                 32 status: repeated Status,
+//	                 53 fireworks: repeated FireWorksInfo, 54 fireWorksGiftList: repeated FireWorksGift } (proto:3-60;
+//	                 1.0.370 CS:624309-624541)
+//	Status         { 1 id:int32, 2 beginTime:int64, 3 expireTime:int64 (ms), 4 layer:int32,
+//	                 5 extraParam:string }                                     (1.0.370 CS:629512-629526)
 //	FireWorksGift  { 1 uuid:int64, 2 configId:int32, 3 num:int32, 4 max:int32, 5 sendTime:int64 (ms),
 //	                 6 sendUid:string, 10 index:int32 }                                      (proto:707-715)
 //	TreasurePointInfo { 1 uuid:int64, 2 ownerUid:string, 3 eventId:string, 4 completionTime:int64 (ms),
 //	                 5 allianceId:string, 7 rewardUserList: repeated string, 10 complete:bool,
 //	                 13 expireTime:int64 (ms), 14 type:int32, 15 createTime:int64, 18 multiple:int32 } (proto:603-624)
 //
-// Field 54 is tag 434 (bytes B2 03), field 53 tag 426 (AA 03). Malformed input returns an error,
-// never a panic: the bytes come from the network.
+// Field 54 is tag 434 (bytes B2 03), field 53 tag 426 (AA 03), field 32 tag 258 (82 02). Malformed
+// input returns an error, never a panic: the bytes come from the network.
 
 const (
 	pbVarint  = 0
@@ -121,13 +126,16 @@ func pbWant(field uint64, got, want int) error {
 // worldPoint is the part of a WorldPointInfo the alliance tile scan reads. Build is nil for a point
 // without buildInfo (resources, monsters, ...), and Treasure for one without treasurePointInfo.
 // UUID is the point's own uuid, the client's PointInfo.uuid (Assembly-CSharp.decompiled.cs:175644).
+// SrcServerID is the owner's home server, which the event base bubbles compare with ServerID
+// (CityDomeProtectEffectManager.lua:1148-1152).
 type worldPoint struct {
-	ID        int32
-	PointType int32
-	UUID      int64
-	ServerID  int32
-	Build     *worldBuild
-	Treasure  *worldTreasure
+	ID          int32
+	PointType   int32
+	UUID        int64
+	ServerID    int32
+	SrcServerID int32
+	Build       *worldBuild
+	Treasure    *worldTreasure
 }
 
 // worldTreasure is the part of a TreasurePointInfo a treasure claim needs. claimers
@@ -157,7 +165,8 @@ func (t *worldTreasure) ClaimedBy(uid string) bool {
 }
 
 // worldBuild is the part of a BuildInfo the fireworks scan reads. Shows counts field 53 (the
-// firework shows playing over the base); Gifts is field 54.
+// firework shows playing over the base); Gifts is field 54; Statuses is field 32, the statuses on
+// the building, among them the event reward bubbles (base-bubbles).
 type worldBuild struct {
 	OwnerUID   string
 	UUID       int64
@@ -165,6 +174,15 @@ type worldBuild struct {
 	AllianceID string
 	Shows      int
 	Gifts      []fireworkGift
+	Statuses   []worldStatus
+}
+
+// worldStatus is one BuildInfo Status: a lw_status id and its window (ms).
+type worldStatus struct {
+	ID         int32
+	BeginTime  int64
+	ExpireTime int64
+	Layer      int32
 }
 
 // fireworkGift is one FireWorksGift: a claimable firework chest on the building.
@@ -187,7 +205,7 @@ func decodeWorldPoint(b []byte) (worldPoint, error) {
 			return p, err
 		}
 		switch field {
-		case 1, 2, 100, 102:
+		case 1, 2, 100, 102, 103:
 			if err := pbWant(field, wire, pbVarint); err != nil {
 				return p, err
 			}
@@ -202,8 +220,10 @@ func decodeWorldPoint(b []byte) (worldPoint, error) {
 				p.PointType = int32(v)
 			case 100:
 				p.UUID = int64(v)
-			default:
+			case 102:
 				p.ServerID = int32(v)
+			default:
+				p.SrcServerID = int32(v)
 			}
 		case 3, 11:
 			if err := pbWant(field, wire, pbBytes); err != nil {
@@ -246,7 +266,7 @@ func decodeBuildInfo(b []byte, bi *worldBuild) error {
 			return err
 		}
 		switch field {
-		case 1, 7, 53, 54:
+		case 1, 7, 32, 53, 54:
 			if err := pbWant(field, wire, pbBytes); err != nil {
 				return err
 			}
@@ -259,6 +279,12 @@ func decodeBuildInfo(b []byte, bi *worldBuild) error {
 				bi.OwnerUID = string(v)
 			case 7:
 				bi.AllianceID = string(v)
+			case 32:
+				s, err := decodeStatus(v)
+				if err != nil {
+					return fmt.Errorf("status: %w", err)
+				}
+				bi.Statuses = append(bi.Statuses, s)
 			case 53:
 				bi.Shows++
 			case 54:
@@ -349,6 +375,43 @@ func decodeTreasure(b []byte, t *worldTreasure) error {
 		}
 	}
 	return nil
+}
+
+// decodeStatus reads one BuildInfo Status; extraParam (5) is skipped.
+func decodeStatus(b []byte) (worldStatus, error) {
+	var s worldStatus
+	r := &pbReader{b: b}
+	for r.more() {
+		field, wire, err := r.tag()
+		if err != nil {
+			return s, err
+		}
+		switch field {
+		case 1, 2, 3, 4:
+			if err := pbWant(field, wire, pbVarint); err != nil {
+				return s, err
+			}
+			v, err := r.varint()
+			if err != nil {
+				return s, err
+			}
+			switch field {
+			case 1:
+				s.ID = int32(v)
+			case 2:
+				s.BeginTime = int64(v)
+			case 3:
+				s.ExpireTime = int64(v)
+			default:
+				s.Layer = int32(v)
+			}
+		default:
+			if err := r.skip(wire); err != nil {
+				return s, err
+			}
+		}
+	}
+	return s, nil
 }
 
 func decodeFireworkGift(b []byte) (fireworkGift, error) {
