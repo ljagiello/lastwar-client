@@ -302,3 +302,57 @@ func TestAllianceTreasuresChatCapsLookups(t *testing.T) {
 		t.Errorf("asked about %d cards, want 20", n)
 	}
 }
+
+// TestAllianceTreasuresChatMatchesThePointUUID: the card names the treasure by the uuid the world
+// tap sends (PointInfo.uuid: WorldPointInfo.uuid, else TreasurePointInfo.uuid; UIUtil.lua:4271-4273),
+// and the claim sends that uuid. A treasure known only by its inner uuid is logged, not claimed.
+func TestAllianceTreasuresChatMatchesThePointUUID(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withRPChat(t, &chat.Result{Granted: true, Posts: []chat.Post{
+		atCard(1, 2*time.Minute, `{"uuid":7202,"targetServer":783}`),
+		atCard(2, time.Minute, `{"uuid":7203,"targetServer":783}`),
+	}}, nil)
+	logs := captureFwLogs(t)
+	byPoint := atWith(atFarDug(7202, 612350), func(f *atFix) { f.uuid = 7201 })
+	byInner := atWith(atFarDug(7204, 612360), func(f *atFix) { f.uuid = 7203 })
+	conn, fake := startFuTreasures(t, []fuTile{fuTreasureTile(byPoint), fuTreasureTile(byInner)},
+		map[int64]*sfs.SFSObject{7202: atInfo(612350, 783, 17), 7203: atInfo(612360, 783, 17)}, nil)
+	if err := runAllianceTreasuresChat(conn, fuChatInit()); err != nil {
+		t.Fatal(err)
+	}
+	claims := fake.only("detect.event.claim.treasure")
+	if len(claims) != 1 || claims[0].Params.GetLong("uuid") != 7202 {
+		t.Fatalf("claims %d, want one, of the point uuid 7202", len(claims))
+	}
+	if out := logs.String(); !strings.Contains(out, "treasure not on its tile\" uuid=7203 pointId=612360 treasureAtPoint=true innerUuidMatches=true") {
+		t.Errorf("the miss of 7203 is not logged with its point:\n%s", out)
+	}
+}
+
+// TestAllianceTreasuresChatStopsOnADeadConnection: a dead game socket during the lookups ends the
+// feature; no block read or claim is tried on it.
+func TestAllianceTreasuresChatStopsOnADeadConnection(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withRPChat(t, &chat.Result{Granted: true, Posts: []chat.Post{
+		atCard(1, time.Minute, `{"uuid":7101,"targetServer":783}`), // asked about first, located
+		atCard(2, 2*time.Minute, `{"uuid":7102,"targetServer":783}`),
+	}}, nil)
+	logs := captureFwLogs(t)
+	withFwPace(t)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if p.GetLong("uuid") == 7102 {
+			return nil // the server closes the connection
+		}
+		return atInfo(612350, 783, 17)
+	})
+	err := runAllianceTreasuresChat(conn, fuChatInit())
+	if !session.ContainsNonTimeoutNetError(err) {
+		t.Fatalf("err %v, want the dead connection", err)
+	}
+	if got := fake.cmds(); !slices.Equal(got, []string{"detect.event.get.treasure.claim.info", "detect.event.get.treasure.claim.info"}) {
+		t.Errorf("sent %v", got)
+	}
+	if out := logs.String(); strings.Contains(out, "world blocks") || strings.Contains(out, "treasure claim") {
+		t.Errorf("tried the block read or a claim on a dead connection:\n%s", out)
+	}
+}

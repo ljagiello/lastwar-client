@@ -170,7 +170,7 @@ func runFireworksChat(conn *session.GameConn, in *Init) error {
 		if rerr != nil {
 			errs = append(errs, rerr)
 			if session.ContainsNonTimeoutNetError(rerr) {
-				break
+				return errors.Join(errs...) // the game connection is gone
 			}
 			continue
 		}

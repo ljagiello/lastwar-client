@@ -184,7 +184,7 @@ func runAllianceTreasuresChat(conn *session.GameConn, in *Init) error {
 		if rerr != nil {
 			errs = append(errs, rerr)
 			if session.ContainsNonTimeoutNetError(rerr) {
-				break
+				return errors.Join(errs...) // the game connection is gone
 			}
 			continue
 		}
@@ -221,9 +221,15 @@ func runAllianceTreasuresChat(conn *session.GameConn, in *Init) error {
 	}
 	var picks []atTreasure
 	for _, t := range targets {
+		// The world tap sends the point's PointInfo.uuid to both the claim-info and the claim
+		// (UIUtil.lua:4271-4273), and the card's uuid to the same claim-info, so the card names
+		// the point by sc.treasure's uuid.
 		i := slices.IndexFunc(sc.treasures, func(pt worldPoint) bool { return sc.treasure(pt).uuid == t.card.t.UUID })
 		if i < 0 {
-			slog.Info(allianceTreasuresChatFeature+": treasure not on its tile", "uuid", t.card.t.UUID, "pointId", t.point)
+			atPoint := slices.IndexFunc(sc.treasures, func(pt worldPoint) bool { return int64(pt.ID) == t.point })
+			slog.Info(allianceTreasuresChatFeature+": treasure not on its tile", "uuid", t.card.t.UUID, "pointId", t.point,
+				"treasureAtPoint", atPoint >= 0,
+				"innerUuidMatches", atPoint >= 0 && sc.treasures[atPoint].Treasure.UUID == t.card.t.UUID)
 			continue
 		}
 		a := sc.treasure(sc.treasures[i])
