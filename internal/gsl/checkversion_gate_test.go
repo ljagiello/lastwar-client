@@ -46,6 +46,27 @@ func TestGrayPercent(t *testing.T) {
 	}
 }
 
+// TestCheckVersionHostListsAreTheClients pins the two built-in lists as literals:
+// ConstURLConfig.onlineCheckVersionHostList and online_ea_CheckVersionHostList
+// (Assembly-CSharp.decompiled.cs:13831-13833, 1.0.370).
+func TestCheckVersionHostListsAreTheClients(t *testing.T) {
+	online := []string{
+		"https://lastwar-serverlist-cf.lastwarapp.net",
+		"https://lastwar-serverlist-us-aws-ali.lastwargame.com",
+		"https://lastwar-serverlist-us-gcp-ali.lastwargame.com",
+	}
+	ea := []string{
+		"https://lastwar-serverlist-ea-us-aws.lastwargame.com",
+		"https://lastwar-serverlist-ea-us-gcp.lastwargame.com",
+	}
+	if !slices.Equal(onlineCheckVersionHosts, online) || !slices.Equal(CheckVersionHosts, online) {
+		t.Errorf("online check-version hosts = %v (CheckVersionHosts %v), want %v", onlineCheckVersionHosts, CheckVersionHosts, online)
+	}
+	if !slices.Equal(onlineEACheckVersionHosts, ea) || !slices.Equal(EACheckVersionHosts, ea) {
+		t.Errorf("early-access check-version hosts = %v (EACheckVersionHosts %v), want %v", onlineEACheckVersionHosts, EACheckVersionHosts, ea)
+	}
+}
+
 // TestCheckVersionHostsFor covers NetworkURLConfig.GetHostListByCurGroupType
 // (Assembly-CSharp.decompiled.cs:14131-14141): a device in the 1-5 bucket asks the early-access
 // hosts, any other the online list, and a replaced CheckVersionHosts is always kept.

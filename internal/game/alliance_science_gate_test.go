@@ -500,6 +500,63 @@ func TestDonationChargeReadRefusedAtTheReset(t *testing.T) {
 	}
 }
 
+// TestDonationReReadRefusedAfterATimeout: the core's donation times out, so alliance-donate-all
+// reads the charges again first; a reset refusal (120836) of that re-read ends the run's donations
+// before another al.science.donate, although the first read still says charges are left.
+func TestDonationReReadRefusedAfterATimeout(t *testing.T) {
+	const id = 10011900
+	synctest.Test(t, func(t *testing.T) {
+		client, server := session.NewPipeGameConnPair(t)
+		srv := &scriptedServer{}
+		go func() {
+			reads, donates := 0, 0
+			for {
+				msg, err := session.ReadNextExtension(server)
+				if err != nil {
+					return
+				}
+				srv.mu.Lock()
+				srv.reqs = append(srv.reqs, msg)
+				srv.mu.Unlock()
+				out := obj()
+				switch msg.Cmd {
+				case "science.data.refresh":
+					out = allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", int64(8000000), "level", 3))
+				case "al.science.refreshNum":
+					reads++
+					out = obj("scienceId", id, "useNum", 5, "maxNum", 30)
+					if reads > 1 {
+						out = obj("errorCode", "120836")
+					}
+				case "al.science.donate":
+					donates++
+					if donates == 1 {
+						continue // the core's donation gets no reply: a timeout
+					}
+					out = obj("scienceId", id, "useNum", 3, "maxNum", 30)
+				}
+				if v, ok := msg.Params.Get("_id"); ok {
+					out.PutValue("_id", v)
+				}
+				if err := server.SendExtension(msg.Cmd, out); err != nil {
+					return
+				}
+			}
+		}()
+		in := inAllianceInit()
+		if err := donateRecommendedAllianceTech(client, in); err == nil {
+			t.Error("core donation error = nil, want the timeout")
+		}
+		if err := donateAllAllianceTech(client, in); err != nil {
+			t.Errorf("donateAllAllianceTech() = %v, want nil (the refusal is no run error)", err)
+		}
+		want := []string{"science.data.refresh", "al.science.refreshNum", "al.science.donate", "al.science.refreshNum"}
+		if got := srv.cmds(); !slices.Equal(got, want) {
+			t.Errorf("requests = %v, want %v", got, want)
+		}
+	})
+}
+
 // donateStep is the fake server's answer to one al.science.donate: pushes sent before the reply,
 // then the reply.
 type donateStep struct {

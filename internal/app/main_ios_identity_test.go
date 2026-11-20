@@ -257,3 +257,45 @@ func TestSaveShumeiID(t *testing.T) {
 		})
 	}
 }
+
+// TestMainReplaysTheConfigDevice: Run takes the captured device from the session config file to the
+// iOS Login: the capture's phone_model, and its ta replayed (the captured lw_game_session_id kept).
+// Without this wiring the Login would carry the GoClient placeholder and the built ta.
+func TestMainReplaysTheConfigDevice(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		addr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+			env, err := server.ReadEnvelope()
+			if err != nil {
+				return
+			}
+			if pv, ok := env.Content.Get("p"); ok {
+				if p, ok := pv.Val.(*sfs.SFSObject); ok {
+					fmt.Fprintf(os.Stderr, "login phone_model=%q ta=%s\n", p.GetString("phone_model"), p.GetString("ta"))
+				}
+			}
+			resp := sfs.NewSFSObject()
+			resp.PutBool("success", true)
+			if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, resp); err != nil {
+				return
+			}
+			_ = server.SendExtension("init", sfs.NewSFSObject())
+		})
+		host, port := testutil.SplitHostPortInt(t, addr)
+		reply := lookupReply()
+		reply.ServerList[0].IP, reply.ServerList[0].Port = gsl.FlexString(host), testutil.FlexPort(port)
+		testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, reply))
+		os.Args = []string{"lastwar-client", "-config", os.Getenv("LASTWAR_TEST_CFG")}
+		Run()
+		return
+	}
+	cfg := SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev-1_n3d", AccessToken: "at-1", IOSMode: true,
+		AppVersion: "1.0.370", VersionCode: "918", Device: auth.CapturedDevice{PhoneModel: "iPhone99,9", Ta: capturedTa}}
+	path := writeSessionConfig(t, cfg)
+	code, stderr := runRefreshHelper(t, "TestMainReplaysTheConfigDevice", "LASTWAR_TEST_CFG="+path)
+	for _, want := range []string{`login phone_model="iPhone99,9"`, `"lw_game_session_id":"99999999-8888-7777-6666-555555555555"`} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("exit %d; want %s in stderr:\n%s", code, want, stderr)
+		}
+	}
+}

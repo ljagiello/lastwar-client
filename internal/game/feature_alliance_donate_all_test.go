@@ -41,7 +41,7 @@ func TestDonateAllAllianceTech(t *testing.T) {
 		{"donate reply without useNum", true, []int{5, -1}, 1, false},
 		{"refreshNum without useNum", true, []int{-1}, 0, false},
 		{"genuine donate failure", true, []int{3, 2, -3}, 2, true},
-		{"capped at the pool size", true, []int{50}, allianceDonateMaxPerRun, false},
+		{"capped at the pool size", true, []int{50}, 30, false}, // a literal: maxNum was 30 live
 		{"nothing recommended", false, nil, 0, false},
 	}
 	for _, c := range cases {
@@ -102,5 +102,36 @@ func TestDonateAllAllianceTech(t *testing.T) {
 				t.Errorf("requests = %v, want only science.data.refresh", srv.cmds())
 			}
 		})
+	}
+}
+
+// TestDonateAllAllianceTechCountsTheCoreDonation: in a -collect run the core's donation is one of
+// the run's 30 (the live pool size, maxNum 30), so alliance-donate-all sends at most 29 after it.
+func TestDonateAllAllianceTechCountsTheCoreDonation(t *testing.T) {
+	client, server := session.NewPipeGameConnPair(t)
+	srv := serveScripted(server, func(msg *session.ExtensionMessage) (string, *sfs.SFSObject) {
+		switch msg.Cmd {
+		case "science.data.refresh":
+			return "", allianceScienceRefreshResponse(allianceScienceEntry(111, 0), allianceScienceEntry(555, 1))
+		case "al.science.refreshNum", "al.science.donate":
+			return "", obj("maxNum", 50, "useNum", 50, "scienceId", 555)
+		}
+		return "", nil
+	})
+	in := inAllianceInit()
+	if err := donateRecommendedAllianceTech(client, in); err != nil {
+		t.Fatalf("core donation: %v", err)
+	}
+	if n := len(srv.requests("al.science.donate")); n != 1 {
+		t.Fatalf("core sent %d al.science.donate, want 1", n)
+	}
+	if err := donateAllAllianceTech(client, in); err != nil {
+		t.Fatalf("donateAllAllianceTech() = %v", err)
+	}
+	if n := len(srv.requests("al.science.donate")); n != 30 {
+		t.Errorf("the run sent %d al.science.donate, want 30 (1 core + 29)", n)
+	}
+	if n := len(srv.requests("al.science.refreshNum")); n != 1 {
+		t.Errorf("al.science.refreshNum sent %d times, want once per run", n)
 	}
 }

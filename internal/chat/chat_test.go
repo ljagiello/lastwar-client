@@ -194,16 +194,23 @@ func TestReadJoinsTheAllianceRoomReadsHistoryAndKeepsOnlyTargetPosts(t *testing.
 func TestSendRefusesEveryCommandThatWrites(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close(); _ = server.Close() }()
+	// Drain the server end, so a send that got past the allowlist would succeed (net.Pipe writes
+	// block until read) and its bytes would be counted.
+	got := make(chan int, 1)
+	go func() {
+		n, _ := io.Copy(io.Discard, server)
+		got <- int(n)
+	}()
 	r := &reader{ws: &wsConn{conn: client}, id: testIdentity(), opt: testOptions(linksOK, nil)}
 	for _, cmd := range []string{"chat.room", "chat.up", "chat.recv", "chat.read", "chat.recvsync", "user.setInfo",
 		"user.setSwitchFlag", "chat.share.send", "al.msg", "room.leave", "chat.delete", "redPackets.rvd.id"} {
-		if err := r.send(cmd, map[string]any{"x": 1}); err == nil {
-			t.Errorf("send(%s) succeeded; only %v may be sent", cmd, readOnlyCmds)
+		if err := r.send(cmd, map[string]any{"x": 1}); err == nil || !strings.Contains(err.Error(), "refusing") {
+			t.Errorf("send(%s) = %v; want the read-only refusal (only %v may be sent)", cmd, err, readOnlyCmds)
 		}
 	}
-	_ = server.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-	if n, err := server.Read(make([]byte, 1)); n != 0 || err == nil {
-		t.Errorf("a refused send wrote %d bytes", n)
+	_ = client.Close()
+	if n := <-got; n != 0 {
+		t.Errorf("refused sends wrote %d bytes", n)
 	}
 	if len(readOnlyCmds) != 2 || !readOnlyCmds[cmdJoinMulti] || !readOnlyCmds[cmdHistoryRooms] {
 		t.Errorf("readOnlyCmds %v", readOnlyCmds)
