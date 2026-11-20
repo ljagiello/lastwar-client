@@ -950,9 +950,9 @@ func shumeiDeviceFromFlags(ssid, bssid, boot string) (shumei.Device, error) {
 	return d, nil
 }
 
-// registerShumeiDevice is shumei.BoxID, a variable so a test can see the device a run registers:
-// the device data is encrypted to ShuMei's key, so the request doesn't show it.
-var registerShumeiDevice = shumei.BoxID
+// registerShumeiDevice is shumei.Register, a variable so a test can see the device a run
+// registers: the device data is encrypted to ShuMei's key, so the request doesn't show it.
+var registerShumeiDevice = shumei.Register
 
 // mintShumeiBoxID registers this session's phone with ShuMei and returns its box ID and the install
 // values as the registration leaves them. It fills any install value the session config left out
@@ -982,15 +982,17 @@ func mintShumeiBoxID(client shumei.Client, deviceID string, dev shumei.Device, i
 	install, filled := install.Fill(time.Now())
 	changed = changed || filled
 	dev.Install = install
-	boxID, err := registerShumeiDevice(client, deviceID, dev)
+	boxID, next, err := registerShumeiDevice(client, deviceID, dev)
+	// Register is one start of the SDK: it counts the start and the collection (a4, a130, a127)
+	// and caches the cloud config whether or not the upload worked, and records the box ID when
+	// it did, so its install is kept either way (1.0.370 audit B28, B93).
+	changed = changed || next != install
+	install = next
 	if err != nil {
 		slog.Warn("shumei boxId generation failed; continuing with an empty shumeiBoxId (the server accepts it)", "error", err, "deviceIdLen", len(deviceID))
 		boxID = ""
 	} else {
 		slog.Info("generated shumeiBoxId via ShuMei deviceprofile/v4", "shumeiBoxIdLen", len(boxID))
-		var registered bool
-		install, registered = install.Registered(boxID, time.Now())
-		changed = changed || registered
 	}
 	switch {
 	case !changed:

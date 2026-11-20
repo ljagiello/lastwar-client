@@ -457,7 +457,7 @@ func TestRunCrossServerTestOneAndroidInstallTime(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var registered []time.Time
-			registerShumeiDevice = func(client shumei.Client, deviceID string, dev shumei.Device) (string, error) {
+			registerShumeiDevice = func(client shumei.Client, deviceID string, dev shumei.Device) (string, shumei.Install, error) {
 				registered = append(registered, dev.Install.FirstInstallTime)
 				return register(client, deviceID, dev)
 			}
