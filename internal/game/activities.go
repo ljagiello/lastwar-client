@@ -337,8 +337,16 @@ func (s *ActivitySweep) All(types ...int32) []Activity {
 // Forget drops the cached cmd reply for a, so the next Info call fetches it again (after a claim
 // changed it).
 func (s *ActivitySweep) Forget(cmd string, a Activity) {
-	delete(s.replies, cmd+"#"+a.IDString())
+	delete(s.replies, replyKey(cmd, a))
 }
+
+// replyKey is the sweep's cache slot for a's cmd reply: per entry (EntryID), never per activityid.
+// The client sends one detail request per entry (AddOneActivity, ActivityListDataManager.lua:275,
+// 281, 321, 423) and files the reply under the id the request carried (RetEventData,
+// :1125-1129). Two entries that share an activityid send different ids where the id is data.id
+// (BattlePass_new, BargainShop, LuckyShop and every Int request), so a shared slot would hand one
+// entry the other's reply.
+func replyKey(cmd string, a Activity) string { return cmd + "#" + a.EntryID() }
 
 // errEventInfoNoData marks a hero.event.info.get reply that carries `success`: the client drops it
 // without reading anything (ActivityEventInfoGetMessage.lua:23-29: only a reply with no errorCode
@@ -365,9 +373,9 @@ func (s *ActivitySweep) EventInfo(a Activity) (*sfs.SFSObject, error) {
 }
 
 // Info sends a detail request for a once per sweep and caches the reply (or the failure) by cmd
-// and activity id. A dead connection fails every later request without sending.
+// and entry (replyKey). A dead connection fails every later request without sending.
 func (s *ActivitySweep) Info(label, cmd string, a Activity, params *sfs.SFSObject) (*sfs.SFSObject, error) {
-	key := cmd + "#" + a.IDString()
+	key := replyKey(cmd, a)
 	if r, ok := s.replies[key]; ok {
 		return r.obj, r.err
 	}

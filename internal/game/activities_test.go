@@ -557,6 +557,108 @@ func TestEventInfoIDPerType(t *testing.T) {
 	}
 }
 
+// TestSweepCachesPerEntry is B64's cache: entries that share an activityid each send their own
+// detail request and read their own reply. The client sends one request per entry, with data.id
+// for BattlePass_new and BargainShop (ActivityListDataManager.lua:281, 423) and for BattlePass
+// (:275), and RetEventData files a reply under the id it echoes (:1125-1129). Forget drops only
+// that entry's reply.
+func TestSweepCachesPerEntry(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		v, _ := p.Get("activityId")
+		r := sfs.NewSFSObject()
+		switch id := v.Val.(type) {
+		case string:
+			r.PutUtfString("id", id)
+		case int32:
+			r.PutUtfString("id", strconv.Itoa(int(id)))
+		}
+		return r
+	})
+	shared := func(id int32) *sfs.SFSObject {
+		a := evActivity(id)
+		a.PutUtfString("activityid", "990001")
+		return a
+	}
+	s := Activities(conn, evInit(30, shared(5038), shared(1071014), shared(99020), shared(99040), shared(2001), shared(2002)))
+	v2 := s.All(actTypeBattlePassNew, actTypeBargainShop)
+	v1 := s.All(actTypeBattlePass)
+	if len(v2) != 4 || len(v1) != 2 {
+		t.Fatalf("parsed %d event-info and %d battle-pass entries, want 4 and 2", len(v2), len(v1))
+	}
+	v1Info := func(a Activity) (*sfs.SFSObject, error) {
+		p := sfs.NewSFSObject()
+		p.PutInt("activityId", a.ID)
+		return s.Info("battle pass info response", battlePassInfoCmd, a, p)
+	}
+	check := func(round string, fetch func(Activity) (*sfs.SFSObject, error), acts []Activity) {
+		t.Helper()
+		for _, a := range acts {
+			info, err := fetch(a)
+			if err != nil {
+				t.Fatalf("%s: activity %d: %v", round, a.ID, err)
+			}
+			if got := info.GetString("id"); got != a.EntryID() {
+				t.Errorf("%s: activity %d read the reply for %q, want its own", round, a.ID, got)
+			}
+		}
+	}
+	counts := func(round string, info, v1 int) {
+		t.Helper()
+		if got := len(fake.only("hero.event.info.get")); got != info {
+			t.Errorf("%s: %d hero.event.info.get, want %d (sent %v)", round, got, info, fake.cmds())
+		}
+		if got := len(fake.only(battlePassInfoCmd)); got != v1 {
+			t.Errorf("%s: %d %s, want %d (sent %v)", round, got, battlePassInfoCmd, v1, fake.cmds())
+		}
+	}
+	for _, round := range []string{"first", "cached"} {
+		check(round, s.EventInfo, v2)
+		check(round, v1Info, v1)
+		counts(round, 4, 2)
+	}
+
+	s.Forget("hero.event.info.get", v2[1])
+	s.Forget(battlePassInfoCmd, v1[1])
+	check("after Forget", s.EventInfo, v2)
+	check("after Forget", v1Info, v1)
+	counts("after Forget", 5, 3)
+	if reqs := fake.only("hero.event.info.get"); len(reqs) == 5 {
+		if last := reqs[4].Params.GetString("activityId"); last != v2[1].EntryID() {
+			t.Errorf("after Forget: refetched %q, want only %q", last, v2[1].EntryID())
+		}
+	}
+}
+
+// TestBattlePassClaimsEachEntrysTasks: two BattlePass_new entries that share an activityid each
+// claim their own tasks under their own id (B64; the cache used to hand the second entry the
+// first one's reply, so it claimed 5038's task with activityId 1071014).
+func TestBattlePassClaimsEachEntrysTasks(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "hero.event.info.get" {
+			return battlePassInfo(0, 0, nil, nil, map[string]int32{"t" + p.GetString("activityId"): battlePassTaskReady})
+		}
+		return evOK()
+	})
+	shared := func(id int32) *sfs.SFSObject {
+		a := evActivity(id)
+		a.PutUtfString("activityid", "990001")
+		return a
+	}
+	if err := runBattlePass(conn, evInit(30, shared(5038), shared(1071014))); err != nil {
+		t.Fatal(err)
+	}
+	got := map[int32]string{}
+	for _, r := range fake.only(battlePassV2TaskCmd) {
+		got[r.Params.GetInt("activityId")] = r.Params.GetString("taskId")
+	}
+	want := map[int32]string{5038: "t5038", 1071014: "t1071014"}
+	if len(got) != len(want) || got[5038] != want[5038] || got[1071014] != want[1071014] {
+		t.Errorf("bp.task.reward activityId -> taskId = %v, want %v (sent %v)", got, want, fake.cmds())
+	}
+}
+
 // TestEventInfoDropsSuccessReply: the client drops a hero.event.info.get reply that carries
 // success (ActivityEventInfoGetMessage.lua:23-29), so EventInfo returns no data and evBatch does
 // not count it as a failure.
