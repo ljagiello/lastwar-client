@@ -30,7 +30,7 @@ In 1.0.364 the Lua builds the alliance room id deterministically, `alliance_<sou
 
 ## Chat WebSocket transport
 
-Everything in this section is from the 1.0.364 Lua (`ChatNetManager`, `ChatManager2`) and C# (`ChatService`), and is static-analysis-only. Chat starts once per login, after the `init` push has been processed.
+Everything in this section is from the 1.0.364 Lua (`ChatNetManager`, `ChatManager2`) and C# (`ChatService`), re-checked against 1.0.370 (`ChatService.RequestServerList`, `Assembly-CSharp.decompiled.cs:70626-70660`; `WebSocketItem`, 70348-70403), and is static-analysis-only. Chat starts once per login, after the `init` push has been processed.
 
 1. **Discovery.** An HTTPS form POST to the first reachable of three line-specific URLs, starting with the game socket's current line:
 
@@ -48,6 +48,12 @@ Everything in this section is from the 1.0.364 Lua (`ChatNetManager`, `ChatManag
 6. **Frames.** Every outbound command is signed, not just `chat.room`, using the formula above. Replies reuse the request's `cmd` with a `result` object; pushes carry `data`.
 
 Nothing claimable travels on the chat socket. Red packets, gift boxes, and shared rewards are claimed with game-socket commands; the chat socket only delivers the ids those commands need.
+
+### goclient's read-only chat reader
+
+Since 1.0.370 `goclient` has a read-only reader (`internal/chat`, static-analysis-only). It runs the discovery and connect steps above, then waits for `login.success` and sends only two commands: `room.joinMulti` for the alliance room (or, with `room_join_control` on, waits for `push.room.synPermission`) and `history.roomsv2` for that room's newest page. It listens 3 s for room pushes and closes. It never sends `user.setInfo`, `user.setSwitchFlag`, a message, a like or a share, and refuses to write any other command. It keeps only posts 600 (treasure dug up), 611 (red packet), 693 and 695 (firework chests).
+
+Its consumers are `chat-scan` (log only), `red-packets` (post 611, `open.red.packet` on the game socket), `fireworks-chat` (posts 693, 695) and `alliance-treasures-chat` (post 600); one chat read per run serves all four, and none is opened unless one of them runs. Because the chat server keeps one session per uid, that read sends the phone's chat session `another.login`, and the phone's chat doesn't reconnect by itself, the way the run's game login drops the phone's game session.
 
 ## Core Alliance commands
 

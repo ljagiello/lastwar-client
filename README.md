@@ -33,15 +33,19 @@ code 4, see "Running unattended (cron)".
   members, claiming all mail and alliance gifts, donating to the alliance's currently-recommended
   tech, and both once-a-day VIP claims.
 - **Confirmed live (previously an open question):** reconnecting into an *established* real
-  account's live game state, with the code exactly as it ships today, i.e. with the `ta` analytics
-  blob's device/anti-fraud sub-fields (`LwDeviceID`/`LwShumeiID`/`LwAirKey`) sent as the empty
-  placeholders a round-13 security fix put in. This was the dossier's biggest open question (the
-  original reconnect proof used `ta`'s *real* captured sub-fields, and it was unknown whether the
-  placeholders would still be accepted). It's now settled: an unattended cron running this
-  from-scratch Go client reconnected and collected real resources over multiple days (August 2026),
-  and it was re-verified after a live zone-server migration. So the server does **not** require
-  `ta`'s real device sub-fields for reconnect. Still open: the *minimal* required `ta` content
-  hasn't been isolated. An Android from-scratch login is live-confirmed.
+  account's live game state with the `ta` analytics blob's device/anti-fraud sub-fields
+  (`lw_device_id`/`lw_shumei_id`/`lw_airKey`) sent as the empty placeholders a round-13 security
+  fix put in. This was the dossier's biggest open question (the original reconnect proof used
+  `ta`'s *real* captured sub-fields, and it was unknown whether the placeholders would still be
+  accepted). It was settled in August 2026: an unattended cron running this from-scratch Go client
+  reconnected and collected real resources over multiple days, and it was re-verified after a live
+  zone-server migration. So the server did **not** require `ta`'s real device sub-fields for
+  reconnect. Since the 1.0.370 follow-up the iOS `ta` no longer sends those placeholders: it
+  carries the `Login`'s `deviceId` and `airKey` and the session config's `shumeiId`, as the 1.0.370
+  app does, and a session config with a captured `ta` replays that `ta` with its build keys, the
+  `Login`'s zone and those three ids taken from the run (static analysis only; one live
+  config-copy test `Login` is needed before the cron uses it). Still open: the *minimal* required
+  `ta` content hasn't been isolated. An Android from-scratch login is live-confirmed.
   See `docs/live-validation.mdx` for the full methodology.
 - The earlier "reconnect blocked" / "init push never arrives" problems were never protocol-level
   gates, they were a token-identity mismatch (the client claimed Android while replaying an
@@ -59,10 +63,12 @@ code 4, see "Running unattended (cron)".
 
 - **Follows the 1.0.370 client (iOS build 918, Android 1911) and its data tables 40413.** The
   November 2026 audit of that build was fixed in place: login, GSL and transport details, the
-  ShuMei fingerprint, every generated table, and the features' gates. Its fixes and the 58 opt-in
-  features it added are static analysis only and haven't been sent live yet; see
-  [docs/client-1-0-370.mdx](docs/client-1-0-370.mdx) for what changed and what to check on the
-  first runs.
+  ShuMei fingerprint, every generated table, and the features' gates. A follow-up applied the
+  user's decisions on it: the iOS `ta` is filled like the app's, `finished-timers` holds finished
+  upgrades and research for their Alliance Duel day, and a read-only alliance chat reader feeds
+  four chat features. Its fixes and the 66 opt-in features it added are static analysis only and
+  haven't been sent live yet; see [docs/client-1-0-370.mdx](docs/client-1-0-370.mdx) for what
+  changed and what to check on the first runs.
 
 ## Scope
 
@@ -118,9 +124,12 @@ adds a `shumeiInstall` object: the per-install values its ShuMei fingerprint rep
 after each registration (see `docs/shumei.mdx`). Keep that object. Copying a config without
 `shumeiInstall` over it makes the next registration report a different phone, and copying an
 older one sends a stale `boxId`. A recapture with `pcap -session-out` (see "Recovering" below)
-writes a fresh file without it: if the `deviceId` didn't change, copy the old `shumeiInstall`
-into the new file. This matters only for configs without a `shumeiBoxId`: `-cs-shumei-gen` never
-registers when one is set, and a captured config usually has one.
+onto the existing session config keeps `shumeiInstall`, as it keeps every key it doesn't write,
+so there is nothing to copy. Only a capture written to a new path lacks it: if the `deviceId`
+didn't change, copy the old `shumeiInstall` into the new file. If the `deviceId` did change, the
+kept `shumeiInstall` belongs to the old one, and the next registration warns and registers a
+fresh install for the new `deviceId`. This matters only for configs without a `shumeiBoxId`:
+`-cs-shumei-gen` never registers when one is set, and a captured config usually has one.
 
 **The game server address is looked up, not typed in.** `ip` (a `|`-delimited gateway list) and
 `port` are optional. The real client asks GSL `getserverlist.php` for its role's server on every
@@ -179,12 +188,22 @@ go run ./cmd/pcap -in login.pcap -session-out ~/.lastwar_goclient_session.json
 `-session-out` finds the Login the server *accepted* (the real app first races the zone port on
 several gateways with `a=29` probes; those are skipped), writes `zone`/`gameUid`/`deviceId`/
 `shumeiBoxId`/`accessToken`/`iosMode` plus the `appVersion`/`versionCode` the token was issued
-under, and the captured `ip`/`port` as a starting address, with mode 0600, and prints only field
-lengths, never values. From an iOS capture it also records the `Login`'s device fields
-(`phone_model`, `osVersion`, `mt`, `idfv`, `distinct_id`, `fromCountry`, `lang`, `phone_screen`,
-`afuid`, `firebaseId`) under `device`; an iOS reconnect sends them again, `fromCountry`/`lang` in
-the GSL form too. Without them the `Login` keeps the placeholder `GoClient` model and the run warns
-to recapture. Recording the build matters: a token is bound to it, so once the real app updates, a
+under, the `shumeiId` (the last `push.shumei.id` after the accepted `Login`, else the captured
+`ta`'s `lw_shumei_id`), and the captured `ip`/`port` as a starting address, with mode 0600, and
+prints only field lengths, never values. From an iOS capture it also records the `Login`'s device
+fields (`phone_model`, `osVersion`, `mt`, `idfv`, `distinct_id`, `fromCountry`, `lang`,
+`phone_screen`, `afuid`, `firebaseId`) and its `ta` under `device`; an iOS reconnect sends them
+again, `fromCountry`/`lang` in the GSL form too, and replays the captured `ta` byte for byte with
+`#app_version`, `lw_version`, `lw_res_version`, `lw_buildcode`, `lw_zone`, `lw_device_id`,
+`lw_airKey` and `lw_shumei_id` taken from the run. Without the device fields the `Login` keeps the
+placeholder `GoClient` model and the run warns to recapture; a captured device without a `ta`
+(recorded before the 1.0.370 follow-up) warns too. Written onto an existing session config,
+`-session-out` keeps every key it doesn't write (`features`, `duelPolicy`, `shumeiInstall` and any
+other), drops `accessTokenTime` when the token changed and the refresh token when the `deviceId`
+changed, and refuses a file that isn't a JSON object. So a recapture can go straight onto the live
+config, with no hand merge. A run also saves the `shumeiId` a `push.shumei.id` brings into the
+config, for its own `deviceId` only, and the next iOS `Login` sends it as `ta` `lw_shumei_id`, as
+the app does. Recording the build matters: a token is bound to it, so once the real app updates, a
 fresh token only works if the Login claims that same build. A config without these two fields
 keeps claiming the build such configs always had, 1.0.344/786 on iOS or 1.0.364/1892 on Android,
 and the run warns to add them. Fresh binds, `-own-device-session` and runs without a config claim
@@ -213,10 +232,11 @@ this repo or commit it anywhere).
 # Features marked OPT-IN change something visible or a player choice (likes, help requests,
 # free pulls, troop conversion, spending items or tickets) and are never turned on by default.
 # A run goes in three phases, by name within each: claims that free capacity (finished-timers,
-# secret-tasks-claim), then the actions, then the progress claims (daily-quests, arms-race-chests,
-# battle-pass, quests, event-claims and the opt-in claims such as battle-pass-overflow), so those
-# that re-read the server also claim what the run's own actions earned (quests and stage-quests
-# read init, so they claim it on the next run).
+# secret-tasks-claim, and truck-reroll, so truck-deploy sends a truck rerolled to UR), then the
+# actions, then the progress claims (daily-quests, arms-race-chests, battle-pass, quests,
+# event-claims and the opt-in claims such as battle-pass-overflow; duel-gacha-draw after
+# duel-gacha's pity claim), so those that re-read the server also claim what the run's own
+# actions earned (quests and stage-quests read init, so they claim it on the next run).
 # A feature that panics is logged with its stack and counted as failed; the others still run:
 ./lastwar-client -list-features
 ./lastwar-client -run daily-quests
@@ -230,11 +250,12 @@ this repo or commit it anywhere).
 # -run of a held feature on a day that doesn't list its types is refused; -run-anyway runs it.
 ./lastwar-client -run radar-claims -run-anyway
 
-# A duel or dig spend (or supplies-search) that sees the diamond balance fall writes
-# <session config>.tripwire.json. While that file exists every duel spend, the Treasure Hunt
-# pickaxe digs, treasure-digs' brick opens and supplies-search refuse to run, in later runs too
-# (each run warns at startup; a -collect run exits 1). Free dig claims still run. Check the account, then remove the file (for -config, or the default
-# session config) and exit:
+# A duel or dig spend, supplies-search or free-research-finish that sees the diamond balance
+# fall writes <session config>.tripwire.json. While that file exists every duel spend, the
+# Treasure Hunt pickaxe digs, treasure-digs' brick opens, supplies-search and
+# free-research-finish refuse to run, in later runs too (each run warns at startup; a -collect
+# run exits 1). Free dig claims still run. Check the account, then remove the file (for -config,
+# or the default session config) and exit:
 ./lastwar-client -clear-tripwire
 
 # Stay connected and issue ad-hoc test commands without re-authenticating. NOTE: since
@@ -250,7 +271,8 @@ mkfifo /tmp/lw_cmd_pipe
 ./lastwar-client -interactive /tmp/lw_cmd_pipe &
 echo 'building.production.collect {"uuid:l":123}' > /tmp/lw_cmd_pipe
 
-# Override specific config fields for a one-off test (e.g. a different captured token):
+# Override specific config fields for a one-off test (e.g. a different captured token). A typed
+# -cs-at is not saved into its own device's session config, which keeps its own token:
 ./lastwar-client -collect -cs-at <a-different-access-token>
 
 # Brand-new guest account instead (always works, no email or config needed):
@@ -289,19 +311,31 @@ device to the server. Delete those files to start fully fresh.
 
 ### Duel-aware features
 
-These read today's Alliance Duel entry; `-list-features` prints the full set. All are off by default.
-The spending ones send only owned items or tickets, refuse any diamond parameter, and stop for the
-rest of the process if a reply shows the diamond balance falling. See
+These read today's Alliance Duel entry, or sit with the duel features they belong to;
+`-list-features` prints the full set. All are off by default; `finished-timers` is one the
+production config enables. The spending ones send only owned items or tickets, refuse any diamond
+parameter, and stop for the rest of the process if a reply shows the diamond balance falling;
+`duel-gacha-draw` spends only the gacha's own score balance. See
 [docs/alliance-duel.mdx](docs/alliance-duel.mdx) for the wire details.
+
+`finished-timers` and `free-research-finish` hold each completion inside the run rather than
+through `Feature.Duel`, so `-list-features` shows `duel:-` for both and `duelPolicy` doesn't
+apply to them. A held research keeps its Tech Center's queue idle until a day that scores
+research power, up to four days after a Saturday finish, and a held HQ upgrade delays everything
+gated on the HQ level.
 
 | Feature | What it does |
 |---|---|
+| `finished-timers` | Enabled in the production config, not opt-in: collects ended timers for free (finished upgrades, repairs, research and healing queues, camp output). Since 1.0.370 it holds a finished upgrade until a day that scores building power (type 23: Base Expansion, Total Mobilization) and a finished research until one that scores research power (type 6: Age of Science, Total Mobilization). It finishes as before when there is no duel (no alliance, no open duel activity) and, with a Warn, when it can't read the duel. Repairs, healing and camp output are never held |
+| `free-research-finish` | OPT-IN, 1.0.370: `queue.ccd.m.new {qUUID, itemIDs: ""}` on a running research whose remaining time is inside the free research time (init effect 30100, less 30 s). Held like `finished-timers`' research. The same bytes are also the client's diamond instant finish behind its diamond confirm (`UISpeedUpConfirmView.lua:131-135`, `ArmyManager.lua:204-210`), so only the research-queue check and the free-time window keep it free; a diamond drop in the reply stops it and sets the tripwire |
 | `duel-speedups` | Applies owned speed-up items (`build.ccd.m.new`, `queue.ccd.m.new`, `building.camp.accel`, items-only form) to running jobs whose queue today's entry lists under score type 51 |
 | `duel-speedups-plan` | Read-only: logs the speed-up calls `duel-speedups` would send |
 | `duel-recruit-tickets` | Spends held hero or survivor recruit tickets (`lottery.hero.card` / `lottery.worker.card`, `useFree: 0`) on days whose entry lists recruit types 42 / 120. It keeps the tickets of a pool where the recruit window would first ask about the wish hero (no wish hero chosen, or the chosen one owned at max rank or max honor while another wish-list hero isn't) |
 | `duel-troop-training` | Starts `building.camp.training` in idle Military Camps, at the highest unlocked tier and a count the food and iron in `init` cover, on Total Mobilization / Enemy Buster days. On Enemy Buster a batch starts only with a training speed-up item held and a later run left in the day. T11 trains in season 4 from day 64 on |
-| `duel-gacha` / `-plan` | OPT-IN, 1.0.370: reads the duel score gacha (`al.duel.lottery.get.info`) and claims its full pity reward; never draws. The plan only reads |
-| `secret-task-assist-plan` | Read-only, 1.0.370: lists the allies' finished Secret Tasks the client would offer to assist and today's assist count; never assists |
+| `duel-gacha` / `-plan` | OPT-IN, 1.0.370: reads the duel score gacha (`al.duel.lottery.get.info`) and claims its full pity reward; never draws (see `duel-gacha-draw`). The plan only reads |
+| `duel-gacha-draw` | OPT-IN, 1.0.370 (user carve-out): draws the duel score gacha one at a time (`al.duel.lottery.lottery`, `num` 1) while its own score balance pays 10,000,000 a draw, at most 50 a run, 1 s apart, and only on a Sunday (server time) or while an Alliance Duel runs, where the client shows its draw buttons. It doesn't read the init switch `alliance_duel` that gates the client's duel window. Spends only that score, never diamonds or items. Stops on any error code. Runs after `duel-gacha` |
+| `secret-task-assist` | OPT-IN, 1.0.370: assists up to 5 allies' finished Secret Tasks a day from the alliance tab (`hero.dispatch.assist`, free); the helped ally sees it; never steals and never dispatches heroes. Scores no duel row, so it is not held |
+| `secret-task-assist-plan` | Read-only, 1.0.370: logs the allies' finished Secret Tasks `secret-task-assist` would assist and today's assist count; never assists |
 | `explorer-treasure-plan` | Read-only, 1.0.370: logs the held Explorer Treasure keys and key boxes; sends nothing |
 | `radar-rescue-claims` | OPT-IN, 1.0.370, held for type 82: `receive.detect.event.reward` for finished rescue tasks whose rescued soldiers fit the stock |
 | `supplies-search` | OPT-IN, 1.0.370: the one risk-free (level 1) step of a radar or building supplies search, then its reward; radar searches only on radar-scoring duel days, building searches every day |
@@ -320,17 +354,36 @@ All are off by default. Every dig write passes a per-command key allowlist that 
 | `fireworks` | The same scan, then `get.fireworks.gift` for each eligible chest: under 120 minutes old, not full, from a current member; 1 s apart; stops at the daily cap |
 | `alliance-treasures-plan` | Read-only: reads the world blocks around every member HQ (at least 30 tiles each way) and lists the radar treasures allies dug (the alliance chat's "treasure ... has been dug up!"), each with its verdict and its distance from the owner's HQ |
 | `alliance-treasures` | The same scan, then `detect.event.claim.treasure` for each treasure that is dug, not expired, from your alliance, not yours, not full and not already claimed by you; 1 s apart; stops on any unexpected error |
+| `fireworks-chat` | OPT-IN, 1.0.370: reads the alliance chat once a run (shared with the other chat features, never posts) and claims the chests its firework cards (posts 693, 695) point at: `find.fireworks.gift.world.point`, one `world.get.block` for the chest's block on your server, then the same rules and `get.fireworks.gift` as `fireworks`. Reaches the S0 alliance-boss chests on alliance buildings away from member HQs, which the HQ scan does not read. Skips chests `fireworks` already answered this run and stops when it hit the daily cap |
+| `alliance-treasures-chat` | OPT-IN, 1.0.370: claims the treasures the chat's "treasure ... has been dug up!" cards (post 600) point at, wherever they are: `detect.event.get.treasure.claim.info {uuid, source 1, targetServer}`, one `world.get.block`, then the same rules and `detect.event.claim.treasure` as `alliance-treasures`. Only on your login server; skips cards whose lookup reply has `num` 0 or none (the client's `remainNum`; unverified) and treasures you already claimed |
 | `treasure-digs` / `-plan` | Radar-ruin, city-ruin and Secret Vault dig boards: claims the free hammer when the board offers it, opens bricks with owned hammers only, and claims the chests |
 | `treasure-hunt` / `-plan` | Treasure Hunt events (v1/v2): digs with owned pickaxes only and claims the tier and stored rewards |
 | `season-dig`, `offseason-dig`, `alliance-boss-dig` / `-plan` | Alliance dig vaults: opens your one free stone and claims relic and personal rewards. `season-dig` covers the Season 3 and Season 7 vaults; `treasure-digs` also covers the S7 off-season vault and chest track |
 
+### Alliance chat reader
+
+Off by default and static-analysis-only. Since 1.0.370 the client has a read-only reader for the
+alliance chat room, which runs on its own WebSocket, not the game socket (see
+[docs/alliance-chat-mail.mdx](docs/alliance-chat-mail.mdx)). It sends only `room.joinMulti` and
+`history.roomsv2`, never a message, like or share, and reads only the alliance room's newest page
+and 3 s of pushes. One chat read per run serves every chat feature: `chat-scan`, `red-packets`,
+`fireworks-chat` and `alliance-treasures-chat`. The chat server keeps one session per uid, so that
+read drops the phone's chat connection (`another.login`), which doesn't reconnect by itself, the
+way a run's game login drops the phone's game session.
+
+| Feature | What it does |
+|---|---|
+| `chat-scan` | Read-only: logs every red packet, firework and treasure-dug card in the alliance room with its verdict; sends nothing on the game socket |
+| `red-packets` | OPT-IN: opens the alliance room's red packets (post 611, `open.red.packet`) the game would let you open, the one expiring first first, 1 s apart, at most 10 a run; stops at the daily cap (`400600`) |
+
 ### Railway features
 
-Both are off by default and static-analysis-only: their requests come from the 1.0.370 client and haven't been sent live yet. Before each truck send or truck attack they save the squad with `formation.save.template`, and before each train attack they fetch the train lineup with `alliance.train.formation`, as the client does. They skip a run while the city is in another warzone, while the station is still fogged, before its opening reward is taken (a `trainData` without `openReward` counts as taken, as in the game), and when the station doesn't report today's count. They ask for `train.data` only while the truck activity is open, and otherwise use the login's `trainData`, as the game does. A timeout or any refusal stops the run, except a target someone else just looted (`E400207`).
+All three are off by default and static-analysis-only: their requests come from the 1.0.370 client and haven't been sent live yet. Before each truck send or truck attack `truck-deploy` and `railway-plunder` save the squad with `formation.save.template`, and before each train attack they fetch the train lineup with `alliance.train.formation`, as the client does. They skip a run while the city is in another warzone, while the station is still fogged, before its opening reward is taken (a `trainData` without `openReward` counts as taken, as in the game), and when the station doesn't report today's count. They ask for `train.data` only while the truck activity is open, and otherwise use the login's `trainData`, as the game does. A timeout or any refusal stops the run, except a target someone else just looted (`E400207`).
 
 | Feature | What it does |
 |---|---|
 | `truck-deploy` | Sends your own parked trucks (`train.send`), **UR only**: quality 5 and the Reindeer Sleigh (10), never anything below. Each gets the strongest free defence squad. It stops at the daily send limit (4 plus effect 90103). Unused sends are lost at the reset, so it runs every day; a UR dispatch scores Alliance Duel type 98 on Tue and Sat |
+| `truck-reroll` | OPT-IN, 1.0.370: runs before `truck-deploy` and uses the one free reroll (`train.change`) of each of your own parked N, R or SR trucks that could leave now, when `changeCountByGold` says it is free (`train_para` 9 is "0,1": only the first reroll of a truck). It keeps a truck that carries the "high goods" the game asks about (2 of item 2270000 or 500105, `train_para` 55) or whose goods can't be read, and never touches SSR, UR or the sleigh. Once per truck per run; it logs the new quality and never deploys, never spends item 1520001 or diamonds, never `train.batch.change` |
 | `railway-plunder` | Plunders other players' trucks (`train.attack`) and other alliances' trains (`alliance.train.attack.kof`, or `alliance.train.attack` before the KOF mode). See the rules below |
 
 `railway-plunder` drops a target that breaks any of these rules, before anything else:
@@ -347,12 +400,16 @@ After those come the game's own gates: 4 plunders a day shared by trucks and tra
 ### Claims added for 1.0.370
 
 The 1.0.370 audit added these claims. Each is its own feature, off by default, and static-only:
-its summary in `-list-features` ends "(static-only, not validated live)". None spends anything,
-marches, or sends a chat message. Each logs its first reply at Info. An error code from one of its
-commands is logged and stops that claim; depending on the feature it also stops the rest of that
-activity or building, or the feature for the run, while others (`city-soldiers`,
-`radar-rescue-claims`, `supplies-search` among them) go on to their other claims. The duel ones
-are in the table above.
+its summary in `-list-features` ends "(static-only, not validated live)". None marches or sends a
+chat message, and none spends anything except the user's carve-outs: `duel-gacha-draw` spends only
+the duel gacha's own score balance, and `truck-reroll` uses only a truck's free reroll.
+`secret-task-assist` is seen by the ally it helps. Each logs its first reply at Info. An error code
+from one of its commands is logged and stops that claim; depending on the feature it also stops
+the rest of that activity or building, or the feature for the run, while others (`city-soldiers`,
+`radar-rescue-claims`, `supplies-search` among them) go on to their other claims. The duel,
+firework, chat and railway ones are in the tables above: the follow-up added `free-research-finish`,
+`duel-gacha-draw` and `secret-task-assist`, `fireworks-chat` and `alliance-treasures-chat`,
+`chat-scan` and `red-packets`, and `truck-reroll`.
 
 | Area | Features |
 |---|---|

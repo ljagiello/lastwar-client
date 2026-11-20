@@ -13,7 +13,7 @@ The protocol uses three ShuMei-related identifiers that are easy to conflate:
 |---|---|---|
 | `smid` | `deviceprofile/v4` response, `detail.deviceId` | The ShuMei Machine ID that the server assigns (88 characters). |
 | `shumeiBoxId` | `Login` request field | What the SDK's `getDeviceId()` returns: `"B"` + `smid` (89 characters) once the server has assigned one. Before that, it returns a `"D"`-prefixed local value instead. Empty is a first-class, non-error client path. |
-| `shumeiId` | server push `push.shumei.id`, ~0.5 s after `Login` | A separate server-issued value; the client caches it and reports it as `ta.lw_shumei_id` in its *next* `Login`. It is **not** the `shumeiBoxId` sent in the current request. |
+| `shumeiId` | server push `push.shumei.id`, ~0.5 s after `Login` | A separate server-issued value; the client caches it and reports it as `ta.lw_shumei_id` in its *next* `Login`. It is **not** the `shumeiBoxId` sent in the current request. Since the 1.0.370 follow-up `goclient` keeps it in the session config's `shumeiId` (recorded by `pcap -session-out`, saved by a run that gets the push, for the config's own `deviceId`) and the iOS `Login` sends it as `ta` `lw_shumei_id`. |
 
 ## The flow
 

@@ -186,7 +186,7 @@ The gate was `ta`. `goclient` filled `ta` only for iOS and sent `{}` on Android.
 | `{}` | `ec=28`, `ep=[E005]` |
 | `#os` = `Android`, `#bundle_id` = `com.fun.lastwar.gp`, `lw_platform` = `market_global`, the build in `#app_version`/`lw_version`/`lw_buildcode`, `lw_zone` = `APS783` | `Login` accepted, `init` arrived |
 
-The `deviceId`, account, and server were the same in both runs, so the 2026-10-04 suspects don't block this `Login`: the Go-generated `deviceId`'s shape, the Android identity itself, and, nine days after binding, trust in the device. `ta`'s `lw_device_id`, `lw_shumei_id`, and `lw_airKey` stayed blank, as they are for iOS. A missing `shumeiBoxId` isn't the cause either, since the accepted `Login` sent none.
+The `deviceId`, account, and server were the same in both runs, so the 2026-10-04 suspects don't block this `Login`: the Go-generated `deviceId`'s shape, the Android identity itself, and, nine days after binding, trust in the device. `ta`'s `lw_device_id`, `lw_shumei_id`, and `lw_airKey` stayed blank, as they were for iOS then (blank before the 1.0.370 follow-up; the iOS `ta` now fills them, Android's still doesn't). A missing `shumeiBoxId` isn't the cause either, since the accepted `Login` sent none.
 
 What the test settles and what it doesn't:
 
@@ -212,7 +212,7 @@ The run logs in as a guest, verifies the email, and logs the account's roles: ea
 A third party ran this iOS bind against production on 2026-10-28 and reported it working ([discussion #56](https://github.com/ljagiello/lastwar-client/discussions/56)), on one established account in one run. It hasn't been reproduced here. Per that report:
 
 - **The bind:** the fresh device's iOS guest `Login` was accepted and its `init` arrived. Email verification and the `loginKey` trade then wrote a config with `iosMode` true and `1.0.344`/`786`.
-- **A `Login` with that config** was accepted with `shumeiBoxId` empty and loaded the account's buildings. It sent the filled iOS `ta`: `#os` = `iOS`, `#bundle_id` = `com.lastwar.ios`, `lw_platform` = `AppStore`, the build and `lw_zone`, with `lw_device_id`, `lw_shumei_id` and `lw_airKey` blank. `ta` = `{}` wasn't tried.
+- **A `Login` with that config** was accepted with `shumeiBoxId` empty and loaded the account's buildings. It sent the filled iOS `ta`: `#os` = `iOS`, `#bundle_id` = `com.lastwar.ios`, `lw_platform` = `AppStore`, the build and `lw_zone`, with `lw_device_id`, `lw_shumei_id` and `lw_airKey` blank (blank before the 1.0.370 follow-up; the iOS `ta` now fills them). `ta` = `{}` wasn't tried.
 - **One `opt=refresh`** with the config's refresh token, a few minutes after the bind, returned code `0`, the current `at` with its original `at.time`, and no `rt`. The Android pair returned the same eight days after issue (see [Refreshing the access token](#refreshing-the-access-token)), so on iOS too an early refresh rotates neither token.
 
 `-server` picks the role to bind, by its server number (`783`) or zone (`APS783`), from the roles the run logs; a value that names no server number is refused before the code is requested. Without it, the role `push.account.login.new` names at its top level is bound. A server the account has no role on, or two roles on one server, fails after verification without saving the binding. By then the code is spent, so bind again from a fresh `LASTWAR_STATE_DIR` with a server from the logged list. If GSL's `opt=login` reply doesn't list the picked role, the trade fails rather than writing another role's server into the config.
@@ -265,7 +265,7 @@ Around and after `init`, the real client sends, in order (observed in the captur
 
 4. Nine `mail.delete.batch {type: "auto", uids}` calls about 4.7 s in. The real client auto-deletes mail older than 30 days once a day, see [Alliance, chat & mail](/alliance-chat-mail).
 
-The server also pushes `push.shumei.id {shumeiId}` about 0.5 s after `Login` (observed live). The client caches that value and reports it as `ta.lw_shumei_id` in its next `Login`. `shumeiId` is the server's own device identifier and is distinct from both `shumeiBoxId` and the `push.shumei.exception.level` risk push; the client also folds it into the analytics super properties (`lw_shumei_id`, `Assembly-CSharp:58829,58940`).
+The server also pushes `push.shumei.id {shumeiId}` about 0.5 s after `Login` (observed live). The client caches that value and reports it as `ta.lw_shumei_id` in its next `Login`. Since the 1.0.370 follow-up `goclient` keeps it in the session config's `shumeiId`: `pcap -session-out` records it (the last `push.shumei.id` after the `Login`, else the captured `ta`'s `lw_shumei_id`), a run saves the last one a push brings, and the iOS `Login` sends it as `ta` `lw_shumei_id`. It belongs to the config's `deviceId`: a run under another one neither sends nor saves it (static-analysis-only). `shumeiId` is the server's own device identifier and is distinct from both `shumeiBoxId` and the `push.shumei.exception.level` risk push; the client also folds it into the analytics super properties (`lw_shumei_id`, `Assembly-CSharp:58829,58940`).
 
 `login.init` is an active pull that the real client never sent in the capture. The C# sends `dataConfigMd5` with it only when non-empty.
 
