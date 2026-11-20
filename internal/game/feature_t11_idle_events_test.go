@@ -53,7 +53,7 @@ func runT11EventsFake(t *testing.T, main, list *sfs.SFSObject, receive func(p *s
 		}
 		return evOK()
 	})
-	if err := runT11IdleEvents(conn, evAllianceInit("t11_idle_game_open")); err != nil && receive == nil {
+	if err := runT11IdleEvents(conn, t11OpenInit("t11_idle_game_open")); err != nil && receive == nil {
 		t.Fatal(err)
 	}
 	for _, c := range fake.cmds() {
@@ -126,7 +126,7 @@ func TestT11IdleEventsSwitchOffAndLocked(t *testing.T) {
 	if err := runT11IdleEvents(conn, evAllianceInit()); err != nil || len(fake.requests()) != 0 {
 		t.Errorf("switch off: err %v, sent %v", err, fake.cmds())
 	}
-	if err := runT11IdleEvents(conn, evAllianceInit("t11_idle_game_open")); err != nil {
+	if err := runT11IdleEvents(conn, t11OpenInit("t11_idle_game_open")); err != nil {
 		t.Errorf("an errorCode on main means not available, got %v", err)
 	}
 	if got := fake.cmds(); !slices.Equal(got, []string{t11MainCmd}) {
@@ -149,7 +149,7 @@ func TestT11IdleEventsReceiveErrorStopsTheEvents(t *testing.T) {
 		}
 		return evErr("E7")
 	})
-	if err := runT11IdleEvents(conn, evAllianceInit("t11_idle_game_open")); err == nil || !strings.Contains(err.Error(), "E7") {
+	if err := runT11IdleEvents(conn, t11OpenInit("t11_idle_game_open")); err == nil || !strings.Contains(err.Error(), "E7") {
 		t.Errorf("err = %v, want the E7 failure returned", err)
 	}
 }

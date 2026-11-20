@@ -34,7 +34,7 @@ func TestT11IdleExpeditionCollectsOnlyANonEmptyPool(t *testing.T) {
 			}
 			return evOK()
 		})
-		if err := runT11IdleExpedition(conn, evAllianceInit("t11_idle_game_open")); err != nil {
+		if err := runT11IdleExpedition(conn, t11OpenInit("t11_idle_game_open")); err != nil {
 			t.Fatal(err)
 		}
 		if got := strings.Join(fake.cmds(), ","); got != c.want {
@@ -53,7 +53,7 @@ func TestT11IdleExpeditionSwitchOffLockedAndFailure(t *testing.T) {
 	if err := runT11IdleExpedition(conn, evAllianceInit()); err != nil || len(fake.requests()) != 0 {
 		t.Errorf("switch off: err %v, sent %v", err, fake.cmds())
 	}
-	if err := runT11IdleExpedition(conn, evAllianceInit("t11_idle_game_open")); err != nil {
+	if err := runT11IdleExpedition(conn, t11OpenInit("t11_idle_game_open")); err != nil {
 		t.Errorf("an errorCode on main means not available, got %v", err)
 	}
 	conn2, _ := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
@@ -62,7 +62,7 @@ func TestT11IdleExpeditionSwitchOffLockedAndFailure(t *testing.T) {
 		}
 		return evErr("E7")
 	})
-	if err := runT11IdleExpedition(conn2, evAllianceInit("t11_idle_game_open")); err == nil || !strings.Contains(err.Error(), "E7") {
+	if err := runT11IdleExpedition(conn2, t11OpenInit("t11_idle_game_open")); err == nil || !strings.Contains(err.Error(), "E7") {
 		t.Errorf("receive failure: err = %v", err)
 	}
 	conn3, _ := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
@@ -71,7 +71,7 @@ func TestT11IdleExpeditionSwitchOffLockedAndFailure(t *testing.T) {
 		}
 		return evErr(evAlreadyExecuted)
 	})
-	if err := runT11IdleExpedition(conn3, evAllianceInit("t11_idle_game_open")); err != nil {
+	if err := runT11IdleExpedition(conn3, t11OpenInit("t11_idle_game_open")); err != nil {
 		t.Errorf("already collected must be benign, got %v", err)
 	}
 }
