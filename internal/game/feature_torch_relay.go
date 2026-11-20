@@ -101,6 +101,14 @@ func runTorchRelay(conn *session.GameConn, in *Init) error {
 	return b.err()
 }
 
+// torchRelayKnown reports whether a's activity_torch_relay row is embedded, the config the
+// client's Torch Relay data needs (ActivityTorchRelayData.lua:220-224).
+func torchRelayKnown(a Activity) bool {
+	rowID, ok := torchRelayActivityRows[a.ID]
+	_, okRow := torchRelayRows[rowID]
+	return ok && okRow
+}
+
 func claimTorchRelay(s *ActivitySweep, b *evBatch, a Activity) {
 	rowID, ok := torchRelayActivityRows[a.ID]
 	row, okRow := torchRelayRows[rowID]

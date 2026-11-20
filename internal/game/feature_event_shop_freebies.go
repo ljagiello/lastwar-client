@@ -160,6 +160,15 @@ func runEventShopFreebies(conn *session.GameConn, in *Init) error {
 			if b.dead {
 				return b.err()
 			}
+			// The Torch Relay free pack needs the activity's activity_torch_relay row with
+			// free_iap_reward > 0 (CanClaimFreePackage, ActivityTorchRelayData.lua:220-224); every row
+			// of tables 40413 has one, so an activity whose row is unknown is skipped, as
+			// claimTorchRelay skips it (1.0.370 audit B61).
+			if f.typ == actTypeTorchRelay && !torchRelayKnown(a) {
+				slog.Info("event-shop-freebies: Torch Relay activity has no known activity_torch_relay row; skipped",
+					"activity", a.ID, "tableVersion", activityTableVersion)
+				continue
+			}
 			fetch := f.info
 			if fetch == nil {
 				fetch = (*ActivitySweep).EventInfo

@@ -150,8 +150,10 @@ func runSeasonDailies(conn *session.GameConn, in *Init) error {
 		if b.dead {
 			break
 		}
+		// The preview sends its entry's own id, data.id, never data.activityId
+		// (SeasonPreviewManager.lua:22-24, 91; 1.0.370 audit B64).
 		p := sfs.NewSFSObject()
-		p.PutUtfString("activityId", a.IDString())
+		p.PutUtfString("activityId", a.EntryID())
 		info, err := s.Info("season pre-task info response", seasonPreTaskInfoCmd, a, p)
 		if err != nil {
 			b.add(err)
@@ -166,7 +168,7 @@ func runSeasonDailies(conn *session.GameConn, in *Init) error {
 				continue
 			}
 			p := sfs.NewSFSObject()
-			p.PutUtfString("activityId", a.IDString())
+			p.PutUtfString("activityId", a.EntryID())
 			p.PutUtfString("taskId", taskID)
 			b.send(fmt.Sprintf("season pre-task %s", taskID), seasonPreTaskRewardCmd, p)
 		}
