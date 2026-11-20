@@ -148,7 +148,7 @@ func thanksgivingCount(o *sfs.SFSObject, act int32, now time.Time) (int64, bool)
 // openActivityOf returns the first init activity among ids that CheckIsSend accepts, by id, with
 // its type taken from typ (the generated table may lack the id).
 func openActivityOf(in *Init, ids []int32, typ int32) (int32, bool) {
-	entries, _ := initActivityEntries(in)
+	entries, _, _ := initActivityEntries(in)
 	now, hq := evNow().UnixMilli(), activityHQLevel(in)
 	var open []int32
 	for _, e := range entries {
@@ -254,6 +254,7 @@ func runBaseBubbles(conn *session.GameConn, in *Init) error {
 				why = "no Thanksgiving activity open"
 			}
 			slog.Info(baseBubblesFeature+": bubble", "owner", sc.ref(b.OwnerUID), "statusId", s.ID, "layer", s.Layer,
+				"serverId", b.ServerID, "srcServerId", b.SrcServerID, "scanServer", sc.server,
 				"expiresInMin", int64(evUnix(s.ExpireTime).Sub(now).Minutes()), "eligible", why == "", "reason", why)
 			if why == "" {
 				picks = append(picks, bb)

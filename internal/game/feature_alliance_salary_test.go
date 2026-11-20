@@ -245,8 +245,13 @@ func TestAllianceSalaryActivityGate(t *testing.T) {
 		{"salary activity open", withActs(other, open), []int32{101}},
 		{"salary activity ended", withActs(other, ended), nil},
 		{"only other known activities", withActs(other), nil},
-		{"an empty activity list", withActs(), nil},
+		{"an empty activity list leaves it undecided", withActs(), []int32{101}},
 		{"an unknown id leaves it undecided", withActs(other, unknown), []int32{101}},
+		{"a non-object entry leaves it undecided", func() *Init {
+			in := withActs(other)
+			in.Object("activity").PutInt("28", 1)
+			return in
+		}(), []int32{101}},
 		{"no activity field", salaryInit(10, 1), []int32{101}},
 	}
 	for _, c := range cases {
@@ -286,6 +291,12 @@ func TestAllianceSalaryOfficerBox(t *testing.T) {
 		want []int32
 	}{
 		{"R3", withRank(func(al *sfs.SFSObject) { al.PutInt("rank", 3) }), []int32{202}},
+		{"R1", withRank(func(al *sfs.SFSObject) { al.PutInt("rank", 1) }), []int32{202}},
+		{"rank 0 is unknown", withRank(func(al *sfs.SFSObject) { al.PutInt("rank", 0) }), []int32{202, 301}},
+		{"rank 0, the player leads", withRank(func(al *sfs.SFSObject) {
+			al.PutInt("rank", 0)
+			al.PutUtfString("learderUid", "uid-self-0001")
+		}), []int32{202, 301}},
 		{"R4", withRank(func(al *sfs.SFSObject) { al.PutInt("rank", 4) }), []int32{202, 301}},
 		{"R5 as a string", withRank(func(al *sfs.SFSObject) { al.PutUtfString("rank", "5") }), []int32{202, 301}},
 		{"leader without rank", withRank(func(al *sfs.SFSObject) { al.PutUtfString("learderUid", "uid-self-0001") }), []int32{202, 301}},

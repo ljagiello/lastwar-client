@@ -32,9 +32,10 @@ import (
 //   - the alliance panel shows the salary entry only while init lists an activity of type 372
 //     (EnumActivity.AllianceSalary, EnumType.lua:6507) that CheckIsSend accepts
 //     (IsFunctionOpen, AllianceMilitaryPayDataManager.lua:171-177; UILWAlMainCtrl.lua:357-360).
-//     Nothing is sent when init lists such an entry that is not open, or when every init activity
-//     id resolves in table activity and none is of type 372; an id the generated table lacks
-//     (a newer table) leaves the gate undecided, and the run goes on as before;
+//     Nothing is sent when init lists such an entry that is not open, or when the init activity
+//     list is not empty, every entry's id resolves in table activity and none is of type 372; an
+//     id the generated table lacks (a newer table), an empty list or a malformed entry leaves the
+//     gate undecided, and the run goes on as before;
 //   - box 301 is listed only for R4/R5 (LWAllianceMilitaryPayMainView.lua:184-188; alliance_pay
 //     row 301 show_type 1 = R4orR5, EnumType.lua:18250; tables 40413). It is skipped when init
 //     alliance shows a rank below 4 (allianceRank); an unknown rank claims it on status 1 as before.
@@ -164,10 +165,11 @@ func allianceCanGetDailySalary(status int64, statusKnown bool, score int64, scor
 // settles it: open when init lists a type-372 activity that CheckIsSend accepts (Activity.open);
 // known and closed when it lists one that is not open, or when every init activity id resolves in
 // table activity and none is type 372. known is false without an init activity field, or when
-// some id is missing from the generated table (it could be a newer salary row).
+// some id is missing from the generated table (it could be a newer salary row), or the list is
+// empty or holds an entry that is not an object: none of those is evidence of a closed salary.
 func allianceSalaryListed(in *Init) (open, known bool) {
-	entries, ok := initActivityEntries(in)
-	if !ok {
+	entries, skipped, ok := initActivityEntries(in)
+	if !ok || len(entries) == 0 || skipped > 0 {
 		return false, false
 	}
 	now, hq := claimNow(in).UnixMilli(), activityHQLevel(in)
@@ -202,41 +204,46 @@ type initActivityEntry struct {
 
 // initActivityEntries returns init `activity`'s entries the way parseActivities walks them (an
 // object keyed by id or an array, ActivityListDataManager's table.walk), including ids the
-// generated table lacks. ok is false when init has no activity field or it is neither shape.
-func initActivityEntries(in *Init) ([]initActivityEntry, bool) {
+// generated table lacks, and how many entries were skipped as not objects. ok is false when init
+// has no activity field or it is neither shape.
+func initActivityEntries(in *Init) (entries []initActivityEntry, skipped int, ok bool) {
 	if in == nil || in.Raw == nil {
-		return nil, false
+		return nil, 0, false
 	}
 	v, ok := in.Raw.Get("activity")
 	if !ok {
-		return nil, false
+		return nil, 0, false
 	}
-	var out []initActivityEntry
 	switch c := v.Val.(type) {
 	case *sfs.SFSObject:
 		for _, k := range c.Keys() {
 			if o := objectField(c, k); o != nil {
-				out = append(out, initActivityEntry{k, o})
+				entries = append(entries, initActivityEntry{k, o})
+			} else {
+				skipped++
 			}
 		}
 	case *sfs.SFSArray:
 		for _, it := range c.Items() {
 			if o, ok := it.Val.(*sfs.SFSObject); ok {
-				out = append(out, initActivityEntry{"", o})
+				entries = append(entries, initActivityEntry{"", o})
+			} else {
+				skipped++
 			}
 		}
 	default:
-		return nil, false
+		return nil, 0, false
 	}
-	return out, true
+	return entries, skipped, true
 }
 
 // allianceRank is the player's rank in the alliance as AllianceBaseInfo:ParseData reads it from
-// init alliance (AllianceBaseInfo.lua:202-232): rank when present, else 5 when learderUid (the
-// wire's spelling) is the player. ok is false when init says neither.
+// init alliance (AllianceBaseInfo.lua:202-232): rank when present and above 0 (ranks run 1-5; a 0
+// is the Lua default, not a rank), else 5 when learderUid (the wire's spelling) is the player. ok
+// is false when init says neither.
 func allianceRank(in *Init) (int64, bool) {
 	al := in.Object("alliance")
-	if r, ok := claimInt(al, "rank"); ok {
+	if r, ok := claimInt(al, "rank"); ok && r > 0 {
 		return r, true
 	}
 	if leader := idString(al, "learderUid"); leader != "" && leader == ownUID(in) {
