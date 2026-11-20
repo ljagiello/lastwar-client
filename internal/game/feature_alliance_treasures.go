@@ -62,7 +62,8 @@ import (
 //   - the player is not in its rewardUserList, and fewer than cap * max(multiple, 1) players are
 //     (IsHaveGetReward, IsReceiveAllReward; A-CS:177905-177943), cap being para2's second field
 //     (radarTreasureCaps). IsHaveGetReward's other test, CheckTreasureReachDailyLimit, looks the
-//     eventId up in world_treasure, which has no detect_event ids, so it never applies here
+//     eventId up in world_treasure, none of whose ids is a detect_event of the treasure types 19/23/38
+//     (24 of its 98 ids are detect_event ids of other types, tables 40413), so it never applies here
 //     (ActDetectTreasureDataManager.lua:86-100);
 //   - it is on the player's server (UIUtil.lua:4109-4115).
 //

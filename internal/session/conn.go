@@ -14,10 +14,10 @@ import (
 	"time"
 )
 
-// SFS2X system-controller action ids actually used by this game (dossier §04.1).
-// ActionHandshake=0 is confirmed present in the game's own Smartfox2xLw.decompiled.cs
-// (SendHandshakeRequest/HandshakeRequest) but was never exercised by this Go
-// client until the sfs2x-api@1.8.6 comparison pass -- see DoHandshake.
+// SFS2X system-controller action ids (dossier §04.1). ActionHandshake=0 is the vanilla SFS2X
+// handshake. The 1.0.370 client never sends it: its system-message handler takes only ids 1
+// (Login) and 29 (ping) (BaseUtils.decompiled.cs:32344-32357), and DoHandshake keeps it only as
+// the off-by-default -handshake experiment.
 const (
 	ActionHandshake     = 0
 	ActionLogin         = 1
@@ -429,7 +429,7 @@ func (c *GameConn) readEnvelope() (*Envelope, error) {
 // scorePushCmd is the server's "points earned" push for score events: Arms Race and, with type
 // 15, the Alliance Duel (PushActScoreObtainMessage.lua:6-16). Nothing waits for it, so it is
 // logged here, where every read passes, with the last request sent: one live day of these lines
-// shows which step (start, finish or claim) books a duel action's points (DUEL.md §8).
+// shows which step (start, finish or claim) books a duel action's points (docs/alliance-duel.mdx).
 const scorePushCmd = "push.act.score.obtain"
 
 func (c *GameConn) logScorePush(env *Envelope) {
@@ -726,15 +726,12 @@ func SendAndWait(conn *GameConn, label, sendCmd string, params *sfs.SFSObject, w
 
 // DoHandshake sends the vanilla SFS2X pre-Login Handshake request
 // (HandshakeRequest.KEY_API="api", KEY_CLIENT_TYPE="cl") and waits for the
-// response. Confirmed present in this game's own decompiled SDK
-// (Smartfox2xLw.decompiled.cs:4363 SendHandshakeRequest, called from
-// OnSocketConnect before any Login) but this Go client never sent it --
-// every login attempt so far (guest, email-bind, and every reconnect
-// variant) skipped straight to Login. Experimental: guest/email-bind work
-// fine without it, so it's not obviously required, but it's cheap to send
-// and untested for the still-open init-push/reconnect-block questions.
-// api="1.7.8" cl="Unity" match the game's own SDK defaults exactly
-// (Smartfox2xLw.decompiled.cs:3613-3621).
+// response. The 1.0.370 client never sends one: its own transport handles
+// only system ids 1 and 29 (BaseUtils.decompiled.cs:32344-32357) and goes
+// straight to Login, as every login of this client does by default. It is
+// kept as the off-by-default -handshake experiment; deleting it is the
+// owner's choice. api="1.7.8" cl="Unity" are the defaults of the vanilla
+// SmartFox2X 1.7.8 SDK, not values the game sends.
 func (c *GameConn) DoHandshake(timeout time.Duration) (*sfs.SFSObject, error) {
 	req := sfs.NewSFSObject()
 	req.PutUtfString("api", "1.7.8")

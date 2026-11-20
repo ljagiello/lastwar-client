@@ -16,9 +16,9 @@ import (
 )
 
 // Secret Tasks (hero dispatch), start half: start today's not-started UR tasks with idle heroes,
-// because a task left unstarted is gone after the daily reset (en:456211; DUEL.md §5) and "Perform
+// because a task left unstarted is gone after the daily reset (en:456211; docs/alliance-duel.mdx) and "Perform
 // a UR secret task" (score 90204, type 99 value 5) is worth 75,000 duel points on Tuesday and
-// Saturday (DUEL.md §2.2, §2.6, §4.2). The claim half is secret-tasks-claim. Static-only: not
+// Saturday (docs/alliance-duel.mdx). The claim half is secret-tasks-claim. Static-only: not
 // sent live yet.
 //
 // What the client does, and what this copies (Lua under SP/lua/src):
@@ -92,7 +92,7 @@ func init() {
 		Summary: "OPT-IN: start today's UR Secret Tasks (hero dispatch) with idle heroes before the daily reset loses them; " +
 			"never refreshes or speeds up a task; stops on any diamond drop",
 		// UR tasks score on Tue and Sat, but an unstarted task does not survive the daily reset,
-		// so it is never held (DUEL.md §5, §7.2).
+		// so it is never held (docs/alliance-duel.mdx).
 		Duel: []DuelScore{{Type: DuelScoreURSecretTask}},
 		Run:  runSecretTaskStarts,
 	})

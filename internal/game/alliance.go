@@ -16,13 +16,13 @@ import (
 // alliance help-all button. Bulk-completes every pending alliance-member
 // help request (construction/research speedups other members requested)
 // in one call, mirroring the Lua handler's own request-construction logic
-// (extracted/lua_decompiled/4368_Net_Msgs_Alliance_AlHelpAllMessage.lua):
+// (Net/Msgs/Alliance/AlHelpAllMessage.lua):
 // the only field actually put on the wire is `cmdBaseTime`, a Long --
 // everything else OnCreate takes (helpBtnPos, toPos, isOnlyDisperse,
 // isOnlyShowDiff) is purely local UI-animation state, never sent. The real
 // client sent an absolute Unix-epoch-milliseconds value
 // (`cmdBaseTime=1783114317664`) from its server-synced clock
-// (UITimeManager:GetServerTime, UILWAlHelpCtrl.lua:25-26); this sends the
+// (UITimeManager:GetServerTime, UILWAlHelpCtrl.lua:30-31); this sends the
 // session's server clock the same way (connNow), the host clock before the
 // first pong.
 //
@@ -43,7 +43,7 @@ func HelpAllianceMembers(conn *session.GameConn) error {
 }
 
 // helpAllianceMembers sends al.help.all only when another member has an open help request, as the
-// real help window does (UILWAlHelpCtrl.lua:15-29: it sends only when some listed request has
+// real help window does (UILWAlHelpCtrl.lua:19-35: it sends only when some listed request has
 // isSelf == false, else shows tip 393023). It lists the requests first with `al.show.help {}`,
 // whose reply carries `helpArr` (AllianceHelpDataManager.lua:47-78; see openHelpRequests). Without
 // init (in.Raw nil) it sends al.help.all unconditionally, as before this gating existed. The
@@ -103,15 +103,15 @@ func ownUID(in *Init) string {
 }
 
 // allianceGiftPremiumMinLevel is DataConfig alliance_gift.k5: the alliance gift level from which
-// the gift window offers Premium "Claim All" (UILWAllianceGiftView.lua:296-297; table item row
-// alliance_gift, k5 = 15 in 39432 and the live 39516). init.dataConfig cannot change it in
+// the gift window offers Premium "Claim All" (UILWAllianceGiftView.lua:307-309; table item row
+// alliance_gift, k5 = 15 in 39432, the live 39516 and 40413). init.dataConfig cannot change it in
 // practice: DataConfig:InitFromNet re-applies the local table over the server's copy
-// (DataConfig.lua:47-68).
+// (DataCenter/Global/DataConfig.lua:36-46, 52-74).
 const allianceGiftPremiumMinLevel = 15
 
 // claimAllianceGifts claims the alliance gifts the way the real gift window offers them:
 //
-//   - nothing at all when init's allianceNewMail (the unclaimed gift count, InitMessage.lua:153) is 0;
+//   - nothing at all when init's allianceNewMail (the unclaimed gift count, InitMessage.lua:156-157) is 0;
 //   - otherwise it lists the gifts with `alliance.reward.list {index: 0, len: 1000}`
 //     (UILWAllianceGiftCtrl.lua:17), whose reply carries the gift level `onLevel` and the
 //     per-type waiting counts `info.redPoint1`/`info.redPoint2` (AllianceGiftDataManager.lua);

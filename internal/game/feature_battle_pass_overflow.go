@@ -45,7 +45,7 @@ const (
 	battlePassOverflowMaxClaims = 20
 )
 
-// battlePassLoginPasses are the type-27 rows of table activity 39879 with showUiType 2, 6 or 9
+// battlePassLoginPasses are the type-27 rows of table activity 40413 with showUiType 2, 6 or 9
 // (no type-142 row has those); Go's activity table carries no showUiType.
 var battlePassLoginPasses = map[int32]bool{
 	13: true, 2101: true, 5001: true, 14004: true, 99164: true, // 2 SevenDayLogin

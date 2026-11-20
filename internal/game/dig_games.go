@@ -27,7 +27,7 @@ import (
 // carry exactly its keys, so the purchase commands can never go out: buy.activity.dig.goods and
 // buy.activity.dig.v2.goods {activityId, num} cost 100 diamonds a pickaxe (activity_dig.diamond_buy
 // "100;200"). Nor can any gold or useGold key. No dig action scores in the Alliance Duel (no score
-// row in duel_scores_gen.go or DUEL.md §2 counts a dig, a vault or the pickaxe item), so none of
+// row in duel_scores_gen.go or docs/alliance-duel.mdx counts a dig, a vault or the pickaxe item), so none of
 // these features declares Duel or Hold.
 const (
 	digsMaxWrites   = 200      // choose, dig, open and claim requests per feature run

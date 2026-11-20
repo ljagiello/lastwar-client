@@ -47,7 +47,7 @@ func init() {
 	registerFeature(Feature{
 		Name:    "radar-claims",
 		Summary: "claim finished radar events and radar level rewards; never starts an event",
-		// Radar tasks score 10,000 duel points each on Mon/Wed/Fri (score type 82; DUEL.md §2.7),
+		// Radar tasks score 10,000 duel points each on Mon/Wed/Fri (score type 82; docs/alliance-duel.mdx),
 		// so claims are held for those days. Finished events never expire.
 		Duel: []DuelScore{{Type: DuelScoreRadarTask}},
 		Hold: true,

@@ -19,7 +19,7 @@ import (
 //     present and false (AllianceStarManager.lua:365-375).
 //
 // Not sent: the legacy red envelopes (get.alliance.red.packet -> get.red.pack). The client still
-// lists them at login, but nothing in 1.0.364 opens the window that claims them; chat red packets
+// lists them at login, but nothing in 1.0.364 or 1.0.370 opens the window that claims them; chat red packets
 // need the chat WebSocket. The ceremony's emoji (thumbs) reward box is the separate opt-in feature
 // alliance-star-emoji.
 const (

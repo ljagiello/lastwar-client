@@ -13,10 +13,11 @@ import (
 
 // Alliance Duel ("VS") scheduling. The duel runs one theme per server day (Mon radar, Tue base
 // expansion, Wed science, Thu heroes, Fri total mobilization, Sat enemy buster, Sun rest), and each
-// day's hero.event.info.get {activityId:"55000"} reply lists the score ids that earn points today.
+// day's hero.event.info.get {activityId:"70000"} reply (the entry's activityid, not its id 55000) lists
+// the score ids that earn points today.
 // Features that earn duel points declare the score types they earn (Feature.Duel); a held feature
 // (Feature.Hold) runs only on a day that scores one of them, so the work is saved for a day it
-// counts. See DUEL.md for the data model, tables and evidence.
+// counts. See docs/alliance-duel.mdx for the data model, tables and evidence.
 
 // The generator also reads lw_hero.json and officer_recruit.json from ${LASTWAR_TABLES}.
 //go:generate go run ./genduelscores -in ${LASTWAR_TABLES}/score.json -version ${LASTWAR_TABLE_VERSION} -out duel_scores_gen.go
@@ -76,7 +77,7 @@ type DuelScore struct {
 	Value string
 }
 
-// Score types and speed-up queues (EnumType.lua:15728-15744; DUEL.md §2).
+// Score types and speed-up queues (Global/EnumType.lua:15799-15809; docs/alliance-duel.mdx).
 const (
 	DuelScoreTrainUnit       int32 = 4   // train one unit (value = unit tier item 3005-3015)
 	DuelScoreRecruitHero     int32 = 42  // one hero recruitment
@@ -92,7 +93,7 @@ const (
 	DuelQueueHeal     = "9"
 )
 
-// Duel themes: the day's heroevent row (TB:heroactivity#70000, DUEL.md §1.2).
+// Duel themes: the day's heroevent row (TB:heroactivity#70000, docs/alliance-duel.mdx).
 const (
 	DuelThemeRadar        int32 = 110000
 	DuelThemeBase         int32 = 110001

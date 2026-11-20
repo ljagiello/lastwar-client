@@ -14,7 +14,7 @@ import (
 	"lastwar-client/internal/sfs"
 )
 
-// Alliance Duel troop training (DUEL.md §4.2 "Starts", §7.2-7.3). OPT-IN: it spends food and iron.
+// Alliance Duel troop training (docs/alliance-duel.mdx). OPT-IN: it spends food and iron.
 // It trains only when today's theme is Total Mobilization (110004, Fri) or Enemy Buster (110005,
 // Sat) AND today scores training (type 4) or training speed-ups (type 51, value 4). The scheduler
 // releases the feature on any day that scores either type, so Run checks the theme again. A day

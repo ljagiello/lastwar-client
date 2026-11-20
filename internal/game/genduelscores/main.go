@@ -99,7 +99,7 @@ func parseFile[T any](path string, fn func([]byte) ([]T, error)) ([]T, error) {
 	return rows, nil
 }
 
-// knownRows are (id, type, value, points) facts from DUEL.md §2 that the dump must reproduce, so a
+// knownRows are (id, type, value, points) facts from docs/alliance-duel.mdx that the dump must reproduce, so a
 // shifted column or a different table can't silently produce a wrong gate.
 var knownRows = []row{
 	{id: 90402, typ: 82, value: "1", points: 10000}, // complete 1 radar task

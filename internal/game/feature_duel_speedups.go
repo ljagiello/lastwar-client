@@ -17,7 +17,7 @@ import (
 	"lastwar-client/internal/sfs"
 )
 
-// Alliance Duel speed-ups (DUEL.md §4.3, §7.2-7.3): apply OWNED speed-up items to RUNNING jobs on
+// Alliance Duel speed-ups (docs/alliance-duel.mdx): apply OWNED speed-up items to RUNNING jobs on
 // the duel days that score them, 50 points per item minute (score type 51; the queue sped up is
 // the score value: 7 build, 6 research, 4 training, 9 heal, EnumType.lua:15739-15744, 15811-15816).
 // Which items go where, by today's theme (hero.event.info.get eventId) AND today's score list:

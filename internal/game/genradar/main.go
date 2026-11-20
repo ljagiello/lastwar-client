@@ -100,7 +100,7 @@ func main() {
 	log.Printf("genradar: wrote %d event ids (%d ranges), %d treasure cap ranges and %d levels to %s", n, len(ranges), len(caps), len(lvs), *out)
 }
 
-// knownEventTypes are (event id -> type) facts from DUEL.md §5.2.5 and the 1.0.364 table, still
+// knownEventTypes are (event id -> type) facts from docs/alliance-duel.mdx and the 1.0.364 table, still
 // true in tables 40413, that the dump must reproduce, so a shifted column or another table can't
 // silently turn a march event into a march-free one.
 var knownEventTypes = map[int64]int64{
@@ -126,7 +126,7 @@ var knownTreasureCaps = map[int64]int64{
 	505601:  100,
 }
 
-// knownLevels are detect_level rows from DUEL.md §5.2.3.
+// knownLevels are detect_level rows from docs/alliance-duel.mdx.
 var knownLevels = []level{
 	{id: 1, show: 5, max: 25, refreshMin: 360, refreshN: 6},
 	{id: 16, show: 12, max: 40, refreshMin: 360, refreshN: 13},

@@ -15,7 +15,7 @@ import (
 	"lastwar-client/internal/sfs"
 )
 
-// Alliance Duel ticket recruits (DUEL.md §4.2 "Pulls", §5, §7.3). OPT-IN: it spends recruit
+// Alliance Duel ticket recruits (docs/alliance-duel.mdx). OPT-IN: it spends recruit
 // tickets. The scheduler releases the feature on a day that scores either kind of recruit, so Run
 // checks each kind again: hero tickets are spent only when today scores type 42 (Train Heroes,
 // Thu) and survivor tickets only when it scores type 120 (Base Expansion, Tue). Every ticket held
@@ -588,8 +588,7 @@ func (r *duelRecruitRun) survivors(in *Init) error {
 	return nil
 }
 
-// Diamond tripwire and ledgers shared by duel-recruit-tickets and duel-troop-training (DUEL.md
-// §7.3). Every spend goes through duelSpendGuard.spend. Unlike session.SendAndWait, it reads every
+// Diamond tripwire and ledgers shared by duel-recruit-tickets and duel-troop-training (docs/alliance-duel.mdx). Every spend goes through duelSpendGuard.spend. Unlike session.SendAndWait, it reads every
 // message that arrives while the reply is awaited, because the balances the client updates come
 // in pushes, not in the spend replies.
 //   - Gold (diamonds): the baseline is init user.gold (PlayerInfo.lua:630-632); without it nothing is

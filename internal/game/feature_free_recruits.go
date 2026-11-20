@@ -58,7 +58,7 @@ func init() {
 		Name:    "free-recruits",
 		Summary: "OPT-IN: take the free hero recruit and free survivor draw when the free timer allows (useFree 1 only)",
 		// The pulls score in the duel (hero Thu, survivor Tue) but a free pull does not stack, so a
-		// held one would be lost: always run (DUEL.md §5).
+		// held one would be lost: always run (docs/alliance-duel.mdx).
 		Duel: []DuelScore{{Type: DuelScoreRecruitHero}, {Type: DuelScoreRecruitSurvivor}},
 		Run:  runFreeRecruits,
 	})
