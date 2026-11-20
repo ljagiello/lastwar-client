@@ -8,6 +8,7 @@ import (
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -80,10 +81,12 @@ const maxControlPipeLineSize = 1024 * 1024
 // RunInteractive keeps the connection alive (heartbeat already running)
 // and reads commands from a control FIFO, one per line, of the form:
 //
-//	cmd.name {"key":"value","num":123,"flag":true}
+//	cmd.name {"key":"value","num":123,"flag":true,"uuid:l":42}
 //
 // The JSON params are optional (bare "cmd.name" sends an empty params
-// object). Every command is sent as an Extension call and any response
+// object). An integer that fits in 32 bits goes out as an Int, a larger one as
+// a Long; a ":i"/":l"/":d"/":s"/":b" suffix on a key picks the SFS type
+// (putJSONValue). Every command is sent as an Extension call and any response
 // sharing the same cmd (or a "push."-prefixed variant) within the next 8s
 // is logged. This exists so we can experiment with many candidate
 // commands against one authenticated session instead of re-running the
@@ -98,7 +101,7 @@ const maxControlPipeLineSize = 1024 * 1024
 // exercised through -interactive.
 func RunInteractive(conn *session.GameConn, controlPipe string) {
 	slog.Info("interactive mode: reading commands", "controlPipe", controlPipe)
-	slog.Info(`format: cmd.name {"key":"value"} (params optional)`)
+	slog.Info(`format: cmd.name {"key":"value","count:i":1,"uuid:l":123} (params optional; a :i/:l/:d/:s/:b key suffix picks the SFS type, else integers that fit 32 bits are Int)`)
 	slog.Info("example usage", "example", `echo 'building.production.collect {"uuid":123}' > `+controlPipe)
 
 	sigCh := make(chan os.Signal, 1)
@@ -411,16 +414,69 @@ func handleInteractiveLine(conn *session.GameConn, line string) {
 	slog.Info("received response", "cmd", msg.Cmd, "params", msg.Params.StringRedacted())
 }
 
+// paramTypeSuffixes are the type suffixes a control-line key may carry ("uuid:l"), naming the SFS
+// type the command catalog lists for that param (index/commands_835.tsv: type:Int, uuid:Long, ...).
+var paramTypeSuffixes = map[string]byte{"i": sfs.SFSInt, "l": sfs.SFSLong, "d": sfs.SFSDouble, "s": sfs.SFSUtfString, "b": sfs.SFSBool}
+
+// putJSONValue puts one control-line param into o. A key may end in a type suffix (":i" Int, ":l"
+// Long, ":d" Double, ":s" UtfString, ":b" Bool) that is stripped from the key sent; the value must
+// fit that type. Without one, a string is a UtfString, a bool a Bool, an integer that fits in 32
+// bits an Int and a larger one a Long, and any other number a Double. Most integer params of the
+// 1.0.370 client are Ints (e.g. Net/Msgs/Account/AccountLoginNewMessage.lua:27 PutInt("type", 0));
+// sending every integer as a Long, as this did before, made a hand-sent command test nothing
+// (1.0.370 audit B82).
 func putJSONValue(o *sfs.SFSObject, key string, v any) bool {
+	var want byte
+	if i := strings.LastIndexByte(key, ':'); i >= 0 {
+		t, ok := paramTypeSuffixes[key[i+1:]]
+		if !ok || i == 0 {
+			slog.Error("bad param type suffix; use :i, :l, :d, :s or :b", "key", key)
+			return false
+		}
+		key, want = key[:i], t
+	}
+	mismatch := func() bool {
+		slog.Error("param value does not fit its type suffix", "key", key, "type", want, "goType", fmt.Sprintf("%T", v))
+		return false
+	}
 	switch val := v.(type) {
 	case string:
+		if want != 0 && want != sfs.SFSUtfString {
+			return mismatch()
+		}
 		o.PutUtfString(key, val)
 	case bool:
+		if want != 0 && want != sfs.SFSBool {
+			return mismatch()
+		}
 		o.PutBool(key, val)
 	case json.Number:
-		if i, err := val.Int64(); err == nil {
+		i, intErr := val.Int64()
+		switch {
+		case want == sfs.SFSUtfString || want == sfs.SFSBool:
+			return mismatch()
+		case want == sfs.SFSInt:
+			if intErr != nil || i < math.MinInt32 || i > math.MaxInt32 {
+				return mismatch()
+			}
+			o.PutInt(key, int32(i))
+			return true
+		case want == sfs.SFSLong:
+			if intErr != nil {
+				return mismatch()
+			}
 			o.PutLong(key, i)
-		} else if f, err := val.Float64(); err == nil {
+			return true
+		case want == sfs.SFSDouble:
+			// handled with the untyped fallback below
+		case intErr == nil && i >= math.MinInt32 && i <= math.MaxInt32:
+			o.PutInt(key, int32(i))
+			return true
+		case intErr == nil:
+			o.PutLong(key, i)
+			return true
+		}
+		if f, err := val.Float64(); err == nil {
 			o.PutDouble(key, f)
 		} else {
 			// Round-41 fix: this used to log val.String() unconditionally, bypassing every

@@ -63,8 +63,12 @@ func BootstrapOwnDevice(httpClient *http.Client, iosMode bool) (*OwnDeviceSessio
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("own device: trading loginKey", "platform", build.Platform, "iosMode", iosMode)
-	lsr, err := gsl.GetServerListAs(httpClient, gateHost, pub, build.Platform, ident.DeviceID, gsl.GSLOpt{Opt: "login", LoginKey: ident.LoginKey}, "", ident.GameUid)
+	// zone is the bound role's: the client's role picker caches it as SERVER_ZONE before this
+	// opt=login call, which sends it (UIRoleLoginView.lua:110-120; Assembly-CSharp.decompiled.cs:
+	// 77411, 77437, 1.0.370). "" for a device bound before the zone was recorded.
+	slog.Info("own device: trading loginKey", "platform", build.Platform, "iosMode", iosMode, "zone", ident.Zone)
+	lsr, err := gsl.GetServerListFor(httpClient, gateHost, pub, formDevice(iosMode, ident.DeviceID, CapturedDevice{}), ident.DeviceID,
+		gsl.GSLOpt{Opt: "login", LoginKey: ident.LoginKey}, ident.Zone, ident.GameUid)
 	if err != nil {
 		return nil, err
 	}

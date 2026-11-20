@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -131,9 +132,11 @@ func TestLoginEmailUnknownServerSavesNoLoginKey(t *testing.T) {
 	}
 }
 
-// TestLoginEmailBindsAnEntrysOwnLoginKey: a role entry that carries its own loginKey (the role
-// picker reads param.loginKey) is bound with it rather than the account's.
-func TestLoginEmailBindsAnEntrysOwnLoginKey(t *testing.T) {
+// TestLoginEmailBindsTheAccountLoginKey: every role binds with the account's top-level loginKey,
+// even one whose entry carries its own: the client gives each RolesInfo the top-level key
+// (DataCenter/AccountData/AccountManager.lua:207-215, 1.0.370) and RolesInfo.Parse reads none
+// (1.0.370 audit B80). The bound role's zone is recorded for the own-device trade.
+func TestLoginEmailBindsTheAccountLoginKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	alt := liveShapeRole(72, "APS72", "uid-72", "Alt")
 	alt.PutUtfString("loginKey", "lk-role-72")
@@ -148,11 +151,54 @@ func TestLoginEmailBindsAnEntrysOwnLoginKey(t *testing.T) {
 		t.Fatalf("Login: %v", err)
 	}
 	defer func() { _ = result.Conn.Close() }()
-	if got := readState(t, loginKeyStatePath()); got != "lk-role-72" {
-		t.Errorf("persisted loginKey = %q, want the entry's lk-role-72", got)
+	if got := readState(t, loginKeyStatePath()); got != "account-login-key" {
+		t.Errorf("persisted loginKey = %q, want the account's", got)
 	}
-	if out := buf.String(); strings.Contains(out, "lk-role-72") || !strings.Contains(out, "ownLoginKey=true") {
-		t.Errorf("want the role's own loginKey noted, never logged:\n%s", out)
+	if got := readState(t, zoneStatePath()); got != "APS72" {
+		t.Errorf("persisted zone = %q, want the bound role's APS72", got)
+	}
+	if out := buf.String(); strings.Contains(out, "lk-role-72") || strings.Contains(out, "account-login-key") {
+		t.Errorf("a loginKey was logged:\n%s", out)
+	}
+}
+
+// TestLoginEmailRecordsTopLevelRoleZone: without -server the zone recorded is the accountArr entry
+// of the top-level gameUid.
+func TestLoginEmailRecordsTopLevelRoleZone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	pipe := emailFlowServer(t, pushWithRoles(liveShapeRole(72, "APS72", "uid-72", "Alt"), liveShapeRole(783, "APS783", "uid-783", "Main")))
+	result, err := Login(LoginOptions{Email: "player@example.com", CodePipe: pipe})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	defer func() { _ = result.Conn.Close() }()
+	if got := readState(t, zoneStatePath()); got != "APS783" {
+		t.Errorf("persisted zone = %q, want the top-level role's APS783", got)
+	}
+}
+
+// TestLoginEmailNoGameUidIsNoBind: push.account.login.new without gameUid means no account was
+// logged in (AccountManager.lua:193-206, 1.0.370), so the bind fails and saves nothing, the
+// loginKey the push carries included (1.0.370 audit B96).
+func TestLoginEmailNoGameUidIsNoBind(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	push := sfs.NewSFSObject()
+	push.PutUtfString("loginKey", "lk-not-bound")
+	push.PutInt("status", 1)
+	pipe := emailFlowServer(t, push)
+
+	_, err := Login(LoginOptions{Email: "player@example.com", CodePipe: pipe})
+	if err == nil || !strings.Contains(err.Error(), "no gameUid") || !strings.Contains(err.Error(), `status="1"`) {
+		t.Fatalf("err = %v, want the no-gameUid bind failure with its status", err)
+	}
+	if !errors.Is(err, session.ErrAuthRejected) {
+		t.Errorf("err = %v, want it to wrap ErrAuthRejected", err)
+	}
+	if lk := readState(t, loginKeyStatePath()); lk != "" {
+		t.Errorf("persisted loginKey %q, want none", lk)
+	}
+	if z := readState(t, zoneStatePath()); z != "" {
+		t.Errorf("persisted zone %q, want none", z)
 	}
 }
 

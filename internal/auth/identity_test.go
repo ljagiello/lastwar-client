@@ -110,10 +110,28 @@ func TestBuildLoginParamsConditionalFields(t *testing.T) {
 			}
 
 			wantEmptyUidFields := c.gameUid == ""
-			for _, key := range []string{"country", "suggestCountry", "timeoffset", "gcmRegisterId", "referrer"} {
+			for _, key := range []string{"country", "suggestCountry", "timeoffset"} {
 				if got := p.Has(key); got != wantEmptyUidFields {
 					t.Errorf("Has(%q) = %v, want %v (GameUid=%q)", key, got, wantEmptyUidFields, c.gameUid)
 				}
+			}
+			// gcmRegisterId/referrer are Android-only (Assembly-CSharp.decompiled.cs:83078-83087 has
+			// neither; Android :83194-83195; 1.0.370 audit B78).
+			for _, key := range []string{"gcmRegisterId", "referrer"} {
+				if got, want := p.Has(key), wantEmptyUidFields && !c.iosMode; got != want {
+					t.Errorf("Has(%q) = %v, want %v (GameUid=%q, IOSMode=%v)", key, got, want, c.gameUid, c.iosMode)
+				}
+			}
+			if got := p.GetString("timeoffset"); wantEmptyUidFields && got != "0" {
+				t.Errorf("timeoffset = %q, want \"0\" (the UTC device ta describes)", got)
+			}
+			// lat: 1 on iOS, 0 on Android (:83132; Android :83246).
+			wantLat := int32(0)
+			if c.iosMode {
+				wantLat = 1
+			}
+			if got := p.GetInt("lat"); got != wantLat {
+				t.Errorf("lat = %d, want %d (IOSMode=%v)", got, wantLat, c.iosMode)
 			}
 
 			wantPackageName := gsl.PackageName

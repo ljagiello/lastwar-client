@@ -14,17 +14,17 @@ import (
 // the device uuid the role was created on and the server's internal database hosts; it carried no
 // loginKey (that one is the account's, at the push's top level). Only the fields below are kept.
 //
-// The 1.0.364 role picker (UIRoleLoginView.OnClickLogin, docs/live-validation.mdx) takes the
-// picked entry's ip/port/zone, loginKey and gameUid, then logs in through GSL opt=login. So an
-// entry's own loginKey wins when one is there; binding a role other than the top-level one is
-// static analysis only, never tried live.
+// The 1.0.370 role picker (UIRoleLoginView:OnClickLogin, UI/UISetting/UIRoleLogin/View/
+// UIRoleLoginView.lua:110-120) takes the picked entry's ip/port/zone and gameUid, and the loginKey
+// the client gave every entry, the account's top-level one (AccountManager.lua:207-215;
+// RolesInfo.Parse reads no loginKey of its own), then logs in through GSL opt=login. Binding a role
+// other than the top-level one is static analysis only, never tried live.
 type accountRole struct {
 	ServerID   string // the entry's id, e.g. "783"
 	Zone       string // e.g. "APS783"
 	ServerName string // e.g. "State#783"
 	GameUid    string
 	Name       string // gameUserName: PII, never logged
-	LoginKey   string // the entry's own loginKey; "" in the live one-role reply
 	Level      string
 	Power      string
 }
@@ -49,7 +49,7 @@ func accountRoles(push *sfs.SFSObject) []accountRole {
 		}
 		roles = append(roles, accountRole{
 			ServerID: scalarString(o, "id"), Zone: o.GetString("zone"), ServerName: o.GetString("name"),
-			GameUid: o.GetString("gameUid"), Name: o.GetString("gameUserName"), LoginKey: o.GetString("loginKey"),
+			GameUid: o.GetString("gameUid"), Name: o.GetString("gameUserName"),
 			Level: scalarString(o, "gameUserLevel"), Power: scalarString(o, "power"),
 		})
 	}
@@ -80,7 +80,7 @@ func logAccountRoles(roles []accountRole) {
 	slog.Info("account roles", "count", len(roles))
 	for i, r := range roles {
 		slog.Info("account role", "index", i, "server", r.ServerID, "zone", r.Zone, "serverName", r.ServerName,
-			"gameUid", r.GameUid, "level", r.Level, "power", r.Power, "hasOwnLoginKey", r.LoginKey != "")
+			"gameUid", r.GameUid, "level", r.Level, "power", r.Power)
 	}
 }
 

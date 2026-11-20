@@ -140,6 +140,10 @@ type deviceIdentity struct {
 	Username  string
 	GameUid   string
 	LoginKey  string
+	// Zone is the zone of the role the -email flow bound ("APS783"), which the client caches as
+	// SERVER_ZONE and sends as GSL `zone` (Assembly-CSharp.decompiled.cs:77411, 77437, 1.0.370);
+	// BootstrapOwnDevice sends it. "" until a bind records one.
+	Zone string
 }
 
 // String/GoString are the round-48 regression fix for the MAJOR finding that deviceIdentity --
@@ -184,6 +188,7 @@ func androidIDStatePath() string { return StateFilePath(".lastwar_goclient_andro
 func usernameStatePath() string  { return StateFilePath(".lastwar_goclient_username") }
 func gameUidStatePath() string   { return StateFilePath(".lastwar_goclient_gameuid") }
 func loginKeyStatePath() string  { return StateFilePath(".lastwar_goclient_loginkey") }
+func zoneStatePath() string      { return StateFilePath(".lastwar_goclient_zone") }
 
 // readTrimmed reads path and returns its trimmed contents. A missing file (os.IsNotExist) is not
 // an error -- it just means that piece of state hasn't been persisted yet (e.g. first run, or a
@@ -415,6 +420,7 @@ func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 	warnIfLoosePermissions(usernameStatePath())
 	warnIfLoosePermissions(gameUidStatePath())
 	warnIfLoosePermissions(loginKeyStatePath())
+	warnIfLoosePermissions(zoneStatePath())
 	androidID, err := loadOrCreateAndroidID()
 	if err != nil {
 		slog.Warn("failed to load or create the android id state file", "path", androidIDStatePath(), "error", err)
@@ -435,12 +441,18 @@ func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 		slog.Warn("failed to read loginKey state file", "path", loginKeyStatePath(), "error", err)
 		return nil, fmt.Errorf("read loginKey state: %w", err)
 	}
+	zone, err := readTrimmed(zoneStatePath())
+	if err != nil {
+		slog.Warn("failed to read zone state file", "path", zoneStatePath(), "error", err)
+		return nil, fmt.Errorf("read zone state: %w", err)
+	}
 	return &deviceIdentity{
 		DeviceID:  id,
 		AndroidID: androidID,
 		Username:  username,
 		GameUid:   gameUid,
 		LoginKey:  loginKey,
+		Zone:      zone,
 	}, nil
 }
 
@@ -508,6 +520,15 @@ func (d *deviceIdentity) SaveGameUid(uid string) error {
 	}
 	d.GameUid = uid
 	return saveStateFile(gameUidStatePath(), uid)
+}
+
+// SaveZone persists the bound role's zone (deviceIdentity.Zone).
+func (d *deviceIdentity) SaveZone(zone string) error {
+	if len(zone) > maxIdentityFieldLen {
+		return fmt.Errorf("identity: zone too long to persist (%d bytes, max %d)", len(zone), maxIdentityFieldLen)
+	}
+	d.Zone = zone
+	return saveStateFile(zoneStatePath(), zone)
 }
 
 // SaveUsername persists the SFS login response's `un` field so the next run
@@ -809,12 +830,19 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// omits all five entirely -- sending them unconditionally, as this
 	// client did before, was an untested guess that turned out to differ
 	// from every real reconnect this server has seen.
+	//
+	// gcmRegisterId and referrer are Android-only: the iOS block has the first three keys alone
+	// (Assembly-CSharp.decompiled.cs:83078-83087, 1.0.370; Android :83185-83196). timeoffset is the
+	// device's UTC offset in seconds ((DateTime.Now - DateTime.UtcNow).TotalSeconds); "0" is the
+	// UTC device the ta blob describes (#zone_offset 0).
 	if in.GameUid == "" {
 		p.PutInt("country", 1)
 		p.PutBool("suggestCountry", false)
 		p.PutUtfString("timeoffset", "0")
-		p.PutUtfString("gcmRegisterId", "")
-		p.PutUtfString("referrer", "")
+		if !in.IOSMode {
+			p.PutUtfString("gcmRegisterId", "")
+			p.PutUtfString("referrer", "")
+		}
 	}
 
 	// AndroidID/IMEI are Android-only identifiers; a real iOS client's
@@ -876,7 +904,13 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p.PutUtfString("packageName", effectivePackageName)
 	p.PutUtfString("packageSign", packageSignHex(effectivePackageName))
 	p.PutUtfString("platform", platformCode)
-	p.PutInt("lat", 1) // real client sent 1 (location-authorized); we hardcoded 0 before
+	// lat is a constant per platform: 1 on iOS, 0 on Android (Assembly-CSharp.decompiled.cs:83132;
+	// Android :83246, 1.0.370).
+	lat := int32(0)
+	if in.IOSMode {
+		lat = 1
+	}
+	p.PutInt("lat", lat)
 	// device_string: a real Android Login sends DeviceManager.GetDeviceString()
 	// (Model/Memory/Vendor/Processor/Graphics/DeviceType); a real iOS Login
 	// doesn't carry it, so it stays Android-only.

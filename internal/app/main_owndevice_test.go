@@ -142,8 +142,8 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 		{name: "fresh device, -server 783", args: "-email player@example.com -server 783",
 			wantLog: []string{"account role", "binding the role on the requested server", "device bound by email verification", "wrote own-device session config"},
 			noLog:   []string{"ignoring -email", "this device already logged in as a guest"},
-			// The 783 entry carries its own loginKey, which wins over the account's.
-			wantGameUid: "uid-783", wantLoginKey: "lk-role-783", wantZone: lookupZone},
+			// The 783 entry carries its own loginKey; the account's top-level one is bound anyway (AccountManager.lua:207-215, 1.0.370 audit B80).
+			wantGameUid: "uid-783", wantLoginKey: "lk-account", wantZone: lookupZone},
 		// The bind's Login and the loginKey trade both run as iOS: the first two lines are the
 		// Login's own, the third the trade's, and nothing in the run says Android.
 		{name: "fresh device, -cs-ios", args: "-email player@example.com -cs-ios",
@@ -165,11 +165,11 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 		{name: "reused guest (username)", args: "-email player@example.com -server 783",
 			seed:        map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_username": "guest-1"},
 			wantLog:     []string{"this device already logged in as a guest", "device bound by email verification"},
-			wantGameUid: "uid-783", wantLoginKey: "lk-role-783", wantZone: lookupZone, wantDeviceID: "dev_n3d"},
+			wantGameUid: "uid-783", wantLoginKey: "lk-account", wantZone: lookupZone, wantDeviceID: "dev_n3d"},
 		{name: "reused guest (gameUid)", args: "-email player@example.com -server 783",
 			seed:        map[string]string{".lastwar_goclient_device_id": "dev_n3d", ".lastwar_goclient_gameuid": "uid-guest"},
 			wantLog:     []string{"this device already logged in as a guest", "device bound by email verification"},
-			wantGameUid: "uid-783", wantLoginKey: "lk-role-783", wantZone: lookupZone, wantDeviceID: "dev_n3d"},
+			wantGameUid: "uid-783", wantLoginKey: "lk-account", wantZone: lookupZone, wantDeviceID: "dev_n3d"},
 		{name: "no role on -server", args: "-email player@example.com -server 999", wantCode: 1,
 			wantLog: []string{"no role on server 999", "fresh LASTWAR_STATE_DIR"},
 			noLog:   []string{"own-device bootstrap failed", "wrote own-device session config"}},
@@ -185,7 +185,7 @@ func TestMainOwnDeviceSessionWithEmail(t *testing.T) {
 			noLog:   []string{"step 6: request email verify code", "wrote own-device session config"}},
 		{name: "plain -email -server", args: "-email player@example.com -server 783", plain: true,
 			wantLog:     []string{"binding the role on the requested server"},
-			wantGameUid: "uid-783", wantLoginKey: "lk-role-783"},
+			wantGameUid: "uid-783", wantLoginKey: "lk-account"},
 		// The plain login reads -cs-ios too, so the flag isn't reported as ignored.
 		{name: "plain -email -cs-ios", args: "-email player@example.com -cs-ios", plain: true,
 			wantLog:     []string{`"check-version: fetch RSA pubkey and pick gate host","iosMode":true`, `"step 2: GSL getserverlist","opt":"new","platform":"iOS"`},
