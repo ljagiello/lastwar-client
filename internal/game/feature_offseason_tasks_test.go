@@ -97,6 +97,53 @@ func TestOffSeasonTasksQueenOfBloodChestOnly(t *testing.T) {
 	}
 }
 
+// TestOffSeasonTasksGroupOneGoalRowInGroupTwoIsATask: SetTaskInfo files a row as a goal only when
+// its Type is the group's goal type (OffSeason1TaskDataManager.lua:77; OffSeason1GoalTaskType,
+// EnumType.lua:17735-17738), so a claimable 10001 (Type -1) in group 2 is a task: the claim-all
+// (configId -1) goes out, and no score-chest claim (configId -2) while no group-2 goal row is
+// claimable.
+func TestOffSeasonTasksGroupOneGoalRowInGroupTwoIsATask(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "city.battle.activity.gain.task.info" {
+			return offSeasonInfoReply(2, map[int32]int32{10001: 1, 11001: 0})
+		}
+		return evOK()
+	})
+	if err := runOffSeasonTasks(conn, evInit(30, evActivity(1000110))); err != nil { // Queen of Blood, type 348
+		t.Fatal(err)
+	}
+	var configIDs []int32
+	for _, r := range fake.only("city.battle.activity.gain.task.reward") {
+		configIDs = append(configIDs, r.Params.GetInt("configId"))
+	}
+	if !slices.Equal(configIDs, []int32{-1}) {
+		t.Errorf("claimed configIds %v, want only the claim-all -1", configIDs)
+	}
+}
+
+// TestOffSeasonTasksClaimEachGroupOnce: two open type-347 activities (OffSeason1Recapture,
+// EnumType.lua:6481) share task group 1, whose info reply carries no activity id, so the group is
+// read and its chest claimed once.
+func TestOffSeasonTasksClaimEachGroupOnce(t *testing.T) {
+	withEvNow(t, evTestNow)
+	const second int32 = 777347
+	activityTable[second] = activityRow{typ: 347}
+	t.Cleanup(func() { delete(activityTable, second) })
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "city.battle.activity.gain.task.info" {
+			return offSeasonInfoReply(1, map[int32]int32{1001: 2, 10001: 1})
+		}
+		return evOK()
+	})
+	if err := runOffSeasonTasks(conn, evInit(30, evActivity(1000109), evActivity(second))); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fake.cmds(), []string{"city.battle.activity.gain.task.info", "city.battle.activity.gain.task.reward"}; !slices.Equal(got, want) {
+		t.Errorf("sent %v, want %v (group 1 once)", got, want)
+	}
+}
+
 func TestOffSeasonTasksGates(t *testing.T) {
 	withEvNow(t, evTestNow)
 	ended := evActivity(1000109)
@@ -109,6 +156,9 @@ func TestOffSeasonTasksGates(t *testing.T) {
 		{"no off-season activity", evInit(30, evActivity(99152)), map[int32]int32{1001: 1}},
 		{"activity ended", evInit(30, ended), map[int32]int32{1001: 1}},
 		{"nothing claimable", evInit(30, evActivity(1000109)), map[int32]int32{1001: 0, 1002: 2, 10001: 0}},
+		// UpdateTaskListInfo keeps a row only when 0 < tonumber(configId) (OffSeason1TaskDataManager.lua:
+		// 38-42, 69-70), so claimable rows with configId 0 or -1 are no task.
+		{"claimable rows without a positive configId", evInit(30, evActivity(1000109)), map[int32]int32{0: 1, -1: 1, 1001: 0}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {

@@ -41,9 +41,11 @@ func skyBattleWindow(in *Init, st, et time.Time) *Init {
 // have none), the way TestThemeNoticeClaimsBeforeTheStart adds a type-30 row.
 const skyBattleGrowthTestID int32 = 777371
 
+// withSkyBattleGrowthRow adds the row with the literal type 371, EnumActivity.ActSkyBattleGrowth
+// (EnumType.lua:6499), not skyBattleGrowthType, so the constant is checked against the client.
 func withSkyBattleGrowthRow(t *testing.T) {
 	t.Helper()
-	activityTable[skyBattleGrowthTestID] = activityRow{typ: skyBattleGrowthType}
+	activityTable[skyBattleGrowthTestID] = activityRow{typ: 371}
 	t.Cleanup(func() { delete(activityTable, skyBattleGrowthTestID) })
 }
 
@@ -515,5 +517,116 @@ func TestCounterAttackRoundsClaimAll(t *testing.T) {
 	}
 	if got := fake.cmds(); len(got) != 0 {
 		t.Errorf("sent %v outside an alliance", got)
+	}
+}
+
+// TestCounterAttackRoundsSkipARoundWithoutARound: InitRoundAward files each entry by its round
+// (CounterAttackDataManager.lua:234), which fails on an entry without one, so the client counts no
+// claimable round; with no other round in state 1, no claim-all goes out.
+func TestCounterAttackRoundsSkipARoundWithoutARound(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		r := evOK()
+		if cmd == "dark.knight.alliance.reward.info" {
+			a := sfs.NewSFSArray()
+			a.AddSFSObject(obj("state", 1)) // no round
+			a.AddSFSObject(obj("round", 2, "state", 0))
+			r.PutSFSArray("allianceRoundReward", a)
+		}
+		return r
+	})
+	if err := runCounterAttackRounds(conn, counterAttackInit(true)); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.only("dark.knight.alliance.award.round"); len(got) != 0 {
+		t.Errorf("claimed %+v, want nothing", got)
+	}
+}
+
+// TestSkyBattleBoxesStopOnRefusal: the normal-window fixture of
+// TestSkyBattleBoxesClaimUntilTheReachedBoxesAreTaken with one reply refused.
+//   - The chapter 1 box claim is refused: an errorCode stops the feature's claims, so chapter 2's
+//     due box is not claimed.
+//   - The stage read is refused: there is nothing to read, so nothing is claimed.
+func TestSkyBattleBoxesStopOnRefusal(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for _, c := range []struct {
+		name      string
+		refuse    string
+		wantBoxes []int32
+	}{
+		{"none refused", "", []int32{1, 2}},
+		{"chapter 1 box refused", "lw.sky.battle.chapter.box.reward", []int32{1}},
+		{"stage read refused", "lw.get.sky.battle.stage", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				if cmd == c.refuse {
+					return evErr("E371001")
+				}
+				r := evOK()
+				switch cmd {
+				case "lw.get.sky.battle.stage":
+					a := sfs.NewSFSArray()
+					a.AddSFSObject(skyChapter(1, nil, 3, 3)) // 6 stars: the 6-star box is due
+					a.AddSFSObject(skyChapter(2, nil, 3, 3))
+					r.PutSFSArray("chapterInfo", a)
+				case "lw.sky.battle.chapter.box.reward":
+					r.PutIntArray("rewardedTarget", []int32{6})
+				}
+				return r
+			})
+			in := skyBattleWindow(evInit(10), evTestNow.Add(-time.Hour), evTestNow.Add(time.Hour))
+			err := runSkyBattleBoxes(conn, in)
+			if (err != nil) != (c.refuse != "") {
+				t.Errorf("err = %v, want a refusal reported: %v", err, c.refuse != "")
+			}
+			var sent []int32
+			for _, r := range fake.only("lw.sky.battle.chapter.box.reward") {
+				sent = append(sent, r.Params.GetInt("chapter"))
+			}
+			if !slices.Equal(sent, c.wantBoxes) {
+				t.Errorf("claimed chapters %v, want %v", sent, c.wantBoxes)
+			}
+		})
+	}
+}
+
+// TestNewbieArenaRewardsStopOnRefusal: two reached rows (ids 1 and 2, in that order) on both arenas.
+// The V1 arena refuses row 1, which stops that activity's claims, so its row 2 is not claimed; the
+// V2 arena is another activity and still claims both. A state-1 row without an id names nothing to
+// claim and is skipped.
+func TestNewbieArenaRewardsStopOnRefusal(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		switch cmd {
+		case "activity.arena.reward.preview", "activity.arena.v2.reward.preview":
+			r := evOK()
+			a := sfs.NewSFSArray()
+			a.AddSFSObject(obj("state", 1, "targetRank", 200)) // no id
+			a.AddSFSObject(obj("id", 1, "state", 1, "targetRank", 100))
+			a.AddSFSObject(obj("id", 2, "state", 1, "targetRank", 50))
+			r.PutSFSArray("achieveRewards", a)
+			return r
+		case "activity.arena.receive":
+			if p.GetInt("id") == 1 {
+				return evErr("E140001")
+			}
+		}
+		return evOK()
+	})
+	err := runNewbieArenaRewards(conn, evInit(30, evActivity(100000), evActivity(100001)))
+	if err == nil || !strings.Contains(err.Error(), "E140001") {
+		t.Errorf("err = %v, want the refusal reported", err)
+	}
+	var sent []string
+	for _, r := range fake.requests() {
+		if strings.HasSuffix(r.Cmd, "receive") {
+			sent = append(sent, r.Cmd+" "+strconv.Itoa(int(r.Params.GetInt("id"))))
+		}
+	}
+	want := []string{"activity.arena.receive 1", "activity.arena.v2.receive 1", "activity.arena.v2.receive 2"}
+	if !slices.Equal(sent, want) {
+		t.Errorf("claimed %q, want %q", sent, want)
 	}
 }
