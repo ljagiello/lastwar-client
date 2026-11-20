@@ -545,9 +545,11 @@ func reconnectBuild(fromConfig, iosMode bool, appVersion, versionCode string) (s
 	return appVersion, versionCode
 }
 
-// exitLoginFailed logs a failed auth.Login and exits: 5 for a forced update (gsl.ErrForcedUpdate),
-// 4 for a blocked account, role, device or IP (ErrAccountBlocked), 2 for any other confirmed
-// server-side auth rejection (ErrAuthRejected, or GSL 211/212), 1 for anything else.
+// exitLoginFailed logs a failed auth.Login and exits: 3 for a terminal server push
+// (ErrSessionEnded; 2 when it removed this device, ErrDeviceRemoved), 5 for a forced update
+// (gsl.ErrForcedUpdate), 4 for a blocked account, role, device or IP (ErrAccountBlocked), 2 for
+// any other confirmed server-side auth rejection (ErrAuthRejected, or GSL 211/212), 1 for
+// anything else (a season-window refusal, E015/E016, included).
 func exitLoginFailed(err error) {
 	slog.Error("login failed", "error", err)
 	exitIfSessionEnded(err, nil)
@@ -698,6 +700,13 @@ const exitCodeAccountBlocked = 4
 // parsing the log.
 const exitCodeForcedUpdate = 5
 
+// exitCodeDeviceRemoved is the exit code for a run whose device the account removed
+// (session.ErrDeviceRemoved: push.account.device.del naming this session's deviceId,
+// PushAccountDeviceDelMessage.lua:8-25). It is 2, the "session is stale" code, not 3: the next
+// scheduled run can't log this device in again until it is bound again or recaptured (1.0.370
+// audit B66).
+const exitCodeDeviceRemoved = 2
+
 // exitIfForcedUpdate exits with exitCodeForcedUpdate when err carries gsl.ErrForcedUpdate, and
 // returns otherwise. conn may be nil.
 func exitIfForcedUpdate(err error, conn *session.GameConn) {
@@ -730,10 +739,21 @@ func exitIfAccountBlocked(err error) {
 
 // exitIfSessionEnded exits with exitCodeSessionEnded when err carries session.ErrSessionEnded,
 // and returns otherwise. The real client never reconnects after these pushes, so this exits even
-// when -interactive was requested. conn may be nil (a failed login has none to close).
+// when -interactive was requested. conn may be nil (a failed login has none to close). A push
+// that removed this device from the account (session.ErrDeviceRemoved, which wraps
+// ErrSessionEnded) exits with exitCodeDeviceRemoved instead.
 func exitIfSessionEnded(err error, conn *session.GameConn) {
 	if !errors.Is(err, session.ErrSessionEnded) {
 		return
+	}
+	if errors.Is(err, session.ErrDeviceRemoved) {
+		slog.Error("this device was removed from the account (push.account.device.del); the session is gone for good. "+
+			"Bind the device again (the -email flow, then -own-device-session) or recapture the real app's session",
+			"error", err, "exitCode", exitCodeDeviceRemoved)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		os.Exit(exitCodeDeviceRemoved)
 	}
 	slog.Error("the server ended this session; exiting without reconnecting, the next scheduled run starts a fresh one",
 		"error", err, "exitCode", exitCodeSessionEnded)
