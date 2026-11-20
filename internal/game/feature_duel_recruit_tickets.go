@@ -24,15 +24,22 @@ import (
 // none after the duel day ends.
 //
 // Hero pools come from init lotteryFreeInfo. Pools of a type other than 1 are dropped; the client
-// drops types 2 and 3 (LotteryDataManager.lua:121). Closed pools are dropped (IsOpen; start and
+// drops types 2 and 3 (LotteryDataManager.lua:121). A pool without type or timeType takes it from
+// its officer_recruit row, as LotteryInfo:UpdateInfo does (LotteryInfo.lua:125-129, 143-147;
+// duelRecruitTable, generated). Closed pools are dropped (IsOpen; start and
 // end are in seconds, LotteryInfo.lua:176-181, 323-329), as are Expert pools outside their window
 // (GetOtherLotteryDict, LotteryDataManager.lua:188-201) and pools with an extra_res cost
 // (LotteryInfo.lua:244-252). The rest are taken in the client's tab order, order descending
 // (UIHeroRecruitCtrl.lua:21-42), with ties broken by id. For each ticket item held, the first pool
 // whose single cost (item "itemId;num|itemId;num", LotteryInfo.lua:152-162) is that ticket is the
-// one pulled. That is the pool the recruit view sends for its current tab. When that pool is a
-// wish pool with no wish hero chosen, the client asks before any pull, so its ticket is kept
-// (duelRecruitWishUnset).
+// one pulled. That is the pool the recruit view sends for its current tab. Its ticket is kept,
+// never spent on a later tab, when the recruit view would ask a wish confirmation before the pull
+// (duelRecruitWishAsk: herorecruit_alert1, alert2 or alert5), or when the answer needs a table this
+// client lacks: a pool not in officer_recruit (newer than the tables) whose chosen wish hero is
+// owned at max rank, where alert2/alert5 depend on the pool's wish list. With the wish UI off
+// (wishSwitch off or wishPityReceiveNum <= 0, IsShowWish, LotteryInfo.lua:468-478), or with a
+// chosen wish hero not owned or below max rank (LotteryInfo.lua:878-884), the client pulls without
+// reading the wish list, and so does this, whether the pool is in the table or not.
 //
 // A single pull is `lottery.hero.card {id, isTen: 0, useFree: 0, aiPushStatus, itemId}`. The
 // client sends it only when the held count >= the single cost (UIHeroRecruitView.lua:963-975). A
@@ -87,43 +94,152 @@ type duelRecruitCost struct {
 
 // duelRecruitPool is one hero pool that can be pulled with tickets.
 type duelRecruitPool struct {
-	id        string
-	order     int64
-	single    duelRecruitCost
-	ten       duelRecruitCost // num 0 when the pool has no ten pull
-	freeDue   bool            // the free pull is due now, or its timer is unknown
-	wishUnset bool            // a wish pool with no wish hero chosen (duelRecruitWishUnset)
+	id      string
+	order   int64
+	single  duelRecruitCost
+	ten     duelRecruitCost // num 0 when the pool has no ten pull
+	freeDue bool            // the free pull is due now, or its timer is unknown
+	ask     string          // the wish confirmation the recruit view would show (duelRecruitWishAsk)
+	unknown bool            // the pool id is not in officer_recruit (only logged: ask decides)
 }
 
-// duelRecruitWishLists is officer_recruit (tables 39879, all 27 rows) id -> whether its wish_list
-// is non-empty. LotteryInfo takes the wish list from the table row, not from the message
-// (LotteryInfo.lua:273-280).
-var duelRecruitWishLists = map[string]bool{
-	"221500": false, "221501": true, "221600": false, "221601": false, "221602": true, "221700": false,
-	"221701": false, "221702": true, "221703": true, "221704": true, "221705": true, "221706": true,
-	"221707": true, "221708": true, "301100": false, "301101": false, "301102": false, "301103": false,
-	"301104": false, "301105": false, "301106": false, "301107": false, "301108": false, "301109": false,
-	"301110": false, "301111": false, "401100": false,
-}
-
-// duelRecruitWishUnset is the recruit view's showEmptyWishConfirm: IsShowWish (wishSwitch set,
-// wishPityReceiveNum > 0 and a non-empty wish list, LotteryInfo.lua:468-478) and no wish hero
-// chosen (GetCurSelectWishHeroId, :480-484). The client then asks herorecruit_alert1 before
-// every pull, single or ten (UIHeroRecruitView.lua:993-1003, 1026-1036, 1072-1083), so a
-// headless run must not pull. wishSwitch is tested the Lua way (any value but false). A pool id
-// newer than tables 39879 counts as having a wish list, so it is skipped too.
-func duelRecruitWishUnset(p *sfs.SFSObject) bool {
+// duelRecruitWishShown is IsShowWish without its duration-type start test (Go drops pools that
+// have not started): wishSwitch set, tested the Lua way (any value but false), wishPityReceiveNum
+// > 0 and a non-empty wish list (LotteryInfo.lua:468-478), the list from the officer_recruit row
+// (:273-280). known is false for a pool id the table lacks.
+func duelRecruitWishShown(p *sfs.SFSObject) (shown, known bool) {
+	row, known := duelRecruitTable[evString(p, "id")]
 	v, ok := p.Get("wishSwitch")
 	if !ok || v.Val == nil || v.Val == false {
-		return false
+		return false, known
 	}
 	if n, _ := evNum(p, "wishPityReceiveNum"); n <= 0 {
+		return false, known
+	}
+	return !known || len(row.wishList) > 0, known
+}
+
+// duelRecruitWishUnset is the recruit view's showEmptyWishConfirm: IsShowWish
+// (duelRecruitWishShown) and no wish hero chosen (GetCurSelectWishHeroId, LotteryInfo.lua:
+// 480-484). The client then asks herorecruit_alert1 before every pull from the recruit window,
+// single or ten (UIHeroRecruitView.lua:993-997, 1026-1030, 1072-1076; its result window's "recruit
+// again" and the 100-pull window send with no wish test, UIHeroRecruitReward.lua:508-538,
+// UIHero100RecruitView.lua:434-457, so the confirmation guards a sitting's first pull), so a
+// headless run must not pull. A pool id not in officer_recruit counts as having a wish list, so it
+// is skipped too.
+func duelRecruitWishUnset(p *sfs.SFSObject) bool {
+	shown, _ := duelRecruitWishShown(p)
+	return shown && evString(p, "wishHero") == ""
+}
+
+// The recruit view's wish confirmations (UIHeroRecruitView.lua:993-1005, 1026-1037, 1072-1082):
+// alert1 asks for a wish hero, alert2 and alert5 say the chosen one is at max rank / max honor
+// level while another owned wish hero is not (LotteryInfo.lua:839-893). duelRecruitWishUnknown is
+// this client's own: the pool or a hero is not in the tables, so the answer is unknown.
+const (
+	duelRecruitWishAlert1  = "herorecruit_alert1"
+	duelRecruitWishAlert2  = "herorecruit_alert2"
+	duelRecruitWishAlert5  = "herorecruit_alert5"
+	duelRecruitWishUnknown = "unknown (pool or wish hero not in the tables)"
+	// duelRecruitWishAlert5Assumed is alert5 decided without honor levels: init userHero carried
+	// none, so a chosen hero at max rank is taken as one the client would ask about.
+	duelRecruitWishAlert5Assumed = "herorecruit_alert5 (assumed: init userHero carries no honorLevel)"
+)
+
+// duelRecruitHero is one owned hero as HeroInfo reads it from init userHero: rankLv (rank, 1 when
+// absent, HeroInfo.lua:30, 160-162) and honorLevel (0 when absent, :57, 246-247).
+type duelRecruitHero struct{ rank, honor int64 }
+
+// duelRecruitHeroes is init userHero by heroId (GetHeroByHeroId, HeroDataManager.lua:255-267: a
+// hero absent here is not owned), and whether any entry carries honorLevel.
+type duelRecruitHeroes struct {
+	byID     map[int64]duelRecruitHero
+	hasHonor bool
+}
+
+func duelRecruitOwnedHeroes(in *Init) duelRecruitHeroes {
+	h := duelRecruitHeroes{byID: map[int64]duelRecruitHero{}}
+	for _, o := range claimObjectsOrMap(in.Raw, "userHero") {
+		id, ok := claimInt(o, "heroId")
+		if _, seen := h.byID[id]; !ok || seen {
+			continue
+		}
+		r := duelRecruitHero{rank: 1}
+		if n, ok := claimInt(o, "rankLv"); ok {
+			r.rank = n
+		}
+		if n, ok := claimInt(o, "honorLevel"); ok {
+			r.honor = n
+			h.hasHonor = true
+		}
+		h.byID[id] = r
+	}
+	return h
+}
+
+// duelRecruitWishAsk returns the wish confirmation the recruit view shows before a pull from pool
+// p, or "" when it pulls without asking: alert1 (duelRecruitWishUnset), then
+// GetWishLotterySecondConfirmKey (LotteryInfo.lua:839-893). That one needs IsShowWish and a chosen
+// wish hero the account owns; with the chosen hero at max rank (rank >= lw_hero max_rank,
+// HeroInfo.lua:989-991) it is alert2 when another owned wish-list hero is below its max rank, else,
+// with the chosen hero also at max honor level (:1453-1455), alert5 when another owned wish-list
+// hero is below its max_honorLevel. When no init userHero entry carries honorLevel, the honor half
+// can't be told from init, so a chosen hero at max rank counts as alert5
+// (duelRecruitWishAlert5Assumed): stricter than the client, and logged as such. The checks run in
+// the client's order: a chosen hero not owned or below max rank returns "" before the wish list
+// is read, so a pool officer_recruit lacks is duelRecruitWishUnknown only once its chosen hero is
+// owned at max rank (or that hero can't be read from wishHero or lw_hero).
+func duelRecruitWishAsk(p *sfs.SFSObject, owned duelRecruitHeroes) string {
+	if duelRecruitWishUnset(p) {
+		return duelRecruitWishAlert1
+	}
+	shown, known := duelRecruitWishShown(p)
+	if !shown {
+		return ""
+	}
+	chosen, err := strconv.ParseInt(strings.TrimSpace(evString(p, "wishHero")), 10, 64)
+	if err != nil {
+		return duelRecruitWishUnknown
+	}
+	hero, ok := owned.byID[chosen]
+	if !ok {
+		return ""
+	}
+	row, ok := duelHero(chosen)
+	if !ok {
+		return duelRecruitWishUnknown
+	}
+	if hero.rank < int64(row.maxRank) {
+		return ""
+	}
+	if !known {
+		return duelRecruitWishUnknown
+	}
+	others := func(below func(h duelRecruitHero, r duelHeroRow) bool) bool {
+		for _, id := range duelRecruitTable[evString(p, "id")].wishList {
+			h, ok := owned.byID[int64(id)]
+			if int64(id) == chosen || !ok {
+				continue
+			}
+			if r, ok := duelHero(int64(id)); !ok || below(h, r) {
+				return true
+			}
+		}
 		return false
 	}
-	if hasList, known := duelRecruitWishLists[evString(p, "id")]; known && !hasList {
-		return false
+	if others(func(h duelRecruitHero, r duelHeroRow) bool { return h.rank < int64(r.maxRank) }) {
+		return duelRecruitWishAlert2
 	}
-	return evString(p, "wishHero") == ""
+	if !owned.hasHonor {
+		return duelRecruitWishAlert5Assumed
+	}
+	if hero.honor < int64(row.maxHonorLevel) {
+		return ""
+	}
+	if others(func(h duelRecruitHero, r duelHeroRow) bool { return h.honor < int64(r.maxHonorLevel) }) {
+		return duelRecruitWishAlert5
+	}
+	return ""
 }
 
 // duelRecruitCosts parses a pool's item string, "itemId;num|itemId;num". ok is false unless the
@@ -151,14 +267,24 @@ func duelRecruitCosts(item string) (single, ten duelRecruitCost, ok bool) {
 // duelRecruitHeroPools returns the ticket-pullable hero pools in the client's tab order.
 func duelRecruitHeroPools(in *Init) []duelRecruitPool {
 	now := evNow().Unix()
+	owned := duelRecruitOwnedHeroes(in)
 	var out []duelRecruitPool
 	for _, p := range in.Objects("lotteryFreeInfo") {
 		id := evString(p, "id")
 		if id == "" {
 			continue
 		}
-		if t, ok := evNum(p, "type"); ok && t != 1 {
+		row, known := duelRecruitTable[id]
+		t, ok := evNum(p, "type")
+		if !ok && known {
+			t, ok = int64(row.typ), true
+		}
+		if ok && t != 1 {
 			continue
+		}
+		timeType := evString(p, "timeType")
+		if !p.Has("timeType") && known {
+			timeType = row.timeType
 		}
 		if evString(p, "extra_res") != "" {
 			continue
@@ -168,7 +294,7 @@ func duelRecruitHeroPools(in *Init) []duelRecruitPool {
 		if end > start && (now <= start || now >= end) {
 			continue
 		}
-		if evString(p, "timeType") == "3" && end <= start {
+		if timeType == "3" && end <= start {
 			continue
 		}
 		single, ten, ok := duelRecruitCosts(evString(p, "item"))
@@ -178,7 +304,8 @@ func duelRecruitHeroPools(in *Init) []duelRecruitPool {
 		limit, _ := evNum(p, "dailyFreeLimit")
 		next, hasNext := evNum(p, "dailyFreeNextFreshTime")
 		pool := duelRecruitPool{id: id, single: single, ten: ten,
-			freeDue: limit > 0 && (!hasNext || next <= 0 || now >= next), wishUnset: duelRecruitWishUnset(p)}
+			freeDue: limit > 0 && (!hasNext || next <= 0 || now >= next),
+			ask:     duelRecruitWishAsk(p, owned), unknown: !known}
 		pool.order, _ = evNum(p, "order")
 		out = append(out, pool)
 	}
@@ -197,24 +324,30 @@ func duelRecruitHeroPools(in *Init) []duelRecruitPool {
 }
 
 // duelInitItemCounts returns the largest init items stack per item id. The client reads items as
-// {uuid, itemId or goodsId, count} (ItemInfo.lua:35-64), as an array or keyed by uuid.
+// {uuid, itemId or goodsId, count, num or itemLeftCnt} (ItemInfo.lua:38-67), as an array or keyed
+// by uuid; duelItemFields gives its precedence.
 func duelInitItemCounts(in *Init) map[string]int64 {
 	out := map[string]int64{}
 	for _, it := range claimObjectsOrMap(in.Raw, "items") {
-		id := evString(it, "itemId")
-		if id == "" {
-			id = evString(it, "goodsId")
-		}
-		n, ok := evNum(it, "count")
-		if !ok {
-			n, ok = evNum(it, "num")
-		}
+		id, n, ok := duelItemFields(it)
 		if id == "" || !ok || n <= 0 {
 			continue
 		}
 		out[id] = max(out[id], n)
 	}
 	return out
+}
+
+// duelItemFields reads an item entry's id and count the way ItemInfo:UpdateInfo does: goodsId
+// overwrites itemId, and itemLeftCnt overwrites num, which overwrites count (ItemInfo.lua:43-67;
+// addNum only adds, and no ledger here is ever raised). ok is false when no count is present.
+func duelItemFields(it *sfs.SFSObject) (id string, count int64, ok bool) {
+	id = evString(it, "goodsId")
+	if id == "" {
+		id = evString(it, "itemId")
+	}
+	count, ok = claimFirstInt(it, "itemLeftCnt", "num", "count")
+	return id, count, ok
 }
 
 // duelPoints is the base points one unit of (typ, value) earns today, or 0 when it scores nothing.
@@ -322,11 +455,23 @@ func (r *duelRecruitRun) heroes(pools []duelRecruitPool) []error {
 			continue
 		}
 		done[ticket] = true
-		if pool.wishUnset {
-			// The ticket stays unspent rather than going to a later tab the player didn't pick.
-			slog.Info("duel-recruit-tickets: the pool's wish hero is not chosen, which the client confirms before any pull; tickets kept",
-				"pool", pool.id, "ticket", ticket, "held", r.g.items[ticket])
+		// The ticket stays unspent rather than going to a later tab the player didn't pick.
+		// Holds this client decides without the client's answer (a pool the tables lack whose
+		// chosen wish hero is at max rank, a wish hero lw_hero lacks, honor levels init lacks)
+		// are Warn: they keep tickets the client might pull, until the tables are regenerated or
+		// init carries the field.
+		if pool.ask != "" {
+			log := slog.Info
+			if pool.ask == duelRecruitWishUnknown || pool.ask == duelRecruitWishAlert5Assumed {
+				log = slog.Warn
+			}
+			log("duel-recruit-tickets: the recruit view would ask a wish confirmation before pulling this pool; tickets kept",
+				"pool", pool.id, "confirmation", pool.ask, "ticket", ticket, "held", r.g.items[ticket])
 			continue
+		}
+		if pool.unknown {
+			slog.Info("duel-recruit-tickets: the pool is not in officer_recruit (tables 40413); the recruit view asks no wish confirmation (wish UI off, or the chosen wish hero not owned or below max rank), so it is pulled as the client pulls it",
+				"pool", pool.id, "ticket", ticket)
 		}
 		recruited := int64(0)
 		for r.canPull() {
@@ -655,22 +800,14 @@ func (g *duelSpendGuard) seeGold(src string, n int64) {
 	}
 }
 
-// seeItem lowers the ledger of a tracked item to the count a push carries. push.item.del removes
-// the stack, so without a count it reads as 0.
+// seeItem lowers the ledger of a tracked item to the count a push carries, read as the client
+// reads it (duelItemFields; ItemManager.lua:54 applies push.item.use with UpdateOneItem). push.item.del
+// removes the stack, so without a count it reads as 0.
 func (g *duelSpendGuard) seeItem(src string, o *sfs.SFSObject) {
-	id := evString(o, "itemId")
-	if id == "" {
-		id = evString(o, "goodsId")
-	}
+	id, n, ok := duelItemFields(o)
 	cur, tracked := g.items[id]
 	if !tracked {
 		return
-	}
-	n, ok := int64(0), false
-	for _, k := range []string{"count", "num", "itemLeftCnt"} {
-		if n, ok = evNum(o, k); ok {
-			break
-		}
 	}
 	if !ok {
 		if src != duelPushItemDel {
