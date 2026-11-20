@@ -130,3 +130,32 @@ func TestCityFirstOccupationGatesAndErrors(t *testing.T) {
 		t.Errorf("registered %v, DefaultOn %v, summary %q", ok, f.DefaultOn, f.Summary)
 	}
 }
+
+// TestCityFirstOccupationNeedsACityID: the claim sends the entry's cityId as an Int
+// (WorldAllianceCityFirstOccupiedRewardMessage.lua:4-7). An entry with a free reward but no
+// cityId, cityId 0, or one an Int cannot carry (it would wrap to 2002) is not claimed.
+func TestCityFirstOccupationNeedsACityID(t *testing.T) {
+	reward := []*sfs.SFSObject{obj("type", 0, "itemId", 200000, "count", 5)}
+	ids := aCityRewardRun(t,
+		obj("cityId", 2002, "firstReward", reward),
+		obj("firstReward", reward),
+		obj("cityId", 0, "firstReward", reward),
+		obj("cityId", int64(1)<<32+2002, "firstReward", reward),
+	)
+	if !slices.Equal(ids, []int32{2002}) {
+		t.Errorf("claimed %v, want [2002]", ids)
+	}
+}
+
+// TestCityFirstOccupationClaimCap: 21 cities with a free reward, and a run claims 20
+// (cityFirstOccMaxClaims, feature_city_first_occupation.go:39).
+func TestCityFirstOccupationClaimCap(t *testing.T) {
+	reward := []*sfs.SFSObject{obj("type", 0, "itemId", 200000, "count", 5)}
+	var cities []*sfs.SFSObject
+	for id := 3001; id <= 3021; id++ {
+		cities = append(cities, obj("cityId", id, "firstReward", reward))
+	}
+	if ids := aCityRewardRun(t, cities...); len(ids) != 20 || ids[19] != 3020 {
+		t.Errorf("claimed %d cities (%v), want 3001 to 3020", len(ids), ids)
+	}
+}

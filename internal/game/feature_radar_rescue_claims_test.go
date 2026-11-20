@@ -81,16 +81,19 @@ func TestRadarRescueSoldiers(t *testing.T) {
 
 // TestRadarRescueClaimsWhatFits: the client claims a finished rescue when its soldiers fit
 // LW_SOLDIER_MAX_STOCK minus the held Player soldiers (RadarCenterDataManager.lua:1281-1313) and
-// asks first otherwise; each claim uses up room.
+// asks first otherwise; each claim uses up room. Events 0, 14 and 15 carry soldiers that fit the
+// 50 left after 13, so only the uuid, type and state filters keep them out.
 func TestRadarRescueClaimsWhatFits(t *testing.T) {
 	events := []*sfs.SFSObject{
 		rescueEv(11, map[int32]int64{3010: 300}),           // fits: room 500
 		rescueEv(12, map[int32]int64{3010: 150, 4005: 60}), // 210 > the 200 left: the client asks
-		rescueEv(13, map[int32]int64{3010: 200}),           // fits the 200 left
-		detectEv(14, 100, radarStateFinished),              // not a rescue: radar-claims' job
-		rescueEv(15, map[int32]int64{3010: 1}),             // not FINISHED: skipped
+		rescueEv(13, map[int32]int64{3010: 150}),           // fits the 200 left
+		rescueEv(14, map[int32]int64{3010: 10}),            // detect_event 100 (type 6), not a rescue: radar-claims' job
+		rescueEv(15, map[int32]int64{3010: 10}),            // not FINISHED: skipped
+		rescueEv(0, map[int32]int64{3010: 10}),             // no uuid to send
 	}
-	events[4].PutInt("state", radarStateNotFinish)
+	events[3].PutInt("eventId", 100)
+	events[4].PutInt("state", 0) // DETECT_EVENT_STATE_NOT_FINISH (EnumType.lua:8515)
 	conn, f := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{detectReply(20, 10, events...)}, nil)
 	if err := runRadarRescueClaims(conn, rescueInit(1000, 500)); err != nil {
 		t.Fatal(err)
@@ -124,6 +127,12 @@ func TestRadarRescueCountsWhatFinishedTimersCollectsFirst(t *testing.T) {
 	hospital.PutInt("type", finishedTimersQueueHospital)
 	hospital.PutLong("startTime", evTestNow.Add(-time.Hour).UnixMilli())
 	hospital.PutLong("updateTime", past)
+	// NewQueueType.RebirthHospital = 117 (EnumType.lua:3240): its healed troops are not in init either.
+	rebirth := sfs.NewSFSObject()
+	rebirth.PutLong("uuid", 92)
+	rebirth.PutInt("type", 117)
+	rebirth.PutLong("startTime", evTestNow.Add(-time.Hour).UnixMilli())
+	rebirth.PutLong("updateTime", past)
 	for _, tc := range []struct {
 		name     string
 		building *sfs.SFSObject
@@ -134,6 +143,7 @@ func TestRadarRescueCountsWhatFinishedTimersCollectsFirst(t *testing.T) {
 		{"camp output ready", camp(300), nil, nil}, // 400 > 500 - 300
 		{"small camp output", camp(50), nil, []int64{11}},
 		{"hospital queue finished", nil, hospital, nil},
+		{"rebirth hospital queue finished", nil, rebirth, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conn, f := startRadarFake(t, radarScoringDay(),
@@ -206,5 +216,41 @@ func TestRadarRescueFeatureIsOptInAndHeld(t *testing.T) {
 	}
 	if f.DefaultOn || !f.Hold || len(f.Duel) != 1 || f.Duel[0].Type != DuelScoreRadarTask {
 		t.Errorf("DefaultOn=%v Hold=%v Duel=%v, want opt-in and held for radar-task days", f.DefaultOn, f.Hold, f.Duel)
+	}
+}
+
+// TestRadarRescueSkipsUnreadableRewards: a finished rescue is claimed only when its reward parses
+// into soldier entries with counts (feature_radar_rescue_claims.go:37-40). The client would sum 0
+// soldiers for 22 and 23 and claim them; Go leaves a reward it cannot read to the player.
+func TestRadarRescueSkipsUnreadableRewards(t *testing.T) {
+	events := []*sfs.SFSObject{
+		rescueEv(21, map[int32]int64{3010: 10}),                           // claimed
+		aRadarRescue(22, [3]int64{27, 4003, 10}),                          // RESOURCE_ITEM, but no lw_soldier row 4003
+		aRadarRescue(23, [3]int64{0, 3010, 10}),                           // a soldier id in a non-RESOURCE_ITEM entry
+		aRadarRescue(24, [3]int64{27, 3010, -5}),                          // a negative count
+		aRadarRescue(25, [3]int64{27, 3010, 10}, [3]int64{27, 3011, -20}), // a negative count beside a good one
+	}
+	conn, f := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{detectReply(20, 10, events...)}, nil)
+	if err := runRadarRescueClaims(conn, rescueInit(1000, 500)); err != nil {
+		t.Fatal(err)
+	}
+	if got := radarUUIDs(f, "receive.detect.event.reward"); !slices.Equal(got, []int64{21}) {
+		t.Errorf("claimed %v, want 21 only", got)
+	}
+}
+
+// TestRadarRescueClaimCap: 51 finished rescues of one soldier each all fit, and a run claims 50, the
+// radar's detect_max_num (feature_radar_rescue_claims.go:46-48).
+func TestRadarRescueClaimCap(t *testing.T) {
+	var events []*sfs.SFSObject
+	for uuid := int64(1); uuid <= 51; uuid++ {
+		events = append(events, rescueEv(uuid, map[int32]int64{3010: 1}))
+	}
+	conn, f := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{detectReply(20, 10, events...)}, nil)
+	if err := runRadarRescueClaims(conn, rescueInit(1000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := radarUUIDs(f, "receive.detect.event.reward"); len(got) != 50 || got[49] != 50 {
+		t.Errorf("claimed %d rescues (%v), want 1 to 50", len(got), got)
 	}
 }

@@ -43,11 +43,23 @@ func TestSeasonMilitaryRankUpStops(t *testing.T) {
 	settling := func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		return obj("militaryLevel", 2, "totalMilitaryScore", int64(900000), "isDailySettleIng", 1)
 	}
+	// scoreDrops answers each rank-up with the next level and a lower score that still passes every
+	// group-60 manual threshold (level 15's unlock_score 667000), so only the drop check stops the
+	// second rank-up.
 	scoreDrops := func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		if cmd == seasonMilitaryUpCmd {
-			return obj("militaryLevel", 3, "totalMilitaryScore", int64(10))
+			return obj("militaryLevel", p.GetInt("viewLevel")+1, "totalMilitaryScore", int64(800000))
 		}
 		return obj("militaryLevel", 2, "totalMilitaryScore", int64(900000))
+	}
+	// noLevelUp answers an info at level 1 and each rank-up without militaryLevel: the client's
+	// GetLevel is Mathf.Max(1, checknumber(Level)) (SeasonMilitaryInfoData.lua:56, 78-79), so the
+	// level reads as 1 again and no second rank-up follows.
+	noLevelUp := func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == seasonMilitaryUpCmd {
+			return obj("totalMilitaryScore", int64(900000), "dailyRewardNum", 0)
+		}
+		return obj("militaryLevel", 1, "totalMilitaryScore", int64(900000))
 	}
 	sameLevel := func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		return obj("militaryLevel", 2, "totalMilitaryScore", int64(900000))
@@ -81,6 +93,8 @@ func TestSeasonMilitaryRankUpStops(t *testing.T) {
 		"daily settlement in progress": {settling, s6, "military.act.info", false},
 		"score drops after a rank-up":  {scoreDrops, s6, "military.act.info,military.up.level", false},
 		"level does not rise":          {sameLevel, s6, "military.act.info,military.up.level", false},
+		"reply without militaryLevel":  {noLevelUp, s6, "military.act.info,military.up.level", false},
+		"no military activity open":    {seasonMilitaryRankReplies(2, 900000), evWithSeason(evInit(30), 6), "", false},
 		"rank-up reply without score":  {noScore, s6, "military.act.info,military.up.level", false},
 		"refused":                      {refused, s6, "military.act.info,military.up.level", true},
 		"end-show phase":               {seasonMilitaryRankReplies(2, 900000), evWithSeason(evInit(30, ended), 6), "", false},
@@ -124,4 +138,48 @@ func TestSeasonMilitaryCanRankUp(t *testing.T) {
 	if seasonMilitaryCanRankUp([]seasonMilitaryLevelRow{{level: 1}, {level: 2}}, 1, 99, nil) {
 		t.Error("a group without a standard_level row has no manual rank-up")
 	}
+	// In the 40413 groups the row after the standard_level one is also the first need_rank row, so
+	// each of the two tests hides the other. These rows split them: CanManualUpgrade wants
+	// level < GetMaxManualLevel(), and ShowUpgradeRed refuses a next row whose need_rank is not 0
+	// (SeasonMilitaryManager.lua:86-97, 337-340).
+	pastCap := []seasonMilitaryLevelRow{{level: 1}, {level: 2, unlockScore: 10}, {level: 3, unlockScore: 20, standardLevel: 1},
+		{level: 4, unlockScore: 30}}
+	if seasonMilitaryCanRankUp(pastCap, 3, 99, nil) {
+		t.Error("level 3 is the standard_level row: no manual rank-up past it, even into a need_rank 0 row")
+	}
+	if !seasonMilitaryCanRankUp(pastCap, 2, 99, nil) {
+		t.Error("level 2 below the standard_level row 3 ranks up")
+	}
+	rankOnly := []seasonMilitaryLevelRow{{level: 1}, {level: 2, unlockScore: 10, needRank: 1}, {level: 3, unlockScore: 20, standardLevel: 1}}
+	if seasonMilitaryCanRankUp(rankOnly, 1, 99, nil) {
+		t.Error("the next row has need_rank 1: only the rank grants it, below the manual cap too")
+	}
+	// An unlock_condition_type of 1 is a condition: only 0 < taskType tests it (:103-108).
+	cond1 := []seasonMilitaryLevelRow{{level: 1}, {level: 2, unlockScore: 10, conditionType: 1, conditionPara: 5},
+		{level: 3, unlockScore: 20, standardLevel: 1}}
+	if seasonMilitaryCanRankUp(cond1, 1, 99, map[int64]int64{1: 4}) || !seasonMilitaryCanRankUp(cond1, 1, 99, map[int64]int64{1: 5}) {
+		t.Error("condition type 1 needs its progress of 5")
+	}
+}
+
+// TestSeasonMilitaryRankUpFromAMissingLevel: an info reply without militaryLevel is level 1 to the
+// client (GetLevel = Mathf.Max(1, checknumber(Level)), SeasonMilitaryInfoData.lua:78-79), so the
+// first rank-up sends viewLevel 1. Group 60 (activity 1200101): 20000 passes level 2's 12000 and
+// not level 3's 29000.
+func TestSeasonMilitaryRankUpFromAMissingLevel(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "military.up.level" {
+			return obj("militaryLevel", p.GetInt("viewLevel")+1, "totalMilitaryScore", int64(20000))
+		}
+		return obj("totalMilitaryScore", int64(20000))
+	})
+	if err := runSeasonMilitaryRankUp(conn, evWithSeason(evInit(30, evActivity(1200101)), 6)); err != nil {
+		t.Fatal(err)
+	}
+	ups := fake.only("military.up.level")
+	if len(ups) != 1 {
+		t.Fatalf("sent %v, want one rank-up", fake.cmds())
+	}
+	seasonParamIs(t, ups[0].Params, "viewLevel", sfs.SFSInt, int32(1))
 }
