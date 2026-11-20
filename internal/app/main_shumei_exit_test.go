@@ -59,13 +59,15 @@ func loginInitPush(server *session.GameConn, pushFirst bool) bool {
 }
 
 // shumeiExitCases are runs that get a push.shumei.id and then end each way a run can end after
-// the Login: the exit code, the server, and the run's -collect, -interactive and -run.
+// the Login: the exit code, the server, and the run's -collect, -interactive and -run. held: the
+// config (and so the Login) already has the pushed id, as one recaptured with pcap -session-out.
 var shumeiExitCases = map[string]struct {
 	code        int
 	server      func(*session.GameConn)
 	collect     bool
 	interactive bool
 	runFeature  string
+	held        bool
 }{
 	// A kick while FetchInit waits for init: exit 3 (exitIfSessionEnded).
 	"kicked during init": {code: exitCodeSessionEnded, collect: true, server: func(server *session.GameConn) {
@@ -86,6 +88,13 @@ var shumeiExitCases = map[string]struct {
 	// -interactive keeps the run going past the failures; RunInteractive then exits 1 itself (no
 	// control pipe), without returning to runCrossServerTest.
 	"collect, then -interactive exits": {code: 1, collect: true, interactive: true, server: func(server *session.GameConn) {
+		if loginInitPush(server, false) {
+			failEveryRequest(server)
+		}
+	}},
+	// The cron's run on a config that already holds the pushed id: the push repeats it, nothing
+	// is written, and the run still logs a line for it.
+	"collect with a failed request, the id already saved": {code: 1, collect: true, held: true, server: func(server *session.GameConn) {
 		if loginInitPush(server, false) {
 			failEveryRequest(server)
 		}
@@ -133,8 +142,16 @@ var shumeiExitCases = map[string]struct {
 // in the session config whichever way it ends: exit 3 on a terminal push, exit 1 on a failed
 // -collect (the cron's case), on RunInteractive's own exit or on a lost connection, and through
 // both ends of -run. Each case runs runCrossServerTest in a re-exec'd subprocess, since it calls
-// os.Exit (see TestRunCrossServerTestExitsCode3WhenServerEndsSession).
+// os.Exit (see TestRunCrossServerTestExitsCode3WhenServerEndsSession). A push that repeats the
+// saved id writes nothing and logs that it is already saved, so the config-copy test, which waits
+// for one of the two lines, holds for a recaptured config too.
 func TestRunCrossServerTestSavesThePushedShumeiIDHoweverTheRunEnds(t *testing.T) {
+	cfgShumeiID := func(held bool) string {
+		if held {
+			return shumeiExitPushed
+		}
+		return "pushed-1"
+	}
 	if name := os.Getenv("LASTWAR_TEST_SHUMEI_EXIT_CASE"); name != "" {
 		c := shumeiExitCases[name]
 		t.Setenv("HOME", t.TempDir())
@@ -143,7 +160,7 @@ func TestRunCrossServerTestSavesThePushedShumeiIDHoweverTheRunEnds(t *testing.T)
 		testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{Code: "0"}))
 		o := crossServerTestOpts{
 			ip: gameHost, port: gamePort, zone: "APS1", gameUid: "uid-1", deviceID: "dev-1_n3d", at: "tok-1",
-			iosMode: true, shumeiID: "pushed-1", configSavePath: os.Getenv("LASTWAR_TEST_SHUMEI_EXIT_CFG"),
+			iosMode: true, shumeiID: cfgShumeiID(c.held), configSavePath: os.Getenv("LASTWAR_TEST_SHUMEI_EXIT_CFG"),
 			collect: c.collect, runFeature: c.runFeature,
 		}
 		if c.interactive {
@@ -157,7 +174,11 @@ func TestRunCrossServerTestSavesThePushedShumeiIDHoweverTheRunEnds(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			path := writeSessionConfig(t, SessionConfig{IP: "127.0.0.1", Port: 1, Zone: "APS1", GameUid: "uid-1",
-				DeviceID: "dev-1_n3d", AccessToken: "tok-1", IOSMode: true, ShumeiID: "pushed-1"})
+				DeviceID: "dev-1_n3d", AccessToken: "tok-1", IOSMode: true, ShumeiID: cfgShumeiID(c.held)})
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
 			cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestSavesThePushedShumeiIDHoweverTheRunEnds$")
 			cmd.Env = append(os.Environ(), "LASTWAR_TEST_SHUMEI_EXIT_CASE="+name, "LASTWAR_TEST_SHUMEI_EXIT_CFG="+path)
 			var stderr bytes.Buffer
@@ -176,8 +197,15 @@ func TestRunCrossServerTestSavesThePushedShumeiIDHoweverTheRunEnds(t *testing.T)
 			if got := readSessionConfig(t, path).ShumeiID; got != shumeiExitPushed {
 				t.Errorf("exit %d: the session config's shumeiId is %q, want the pushed %q; stderr=%s", code, got, shumeiExitPushed, stderr.String())
 			}
-			if !strings.Contains(stderr.String(), "saved the pushed shumeiId") {
-				t.Errorf("no \"saved the pushed shumeiId\" line; stderr=%s", stderr.String())
+			wantLine, notLine := "saved the pushed shumeiId", "pushed shumeiId already saved"
+			if c.held {
+				wantLine, notLine = notLine, wantLine
+				if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
+					t.Errorf("a repeated push rewrote the session config (err %v)", err)
+				}
+			}
+			if !strings.Contains(stderr.String(), wantLine) || strings.Contains(stderr.String(), notLine) {
+				t.Errorf("want a %q line and no %q line; stderr=%s", wantLine, notLine, stderr.String())
 			}
 		})
 	}

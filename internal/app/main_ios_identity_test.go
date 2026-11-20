@@ -206,19 +206,23 @@ func TestConfigShumeiID(t *testing.T) {
 }
 
 // TestSaveShumeiID: a pushed shumeiId is saved into its own device's config with every other field
-// as it was; another device's config, an empty id or an unchanged one writes nothing.
+// as it was; another device's config, an empty id or an unchanged one writes nothing. A saved id
+// and an unchanged one each log their own line, the two the config-copy test waits for (README,
+// docs/client-1-0-370.mdx), so a push that repeats the saved id is not read as no push.
 func TestSaveShumeiID(t *testing.T) {
 	base := SessionConfig{IP: "h", Port: 1, Zone: "APS1", GameUid: "uid-1", DeviceID: "dev-1", AccessToken: "at-1",
 		IOSMode: true, ShumeiID: "pushed-1", Device: auth.CapturedDevice{PhoneModel: "iPhone99,9", Ta: `{"#os":"iOS"}`},
 		Features: map[string]bool{"radar": true}}
+	const savedLine, alreadyLine = "saved the pushed shumeiId", "pushed shumeiId already saved"
 	for _, tc := range []struct {
 		name, deviceID, id, wantID string
-		wantWrite                  bool
+		wantWrite, wantAlready     bool
 	}{
-		{"a new id for the config's device", "dev-1", "pushed-2", "pushed-2", true},
-		{"the same id", "dev-1", "pushed-1", "pushed-1", false},
-		{"an empty id", "dev-1", "", "pushed-1", false},
-		{"another device", "dev-2", "pushed-2", "pushed-1", false},
+		{"a new id for the config's device", "dev-1", "pushed-2", "pushed-2", true, false},
+		{"the same id", "dev-1", "pushed-1", "pushed-1", false, true},
+		{"an empty id", "dev-1", "", "pushed-1", false, false},
+		{"another device", "dev-2", "pushed-2", "pushed-1", false, false},
+		{"another device, the config's id", "dev-2", "pushed-1", "pushed-1", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeSessionConfig(t, base)
@@ -236,11 +240,19 @@ func TestSaveShumeiID(t *testing.T) {
 			if diff := sessionConfigDiff(got, before); len(diff) > 0 {
 				t.Errorf("saveShumeiID changed %v", diff)
 			}
-			if wrote := strings.Contains(logs.String(), "saved the pushed shumeiId"); wrote != tc.wantWrite {
+			if wrote := strings.Contains(logs.String(), savedLine); wrote != tc.wantWrite {
 				t.Errorf("wrote = %v, want %v; log:\n%s", wrote, tc.wantWrite, logs.String())
 			}
-			if strings.Contains(logs.String(), "pushed-2") {
-				t.Errorf("the log shows the shumeiId:\n%s", logs.String())
+			if already := strings.Contains(logs.String(), alreadyLine); already != tc.wantAlready {
+				t.Errorf("logged %q = %v, want %v; log:\n%s", alreadyLine, already, tc.wantAlready, logs.String())
+			}
+			if (tc.wantWrite || tc.wantAlready) && !strings.Contains(logs.String(), fmt.Sprintf("shumeiIdLen=%d", len(tc.id))) {
+				t.Errorf("no shumeiIdLen=%d; log:\n%s", len(tc.id), logs.String())
+			}
+			for _, id := range []string{"pushed-1", "pushed-2"} {
+				if strings.Contains(logs.String(), id) {
+					t.Errorf("the log shows the shumeiId %q:\n%s", id, logs.String())
+				}
 			}
 		})
 	}

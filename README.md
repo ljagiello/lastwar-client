@@ -43,10 +43,12 @@ code 4, see "Running unattended (cron)".
   reconnect. Since the 1.0.370 follow-up the iOS `ta` no longer sends those placeholders: it
   carries the `Login`'s `deviceId` and `airKey` and the session config's `shumeiId`, as the 1.0.370
   app does, and a session config with a captured `ta` replays that `ta` with its build keys, the
-  `Login`'s zone and those three ids taken from the run (static analysis only; a live config-copy
-  test of two runs is needed before the cron uses it: the first saves the pushed `shumeiId` and
-  logs `saved the pushed shumeiId`, which must appear before the second run, and the second sends
-  it). Still open: the *minimal* required
+  `Login`'s zone and those three ids taken from the run (static analysis only). A live config-copy
+  test is needed before the cron uses it. A copy without a `shumeiId`, one from before the
+  follow-up or one where `pcap` printed `shumeiId (0 chars)`, takes two runs: the first saves the
+  pushed `shumeiId` and logs `saved the pushed shumeiId`, which must appear before the second run,
+  and the second sends it. A copy that already has one sends it from its first run, which logs
+  `pushed shumeiId already saved` when the push repeats it. Still open: the *minimal* required
   `ta` content hasn't been isolated. An Android from-scratch login is live-confirmed.
   See `docs/live-validation.mdx` for the full methodology.
 - The earlier "reconnect blocked" / "init push never arrives" problems were never protocol-level
