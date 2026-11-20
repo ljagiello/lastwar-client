@@ -31,18 +31,6 @@ func packageSignHex(forPackageName string) string {
 	return sha1Hex(forPackageName)
 }
 
-// apkCertHex is the raw DER-encoded signing certificate, hex-encoded --
-// exactly what Android's android.content.pm.Signature.toCharsString()
-// returns. Extracted directly from com.fun.lastwar.gp.apk's
-// META-INF/BNDLTOOL.RSA (a PKCS#7 SignedData blob) via:
-//
-//	openssl pkcs7 -inform DER -in BNDLTOOL.RSA -print_certs | openssl x509 -outform DER | xxd -p
-//
-// This is public information (anyone can extract it from the APK), used
-// only for the `psh` field's MD5 input -- dossier §11 confirms this is not
-// secret/derived-from-native-computation.
-const apkCertHex = "3082029c30820184a00302010202046fdfb4c4300d06092a864886f70d0101050500300f310d300b060355040a0c044c4359443020170d3233303131363133323131335a180f32303733303130333133323131335a300f310d300b060355040a0c044c43594430820122300d06092a864886f70d01010105000382010f003082010a028201010089ef3aa54cf5a75c83d18c37694482552227620de97dbce3747d0d820b94400a322a65ad61b8360deaf036a9755a4058a6eb01388f6fcb3b061bea3730bc401022471739ebcbe3337c3a67e211c5f7a909397198a6824a0f71a9d8c715575b6529055d922fe7e007ce71b16098c491bdea6f4767ac2e2e7e6cbaa5fbb11c55ffb6561a895c3e7437cb41697db019005473d9f77f4430b163848231ec4903259949b489d5eb436f9cbf4206fcbf040d8c6da6300e30edfeecb5619abfb79dbab2837b4adddba51582a5c85e50568ae32355eba1f974f5567dbb4ac8afdd9ce474f6555e9f5f1085b82072052a08a772db1ee943615b38833dd1e95f0c827ffeed0203010001300d06092a864886f70d01010505000382010100488695eee865bc3992e9dcfa86a19719eb753b7abcd7a5d7ddfd9471229136b37bf08bce8520a98280c0915202ea5a6530f12f81fc6b85769685d8049e73f94d7584ad5e62babc1f9c8c34617f2856d40f7592dad213a0b29edcb5c6ef9179e2d220fd4d83ed42bd6b4f0e430bbcb970db89b352aac9a41f90b15dcb1f76f3efd8e6d104fc23c71c77d50448d9b7666ca182210a33d95b7786a2400f20ff6b9bb33a464bd1134f14eb6a4d6c169d526c2875a5ba0dca2f1f8b8920d1eb3dabfa7977f35fd348eba2a72ee7b052dd8618d5a50b84c25a5e7afdeba271c5eff310d49b934bd8b80724dd7784f35550cfe72c6e0a00140bf50f45acbe1a7eafc2ff"
-
 func md5Hex(s string) string {
 	sum := md5.Sum([]byte(s))
 	return hex.EncodeToString(sum[:])
@@ -55,7 +43,9 @@ func sha1Hex(s string) string {
 
 // pshField is the Login's psh for the platform the Login claims (iosMode).
 //
-// Android (SdkManager.LW_PSH): MD5(cmdBaseTime + hex(signing-cert DER)).
+// Android (SdkManager.LW_PSH): MD5(cmdBaseTime + hex(signing-cert DER)), the base.apk certificate
+// shumei.AppCertHex (signature.toCharsString(), extracted from the APK's signing block; shumei's
+// TestAppCert pins its subject O=LCYD and hash).
 // iOS (rg_getPsh:): MD5(cmdBaseTime + "7" + bundle id). rg_getPsh: puts "7" there when the app
 // bundle has no embedded.mobileprovision, as in an App Store install, and "3" when it has one
 // (static analysis only). goclient presents as the App Store app, so it sends "7". That matches
@@ -65,7 +55,7 @@ func pshField(iosMode bool, cmdBaseTime string) string {
 	if iosMode {
 		return md5Hex(cmdBaseTime + "7" + iosPackageName)
 	}
-	return md5Hex(cmdBaseTime + apkCertHex)
+	return md5Hex(cmdBaseTime + shumei.AppCertHex)
 }
 
 // securityCode reproduces the login field of the same name:
