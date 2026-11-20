@@ -33,7 +33,7 @@ func main() {
 	clientStr := flag.String("client", "", "client-side IP (default: auto-detect the connection initiator)")
 	out := flag.String("out", "", "write <prefix>_c2s.bin and <prefix>_s2c.bin")
 	decode := flag.Bool("decode", false, "decode the reassembled stream inline instead of writing .bin files")
-	sessionOut := flag.String("session-out", "", "write the reconnect credentials from the capture's server-accepted Login to this session config JSON (0600; values are never printed). Searches every plain stream unless -stream is given")
+	sessionOut := flag.String("session-out", "", "write the reconnect credentials from the capture's server-accepted Login to this session config JSON (0600; values are never printed). Onto an existing session config, it keeps every key the capture doesn't write (features, duelPolicy, ...). Searches every plain stream unless -stream is given")
 	flag.Parse()
 
 	var err error

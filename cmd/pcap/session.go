@@ -315,10 +315,65 @@ func decodeAll(data []byte) []*sfs.SFSObject {
 	}
 }
 
-// writeSessionConfig writes cfg as indented JSON with 0600 permissions, tightening an existing
-// file's mode too since it now holds a live access token.
+// capturedKeys are the session config keys a capture owns: -session-out writes each one the
+// capture has and removes each one it lacks (an Android capture's device, a capture without a
+// shumeiId), since a value left from an older session would describe another Login.
+var capturedKeys = []string{
+	"ip", "port", "zone", "gameUid", "deviceId", "shumeiBoxId", "accessToken", "iosMode",
+	"appVersion", "versionCode", "device", "shumeiId",
+}
+
+// mergedSessionConfig is cfg laid over the session config already at path, so a recapture keeps
+// every key it doesn't write: the features, the duel policy, the ShuMei install, and keys
+// SessionConfig doesn't model. Two kept keys describe what the capture replaces, so they go with
+// it: accessTokenTime with an access token the capture changes (a time 0 is never stale,
+// gsl.ChooseOpt), and the refresh token and its time with a deviceId the capture changes (they
+// were issued to the old device, as configRefreshToken in internal/app has it). No file, or an
+// empty one, is a fresh config; anything else that isn't a JSON object is an error, so it is not
+// written over.
+func mergedSessionConfig(path string, cfg *app.SessionConfig) ([]byte, error) {
+	captured, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(captured, &fields); err != nil {
+		return nil, err
+	}
+	merged := map[string]json.RawMessage{}
+	old, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return nil, err
+	case len(bytes.TrimSpace(old)) > 0:
+		var before app.SessionConfig
+		if json.Unmarshal(old, &merged) != nil || merged == nil || json.Unmarshal(old, &before) != nil {
+			return nil, fmt.Errorf("%s exists but is not a session config (a JSON object); move it away or fix it, so its keys aren't lost", path)
+		}
+		if before.AccessToken != cfg.AccessToken {
+			delete(merged, "accessTokenTime")
+		}
+		if before.DeviceID != cfg.DeviceID {
+			delete(merged, "refreshToken")
+			delete(merged, "refreshTokenTime")
+		}
+	}
+	for _, k := range capturedKeys {
+		if v, ok := fields[k]; ok {
+			merged[k] = v
+		} else {
+			delete(merged, k)
+		}
+	}
+	return json.MarshalIndent(merged, "", "  ")
+}
+
+// writeSessionConfig writes cfg over the session config at path (mergedSessionConfig) as indented
+// JSON with 0600 permissions, tightening an existing file's mode too since it now holds a live
+// access token.
 func writeSessionConfig(path string, cfg *app.SessionConfig) error {
-	b, err := json.MarshalIndent(cfg, "", "  ")
+	b, err := mergedSessionConfig(path, cfg)
 	if err != nil {
 		return err
 	}

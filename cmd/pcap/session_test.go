@@ -143,6 +143,130 @@ func TestRunSessionOutWritesAcceptedLogin(t *testing.T) {
 	}
 }
 
+// TestRunSessionOutKeepsTheExistingConfigsOtherKeys: -session-out onto an existing session config
+// writes the capture's keys and keeps every key it doesn't write, the features, the duel policy and
+// a key SessionConfig doesn't model among them (a recapture used to drop them all). Two kept keys
+// describe what the capture replaces: accessTokenTime goes with a new access token, and the refresh
+// token and its time go with a new deviceId (they were issued to the old one).
+func TestRunSessionOutKeepsTheExistingConfigsOtherKeys(t *testing.T) {
+	in := loginCapture(t, true)
+	existing := func(deviceID, at string) string {
+		return `{
+  "ip": "198.51.100.1", "port": 1, "zone": "APS1", "gameUid": "old-uid", "deviceId": "` + deviceID + `",
+  "shumeiBoxId": "old-box", "accessToken": "` + at + `", "iosMode": false, "appVersion": "1.0.300", "versionCode": "700",
+  "device": {"phone_model": "iPhone1,1", "ta": "{}"}, "shumeiId": "old-shumei-id",
+  "refreshToken": "rt-old", "accessTokenTime": 1700000000, "refreshTokenTime": 1700000001,
+  "features": {"daily-quests": true, "radar-claims": false},
+  "duelPolicy": {"radar-claims": "always"},
+  "shumeiInstall": {"deviceId": "` + deviceID + `", "androidId": "0123456789abcdef"},
+  "note": "recaptured by hand"
+}`
+	}
+	cases := []struct {
+		name, deviceID, at string
+		wantKept, wantGone []string
+	}{
+		{"same device, new token", testDevice, "old-at",
+			[]string{"features", "duelPolicy", "shumeiInstall", "note", "refreshToken", "refreshTokenTime"},
+			[]string{"accessTokenTime", "device", "shumeiId"}},
+		{"same device, same token", testDevice, testToken,
+			[]string{"features", "duelPolicy", "shumeiInstall", "note", "refreshToken", "refreshTokenTime", "accessTokenTime"},
+			[]string{"device", "shumeiId"}},
+		{"another device", "old-device_n3d", "old-at",
+			[]string{"features", "duelPolicy", "shumeiInstall", "note"},
+			[]string{"accessTokenTime", "refreshToken", "refreshTokenTime", "device", "shumeiId"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "session.json")
+			old := existing(tc.deviceID, tc.at)
+			if err := os.WriteFile(dst, []byte(old), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var runErr error
+			captureStdout(t, func() { runErr = runSessionOut(in, -1, "", dst) })
+			if runErr != nil {
+				t.Fatalf("runSessionOut: %v", runErr)
+			}
+			b, err := os.ReadFile(dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, before map[string]json.RawMessage
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(old), &before); err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range tc.wantKept {
+				if v, ok := got[k]; !ok || compactJSON(t, v) != compactJSON(t, before[k]) {
+					t.Errorf("%s = %s, want it kept as %s", k, got[k], before[k])
+				}
+			}
+			for _, k := range tc.wantGone {
+				if v, ok := got[k]; ok {
+					t.Errorf("%s = %s, want it gone (the capture has none, or it described what the capture replaced)", k, v)
+				}
+			}
+			// The capture's own keys (loginCapture: an iOS Login with no device fields, no shumeiId).
+			for k, want := range map[string]string{
+				"ip": `"203.0.113.5"`, "port": "10783", "zone": `"APS783"`, "gameUid": `"1000000000000783"`, "deviceId": `"` + testDevice + `"`,
+				"shumeiBoxId": `"` + testShumei + `"`, "accessToken": `"` + testToken + `"`, "iosMode": "true",
+				"appVersion": `"1.0.344"`, "versionCode": `"786"`,
+			} {
+				if string(got[k]) != want {
+					t.Errorf("%s = %s, want %s from the capture", k, got[k], want)
+				}
+			}
+		})
+	}
+}
+
+// TestRunSessionOutRefusesAnUnreadableConfig: an existing file that isn't a JSON object is left
+// as it is, since writing over it would lose whatever it holds; an empty file is no config.
+func TestRunSessionOutRefusesAnUnreadableConfig(t *testing.T) {
+	in := loginCapture(t, true)
+	for _, tc := range []struct {
+		name, content string
+		wantErr       bool
+	}{
+		{"not JSON", `{"features": {"daily-quests": true},`, true},
+		{"a list", `["features"]`, true},
+		{"empty", "", false},
+		{"whitespace", " \n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "session.json")
+			if err := os.WriteFile(dst, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var runErr error
+			captureStdout(t, func() { runErr = runSessionOut(in, -1, "", dst) })
+			b, _ := os.ReadFile(dst)
+			if tc.wantErr {
+				if runErr == nil || string(b) != tc.content {
+					t.Errorf("err = %v, file = %q; want an error and the file untouched", runErr, b)
+				}
+				return
+			}
+			if runErr != nil || !strings.Contains(string(b), testDevice) {
+				t.Errorf("err = %v; want the capture written over an empty file", runErr)
+			}
+		})
+	}
+}
+
+// compactJSON is raw with insignificant whitespace removed, as encoding/json writes it.
+func compactJSON(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var b bytes.Buffer
+	if err := json.Compact(&b, raw); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
 // TestRunSessionOutRecordsProbedGateways mirrors the real client's connect race: an a=29 probe to a
 // second gateway that answered but lost, plus one to a gateway that never answered. Only the one
 // that answered joins the fallback list, after the gateway the accepted Login used.
