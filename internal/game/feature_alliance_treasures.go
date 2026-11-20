@@ -83,8 +83,12 @@ import (
 // server's answers and are benign. The daily cap's code is unknown, so any other errorCode stops
 // the run.
 //
-// Not done: digging or helping to dig (a march), the dig window, the chat card, and treasures of
-// other kinds (sandworm, flower train, ...), which have their own rules. The alliance boxes of
+// The chat card itself is read by the opt-in twin alliance-treasures-chat
+// (feature_alliance_treasures_chat.go), which looks each card's treasure up and claims it through
+// claimTreasures with this feature's rules; the two share one run's claim state (tileClaims).
+//
+// Not done: digging or helping to dig (a march), the dig window, and treasures of other kinds
+// (sandworm, flower train, ...), which have their own rules. The alliance boxes of
 // types 2, 5 and 8 (siege, invasion, alliance-boss sandbox; MASTER G41) are left unclaimed
 // pending the user's ruling: a claim takes one of the box's shared slots and puts the uid in
 // rewardUserList, and alliance mates see the slot count drop (CS:186599-186602, 119184-119187).
@@ -301,14 +305,24 @@ func runAllianceTreasures(conn *session.GameConn, in *Init) error {
 		return err
 	}
 	errs := []error{err}
-	answered := map[int64]bool{}
+	st := tileClaims(conn, in, allianceTreasureFamily)
+	answered := st.answered
 	picks := sc.reviewTreasures(answered)
 	if len(picks) > atMaxClaimsPerRun {
 		slog.Info("alliance-treasures: more claimable treasures than the per-run cap; the rest wait for the next run",
 			"eligible", len(picks), "cap", atMaxClaimsPerRun)
 		picks = picks[:atMaxClaimsPerRun]
 	}
-	got := 0
+	got, cerrs := sc.claimTreasures(conn, "alliance-treasures", picks, st)
+	errs = append(errs, cerrs...)
+	slog.Info("alliance-treasures: claims done", "claimed", got, "answered", len(answered), "eligible", len(picks))
+	return errors.Join(errs...)
+}
+
+// claimTreasures sends detect.event.claim.treasure {uuid: Long, targetServer: Int} for picks,
+// atClaimPace apart, logging as name. Every answered treasure goes into st.answered; any errorCode
+// but the benign ones stops the claims and is kept in st.stop. got counts the treasures claimed.
+func (sc *fwScan) claimTreasures(conn *session.GameConn, name string, picks []atTreasure, st *tileClaimState) (got int, errs []error) {
 	for i, a := range picks {
 		if i > 0 {
 			fwSleep(atClaimPace)
@@ -316,7 +330,7 @@ func runAllianceTreasures(conn *session.GameConn, in *Init) error {
 		p := sfs.NewSFSObject()
 		p.PutLong("uuid", a.uuid)
 		p.PutInt("targetServer", int32(a.server))
-		resp, code, err := fwRequest(conn, "alliance-treasures: treasure claim", allianceTreasureClaimCmd, p)
+		resp, code, err := fwRequest(conn, name+": treasure claim", allianceTreasureClaimCmd, p)
 		if err != nil {
 			errs = append(errs, err)
 			if session.ContainsNonTimeoutNetError(err) {
@@ -324,24 +338,24 @@ func runAllianceTreasures(conn *session.GameConn, in *Init) error {
 			}
 			continue
 		}
-		answered[a.uuid] = true
+		st.answered[a.uuid] = true
 		who := []any{"uuid", a.uuid, "owner", sc.ref(a.pt.Treasure.OwnerUID), "eventId", a.pt.Treasure.EventID}
 		if code == "" {
 			got++
-			slog.Info("alliance-treasures: claimed a treasure", append(who, "isBigReward", evBool(resp, "isBigReward"),
+			slog.Info(name+": claimed a treasure", append(who, "isBigReward", evBool(resp, "isBigReward"),
 				"bigRewardMultiple", evString(resp, "bigRewardMultiple"), "treasureRewardLimit", evString(resp, "treasureRewardLimit"),
 				"reward", fwReward(resp), "replyKeys", resp.Keys())...)
 			continue
 		}
 		if meaning := allianceTreasureBenignCodes[code]; meaning != "" {
-			slog.Info("alliance-treasures: treasure not claimable (expected)", append(who, "errorCode", code, "meaning", meaning)...)
+			slog.Info(name+": treasure not claimable (expected)", append(who, "errorCode", code, "meaning", meaning)...)
 			continue
 		}
 		// The daily cap's code is unknown; stop on any unexpected answer rather than send more.
-		slog.Warn("alliance-treasures: claim refused; stopping this run", append(who, "errorCode", code)...)
-		errs = append(errs, fmt.Errorf("alliance-treasures: %s uuid %d: errorCode=%s", allianceTreasureClaimCmd, a.uuid, code))
+		st.stop = code
+		slog.Warn(name+": claim refused; stopping this run", append(who, "errorCode", code)...)
+		errs = append(errs, fmt.Errorf("%s: %s uuid %d: errorCode=%s", name, allianceTreasureClaimCmd, a.uuid, code))
 		break
 	}
-	slog.Info("alliance-treasures: claims done", "claimed", got, "answered", len(answered), "eligible", len(picks))
-	return errors.Join(errs...)
+	return got, errs
 }
