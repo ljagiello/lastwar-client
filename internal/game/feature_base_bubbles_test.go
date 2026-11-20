@@ -359,7 +359,7 @@ func TestBaseBubblesDayCapAndGates(t *testing.T) {
 // fake99108Activity checks openActivityOf picks the lowest open id.
 func fake99108Activity(t *testing.T) int32 {
 	t.Helper()
-	id, _ := openActivityOf(bbInit(0, 99302, 99108), thanksgivingActivities, thanksgivingActivityType)
+	id, _ := openActivityOf(bbInit(0, 99302, 99108), thanksgivingActivities(), thanksgivingActivityType)
 	return id
 }
 
@@ -391,5 +391,82 @@ func TestBaseBubblesFeature(t *testing.T) {
 	}
 	if len(thanksgivingStatuses) != 4 || valentineStatuses[520533].activityID != 99192 {
 		t.Error("lw_status constants")
+	}
+	// Table activity 40413's type-321 (ActGiftGiving) rows are 99108 and 99302; both are in the
+	// generated table, which the lookup reads.
+	if got := thanksgivingActivities(); !slices.Equal(got, []int32{99108, 99302}) {
+		t.Errorf("thanksgivingActivities() = %v, want [99108 99302]", got)
+	}
+}
+
+// bbTwoOnOneBase holds ally A's HQ with two claimable Thanksgiving statuses whose expiries run
+// opposite to their ids (500521 in 10 h, 500522 in 5 h), and the player's own HQ with a Valentine
+// bubble (520526) that expires after both.
+func bbTwoOnOneBase() *sfs.SFSObject {
+	pts := sfs.NewSFSArray()
+	pts.AddByteArray(pbHQStatus(347520, fwAllyA, fwServer, fwServer, bbStatus(500521, 10*time.Hour), bbStatus(500522, 5*time.Hour)))
+	pts.AddByteArray(pbHQStatus(347513, fwSelf, fwServer, fwServer, bbStatus(520526, 12*time.Hour)))
+	r := sfs.NewSFSObject()
+	r.PutSFSArray("points", pts)
+	r.PutLong("timeStamp", evTestNow.UnixMilli())
+	return r
+}
+
+// TestBaseBubblesOrderAndStops covers wp7-r2 #1 and #2 on bbTwoOnOneBase:
+//   - the bubble over one base taps its statuses by type2 descending, then id ascending
+//     (BuildingRewardBubbleEffect.lua:150-155), so 500521 is claimed before 500522 although it
+//     expires later, and thanksgiving.info goes out once before both;
+//   - a refused thanksgiving.info skips the Thanksgiving claims but the Valentine own-base claim
+//     still goes out;
+//   - a refused Thanksgiving claim ends the run: nothing follows it.
+func TestBaseBubblesOrderAndStops(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withFwPace(t)
+	ok := bbReplies(0)
+	for _, c := range []struct {
+		name    string
+		refuse  func(cmd string, p *sfs.SFSObject) bool
+		want    []string // the commands after the scan, Thanksgiving claims as "claim <statusId>"
+		wantErr bool
+	}{
+		{"all answered", func(string, *sfs.SFSObject) bool { return false },
+			[]string{thanksgivingInfoCmd, "claim 500521", "claim 500522", valentineOwnerClaimCmd}, false},
+		{"info refused", func(cmd string, _ *sfs.SFSObject) bool { return cmd == thanksgivingInfoCmd },
+			[]string{thanksgivingInfoCmd, valentineOwnerClaimCmd}, true},
+		{"first claim refused", func(cmd string, p *sfs.SFSObject) bool {
+			return cmd == thanksgivingClaimCmd && p.GetInt("statusId") == 500521
+		}, []string{thanksgivingInfoCmd, "claim 500521"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			blocks := fwBlockAnswer(t, bbTwoOnOneBase())
+			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				switch {
+				case cmd == fireworksRankCmd:
+					return fwRankReply()
+				case cmd == fireworksBlockCmd:
+					return blocks()
+				case c.refuse(cmd, p):
+					return evErr("E_REFUSED")
+				}
+				return ok(cmd, p)
+			})
+			err := runBaseBubbles(conn, bbInit(0, 99302, 99137))
+			if (err != nil) != c.wantErr {
+				t.Errorf("run = %v, want an error %v", err, c.wantErr)
+			}
+			var got []string
+			for _, r := range fake.requests() {
+				switch r.Cmd {
+				case fireworksRankCmd, fireworksBlockCmd:
+				case thanksgivingClaimCmd:
+					got = append(got, "claim "+strconv.Itoa(int(r.Params.GetInt("statusId"))))
+				default:
+					got = append(got, r.Cmd)
+				}
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("sent %v, want %v", got, c.want)
+			}
+		})
 	}
 }

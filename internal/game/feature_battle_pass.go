@@ -101,6 +101,11 @@ func claimBattlePass(s *ActivitySweep, b *evBatch, a Activity) {
 	level, _ := evNum(pass, "level")
 	unlock, _ := evNum(pass, "unlock")
 	highUnlock, _ := evNum(pass, "high_unlock")
+	// The cells of the views with a high tier claim a state-2 task with either track bought
+	// (UIBattlePassTaskCellNewYear.lua:248, UIBattlePassTaskCellSeason.lua:248,
+	// UISeasonBattlePassTaskItem.lua:249); the views without one (UIBattlePassTaskCell.lua:248,
+	// UIBattlePassNormalNewTaskCell.lua:247) test unlock only, and they have no high track to buy,
+	// so high_unlock is never 1 there.
 	bought := unlock == 1 || highUnlock == 1
 
 	for _, t := range evObjects(info, "taskArr") {

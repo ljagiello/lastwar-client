@@ -76,8 +76,8 @@ This section walks through going from a clean checkout to a working `-collect` r
       "shumeiBoxId": "your-real-shumei-fingerprint-token",
       "accessToken": "your-real-access-token-from-a-captured-login",
       "iosMode": true,
-      "appVersion": "1.0.344",
-      "versionCode": "786"
+      "appVersion": "1.0.370",
+      "versionCode": "918"
     }
     ```
 
@@ -117,7 +117,7 @@ This section walks through going from a clean checkout to a working `-collect` r
 # Stay connected and issue ad-hoc test commands without re-authenticating:
 mkfifo /tmp/lw_cmd_pipe
 ./lastwar-client -interactive /tmp/lw_cmd_pipe &
-echo 'building.production.collect {"uuid":123}' > /tmp/lw_cmd_pipe
+echo 'building.production.collect {"uuid:l":123}' > /tmp/lw_cmd_pipe
 
 # Override specific config fields for a one-off test (e.g. a different captured token):
 ./lastwar-client -collect -cs-at <a-different-access-token>

@@ -37,7 +37,7 @@ platform, newServer=1, isSimulator, zone=<cached zone>, gameuid=<gameUid>,
 openCountry=<storefront>, [opt, loginKey | rt]
 ```
 
-This inner `uuid` is the device id, not the outer `uuid` POST field that carries the RSA-encrypted salt. The BestHTTP path sends the same fields with `newServer` after `gameuid`, and `goclient` matches the BestHTTP order. `platform` is `"Android"` on Android and `"iOS"` on iOS; `goclient` always sends `"Android"` and an empty `zone`. How the client picks `opt`, and what the response's `code` field means, are on [Identity, login & session](/auth#token-lifecycle).
+This inner `uuid` is the device id, not the outer `uuid` POST field that carries the RSA-encrypted salt. The BestHTTP path sends the same fields with `newServer` after `gameuid`, and `goclient` matches the BestHTTP order. `platform` is `"Android"` on Android and `"iOS"` on iOS. `goclient` sends `"iOS"` for an iOS session (`iosMode`) and `"Android"` otherwise, and the session's zone as `zone` (empty only when no zone is known). The device fields follow the identity: an iOS session sends its captured device's `fromCountry` and `lang` as `country` and `lang` (`US` and `en` without a capture) and an empty `simOp`; an Android one sends `US`, `en` and the SIM operator of the catalog phone its device id selects. `isSimulator` is always `0` and `openCountry` always `US`. How the client picks `opt`, and what the response's `code` field means, are on [Identity, login & session](/auth#token-lifecycle).
 
 The crypto itself is unchanged in 1.0.364: RSA PKCS#1 v1.5, a 20-character salt, and AES-256-ECB keyed by `hex(MD5(salt))`, with URL-safe base64.
 

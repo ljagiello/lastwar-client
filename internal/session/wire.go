@@ -236,6 +236,14 @@ const silenceLimit = 12 * time.Second
 // already stops on. Only blocked time counts, since frames wait unread between waits on a
 // healthy connection. The watchdog is off until the first pong, like the client's (notePong),
 // so a connection whose server never pongs keeps today's behaviour. No reconnect.
+//
+// A single wait longer than silenceLimit can pass it on its own: the 15 s init wait
+// (game.FetchInit from internal/app) with no frame at all after a pong ends as a dead
+// connection. The client keeps CheckOffline off while loading (`!Loading.IsLoading`,
+// Assembly-CSharp.decompiled.cs:8482-8491), so it would not drop the connection there. A run
+// without -interactive ends the same way either way (a timed-out or dead init both exit 1). The
+// first wait on a connection (the Login's) cannot trip it: the frame that sets pongSeen also
+// counts in framesRead, so that wait is never silent.
 func (c *GameConn) noteSilentWait(start time.Time, framesBefore uint64, timeoutErr error) error {
 	if !c.pongSeen.Load() || c.framesRead.Load() != framesBefore {
 		return timeoutErr

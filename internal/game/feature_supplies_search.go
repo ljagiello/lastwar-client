@@ -170,6 +170,11 @@ func runSuppliesSearch(conn *session.GameConn, in *Init) error {
 		slog.Info(suppliesSearchFeature + ": no init push; skipping")
 		return nil
 	}
+	// The feature writes the diamond tripwire (checkGold), so it also honours one set by any run:
+	// nothing is sent until the file is cleared.
+	if err := tripwireErr(suppliesSearchFeature); err != nil {
+		return err
+	}
 	r := &suppliesSearchRun{conn: conn}
 	if g, ok := claimInt(in.Object("user"), "gold"); ok {
 		r.gold, r.goldSet = g, true

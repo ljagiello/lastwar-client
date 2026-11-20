@@ -127,6 +127,25 @@ func TestTacticalStagesDueUsesTheParsedIndexAndTheActivatedCount(t *testing.T) {
 	}
 }
 
+// TestTacticalStagesDueKeepsTheLastEntryOfACardType: UpdateCardCollections stores
+// cardCollections[cardType], so a later entry of the same type replaces an earlier one
+// (TacticalCardDataManager.lua:101-119) and only the last one's stages are claimed (wp9-r3 #9).
+func TestTacticalStagesDueKeepsTheLastEntryOfACardType(t *testing.T) {
+	collects := []*sfs.SFSObject{
+		tacticalCollect(50101, 1, "0;1"),     // replaced by the next type-1 entry
+		tacticalCollect(50101, 1, "0;2|1;1"), // stage 0 received, stage 1 available
+		tacticalCollect(50301, 3, "0;1|1;0"), // the only type-3 entry
+	}
+	got := tacticalStagesDue(collects, map[int64]int64{1: 0, 3: 0})
+	want := []tacticalStage{
+		{cfgID: 50101, cardType: 1, index: 1, state: 1},
+		{cfgID: 50301, cardType: 3, index: 0, state: 1},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("due = %+v\nwant  %+v", got, want)
+	}
+}
+
 func TestTacticalActiveCardsCountsDistinctIDs(t *testing.T) {
 	r := evOK()
 	a := sfs.NewSFSArray()
@@ -140,6 +159,28 @@ func TestTacticalActiveCardsCountsDistinctIDs(t *testing.T) {
 	got := tacticalActiveCards(r)
 	if got[1] != 3 || got[2] != 0 {
 		t.Errorf("active = %v, want type 1: 3, type 2: 0", got)
+	}
+}
+
+// TestTacticalActiveCardsMergesEntriesOfOneType: UpdateCardBookData puts every entry's cards into
+// one set per cardType, keyed by tonumber(card) (TacticalCardDataManager.lua:156-176), so two
+// entries of type 1 listing 101;102 and 102;103 make 3 active cards, and "07" is card 7.
+func TestTacticalActiveCardsMergesEntriesOfOneType(t *testing.T) {
+	r := evOK()
+	a := sfs.NewSFSArray()
+	for _, e := range []struct {
+		typ   int32
+		cards string
+	}{{1, "101;102"}, {1, "102;103"}, {4, "7;07"}} {
+		o := sfs.NewSFSObject()
+		o.PutInt("cardType", e.typ)
+		o.PutUtfString("cards", e.cards)
+		a.AddSFSObject(o)
+	}
+	r.PutSFSArray("collectCards", a)
+	got := tacticalActiveCards(r)
+	if got[1] != 3 || got[4] != 1 {
+		t.Errorf("active = %v, want type 1: 3 (merged), type 4: 1", got)
 	}
 }
 

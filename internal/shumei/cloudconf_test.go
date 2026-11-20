@@ -275,6 +275,8 @@ type cloudConfServer struct {
 	paths  []string
 	sid    string
 	upload map[string]any
+	// mangle, when set, edits the reply's detail before it is sent.
+	mangle func(detail map[string]any)
 }
 
 func (s *cloudConfServer) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -304,7 +306,11 @@ func (s *cloudConfServer) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			s.t.Fatalf("pri: %v", err)
 		}
-		detail, _ := json.Marshal(encryptConf(s.t, key, 1, s.config))
+		conf := encryptConf(s.t, key, 1, s.config)
+		if s.mangle != nil {
+			s.mangle(conf)
+		}
+		detail, _ := json.Marshal(conf)
 		reply = fmt.Sprintf(`{"code":1100,"requestId":"r-c","detail":%s}`, detail)
 	case "/deviceprofile/v4":
 		var p map[string]any
@@ -364,5 +370,125 @@ func TestRegisterCloudConf(t *testing.T) {
 	}
 	if next.CloudConfMD5 != in.CloudConfMD5 || next.CloudConfExcluded != in.CloudConfExcluded {
 		t.Errorf("after a failed cloudconf the cache = %q, %q; want it kept", next.CloudConfMD5, next.CloudConfExcluded)
+	}
+}
+
+// TestSensitiveOffFollowsJavaSplit: the flat parser names a switch
+// key.split("\\.")[1] and collects the names in a HashSet
+// (l11l111l1lll.java:95-111). Java's split drops trailing empty strings, so
+// "sensitive.wifi.scan" and "sensitive.wifi." both name wifi (once),
+// "sensitive..x" names "", and "sensitive." throws on index 1 and is skipped.
+func TestSensitiveOffFollowsJavaSplit(t *testing.T) {
+	config := `{"sensitive.wifi.scan":false,"sensitive.":false,"sensitive.wifi.":false,"sensitive..x":false,"sensitive.gps":false}`
+	got, err := sensitiveOff([]byte(config), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"wifi", "", "gps"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("sensitiveOff = %q, want %q", got, want)
+	}
+	nested, err := sensitiveOff([]byte(`{"sensitive":{"tel":true,"tel":true}}`), false)
+	if err != nil || !reflect.DeepEqual(nested, []string{"tel"}) {
+		t.Errorf("nested sensitiveOff = %q, %v; want [tel] once", nested, err)
+	}
+}
+
+// TestDecodeCloudConfReadsTheConfigLikeTheSDK: getInt("length") must succeed
+// (l11l111l1lll.java:249; a numeric string counts, as org.json coerces it),
+// and data goes through Base64.decode(..., DEFAULT) (l1l1l11Ill.java:649-655),
+// which skips line breaks and takes unpadded input.
+func TestDecodeCloudConfReadsTheConfigLikeTheSDK(t *testing.T) {
+	key := bytes.Repeat([]byte{5}, 32)
+	// A config whose ciphertext's base64 ends in padding, so the unpadded
+	// case tests something.
+	config := `{"sensitive.wifi":false}`
+	for pad := ""; !strings.HasSuffix(encryptConf(t, key, 1, config)["data"].(string), "="); pad += "x" {
+		config = `{"sensitive.wifi":false,"pad":"` + pad + `"}`
+	}
+	for _, c := range []struct {
+		name   string
+		mangle func(d map[string]any)
+		ok     bool
+	}{
+		{"as sent", func(map[string]any) {}, true},
+		{"no length", func(d map[string]any) { delete(d, "length") }, false},
+		{"length a numeric string", func(d map[string]any) { d["length"] = "24" }, true},
+		{"length not a number", func(d map[string]any) { d["length"] = "many" }, false},
+		{"data wrapped every 76 characters", func(d map[string]any) {
+			s := d["data"].(string)
+			var b strings.Builder
+			for len(s) > 76 {
+				b.WriteString(s[:76] + "\n")
+				s = s[76:]
+			}
+			b.WriteString(s + "\n")
+			d["data"] = b.String()
+		}, true},
+		{"data without padding", func(d map[string]any) { d["data"] = strings.TrimRight(d["data"].(string), "=") }, true},
+	} {
+		d := encryptConf(t, key, 1, config)
+		if !strings.HasSuffix(d["data"].(string), "=") {
+			t.Fatal("the fixture's data must end in padding for the unpadded case to test anything")
+		}
+		c.mangle(d)
+		detail, _ := json.Marshal(d)
+		conf, err := decodeCloudConf(detail, key)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: decodeCloudConf error = %v, want ok %v", c.name, err, c.ok)
+			continue
+		}
+		if c.ok && !reflect.DeepEqual(conf.Excluded, []string{"wifi"}) {
+			t.Errorf("%s: excluded %v, want [wifi]", c.name, conf.Excluded)
+		}
+	}
+}
+
+// TestRegisterUndecodableCloudConfFallsBackToTheBuiltIn: a reply whose detail
+// carries "data" goes to the SDK's success handler even when it does not
+// decode; that leaves the config in force null and saves the reply, so the
+// built-in config is in force from then on (l11l111l1lll.java:30-39,
+// 296-309): the cache is cleared, and the next start sends the built-in md5
+// and exclusions. A detail without "data" is the error path (empty handler,
+// :79-86): the cache stays.
+func TestRegisterUndecodableCloudConfFallsBackToTheBuiltIn(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := testInstall
+	cached.CloudConfMD5, cached.CloudConfExcluded = strings.Repeat("cd", 16), "wifi"
+	for _, c := range []struct {
+		name      string
+		mangle    func(d map[string]any)
+		wantCache [2]string
+	}{
+		{"data that does not decode", func(d map[string]any) { delete(d, "length") }, [2]string{"", ""}},
+		{"data under the wrong key", func(d map[string]any) {
+			d["data"] = base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))
+		}, [2]string{"", ""}},
+		{"no data", func(d map[string]any) { delete(d, "data") }, [2]string{cached.CloudConfMD5, "wifi"}},
+	} {
+		srv := &cloudConfServer{t: t, priv: priv, config: `{"sensitive.tel":false}`, status: http.StatusOK, mangle: c.mangle}
+		d := testDevice()
+		d.Install = cached
+		id, in, err := register(&http.Client{Transport: srv}, &priv.PublicKey, testDeviceID, d, time.Now)
+		if err != nil || id != "Bsmid-new" {
+			t.Fatalf("%s: register = %q, %v; want Bsmid-new (a cloudconf problem never fails the upload)", c.name, id, err)
+		}
+		if got := [2]string{in.CloudConfMD5, in.CloudConfExcluded}; got != c.wantCache {
+			t.Errorf("%s: cache = %q, want %q", c.name, got, c.wantCache)
+		}
+		if err := in.Validate(); err != nil {
+			t.Errorf("%s: install Validate() = %v", c.name, err)
+		}
+		if c.wantCache[0] == "" {
+			body, err := cloudConfRequest(&priv.PublicKey, in, "s", bytes.Repeat([]byte{1}, 32))
+			if err != nil || !bytes.Contains(body, []byte(`"md5":"dcce7a4761131c32012fa53ccb09d77b"`)) {
+				t.Errorf("%s: next cloudconf body %s (%v), want the built-in md5", c.name, body, err)
+			}
+			if got := in.cloudExcluded(); !reflect.DeepEqual(got, []string{"gps", "tel"}) {
+				t.Errorf("%s: exclusions in force %v, want the built-in gps, tel", c.name, got)
+			}
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package game
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -238,6 +239,187 @@ func TestHandCopiedListsMatchTheDump(t *testing.T) {
 		for bid := range cards {
 			if _, ok := collectCmdFor(bid); !ok {
 				t.Errorf("week-card farm %d has no collect command", bid)
+			}
+		}
+	})
+
+	// The stage quest lists (final-r3 tests-tables-docs 8): questStageRanges must cover exactly
+	// activity_stage's stage_quest ids, and stageQuestRanges must list, for every stage the five
+	// stage-quest activity types read (stageQuestActivityStage's values, themselves checked against
+	// table activity above), exactly the quests those stages list.
+	stageQuests := func(t *testing.T) map[int64][]int64 {
+		out := map[int64][]int64{}
+		for id, r := range eventTableDump(t, "activity_stage") {
+			qs, _ := r["stage_quest"].([]any)
+			for _, q := range qs {
+				out[num(q)] = append(out[num(q)], num(r["stage"]))
+				if num(q) <= 0 {
+					t.Errorf("activity_stage %s has stage_quest %v", id, q)
+				}
+			}
+		}
+		for q := range out {
+			slices.Sort(out[q])
+		}
+		return out
+	}
+
+	t.Run("questStageRanges", func(t *testing.T) {
+		quests := stageQuests(t)
+		for q := range quests {
+			if !questIsStageQuest(strconv.FormatInt(q, 10)) {
+				t.Errorf("activity_stage lists quest %d, which questStageRanges lacks", q)
+			}
+		}
+		for _, r := range questStageRanges {
+			for q := r[0]; q <= r[1]; q++ {
+				if _, ok := quests[q]; !ok {
+					t.Errorf("questStageRanges covers %d, which no activity_stage row lists", q)
+				}
+			}
+		}
+	})
+
+	t.Run("stageQuestRanges", func(t *testing.T) {
+		read := map[int64]bool{}
+		for _, stage := range stageQuestActivityStage {
+			read[stage] = true
+		}
+		want := map[int64]string{}
+		for q, stages := range stageQuests(t) {
+			var in []int64
+			for _, s := range stages {
+				if read[s] {
+					in = append(in, s)
+				}
+			}
+			if len(in) > 0 {
+				want[q] = fmt.Sprint(slices.Compact(in))
+			}
+		}
+		got := map[int64]string{}
+		for _, r := range stageQuestRanges {
+			for q := r.lo; q <= r.hi; q++ {
+				got[q] = fmt.Sprint(slices.Sorted(slices.Values(r.stages)))
+			}
+		}
+		if !maps.Equal(got, want) {
+			for q, s := range want {
+				if got[q] != s {
+					t.Errorf("activity_stage: quest %d is listed by stages %s; stageQuestRanges has %q", q, s, got[q])
+				}
+			}
+			for q, s := range got {
+				if _, ok := want[q]; !ok {
+					t.Errorf("stageQuestRanges lists quest %d (stages %s), which no stage of the five types lists", q, s)
+				}
+			}
+		}
+	})
+
+	// The lists the new opt-in features copy by hand (final-r3 new-features 6).
+	t.Run("tacticalBoxRewards", func(t *testing.T) {
+		got := map[int64][2]int64{}
+		for id, r := range tacticalBoxRewards {
+			got[id] = [2]int64{r.season, r.point}
+		}
+		want := map[int64][2]int64{}
+		for id, r := range eventTableDump(t, "battle_card_box_reward") {
+			want[key(id)] = [2]int64{num(r["season"]), num(r["point"])}
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("tacticalBoxRewards = %v, battle_card_box_reward season/point %v", got, want)
+		}
+	})
+
+	t.Run("tacticalCardNum", func(t *testing.T) {
+		want := map[int64]string{}
+		for id, r := range eventTableDump(t, "battle_card_reward") {
+			want[key(id)] = eventDumpScalar(r["card_num"])
+		}
+		got := map[int64]string{}
+		for id, n := range tacticalCardNum {
+			got[id] = strings.ReplaceAll(fmt.Sprint(n), " ", ",")
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("tacticalCardNum = %v, battle_card_reward card_num %v", got, want)
+		}
+	})
+
+	t.Run("offSeasonGoalTypes", func(t *testing.T) {
+		want := map[int64]int32{}
+		for id, r := range eventTableDump(t, "activity_offSeason_task") {
+			if typ := num(r["Type"]); typ < 0 {
+				want[key(id)] = int32(typ)
+			}
+		}
+		if !maps.Equal(offSeasonGoalTypes, want) {
+			t.Errorf("offSeasonGoalTypes = %v, activity_offSeason_task rows with a negative Type %v", offSeasonGoalTypes, want)
+		}
+	})
+
+	t.Run("letterItemIDs", func(t *testing.T) {
+		vip, ok := eventTableDump(t, "item")["vip_letter"]
+		if v := eventDumpScalar(vip["k2"]); !ok || v != letterVIP18ID {
+			t.Errorf("letterVIP18ID = %s, item vip_letter k2 %q", letterVIP18ID, v)
+		}
+		var want []string
+		for id, r := range eventTableDump(t, "goods") {
+			if num(r["type"]) == 160 && id != eventDumpScalar(vip["k2"]) {
+				want = append(want, id)
+			}
+		}
+		if got := slices.Sorted(slices.Values(letterItemIDs)); !slices.Equal(got, slices.Sorted(slices.Values(want))) {
+			t.Errorf("letterItemIDs = %v, goods of type 160 but vip_letter k2 %v", got, slices.Sorted(slices.Values(want)))
+		}
+	})
+
+	t.Run("citySoldiersSparkUpgradeItem", func(t *testing.T) {
+		want := map[int64]int64{}
+		for id, r := range eventTableDump(t, "lw_civilization_spark") {
+			need, _ := r["upgrade_need"].([]any)
+			if len(need) == 0 {
+				continue
+			}
+			if len(need) != 2 || num(need[1]) != 1 {
+				t.Errorf("lw_civilization_spark %s upgrade_need %v: the feature assumes one item", id, need)
+			}
+			want[num(r["level"])] = num(need[0])
+		}
+		if !maps.Equal(citySoldiersSparkUpgradeItem, want) {
+			t.Errorf("citySoldiersSparkUpgradeItem = %v, lw_civilization_spark upgrade_need %v", citySoldiersSparkUpgradeItem, want)
+		}
+	})
+
+	t.Run("baseBubbleStatuses", func(t *testing.T) {
+		thanks, scout := map[int32]bool{}, map[int32]bool{}
+		valentine := map[int32]valentineStatus{}
+		caps := map[int64]int{}
+		for _, r := range eventTableDump(t, "activity_Valentine_Get") {
+			caps[num(r["day_first_status"])] = int(num(r["bubble_times"]))
+		}
+		for id, r := range eventTableDump(t, "lw_status") {
+			switch num(r["type2"]) {
+			case 31: // StatusType2.BuildingRewardBubble (Thanksgiving)
+				thanks[int32(key(id))] = true
+			case 33: // StatusType2.BuildingRewardBubble2 (a scout march, never sent)
+				scout[int32(key(id))] = true
+			case 35: // the Valentine bubble
+				valentine[int32(key(id))] = valentineStatus{activityID: int32(num(r["activity_id"])), dayCap: caps[key(id)]}
+			}
+		}
+		if !maps.Equal(thanksgivingStatuses, thanks) {
+			t.Errorf("thanksgivingStatuses = %v, lw_status type2 31 %v", thanksgivingStatuses, thanks)
+		}
+		if !maps.Equal(scoutBubbleStatuses, scout) {
+			t.Errorf("scoutBubbleStatuses = %v, lw_status type2 33 %v", scoutBubbleStatuses, scout)
+		}
+		if !maps.Equal(valentineStatuses, valentine) {
+			t.Errorf("valentineStatuses = %v, lw_status type2 35 with activity_Valentine_Get bubble_times %v", valentineStatuses, valentine)
+		}
+		for id, r := range eventTableDump(t, "activity_thanksgiving") {
+			if n := num(r["day_receive_num"]); n != thanksgivingDayReceiveNum {
+				t.Errorf("activity_thanksgiving %s day_receive_num %d, thanksgivingDayReceiveNum %d", id, n, thanksgivingDayReceiveNum)
 			}
 		}
 	})

@@ -1,6 +1,8 @@
 package game
 
 import (
+	"encoding/json"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -261,5 +263,81 @@ func TestFreeRecruitsWarnsOnWishPoolWithNoWishHero(t *testing.T) {
 	out := logs.String()
 	if n := strings.Count(out, "level=WARN"); n != 1 || !strings.Contains(out, "pool=221501") {
 		t.Errorf("want exactly one Warn, for pool 221501; logs:\n%s", out)
+	}
+}
+
+// TestFreeRecruitsWarnsOnEveryWishConfirmation is the B4 decision (DECISIONS.md 2026-11-19: warn and
+// keep pulling) over every confirmation the recruit view asks before a free pull
+// (OnBtnRecruitOneClick, UIHeroRecruitView.lua:980-1007): herorecruit_alert1 with no wish hero
+// (:993-997), else GetWishLotterySecondConfirmKey's herorecruit_alert2 / herorecruit_alert5
+// (:999-1004; LotteryInfo.lua:839-893). Pool 221501's officer_recruit 40413 wish_list is
+// 50006|50008|...; lw_hero 40413 gives both heroes max_rank 26 and max_honorLevel 600. The pull goes
+// out in every case, and the Warn names the confirmation in its alert attribute.
+func TestFreeRecruitsWarnsOnEveryWishConfirmation(t *testing.T) {
+	due := time.Now().Add(-time.Minute).Unix()
+	for name, c := range map[string]struct {
+		wishHero string
+		heroes   [][3]int // heroId, rankLv, honorLevel (< 0: omitted)
+		alert    string   // "" for no Warn
+	}{
+		"alert1: no wish hero":                   {"", nil, "herorecruit_alert1"},
+		"alert2: another wish hero below rank":   {"50006", [][3]int{{50006, 26, 600}, {50008, 25, 600}}, "herorecruit_alert2"},
+		"alert5: another wish hero below honor":  {"50006", [][3]int{{50006, 26, 600}, {50008, 26, 10}}, "herorecruit_alert5"},
+		"alert5 assumed: no honorLevel in init":  {"50006", [][3]int{{50006, 26, -1}, {50008, 26, -1}}, "herorecruit_alert5 (assumed: init userHero carries no honorLevel)"},
+		"unknown: wish hero not a hero id":       {"not-a-hero", nil, "unknown (pool or wish hero not in the tables)"},
+		"no question: every wish hero maxed":     {"50006", [][3]int{{50006, 26, 600}, {50008, 26, 600}}, ""},
+		"no question: chosen hero below max":     {"50006", [][3]int{{50006, 25, 600}, {50008, 1, 0}}, ""},
+		"no question: chosen hero not owned yet": {"50006", [][3]int{{50008, 1, 0}}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf strings.Builder
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(orig) })
+
+			in := freeRecruitsInit(nil, heroPool{id: "221501", limit: 1, next: due})
+			pool := in.Objects("lotteryFreeInfo")[0]
+			pool.PutBool("wishSwitch", true)
+			pool.PutInt("wishPityReceiveNum", 200)
+			pool.PutUtfString("wishHero", c.wishHero)
+			if c.heroes != nil {
+				duelUserHeroes(in, c.heroes...)
+			}
+			fake, err := runFreeRecruitsFake(t, in, -1, rewardOK())
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			var pulled []string
+			for _, r := range fake.requests() {
+				if r.Cmd == freeRecruitsHeroCmd {
+					pulled = append(pulled, r.Params.GetString("id"))
+				}
+			}
+			if !slices.Equal(pulled, []string{"221501"}) {
+				t.Errorf("pulled %v, want [221501]: a confirmation is a Warn, never a skip", pulled)
+			}
+			var alerts []string
+			for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+				var rec map[string]any
+				if err := json.Unmarshal([]byte(line), &rec); err != nil {
+					t.Fatalf("log line %q: %v", line, err)
+				}
+				if rec["level"] != "WARN" {
+					continue
+				}
+				a, _ := rec["alert"].(string)
+				alerts = append(alerts, a)
+				if rec["pool"] != "221501" {
+					t.Errorf("the Warn names pool %v, want 221501", rec["pool"])
+				}
+			}
+			var want []string
+			if c.alert != "" {
+				want = []string{c.alert}
+			}
+			if !slices.Equal(alerts, want) {
+				t.Errorf("Warn alerts %q, want %q", alerts, want)
+			}
+		})
 	}
 }

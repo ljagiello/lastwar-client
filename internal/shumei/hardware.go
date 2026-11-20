@@ -157,12 +157,18 @@ func (h Hardware) ScreenWH() (w, height int) {
 // Verizon 311480) and an English launcher, so the phone agrees with the
 // Login's fromCountry "US" and lang "en": the real client sends the device
 // locale's country there (SdkManager.java:199-222, AND-CS:83240), and the
-// cron's iOS account keeps those values.
+// cron's iOS account keeps those values. Some build fingerprints are a
+// regional firmware (the EEA builds, and the Korean G988N one under model
+// SM-G988B); a European phone on a US SIM is possible, so they stay as they
+// are until the catalog is next refreshed with US or unlocked builds, which
+// would change an existing install's fingerprint.
 //
 // The sensor lists name only a few of each phone's sensors. A real phone's
 // getSensorList(TYPE_ALL) has dozens, and each entry's first field is the
 // sensor type (l1l11I111l.java:16-17); every list has a light sensor (type 5),
-// which the game's emulator test looks for (SdkManager.java:995-1003). A full
+// which the game's emulator test looks for (SdkManager.java:995-1003). The
+// light sensor's vendor is a placeholder on some models (TDK and AKM make
+// those phones' motion and magnetic sensors, not their light sensors). A full
 // list per model needs a dump from that phone.
 var hardwareCatalog = []Hardware{
 	{

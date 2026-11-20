@@ -52,6 +52,15 @@ func TestSeasonMilitaryRankUpStops(t *testing.T) {
 	sameLevel := func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		return obj("militaryLevel", 2, "totalMilitaryScore", int64(900000))
 	}
+	// noScore answers each rank-up without totalMilitaryScore. The client's HandleLevelUp then reads
+	// 0 (checknumber, SeasonMilitaryInfoData.lua:53-64; FuncUtil.lua:1-3) and offers no further
+	// rank-up, so only one military.up.level goes out although 900000 would pass every threshold.
+	noScore := func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == seasonMilitaryUpCmd {
+			return obj("militaryLevel", p.GetInt("viewLevel")+1, "dailyRewardNum", 0)
+		}
+		return obj("militaryLevel", 2, "totalMilitaryScore", int64(900000))
+	}
 	refused := func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		if cmd == seasonMilitaryUpCmd {
 			return evErr("E9")
@@ -72,6 +81,7 @@ func TestSeasonMilitaryRankUpStops(t *testing.T) {
 		"daily settlement in progress": {settling, s6, "military.act.info", false},
 		"score drops after a rank-up":  {scoreDrops, s6, "military.act.info,military.up.level", false},
 		"level does not rise":          {sameLevel, s6, "military.act.info,military.up.level", false},
+		"rank-up reply without score":  {noScore, s6, "military.act.info,military.up.level", false},
 		"refused":                      {refused, s6, "military.act.info,military.up.level", true},
 		"end-show phase":               {seasonMilitaryRankReplies(2, 900000), evWithSeason(evInit(30, ended), 6), "", false},
 		"out of season":                {seasonMilitaryRankReplies(2, 900000), evInit(30, evActivity(1200101)), "", false},

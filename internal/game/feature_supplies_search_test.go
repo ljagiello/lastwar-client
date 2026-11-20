@@ -2,6 +2,7 @@ package game
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -100,6 +101,16 @@ func TestSuppliesSearchTakesOnlyTheRiskFreeStep(t *testing.T) {
 	if got := suppliesSent(f); !slices.Equal(got, want) {
 		t.Errorf("sent\n%v\nwant\n%v", got, want)
 	}
+	// Each request carries its uuid as an SFS Long, as the client puts it
+	// (Net/Msgs/SuppliesSearch/*.lua:6, PutLong eventUuid / buildingUuid).
+	for _, r := range f.requests() {
+		switch r.Cmd {
+		case "detect.event.supplies.search.next", "detect.event.get.supplies.search.reward":
+			seasonParamIs(t, r.Params, "eventUuid", sfs.SFSLong, r.Params.GetLong("eventUuid"))
+		case "building.supplies.search.next", "building.get.supplies.search.reward":
+			seasonParamIs(t, r.Params, "buildingUuid", sfs.SFSLong, r.Params.GetLong("buildingUuid"))
+		}
+	}
 }
 
 // TestSuppliesSearchRadarHeldOffDuelRadarDays: a radar search completes a radar task (score 82),
@@ -156,6 +167,32 @@ func TestSuppliesSearchDiamondDropTrips(t *testing.T) {
 	var rec TripwireRecord
 	if err := json.Unmarshal(data, &rec); err != nil || rec.Feature != suppliesSearchFeature {
 		t.Errorf("tripwire record = %+v (%v), want feature %s", rec, err, suppliesSearchFeature)
+	}
+}
+
+// TestSuppliesSearchHonoursASetTripwire: with the tripwire file set (by this feature or any other
+// spend, in an earlier run), nothing is sent, not even the risk-free step, and the run reports it.
+func TestSuppliesSearchHonoursASetTripwire(t *testing.T) {
+	path := tripwireTemp(t)
+	tripwireTrip("duel-recruit-tickets", "lottery.hero.card", "an earlier run's diamond drop")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("tripwire file not written: %v", err)
+	}
+	conn, f := startRadarFake(t, radarScoringDay(), []*sfs.SFSObject{detectReply(20, 10)},
+		func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+			if cmd == suppliesBuildNextCmd {
+				return suppliesReply("buildingUuid", p.GetLong("buildingUuid"), 1, 0)
+			}
+			return nil
+		})
+	in := digTestInit(nil)
+	in.Buildings = append(in.Buildings, suppliesBuilding(301, 10150000, suppliesInfo(0, 0)))
+	err := runSuppliesSearch(conn, in)
+	if !errors.Is(err, errTripwire) {
+		t.Errorf("run = %v, want the tripwire refusal", err)
+	}
+	if got := suppliesSent(f); len(got) != 0 {
+		t.Errorf("sent %v while the tripwire file exists, want nothing", got)
 	}
 }
 

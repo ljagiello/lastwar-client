@@ -78,10 +78,18 @@ const (
 	baseBubblesMaxClaims      = thanksgivingDayReceiveNum
 )
 
-// thanksgivingActivities are table activity's type-321 rows (tables 40413): 99108 (2024) and
-// 99302 (2026, data_date 2026-11-22; the generated activity table of this tree is older and lacks
-// it, so the type is taken from here).
-var thanksgivingActivities = []int32{99108, 99302}
+// thanksgivingActivities returns the generated activity table's type-321 rows, in id order: 99108
+// (2024) and 99302 (2026, data_date 2026-11-22) in tables 40413.
+func thanksgivingActivities() []int32 {
+	var ids []int32
+	for id, r := range activityTable {
+		if r.typ == thanksgivingActivityType {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
 
 // thanksgivingStatuses are lw_status's type2-31 rows (tables 40413; activity_id empty, time 86400).
 var thanksgivingStatuses = map[int32]bool{500521: true, 500522: true, 500550: true, 500551: true}
@@ -247,7 +255,7 @@ func runBaseBubbles(conn *session.GameConn, in *Init) error {
 	if in == nil || in.Raw == nil {
 		return nil
 	}
-	tgAct, tgOpen := openActivityOf(in, thanksgivingActivities, thanksgivingActivityType)
+	tgAct, tgOpen := openActivityOf(in, thanksgivingActivities(), thanksgivingActivityType)
 	var valentineActs []int32
 	for _, v := range valentineStatuses {
 		valentineActs = append(valentineActs, v.activityID)
@@ -294,9 +302,24 @@ func runBaseBubbles(conn *session.GameConn, in *Init) error {
 			}
 		}
 	}
+	// Bases go by their first expiry, then point. On one base the bubble taps its statuses by type2
+	// descending, then id ascending (BuildingRewardBubbleEffect.lua:150-155), and the next tap
+	// takes the next one, so a base's picks keep that order (wp7-r2 #2).
+	firstExpiry := map[int32]int64{}
+	for _, bb := range picks {
+		if e, ok := firstExpiry[bb.base.PointID]; !ok || bb.status.ExpireTime < e {
+			firstExpiry[bb.base.PointID] = bb.status.ExpireTime
+		}
+	}
+	type2 := func(bb baseBubble) int {
+		if bb.own {
+			return 35 // the Valentine bubble's lw_status type2
+		}
+		return 31 // StatusType2.BuildingRewardBubble (Thanksgiving)
+	}
 	slices.SortStableFunc(picks, func(a, b baseBubble) int {
-		return cmp.Or(cmp.Compare(a.status.ExpireTime, b.status.ExpireTime), cmp.Compare(a.base.PointID, b.base.PointID),
-			cmp.Compare(a.status.ID, b.status.ID))
+		return cmp.Or(cmp.Compare(firstExpiry[a.base.PointID], firstExpiry[b.base.PointID]),
+			cmp.Compare(a.base.PointID, b.base.PointID), cmp.Compare(type2(b), type2(a)), cmp.Compare(a.status.ID, b.status.ID))
 	})
 	got, sent := 0, 0
 	pace := func() { // a pause before every request but the first

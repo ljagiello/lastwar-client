@@ -85,7 +85,8 @@ func TestSeasonAchievementsGates(t *testing.T) {
 			}
 		})
 	}
-	// No gradeValue: nothing is reached, so nothing is claimed; an error stops that achievement.
+	// No gradeValue: nothing is reached, so nothing is claimed (a refused grade claim is pinned by
+	// TestSeasonClaimsStopOnTheFirstRefusal).
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		if cmd == seasonAchieveInfoCmd {
 			return obj("gradesInfo", []*sfs.SFSObject{obj("grade", 1)})

@@ -74,6 +74,10 @@ func runCityGarbage(conn *session.GameConn, in *Init) error {
 		slog.Info(cityGarbageFeature + ": no init push; skipping")
 		return nil
 	}
+	// The first errorCode ends the run. The client lists only piles on unlocked fog
+	// (Data.Fog:IsUnlock, CityPointDataManager.lua:164, 196), which init can't show, and init's
+	// order is stable, so a refused pile under fog would stop every run at the same pile. Once a
+	// live run shows that code, try the next pile on it or register it as benign (wp4-r1 m1).
 	for i, uuid := range cityGarbagePiles(in) {
 		if i > 0 {
 			time.Sleep(cityGarbageSpacing)

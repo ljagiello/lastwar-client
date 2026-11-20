@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -91,47 +92,82 @@ func cloudConfRequest(pub *rsa.PublicKey, in Install, sid string, key []byte) ([
 	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
+// errCloudConfUndecodable marks a cloudconf reply that carried a config (a
+// detail with "data") that does not decode. The SDK's success handler takes
+// such a reply anyway: it sets the config in force to the failed decode's null
+// and saves the reply (l11l111l1lll.java:30-39), so from then on the cached
+// config fails to decode too and the built-in one is in force
+// (l111l11111lIl(), :296-309). Register clears the cache for it.
+var errCloudConfUndecodable = errors.New("shumei: the cloud config in the cloudconf reply does not decode")
+
+// cloudConfReply is what a cloudconf reply said besides its config: code
+// (optInt "code", -1 when absent) and requestId, both only logged.
+type cloudConfReply struct {
+	Code      string
+	RequestID string
+}
+
 // fetchCloudConf POSTs the cloudconf request and decodes the reply's config
 // with key. The reply is {code, requestId, detail}; the config is detail when
-// it holds "data" (l111l11IlIlIl.java:14-17).
-func fetchCloudConf(client Client, pub *rsa.PublicKey, in Install, sid string) (cloudConf, error) {
+// it is an object holding "data" (l111l11IlIlIl.java:14-17). Anything else,
+// like a failed POST, is the SDK's error path, whose handler is empty
+// (l11l111l1lll.java:79-86): the cached config stays. A detail with "data"
+// that does not decode is errCloudConfUndecodable.
+func fetchCloudConf(client Client, pub *rsa.PublicKey, in Install, sid string) (cloudConf, cloudConfReply, error) {
+	var meta cloudConfReply
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
-		return cloudConf{}, fmt.Errorf("shumei: cloudconf key: %w", err)
+		return cloudConf{}, meta, fmt.Errorf("shumei: cloudconf key: %w", err)
 	}
 	body, err := cloudConfRequest(pub, in, sid, key)
 	if err != nil {
-		return cloudConf{}, err
+		return cloudConf{}, meta, err
 	}
 	req, err := http.NewRequest(http.MethodPost, DefaultCloudConfURL, bytes.NewReader(body))
 	if err != nil {
-		return cloudConf{}, fmt.Errorf("shumei: build cloudconf request: %w", err)
+		return cloudConf{}, meta, fmt.Errorf("shumei: build cloudconf request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Connection", "Close")
 	resp, err := client.Do(req)
 	if err != nil {
-		return cloudConf{}, fmt.Errorf("shumei: post cloudconf: %w", err)
+		return cloudConf{}, meta, fmt.Errorf("shumei: post cloudconf: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseSize))
 	if err != nil {
-		return cloudConf{}, fmt.Errorf("shumei: read cloudconf reply: %w", err)
+		return cloudConf{}, meta, fmt.Errorf("shumei: read cloudconf reply: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return cloudConf{}, fmt.Errorf("shumei: cloudconf status %d: %s", resp.StatusCode, truncate(raw))
+		return cloudConf{}, meta, fmt.Errorf("shumei: cloudconf status %d: %s", resp.StatusCode, truncate(raw))
 	}
 	var reply struct {
-		Code   int             `json:"code"`
-		Detail json.RawMessage `json:"detail"`
+		Code      json.RawMessage `json:"code"`
+		RequestID json.RawMessage `json:"requestId"`
+		Detail    json.RawMessage `json:"detail"`
 	}
 	if err := json.Unmarshal(raw, &reply); err != nil {
-		return cloudConf{}, fmt.Errorf("shumei: parse cloudconf reply: %w", err)
+		return cloudConf{}, meta, fmt.Errorf("shumei: parse cloudconf reply: %w", err)
 	}
-	if len(reply.Detail) == 0 || reply.Detail[0] != '{' {
-		return cloudConf{}, fmt.Errorf("shumei: cloudconf reply (code %d) has no config", reply.Code)
+	meta.Code = "-1"
+	if len(reply.Code) > 0 {
+		meta.Code = string(reply.Code)
 	}
-	return decodeCloudConf(reply.Detail, key)
+	if json.Unmarshal(reply.RequestID, &meta.RequestID) != nil {
+		meta.RequestID = string(reply.RequestID)
+	}
+	var detail map[string]json.RawMessage
+	if len(reply.Detail) == 0 || reply.Detail[0] != '{' || json.Unmarshal(reply.Detail, &detail) != nil {
+		return cloudConf{}, meta, fmt.Errorf("shumei: cloudconf reply (code %s) has no config", meta.Code)
+	}
+	if _, ok := detail["data"]; !ok {
+		return cloudConf{}, meta, fmt.Errorf("shumei: cloudconf reply (code %s) has no config data", meta.Code)
+	}
+	conf, err := decodeCloudConf(reply.Detail, key)
+	if err != nil {
+		return cloudConf{}, meta, fmt.Errorf("%w: %w", errCloudConfUndecodable, err)
+	}
+	return conf, meta, nil
 }
 
 // decodeCloudConf decodes a cloud config as l11l111l1lll.l1111l111111Il
@@ -142,17 +178,23 @@ func fetchCloudConf(client Client, pub *rsa.PublicKey, in Install, sid string) (
 // (l1l1l11Ill.l11l1111lIIl).
 func decodeCloudConf(detail []byte, key []byte) (cloudConf, error) {
 	var d struct {
-		Ver  int    `json:"ver"`
-		Enc  int    `json:"enc"`
-		Data string `json:"data"`
+		Ver    int             `json:"ver"`
+		Enc    int             `json:"enc"`
+		Data   string          `json:"data"`
+		Length json.RawMessage `json:"length"`
 	}
 	if err := json.Unmarshal(detail, &d); err != nil {
 		return cloudConf{}, fmt.Errorf("shumei: parse cloud config: %w", err)
 	}
+	// The SDK reads getInt("length") first, so a config without a numeric
+	// length is dropped (l11l111l1lll.java:249); the value itself is unused.
+	if !javaInt(d.Length) {
+		return cloudConf{}, errors.New("shumei: cloud config has no numeric length")
+	}
 	if d.Data == "" {
 		return cloudConf{}, errors.New("shumei: cloud config has no data")
 	}
-	ct, err := base64.StdEncoding.DecodeString(d.Data)
+	ct, err := javaBase64Decode(d.Data)
 	if err != nil {
 		return cloudConf{}, fmt.Errorf("shumei: cloud config data: %w", err)
 	}
@@ -188,25 +230,34 @@ func decodeCloudConf(detail []byte, key []byte) (cloudConf, error) {
 	return cloudConf{MD5: hex.EncodeToString(sum[:]), Excluded: excluded}, nil
 }
 
-// sensitiveOff returns, in document order, the names a config's sensitive
-// switches turn off. flat is the ver-1 form, "sensitive.<name>": bool at the
-// top level, where JSONObject.optBoolean counts anything but true (or "true")
-// as false; otherwise it is a "sensitive" object whose true (or "true") values
-// turn their names off (l11l111l1lll.java:107-122, 230-243).
+// sensitiveOff returns, in document order and once each (the SDK collects
+// them in a HashSet), the names a config's sensitive switches turn off. flat
+// is the ver-1 form, "sensitive.<name>": bool at the top level, where
+// JSONObject.optBoolean counts anything but true (or "true") as false
+// (l11l111l1lll.java:95-111, called at :156); the name is sensitiveName's.
+// Otherwise it is a "sensitive" object whose true (or "true") values turn
+// their names off (:227-240, called at :379).
 func sensitiveOff(config []byte, flat bool) ([]string, error) {
 	var off []string
+	seen := map[string]bool{}
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			off = append(off, name)
+		}
+	}
 	err := orderedObject(config, func(key string, val json.RawMessage) {
 		switch {
 		case flat:
-			if name, ok := strings.CutPrefix(key, "sensitive."); ok && !javaTrue(val) {
-				off = append(off, name)
+			if name, ok := sensitiveName(key); ok && !javaTrue(val) {
+				add(name)
 			}
 		case key == "sensitive":
 			// A "sensitive" member that isn't an object turns nothing off, as
 			// the SDK's caught exception leaves the set empty.
 			_ = orderedObject(val, func(name string, on json.RawMessage) {
 				if javaTrue(on) {
-					off = append(off, name)
+					add(name)
 				}
 			})
 		}
@@ -237,6 +288,54 @@ func orderedObject(obj []byte, f func(key string, val json.RawMessage)) error {
 		f(key, val)
 	}
 	return nil
+}
+
+// sensitiveName is the name a flat "sensitive.*" key switches:
+// key.split("\\.")[1] (l11l111l1lll.java:101-104). Java's split drops
+// trailing empty strings, so "sensitive.a.b" and "sensitive.a." name "a",
+// "sensitive..b" names "", and "sensitive." has no index 1: the SDK's caught
+// exception skips the key, so ok is false.
+func sensitiveName(key string) (name string, ok bool) {
+	if !strings.HasPrefix(key, "sensitive.") {
+		return "", false
+	}
+	parts := strings.Split(key, ".")
+	for len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) < 2 {
+		return "", false
+	}
+	return parts[1], true
+}
+
+// javaInt reports whether JSONObject.getInt reads v as a number: a JSON
+// number, or a string that parses as one (org.json's coercion).
+func javaInt(v json.RawMessage) bool {
+	var f float64
+	if json.Unmarshal(v, &f) == nil {
+		return true
+	}
+	var s string
+	if json.Unmarshal(v, &s) != nil {
+		return false
+	}
+	_, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return err == nil
+}
+
+// javaBase64Decode decodes s as the SDK's Base64.decode(bytes, DEFAULT)
+// (l1l1l11Ill.java:649-655): line breaks are skipped, as in the
+// DEFAULT-flag output Android's encoder wraps at 76 characters (Go's decoder
+// skips them too; they are removed first so the length test below sees the
+// real length), and the trailing "=" padding is optional, though when
+// present it must be complete.
+func javaBase64Decode(s string) ([]byte, error) {
+	s = strings.NewReplacer("\r", "", "\n", "").Replace(s)
+	if len(s)%4 == 0 {
+		return base64.StdEncoding.DecodeString(s)
+	}
+	return base64.RawStdEncoding.DecodeString(s)
 }
 
 // javaTrue reports whether JSONObject.optBoolean/getBoolean reads v as true:
