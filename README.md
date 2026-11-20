@@ -134,9 +134,10 @@ cold start, and since the 1.0.370 fixes this client does too:
   It dials the listed server and adopts any access or refresh token the reply carries. A reply
   that rotates the refresh token is saved to the config before the `Login`.
 - When the listed server can't be reached, the `Login` is retried at the configured address. When
-  it refuses a token the lookup handed back (`E011`), the `Login` is retried with the configured
-  token. If every gateway refuses the connection, or the `Login` gets no reply, the client looks
-  the server up once more and retries there.
+  a server refuses a token a lookup handed back (`E011`), the `Login` is retried there with the
+  token the lookup replaced (the configured one, or the one this run's refresh issued), after any
+  lookup. If no lookup has worked yet and every gateway refuses the connection, or the `Login`
+  gets no reply, the client looks the server up once and retries there.
 - The address it connected to is saved back into the config. On the first run after an update,
   GSL's gateway host names will likely replace the captured IPs.
 
@@ -347,8 +348,11 @@ After those come the game's own gates: 4 plunders a day shared by trucks and tra
 
 The 1.0.370 audit added these claims. Each is its own feature, off by default, and static-only:
 its summary in `-list-features` ends "(static-only, not validated live)". None spends anything,
-marches, or sends a chat message. Each logs its first reply at Info, and an error code from one of
-its commands stops that feature for the run. The duel ones are in the table above.
+marches, or sends a chat message. Each logs its first reply at Info. An error code from one of its
+commands is logged and stops that claim; depending on the feature it also stops the rest of that
+activity or building, or the feature for the run, while others (`city-soldiers`,
+`radar-rescue-claims`, `supplies-search` among them) go on to their other claims. The duel ones
+are in the table above.
 
 | Area | Features |
 |---|---|
@@ -359,10 +363,13 @@ its commands stops that feature for the run. The duel ones are in the table abov
 | More events | `tactical-card-box-points`, `tactical-card-collection`, `offseason-tasks`, `survivor-pack` (free half only), `doomsday-quests`, `parkour-tasks`, `front-break-tasks`, `leading-quest-tasks`, `hero-trial-stage`, `sand-worm-tasks`, `crazy-rock-tasks`, `letters`, `sky-battle-boxes`, `newbie-arena-rewards`, `birthday-set-reward`, `mastery-newbie-reward`, `counter-attack-rounds`, `theme-prenotice` |
 | Season | `season-achievements`, `military-rank-up`, `season-trends`, `season-outpost-boxes`, `cross-throne-rewards`, `bloody-night-tasks`, `jungle-trial-rewards`, `gold-tree-prayer` |
 
-Two features that are on by default changed in a way to check on the first runs: `season-dailies`
-now sends the power-milestone pair only in a Desert (type 1) season, as the client does, so in
-any other season the achievement grades wait for `season-achievements`; and `quests` leaves the
-Season 7 Lockhart quest 2400008 to `stage-quests`. See docs/client-1-0-370.mdx for the full list.
+Two features that the production config enables changed in a way to check on the first runs:
+`season-dailies` now sends the power-milestone pair only in a Desert (type 1) season, as the
+client does, so in any other season the achievement grades are left to `season-achievements`;
+and `quests` leaves the Season 7 Lockhart quest 2400008 to `stage-quests`. Both of those are off
+by default and not validated live, so until `season-achievements` and `stage-quests` are
+validated and enabled, nothing claims the non-Desert achievement grades or 2400008. See
+docs/client-1-0-370.mdx for the full list.
 
 Every run with a feature enabled logs one `alliance duel` line (theme, score, next chest, day end),
 and every `push.act.score.obtain` the server sends is logged as `activity score obtained` with the

@@ -103,7 +103,7 @@ A rejected `Login` arrives as SFS2X `ec=28` with a reason string in `ep[0]` (see
 | `E010` | Account deletion pending | Dialog |
 | `E011` | `ERROR_LOGIN_ACCESS_TOKEN` | Clears **only `at`** and keeps `rt`. Shows a dialog and reloads; the reload runs GSL `opt=refresh`, because `at` is now empty. Confirmed live as the whole failure signature of a rotated token |
 | `E012` | Korean real-name authentication | Dialog |
-| `E013`, `E015`, `E016` | Season register ban, season start, season stop or maintenance | `E013` clears all user data |
+| `E013`, `E015`, `E016` | Season register ban, season start, season stop or maintenance | `E013` clears all user data. `E015` and `E016` offer a reload or quit and keep every credential |
 | `E014` | `ERROR_OLD_UID_USE_NEW_RT` | Clears `gameUid`, `at`, `rt`, and `loginKey`, then reloads |
 | `4` (with `;` details) | `ERROR_BANID`: a ban | Ban dialog, see [Reading a ban](#reading-a-ban). The ban view also calls `AccountCredentialManager.ClearAll()` (`UIAccountBanView.lua:223`); when it does isn't recorded |
 | `43`, `44` | IP blacklist, device blacklist | No C# case; falls through to the generic `E117` |
@@ -111,7 +111,7 @@ A rejected `Login` arrives as SFS2X `ec=28` with a reason string in `ep[0]` (see
 | `49` (with `;` details) | `TRAFFIC_CONTROL_BANNED_USER` | UI only |
 | `55`-`58` | Role deletion: applied, deleted, refused, confirmed. New in 1.0.364 | UI only |
 
-None of the numeric codes is a credential problem, and none is worth retrying. The `E1xx` codes (`E101`-`E117`) are client-local loading and network codes; the server never sends them. `goclient` reports `E011` as `session.ErrTokenRejected`, the numeric codes above as `session.ErrAccountBlocked`, and every other rejection as `ErrAuthRejected`. A blocked account, role, device or IP exits with code `4`, because neither a fresh capture nor a token refresh can fix it. The other rejections exit with code `2`.
+None of the numeric codes is a credential problem, and none is worth retrying. The `E1xx` codes (`E101`-`E117`) are client-local loading and network codes; the server never sends them. `goclient` reports `E011` as `session.ErrTokenRejected`, the numeric codes above as `session.ErrAccountBlocked`, `E005` as `session.ErrLoginMaintenanceOrIdentity`, `E015`/`E016` (the season's server window) as `session.ErrSeasonWindow`, and every other rejection as `ErrAuthRejected`. A blocked account, role, device or IP exits with code `4`, because neither a fresh capture nor a token refresh can fix it. `E015`/`E016` exit with code `1`: they are a server state, not a credential problem, so the next run may get in. `E005` still exits with code `2`, like the other rejections; whether it should is still undecided (see [Client 1.0.370](/client-1-0-370#not-done)).
 
 The real client's recovery from `E011` needs the refresh token: clear `at`, run GSL `opt=refresh` with `rt`, store the new pair, and log in again. `goclient` does the same for a session config that holds a refresh token, such as an own-device one (see [Refreshing the access token](#refreshing-the-access-token)). A config captured from the real app has no refresh token, so its recovery is a fresh capture, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token).
 
@@ -146,14 +146,20 @@ When the `Login` response carries `serverInfo`, the real client saves the new ip
 
 ### Looking up the game server
 
-A session config's `ip` and `port` are optional. The game server's address comes from GSL `getserverlist.php`, as it does for the real client on every cold start, so you don't have to copy it from a capture. `goclient`'s session-config reconnect asks GSL in two cases:
+A session config's `ip` and `port` are optional. The game server's address comes from GSL `getserverlist.php`, as it does for the real client on every cold start, so you don't have to copy it from a capture. The client clears its cached server before it connects (`ClearServerNetworkInfo` in `CheckResVersionState.OnEnter`), so it asks GSL every time. Since the 1.0.370 fixes, `goclient`'s session-config reconnect does the same:
 
-- **No address given:** it looks the role's server up before dialing.
-- **The given address doesn't answer:** every gateway refuses the connection, or the `Login` gets no reply. It looks the server up once and, if GSL names a different address, retries there. A rejected `Login`, such as `E011`, never triggers a lookup.
+- **Before every `Login`:** one lookup, unless the run just refreshed its tokens (the refresh was its GSL call) or the address was typed on the command line. With no address saved, this lookup is the only way to find the server, and the run stops if it fails.
+- **It fails open:** with an address saved, a lookup that fails in any way, GSL `211`/`212` included, keeps the configured address and token and changes nothing else.
+- **What it takes from the reply:** the entry that carries the session's `gameUid` (an entry that names another role is refused), its address, and any access or refresh token the reply carries, as the client's `SaveGameLoginToken` stores them. A `-cs-at` typed on the command line is kept. A reply that rotates the refresh token is saved to the session config before the `Login`, so a `Login` that fails afterwards can't lose it.
+- **When the listed server doesn't answer:** every gateway refuses the connection, or the `Login` gets no reply. The `Login` is retried at the configured address, if one is saved, still with the token the lookup handed back.
+- **When a server refuses a handed-back token (`E011`):** it answered, so its address stays, and the `Login` is retried there with the token the lookup replaced: the configured one, or the one this run's refresh issued. The session config keeps that token, not the refused one. This holds after every lookup, the one after an address stops answering included.
+- **When the address doesn't answer and no lookup has worked yet** (the pre-`Login` one failed, or none was made): `goclient` looks the server up once and, if GSL names a different address, retries there. A rejected `Login`, such as `E011`, never triggers a lookup.
 
-A working address costs no GSL call. Either way, `goclient` saves the address it connected to back into the session config.
+`goclient` saves the address it connected to back into the session config. On the first run after the 1.0.370 fixes, GSL's gateway host names will likely replace the captured IPs.
 
-The lookup sends no `opt` field, the request the real app makes on a cold start while it holds a fresh `at` and an `rt`. It sends the session's device, `zone` and `gameUid`, and `platform=iOS` for a session the iOS app issued. It takes only the address from the reply, picking the entry that carries the session's `gameUid` and refusing an entry that names another role. It keeps the session's `at` and logs whether the reply carried a different one.
+The lookup sends no `opt` field, the request the real app makes on a cold start while it holds a fresh `at` and an `rt`. It sends the session's device, `zone` and `gameUid`, and `platform=iOS` for a session the iOS app issued.
+
+Before the 1.0.370 fixes, the lookup ran only with no address saved or after the address stopped answering, and it took only the address from the reply and kept the session's `at`. The live checks below ran on that version.
 
 Confirmed live on 2026-10-10 against a session captured from the iOS app, with the Android check-version reply's gate host and RSA key:
 

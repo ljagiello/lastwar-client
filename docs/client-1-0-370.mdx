@@ -15,7 +15,7 @@ description: "What the Go client changed to follow Last War 1.0.370 (iOS 918, An
 
 These change what the scheduled iOS run does. Give them one config-copy test login before the cron uses them.
 
-- **GSL lookup before every reconnect.** As the real client does on every cold start, the run asks GSL `getserverlist.php` (no `opt`) for the role's server before the `Login`. It fails open: any lookup error keeps the configured address and token. A token the reply carries is used, and a rotated refresh token is saved before the `Login`. If the listed server can't be reached, the `Login` goes to the configured address; if it refuses a handed-back token (`E011`), the configured token is tried. GSL's gateway host names will likely replace the captured IPs on the first run.
+- **GSL lookup before every reconnect.** As the real client does on every cold start, the run asks GSL `getserverlist.php` (no `opt`) for the role's server before the `Login`. It fails open: any lookup error keeps the configured address and token. A token the reply carries is used, and a rotated refresh token is saved before the `Login`. If the listed server can't be reached, the `Login` goes to the configured address; if a server refuses a handed-back token (`E011`), the token the lookup replaced (the configured one, or the one this run's refresh issued) is tried at the same address, after any lookup. GSL's gateway host names will likely replace the captured IPs on the first run.
 - **The `Login`:** `netType` is 1 (Wi-Fi). The `ta` field `lw_version` is the claimed app version. From an iOS capture, `cmd/pcap -session-out` records the device fields (`phone_model`, `osVersion`, `mt`, `idfv`, `distinct_id`, `fromCountry`, `lang`, `phone_screen`, `afuid`, `firebaseId`) under `device`, and an iOS reconnect sends them again; without them the run warns to recapture. `isUseLz4` goes out only while check-version's switches 4 and 5 are off. With switch 25 off, no `shumeiBoxId` is sent. About 5 % of device ids are bucketed to the `ea-` check-version hosts, as in the client.
 - **Forced update:** check-version or a `Login` reply with `updateType` 2 stops the run before GSL or `init`, exit code **5**.
 - **Ends of a session:** `push.user.gm.off` and `push.refund.restart` end the run with exit 3, like `push.user.off`. A `push.account.device.del` that names this run's device ends it with exit 2: bind again or recapture. `E015`/`E016` (the season's server window) exit 1. `E005` is unchanged (exit 2).
@@ -42,7 +42,7 @@ These change what the scheduled iOS run does. Give them one config-copy test log
 
 ## New opt-in features
 
-58 features, each off by default with a summary ending "(static-only, not validated live)". None spends anything, marches or chats. Each logs its first reply at Info, registers no benign error code, and stops on the first refusal. The read-only `-plan` features send only reads.
+58 features, each off by default with a summary ending "(static-only, not validated live)". None spends anything, marches or chats. Each logs its first reply at Info and registers no benign error code. An error code is logged and stops that claim; depending on the feature it also stops the rest of that activity or building, or the feature for the run, while others (`city-soldiers`, `radar-rescue-claims`, `supplies-search` among them) go on to their other claims. The read-only `-plan` features send only reads.
 
 | Area | Features |
 |---|---|
@@ -61,6 +61,7 @@ The progress claims among them run in the last phase, after the actions, so a ru
 
 - The GSL lookup line before the `Login`, and whether the saved address changed.
 - `season-dailies`: the logged season config and type; in a non-Desert season no power-milestone pair goes out.
+- Two claims move from features the production config enables to opt-in ones that are off by default and not validated live: the achievement grades outside a Desert season (`season-dailies` to `season-achievements`) and the Season 7 Lockhart quest 2400008 (`quests` to `stage-quests`). Nothing claims them until `season-achievements` and `stage-quests` are validated and enabled.
 - `alliance-salary`: the gate depends on init listing activity 28 (the only type-372 row in 40413). Revert the gate if it skips an account that used to claim.
 - `card-dailies`: the truck privilege claim needs init `monopolyStageInfo.stageId`; without it nothing is claimed.
 - `free-chests`: no weekly package below HQ 8, and a Warn each run while init has no `weekFreeReward`.
