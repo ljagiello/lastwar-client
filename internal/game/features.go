@@ -73,7 +73,7 @@ const (
 // phaseAction entries are the actions named in MASTER B3 (aud-events F2, aud-dailies F3) and every
 // feature with a Duel field; they are listed so the table shows what the progress claims follow.
 // The phaseProgress entries are B3's five claims and the opt-in progress claims added with the
-// 1.0.367 audit. battle-pass-overflow must follow battle-pass, which changes the pass's exp and
+// 1.0.367 and 1.0.370 audits. battle-pass-overflow must follow battle-pass, which changes the pass's exp and
 // level; it does, by name within the phase.
 var featurePhases = map[string]int{
 	"finished-timers":    phaseCapacity,
@@ -103,6 +103,30 @@ var featurePhases = map[string]int{
 	"torch-relay":            phaseProgress,
 	"tower-up-first-rewards": phaseProgress,
 	"zone-mobilization":      phaseProgress,
+
+	// 1.0.370 audit: the opt-in duel gacha (G20) runs once a run after arms-race-chests, and the
+	// opt-in progress claims of WP5, WP7 and WP9.
+	"alliance-star-emoji":      phaseProgress,
+	"city-first-occupation":    phaseProgress,
+	"counter-attack-rounds":    phaseProgress,
+	"crazy-rock-tasks":         phaseProgress,
+	"doomsday-quests":          phaseProgress,
+	"duel-gacha":               phaseProgress,
+	"duel-gacha-plan":          phaseProgress,
+	"front-break-tasks":        phaseProgress,
+	"hero-trial-stage":         phaseProgress,
+	"hero-wish-claim":          phaseProgress,
+	"leading-quest-tasks":      phaseProgress,
+	"newbie-arena-rewards":     phaseProgress,
+	"offseason-tasks":          phaseProgress,
+	"parkour-tasks":            phaseProgress,
+	"s0-alliance-boss":         phaseProgress,
+	"sand-worm-tasks":          phaseProgress,
+	"sky-battle-boxes":         phaseProgress,
+	"survivor-pack":            phaseProgress,
+	"tactical-card-box-points": phaseProgress,
+	"tactical-card-collection": phaseProgress,
+	"zone-mobilization-tasks":  phaseProgress,
 }
 
 // featurePhase returns name's run phase.

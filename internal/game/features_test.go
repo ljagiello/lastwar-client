@@ -115,7 +115,13 @@ func TestFeaturePhasesNameRegisteredFeatures(t *testing.T) {
 	}
 	for _, name := range []string{"arms-race-chests", "battle-pass", "daily-quests", "event-claims", "quests",
 		"alliance-premium-gifts", "battle-pass-overflow", "ghost-recon", "stage-quests", "t11-idle-events",
-		"torch-relay", "tower-up-first-rewards", "zone-mobilization"} {
+		"torch-relay", "tower-up-first-rewards", "zone-mobilization",
+		// 1.0.370 audit (G20 duel gacha after arms-race-chests; WP5/WP7/WP9 progress claims)
+		"alliance-star-emoji", "city-first-occupation", "counter-attack-rounds", "crazy-rock-tasks", "doomsday-quests",
+		"duel-gacha", "duel-gacha-plan", "front-break-tasks", "hero-trial-stage", "hero-wish-claim",
+		"leading-quest-tasks", "newbie-arena-rewards", "offseason-tasks", "parkour-tasks", "s0-alliance-boss",
+		"sand-worm-tasks", "sky-battle-boxes", "survivor-pack", "tactical-card-box-points",
+		"tactical-card-collection", "zone-mobilization-tasks"} {
 		if featurePhase(name) != phaseProgress {
 			t.Errorf("%s must run last: it claims the progress this run's actions earn", name)
 		}

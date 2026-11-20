@@ -249,7 +249,7 @@ func TestGoGenerateDirectivesAndExpand(t *testing.T) {
 		byOut[d.out] = d
 	}
 	for _, out := range []string{"activity_tables_gen.go", "alliance_science_gen.go", "dig_tables_gen.go", "duel_scores_gen.go",
-		"mail_groups_gen.go", "production_gen.go", "radar_tables_gen.go", "visitor_types_gen.go"} {
+		"mail_groups_gen.go", "production_gen.go", "radar_tables_gen.go", "season_tables_gen.go", "visitor_types_gen.go"} {
 		if _, ok := byOut[out]; !ok {
 			t.Errorf("no //go:generate directive writes %s (found %v)", out, ds)
 		}
