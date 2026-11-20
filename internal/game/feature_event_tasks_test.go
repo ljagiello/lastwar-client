@@ -165,11 +165,17 @@ func TestDoomsdayQuestsNeedAnOpenEvent(t *testing.T) {
 	}
 }
 
+// evInfo starts a hero.event.info.get data reply. The client drops a reply that carries success
+// (Net/Msgs/Activity/ActivityEventInfoGetMessage.lua:26-29), and so does EventInfo
+// (errEventInfoNoData), so an info fixture must not start from evOK.
+func evInfo() *sfs.SFSObject { return sfs.NewSFSObject() }
+
 func TestParkourTasksClaimAll(t *testing.T) {
 	withEvNow(t, evTestNow)
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		r := evOK()
 		if cmd == "hero.event.info.get" {
+			r = evInfo()
 			switch p.GetString("activityId") {
 			case "2000001":
 				r.PutSFSArray("taskArr", evTasks("taskId", map[string]int32{"1": 2, "2": 1, "3": 0}))
@@ -225,6 +231,7 @@ func TestFrontBreakTasksAndSoldierBoxes(t *testing.T) {
 			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 				r := evOK()
 				if cmd == "hero.event.info.get" {
+					r = evInfo()
 					r.PutSFSArray("taskArr", evTasks("taskId", c.tasks))
 					r.PutSFSArray("soldierBox", boxes(c.boxes...))
 				}
@@ -250,7 +257,7 @@ func TestLeadingQuestTasksClaimsEachDoneTaskAndStopsOnRefusal(t *testing.T) {
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		switch cmd {
 		case "hero.event.info.get":
-			r := evOK()
+			r := evInfo()
 			r.PutSFSArray("taskArr", evTasks("taskId", map[string]int32{"11": 1, "12": 2, "13": 1, "14": 1}))
 			return r
 		case leadingQuestRewardCmd:
@@ -279,7 +286,7 @@ func TestLeadingQuestTasksClaimsEachDoneTaskAndStopsOnRefusal(t *testing.T) {
 func TestHeroTrialStageClaimsTheCurrentStageOnly(t *testing.T) {
 	withEvNow(t, evTestNow)
 	stages := func(cur int32, states ...int32) *sfs.SFSObject {
-		r := evOK()
+		r := evInfo()
 		r.PutInt("cur_stage", cur)
 		a := sfs.NewSFSArray()
 		for i, st := range states {
@@ -300,7 +307,7 @@ func TestHeroTrialStageClaimsTheCurrentStageOnly(t *testing.T) {
 		{"an older stage in state 1 is not the current one", stages(3, 1, 2, 0), false},
 		{"current stage claimed", stages(2, 2, 2, 0), false},
 		{"no cur_stage", func() *sfs.SFSObject {
-			r := evOK()
+			r := evInfo()
 			v, _ := stages(1, 1).Get("stageArr")
 			r.PutValue("stageArr", v)
 			return r
