@@ -161,9 +161,12 @@ func TestSeasonOutputStrongholdSourceServer(t *testing.T) {
 		season int32
 		want   []int32 // serverId of each get.stronghold.output, in order
 	}{
-		"S7": {7, []int32{790, 812}},
+		"S2": {2, []int32{790, 812}},
 		"S3": {3, []int32{790, 812}},
+		"S4": {4, []int32{790, 812}},
+		"S5": {5, []int32{790}},
 		"S6": {6, []int32{790}},
+		"S7": {7, []int32{790, 812}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {

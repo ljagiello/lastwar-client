@@ -10,7 +10,8 @@ import (
 )
 
 // crystalBossFake answers the crystal boss reads: the march reply names marchID (none when ""),
-// the progress reply is for progressSeason with one claimable segment, and the achievement reply
+// the progress reply is for progressSeason (no season field when negative) with one claimable
+// segment, and the achievement reply
 // carries tasks and names replyID (none when "").
 func crystalBossFake(t *testing.T, marchID string, progressSeason int32, replyID string, tasks *sfs.SFSArray) (*evFake, func(*Init) error) {
 	t.Helper()
@@ -23,7 +24,9 @@ func crystalBossFake(t *testing.T, marchID string, progressSeason int32, replyID
 			}
 		case redBossProgressCmd:
 			r.PutInt("claimableCount", 1)
-			r.PutInt("season", progressSeason)
+			if progressSeason >= 0 {
+				r.PutInt("season", progressSeason)
+			}
 		case redBossAchievementCmd:
 			if replyID != "" {
 				r.PutUtfString("activityId", replyID)
@@ -206,6 +209,8 @@ func TestCrystalBossSeasonAndActivityFilters(t *testing.T) {
 	}{
 		{"progress of another season", 6, "", nil, nil},
 		{"progress of the account's season", 7, "", nil, []int32{1}},
+		// HandleProgressData returns when tonumber(message.season) == nil (CrystalBossDataManager.lua:901-909).
+		{"progress reply without season", -1, "", nil, nil},
 		{"attack task of another season", 6, "", one(crystalBossTask(crystalTypeAttack, 3, 1, 6)), nil},
 		{"attack task of this season", 6, "", one(crystalBossTask(crystalTypeAttack, 3, 1, 7)), []int32{2}},
 		{"damage task, any season", 6, "", one(crystalBossTask(crystalTypeDamage, 3, 1, -1)), []int32{2}},

@@ -189,6 +189,10 @@ func TestBattlePassHighTierRows(t *testing.T) {
 		{"no high tier (no highExchangeId)", 19, 1, false, true, false},
 		{"high tier not bought", 19, 0, true, true, false},
 		{"login pass view", 13, 1, true, true, false},
+		// The other no-high-row views (BattlePassType showUiType 3, 6, 9), by activity row in tables 40413.
+		{"show type 3 view", 5018, 1, true, true, false},
+		{"show type 6 view", 99022, 1, true, true, false},
+		{"show type 9 view", 99044, 1, true, true, false},
 	} {
 		conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 			if cmd == battlePassInfoCmd {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -25,6 +26,14 @@ func TestRunCrossServerTestCheckVersionHostFollowsTheDeviceBucket(t *testing.T) 
 		{"bucket 97", "0123456789ABCDEF0123456789ABCDEF_n3d", "lastwar-serverlist-cf.lastwarapp.net"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			// The built-in host lists are real hosts. Any request that misses the in-memory client
+			// (gsl.DefaultHTTPClient has no Transport of its own) fails here instead of dialing.
+			origTransport := http.DefaultTransport
+			http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				t.Errorf("request to %s left the in-memory client", r.URL.Host)
+				return nil, errors.New("blocked: no real network in tests")
+			})
+			t.Cleanup(func() { http.DefaultTransport = origTransport })
 			builtin := slices.Clone(gsl.CheckVersionHosts)
 			t.Setenv("HOME", t.TempDir())
 			client := testutil.UseInMemoryGSL(t, lookupReply())

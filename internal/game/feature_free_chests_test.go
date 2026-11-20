@@ -172,7 +172,7 @@ func TestFreeChestsSwitchGate(t *testing.T) {
 		in := freeChestsInit(freeChestsHQ, yesterday, yesterday)
 		if v != nil {
 			dc := sfs.NewSFSObject()
-			dc.PutValue(freeChestSwitch, *v)
+			dc.PutValue("free_chest_receive", *v) // a literal, so a wrong freeChestSwitch fails
 			in.Raw.PutSFSObject("dataConfig", dc)
 		}
 		return in
@@ -211,7 +211,7 @@ func TestFreeChestsWeeklyPackageSwitch(t *testing.T) {
 		in := freeChestsInit(freeChestsHQ, yesterday, yesterday)
 		if v != nil {
 			dc := sfs.NewSFSObject()
-			dc.PutValue(freeChestsWeeklySwitch, *v)
+			dc.PutValue("weekgift_new_switch", *v) // a literal, so a wrong freeChestsWeeklySwitch fails
 			in.Raw.PutSFSObject("dataConfig", dc)
 		}
 		return in

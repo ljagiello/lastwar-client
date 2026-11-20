@@ -132,7 +132,7 @@ func TestSeasonWeekCardSkips(t *testing.T) {
 	yesterday := evTestTomorrow.Add(-25 * time.Hour)
 	switchOff := seasonWeekCardInit()
 	dc := sfs.NewSFSObject()
-	dc.PutInt(freeChestSwitch, 0)
+	dc.PutInt("free_chest_receive", 0) // a literal, so a wrong freeChestSwitch fails
 	switchOff.Raw.PutSFSObject("dataConfig", dc)
 	for name, c := range map[string]struct {
 		in    *Init
