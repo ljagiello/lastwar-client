@@ -282,7 +282,9 @@ func duelSpeedupsJobs(in *Init, nowMs int64) []*duelSpeedupJob {
 		lv, _ := claimInt(b, "lv")
 		name := fmt.Sprintf("%s %d", BuildingNameOf(int32(bID)), uuid)
 		state, _ := claimInt(b, "state")
-		if uT, _ := claimInt(b, "uT"); uT > nowMs {
+		// The build queue on the building, when there is one, carries the upgrade end the client
+		// uses (BuildQueueManager.lua:18-55; 1.0.370 audit B72).
+		if uT, _ := buildingUpgradeTime(in, b); uT > nowMs {
 			switch {
 			case state == duelBuildingFoldUp || state == duelBuildingPaused || state == duelBuildingCrossing:
 			case bID == claimHQBuildingID && lv == finishedTimersShieldHQLevel && finishedTimersShieldUp(in, nowMs):

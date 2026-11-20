@@ -72,7 +72,9 @@ func runAllianceCallHelp(conn *session.GameConn, in *Init) error {
 			continue
 		}
 		help, _ := claimInt(b, "help")
-		uT, _ := claimInt(b, "uT")
+		// The build queue on the building, when there is one, carries the upgrade end the client
+		// uses (BuildQueueManager.lua:18-55; 1.0.370 audit B72).
+		uT, _ := buildingUpgradeTime(in, b)
 		upgradeDone := uT > 0 && now >= uT
 		if dStT, _ := claimInt(b, "dStT"); dStT <= 0 {
 			if uT > 0 && !upgradeDone && (help == 0 || help == 2) {
