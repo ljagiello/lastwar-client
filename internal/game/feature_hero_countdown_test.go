@@ -51,6 +51,25 @@ func TestHeroCountdownClaimsOnlyEndedCountdowns(t *testing.T) {
 	}
 }
 
+// TestHeroCountdownNeedsABuildingUUID: the claim sends the building's uuid
+// (BuildHeroCountdownManager.lua:90-98); an ended countdown on a building listed with uuid 0 has none
+// to send.
+func TestHeroCountdownNeedsABuildingUUID(t *testing.T) {
+	past := time.Now().Add(-time.Minute).UnixMilli()
+	in := heroCountdownInit(map[int64]int64{0: past, 11: past})
+	conn, fake := startRewardFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return rewardOK() })
+	if err := runHeroCountdown(conn, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var uuids []int64
+	for _, r := range fake.requests() {
+		uuids = append(uuids, r.Params.GetLong("uuid"))
+	}
+	if !slices.Equal(uuids, []int64{11}) {
+		t.Errorf("claimed %v, want [11]", uuids)
+	}
+}
+
 func TestHeroCountdownStopsOnAnError(t *testing.T) {
 	past := time.Now().Add(-time.Minute).UnixMilli()
 	in := heroCountdownInit(map[int64]int64{11: past, 12: past})

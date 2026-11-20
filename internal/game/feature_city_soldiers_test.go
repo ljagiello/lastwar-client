@@ -89,6 +89,8 @@ func TestCitySoldiersClaims(t *testing.T) {
 		{"stock full", [][4]int64{stage, spark, yard}, 1_000, 1_000, -1, nil, nil},
 		// The stage claim takes the stock to the cap; the spark claim is left.
 		{"room for one", [][4]int64{stage, spark, yard}, 1_120, 1_000, -1, nil, []string{citySoldiersStageCmd}},
+		// The stock is below its cap, but the 1500 waiting are more than the whole cap of 1000.
+		{"more than the whole stock", [][4]int64{{1, citySoldiersCountBattle, 3, 1_500}}, 1_000, 0, -1, nil, nil},
 		// A finished Military Camp counts as taken first (finished-timers runs earlier).
 		{"camp output fills the room", [][4]int64{stage, yard, {4, finishedTimersMilitaryCamp, 10, 500}}, 1_400, 1_000, -1, nil, nil},
 	}
@@ -103,6 +105,43 @@ func TestCitySoldiersClaims(t *testing.T) {
 				t.Errorf("sent %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// TestCitySoldiersSparkItemFieldNames: CheckCanUpgrade compares the upgrade item's
+// ItemData:GetItemCount, the stack's ItemInfo.count (LWCivilizationSparkManager.lua:165-177;
+// ItemData.lua:596-599). ItemInfo:UpdateInfo names the item by itemId or goodsId and sets count
+// from count, then num, then itemLeftCnt, so the last of them present wins (ItemInfo.lua:43-66). A
+// spark at level 2 whose upgrade item 666702 is held can be upgraded: the client shows the upgrade
+// bubble, not the soldiers, and the soldiers are left.
+func TestCitySoldiersSparkItemFieldNames(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		item  *sfs.SFSObject
+		claim bool
+	}{
+		{"itemId, count 1", obj("uuid", int64(1), "itemId", 666702, "count", 1), false},
+		{"goodsId, num 1", obj("uuid", int64(1), "goodsId", 666702, "num", 1), false},
+		{"itemId, itemLeftCnt 1", obj("uuid", int64(1), "itemId", 666702, "itemLeftCnt", 1), false},
+		{"count 0, itemLeftCnt 1", obj("uuid", int64(1), "itemId", 666702, "count", 0, "itemLeftCnt", 1), false},
+		{"count 0: none held", obj("uuid", int64(1), "itemId", 666702, "count", 0), true},
+		{"count 1, itemLeftCnt 0: none left", obj("uuid", int64(1), "itemId", 666702, "count", 1, "itemLeftCnt", 0), true},
+	} {
+		in := citySoldiersInit([][4]int64{{2, 10230000, 1, 80}, {3, 10104000, 5, 0}}, 10_000, 1_000, 2, nil)
+		arr := sfs.NewSFSArray()
+		arr.AddSFSObject(c.item)
+		in.Raw.PutSFSArray("items", arr)
+		got, err := citySoldiersCmds(t, in, citySoldiersOK)
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		var want []string
+		if c.claim {
+			want = []string{"lw.claim.spark.soldier"}
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: sent %v, want %v", c.name, got, want)
+		}
 	}
 }
 

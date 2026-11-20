@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"lastwar-client/internal/sfs"
 )
@@ -52,6 +53,11 @@ func TestSeasonTrendsSkips(t *testing.T) {
 	withEvNow(t, evTestNow)
 	noStart := evWithSeason(evInit(30), 6)
 	noStart.Object("playerServerSeasonInfo").PutLong("seasonStartTime", 0)
+	// S6 with its start time still in init, but past seasonEndTime.
+	ended := evWithSeason(evInit(30), 6)
+	for _, k := range []string{"playerServerSeasonInfo", "curServerSeasonInfo"} {
+		ended.Object(k).PutLong("seasonEndTime", evTestNow.Add(-time.Hour).UnixMilli())
+	}
 	offSeason := func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		r := seasonTrendS6(cmd, p)
 		r.PutInt("off_seaon", 1)
@@ -69,6 +75,7 @@ func TestSeasonTrendsSkips(t *testing.T) {
 		want  string
 	}{
 		"out of season":       {evInit(30), seasonTrendS6, ""},
+		"season ended":        {ended, seasonTrendS6, ""},
 		"no seasonStartTime":  {noStart, seasonTrendS6, ""},
 		"off-season list":     {evWithSeason(evInit(30), 6), offSeason, seasonTrendInfoCmd},
 		"group not in table":  {evWithSeason(evInit(30), 6), unknownGroup, seasonTrendInfoCmd},
@@ -81,6 +88,44 @@ func TestSeasonTrendsSkips(t *testing.T) {
 			}
 			if got := strings.Join(fake.cmds(), ","); got != c.want {
 				t.Errorf("sent %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestSeasonTrendsOpenAfterTheUnlockDay: trend 497 (lw_season_trends: group 60, unlock_time 22,
+// para2 1000) opens at the season start plus 21 days (start_time = groupStartTime + 86400 *
+// (unlock_time - 1) * 1000, LWSeasonTrendsData.lua:24-25) and is claimable once the server time is
+// past it (curTime > start_time, LWSeasonTrendsManager.lua:500). Each case moves seasonStartTime.
+func TestSeasonTrendsOpenAfterTheUnlockDay(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for _, c := range []struct {
+		name  string
+		start time.Time
+		want  []int32
+	}{
+		{"opened a millisecond ago", evTestNow.Add(-21*24*time.Hour - time.Millisecond), []int32{497}},
+		{"opens now", evTestNow.Add(-21 * 24 * time.Hour), nil},
+		{"opens in a day", evTestNow.Add(-20 * 24 * time.Hour), nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				if cmd == "lw.season.trend.info" {
+					return seasonTrendInfo(60, [3]int32{497, 1000, 0})
+				}
+				return obj("trend_id", p.GetInt("trend_id"), "rewards", []*sfs.SFSObject{})
+			})
+			in := evWithSeason(evInit(30), 6)
+			in.Object("playerServerSeasonInfo").PutLong("seasonStartTime", c.start.UnixMilli())
+			if err := runSeasonTrends(conn, in); err != nil {
+				t.Fatal(err)
+			}
+			var claimed []int32
+			for _, r := range fake.only("lw.season.trend.reward") {
+				claimed = append(claimed, r.Params.GetInt("trend_id"))
+			}
+			if !slices.Equal(claimed, c.want) {
+				t.Errorf("claimed %v, want %v", claimed, c.want)
 			}
 		})
 	}

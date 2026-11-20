@@ -470,3 +470,148 @@ func TestBaseBubblesOrderAndStops(t *testing.T) {
 		})
 	}
 }
+
+// TestBaseBubblesRefusedNextToClaimed: each case changes one thing of the claimed fixture (ally A's
+// HQ with Thanksgiving status 500521, the player's HQ with Valentine status 520526, Thanksgiving
+// 99302 and Valentine 99137 open, today's count 0) and the claim it gates is not sent.
+func TestBaseBubblesRefusedNextToClaimed(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withFwPace(t)
+	allyA := func(server int32, statuses ...worldStatus) []byte {
+		return pbHQStatus(347520, fwAllyA, server, server, statuses...)
+	}
+	tg, val := bbStatus(500521, 10*time.Hour), bbStatus(520526, 5*time.Hour)
+	block := aBbBlock(allyA(fwServer, tg), pbHQStatus(347513, fwSelf, fwServer, fwServer, val))
+	opened := []int32{99302, 99137}
+	received := []string{fwAllyA + "_500550_1000"}
+	today := []map[string]int32{{"99302": 0}}
+	closed := func(id int32) func(*Init) {
+		return func(in *Init) {
+			a := evActivity(id)
+			a.PutLong("endTime", evTestNow.Add(-time.Hour).UnixMilli())
+			a.PutLong("endViewTime", evTestNow.Add(-time.Hour).UnixMilli())
+			in.Object("activity").PutSFSObject(strconv.Itoa(int(id)), a)
+		}
+	}
+	both := []string{"val 520526", "info", "tg 500521"}
+	for _, c := range []struct {
+		name  string
+		block *sfs.SFSObject
+		in    *Init
+		edit  func(*Init)
+		want  []string
+	}{
+		{"both claimed", block, aBbInit(opened, received, today, true), nil, both},
+		// BuildingGetRewardBubbleEffect.lua:130-140: the Valentine bubble is the player's own base's.
+		{"the Valentine status on ally A's HQ", aBbBlock(allyA(fwServer, tg, val), pbHQStatus(347513, fwSelf, fwServer, fwServer)),
+			aBbInit(opened, received, today, true), nil, []string{"info", "tg 500521"}},
+		// CityDomeProtectEffectManager.lua:1147-1165: serverId == srcServerId == the player's server.
+		{"ally A's HQ at home on server 999", aBbBlock(allyA(999, tg), pbHQStatus(347513, fwSelf, fwServer, fwServer, val)),
+			aBbInit(opened, received, today, true), nil, []string{"val 520526"}},
+		// GetOneOpenActId walks open activities only (ActGiftGivingDataManager.lua:263-293).
+		{"Thanksgiving 99302 listed but ended", block, aBbInit(opened, received, today, true), closed(99302), []string{"val 520526"}},
+		{"Valentine 99137 listed but ended", block, aBbInit(opened, received, today, true), closed(99137), []string{"info", "tg 500521"}},
+		// The count sits in the second thanksgiving_times map; the client merges every map
+		// (SetRewardBubbleGetNumData, ActGiftGivingDataManager.lua:221-232), so the day's 10 are used.
+		{"today's 10 in the second map", block, aBbInit(opened, received, []map[string]int32{{"99108": 0}, {"99302": 10}}, true), nil,
+			[]string{"val 520526"}},
+		// Init lists today's 10 without thanksgiving_times_expire. The client would read 0 here
+		// (expire starts at 0 and only a present key sets it, ActGiftGivingDataManager.lua:17,
+		// 229-231, 245-247); Go keeps the listed count, so a run never passes day_receive_num on
+		// such an init.
+		{"today's 10 without the expire key", block, aBbInit(opened, received, []map[string]int32{{"99302": 10}}, false), nil,
+			[]string{"val 520526"}},
+		// The own pair is listed until an hour from now: received today (the dict's expire counts
+		// for Valentine, BuildingGetRewardBubbleEffect.lua:130-140).
+		{"the own Valentine pair received", block,
+			aBbInit(opened, append(slices.Clone(received), fwSelf+"_520526_"+strconv.FormatInt(evTestNow.Add(time.Hour).Unix(), 10)), today, true),
+			nil, []string{"info", "tg 500521"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.edit != nil {
+				c.edit(c.in)
+			}
+			got := aBbClaims(t, c.block, c.in, func(_ int, p *sfs.SFSObject) *sfs.SFSObject { return fwClaimOK(p) })
+			if !slices.Equal(got, c.want) {
+				t.Errorf("sent %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestBaseBubblesInRunDayCount: ally A's HQ carries three claimable Thanksgiving statuses. Each
+// claim counts toward day_receive_num 10: the reply's thanksgiving_times when it is higher, else one
+// more, so a run that starts at 8 claims two whatever the replies say, and a reply at 10 ends it.
+func TestBaseBubblesInRunDayCount(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withFwPace(t)
+	block := aBbBlock(pbHQStatus(347520, fwAllyA, fwServer, fwServer,
+		bbStatus(500521, 10*time.Hour), bbStatus(500522, 9*time.Hour), bbStatus(500551, 8*time.Hour)))
+	two := []string{"info", "tg 500521", "tg 500522"}
+	for _, c := range []struct {
+		name  string
+		start int32
+		reply func(n int) (int32, bool) // the count a claim reply carries, if any
+		want  []string
+	}{
+		{"replies without the count", 8, func(int) (int32, bool) { return 0, false }, two},
+		{"replies with the count before the claim", 8, func(int) (int32, bool) { return 8, true }, two},
+		{"replies with the count after the claim", 8, func(n int) (int32, bool) { return 8 + int32(n), true }, two},
+		{"a reply at the day's 10", 0, func(int) (int32, bool) { return 10, true }, []string{"info", "tg 500521"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			in := aBbInit([]int32{99302}, nil, []map[string]int32{{"99302": c.start}}, true)
+			got := aBbClaims(t, block, in, func(n int, p *sfs.SFSObject) *sfs.SFSObject {
+				r := fwClaimOK(p)
+				if v, ok := c.reply(n); ok {
+					tt := sfs.NewSFSArray()
+					tt.AddSFSObject(obj("99302", v))
+					r.PutSFSArray("thanksgiving_times", tt)
+				}
+				return r
+			})
+			if !slices.Equal(got, c.want) {
+				t.Errorf("sent %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestBaseBubblesRunCap: three members' HQs carry twelve Thanksgiving statuses and the player's HQ
+// a Valentine one. The day's count stops the Thanksgiving claims at 10, and the run's cap of 10
+// claims (baseBubblesMaxClaims, feature_base_bubbles.go:78) leaves the eleventh unsent.
+func TestBaseBubblesRunCap(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withFwPace(t)
+	four := func(point int32, owner string, h time.Duration) []byte {
+		return pbHQStatus(point, owner, fwServer, fwServer, bbStatus(500521, h), bbStatus(500522, h), bbStatus(500550, h), bbStatus(500551, h))
+	}
+	block := aBbBlock(four(347520, fwAllyA, 10*time.Hour), four(500001, fwAllyB, 11*time.Hour), four(123456, fwAway, 12*time.Hour),
+		pbHQStatus(347513, fwSelf, fwServer, fwServer, bbStatus(520526, 5*time.Hour)))
+	in := aBbInit([]int32{99302, 99137}, nil, []map[string]int32{{"99302": 0}}, true)
+	got := aBbClaims(t, block, in, func(_ int, p *sfs.SFSObject) *sfs.SFSObject { return fwClaimOK(p) })
+	claims := slices.DeleteFunc(slices.Clone(got), func(s string) bool { return s == "info" })
+	if len(claims) != 10 || claims[0] != "val 520526" {
+		t.Errorf("claimed %v, want the Valentine bubble and nine Thanksgiving ones (10)", claims)
+	}
+}
+
+// TestBaseBubbleValentineNeedsTheOwnUID: a base with no owner is not the player's, also when init
+// names no uid (BuildingGetRewardBubbleEffect.lua:130-140 compares the owner with the player's uid).
+func TestBaseBubbleValentineNeedsTheOwnUID(t *testing.T) {
+	val := bbStatus(520526, 5*time.Hour)
+	for _, c := range []struct {
+		name, own, owner string
+		want             bool
+	}{
+		{"the player's HQ", fwSelf, fwSelf, true},
+		{"an ownerless base, own uid unknown", "", "", false},
+		{"an ownerless base", fwSelf, "", false},
+	} {
+		sc := &fwScan{ownUID: c.own, server: fwServer, now: evTestNow, roster: fwRoster{byUID: map[string]fwMember{fwSelf: {}}}}
+		b := fwBase{PointID: 347513, ServerID: fwServer, SrcServerID: fwServer, OwnerUID: c.owner, Statuses: []worldStatus{val}}
+		if got := sc.bubbleVerdict(b, val, baseReceiveDict{}, evTestNow) == ""; got != c.want {
+			t.Errorf("%s: claimable %v, want %v", c.name, got, c.want)
+		}
+	}
+}

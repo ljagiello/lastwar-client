@@ -134,7 +134,9 @@ func citySoldiersSparkUpgradable(in *Init) (level, item int64, upgradable bool) 
 		if id, _ := claimFirstInt(it, "itemId", "goodsId"); id != item {
 			continue
 		}
-		if n, ok := claimFirstInt(it, "count", "num", "itemLeftCnt"); ok && n >= 1 {
+		// ItemInfo:UpdateInfo applies count, then num, then itemLeftCnt, so the last one present is
+		// the stack's count (ItemInfo.lua:52-66).
+		if n, ok := claimFirstInt(it, "itemLeftCnt", "num", "count"); ok && n >= 1 {
 			return level, item, true
 		}
 	}

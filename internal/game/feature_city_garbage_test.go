@@ -79,6 +79,25 @@ func TestCityGarbageClaimsRewardPiles(t *testing.T) {
 	}
 }
 
+// TestCityGarbageNeedsAUUID: the tap sends the point's uuid (UIUtil.lua:3088-3117); a pile listed with
+// uuid 0 has none to send.
+func TestCityGarbageNeedsAUUID(t *testing.T) {
+	noCityGarbageSpacing(t)
+	captureVisitorLog(t)
+	in := cityGarbageInit(cityPoint(0, 4, 1), cityPoint(101, 4, 1)) // CityPointType.GarbageReward 4 (EnumType.lua:8894)
+	conn, fake := startRewardFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return rewardOK() })
+	if err := runCityGarbage(conn, in); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var uuids []int64
+	for _, r := range fake.requests() {
+		uuids = append(uuids, r.Params.GetLong("uuid"))
+	}
+	if !slices.Equal(uuids, []int64{101}) {
+		t.Errorf("claimed %v, want [101]", uuids)
+	}
+}
+
 func TestCityGarbageStopsOnAnError(t *testing.T) {
 	noCityGarbageSpacing(t)
 	captureVisitorLog(t)
