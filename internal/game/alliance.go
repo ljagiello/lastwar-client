@@ -422,13 +422,14 @@ func allianceScienceFor(conn *session.GameConn, in *Init) (*allianceScienceRun, 
 }
 
 // allianceScienceOutOfSeason is the client's `not SeasonUtil.IsInSeason()` for the tab-3 gate
-// (AlScienceDonateInfo.lua:426-430): true with init when allianceTasksInSeason, the
-// ServerInReady() and InNormalMode() part of IsInSeason (SeasonUtil.lua:73-90,
-// SeasonInfoTemplate.lua:281-297) on init playerServerSeasonInfo, says no season is running.
-// IsInSeason's battle-server-group test (IsInBattleServerGroupInt, which needs table lw_season) is
-// not modelled, so Go can call a season running where the client would not; that only lets a
-// tab-3 donation through, as before this gate existed. Without init (the blind form) nothing is
-// known and nothing is gated.
+// (AlScienceDonateInfo.lua:426-430): true with init when allianceTasksInSeason says no season is
+// running. allianceTasksInSeason (init playerServerSeasonInfo open and before seasonEndTime) only
+// approximates IsInSeason's ServerInReady() and InNormalMode() (SeasonUtil.lua:73-90,
+// SeasonInfoTemplate.lua:281-297): InNormalMode needs the season's mode 1, and IsInSeason is false
+// without server season info. Its battle-server-group test (IsInBattleServerGroupInt, which needs
+// table lw_season) is not modelled either, so Go can call a season running where the client would
+// not; that only lets a tab-3 donation through, as before this gate existed. Without init (the
+// blind form) nothing is known and nothing is gated.
 func allianceScienceOutOfSeason(in *Init) bool {
 	return in != nil && in.Raw != nil && !allianceTasksInSeason(in)
 }

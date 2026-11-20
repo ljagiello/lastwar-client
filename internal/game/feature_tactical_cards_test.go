@@ -127,6 +127,25 @@ func TestTacticalStagesDueUsesTheParsedIndexAndTheActivatedCount(t *testing.T) {
 	}
 }
 
+// TestTacticalStagesDueKeepsTheLastEntryOfACardType: UpdateCardCollections stores
+// cardCollections[cardType], so a later entry of the same type replaces an earlier one
+// (TacticalCardDataManager.lua:101-119) and only the last one's stages are claimed (wp9-r3 #9).
+func TestTacticalStagesDueKeepsTheLastEntryOfACardType(t *testing.T) {
+	collects := []*sfs.SFSObject{
+		tacticalCollect(50101, 1, "0;1"),     // replaced by the next type-1 entry
+		tacticalCollect(50101, 1, "0;2|1;1"), // stage 0 received, stage 1 available
+		tacticalCollect(50301, 3, "0;1|1;0"), // the only type-3 entry
+	}
+	got := tacticalStagesDue(collects, map[int64]int64{1: 0, 3: 0})
+	want := []tacticalStage{
+		{cfgID: 50101, cardType: 1, index: 1, state: 1},
+		{cfgID: 50301, cardType: 3, index: 0, state: 1},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("due = %+v\nwant  %+v", got, want)
+	}
+}
+
 func TestTacticalActiveCardsCountsDistinctIDs(t *testing.T) {
 	r := evOK()
 	a := sfs.NewSFSArray()

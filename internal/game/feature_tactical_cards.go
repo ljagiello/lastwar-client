@@ -219,13 +219,22 @@ func tacticalActiveCards(reply *sfs.SFSObject) map[int64]int64 {
 	return out
 }
 
-// tacticalStagesDue lists the stages of the init collections the card book view would claim.
+// tacticalStagesDue lists the stages of the init collections the card book view would claim. The
+// client keeps one collection per card type, the last entry of that type
+// (cardCollections[cardType] = ..., TacticalCardDataManager.lua:101-119), so an earlier entry of a
+// repeated type is not claimed.
 func tacticalStagesDue(collects []*sfs.SFSObject, active map[int64]int64) []tacticalStage {
+	last := map[int64]int{}
+	for i, c := range collects {
+		if typ, ok := evNum(c, "cardType"); ok {
+			last[typ] = i
+		}
+	}
 	var due []tacticalStage
-	for _, c := range collects {
+	for i, c := range collects {
 		cfg, ok1 := evNum(c, "cfgId")
 		typ, ok2 := evNum(c, "cardType")
-		if !ok1 || !ok2 {
+		if !ok1 || !ok2 || last[typ] != i {
 			continue
 		}
 		need, known := tacticalCardNum[cfg]

@@ -151,11 +151,18 @@ func runSkyBattleBoxes(conn *session.GameConn, in *Init) error {
 	}
 	hq := activityHQLevel(in)
 	b := &evBatch{conn: conn}
+	// The chapter view's only opener, the city bubble, opens the growth mode whenever it is open
+	// (BuildBubbleManager.lua:3773-3781), so the client never reads the normal chapters then.
+	growthOpen := skyBattleModeOpen(conn, in, skyBattleGrowthMode)
 	for _, m := range skyBattleModes {
 		if b.dead {
 			break
 		}
 		if hq < m.minHQ {
+			continue
+		}
+		if m.stageType == skyBattleNormalMode && growthOpen {
+			slog.Info(skyBattleBoxesFeature + ": the growth mode is open, which the city bubble opens instead; normal chapters not read")
 			continue
 		}
 		if !skyBattleModeOpen(conn, in, m.stageType) {
@@ -175,12 +182,18 @@ func runSkyBattleBoxes(conn *session.GameConn, in *Init) error {
 				info[id] = c
 			}
 		}
-		slog.Info(skyBattleBoxesFeature+": "+m.name, "stageType", m.stageType, "chapters", len(info))
+		slog.Info(skyBattleBoxesFeature+": "+m.name, "stageType", m.stageType, "chapters", len(info), "keys", r.Params.Keys())
 		chapters := make([]int64, 0, len(m.thresholds))
 		for ch := range m.thresholds {
 			chapters = append(chapters, ch)
 		}
 		slices.Sort(chapters)
+		for _, ch := range chapters {
+			if c := info[ch]; c != nil {
+				slog.Info(skyBattleBoxesFeature+": chapter read", "stageType", m.stageType, "chapter", ch,
+					"stars", skyBattleChapterStars(c), "rewardedTarget", evNums(c, "rewardedTarget"))
+			}
+		}
 		for _, ch := range chapters {
 			if !claimSkyBattleChapter(b, m.stageType, ch, m.thresholds[ch], info[ch]) {
 				break
@@ -211,16 +224,22 @@ func skyBattleWindowOpen(sb *sfs.SFSObject, nowMs int64) bool {
 	return sok && eok && nowMs >= st && nowMs <= et
 }
 
-// claimSkyBattleChapter claims one chapter's reached boxes; false when a claim failed.
-func claimSkyBattleChapter(b *evBatch, stageType int32, chapter int64, thresholds []int64, info *sfs.SFSObject) bool {
-	if info == nil {
-		return true
-	}
+// skyBattleChapterStars sums a chapterInfo entry's stageInfo[].star.
+func skyBattleChapterStars(info *sfs.SFSObject) int64 {
 	var stars int64
 	for _, st := range evObjects(info, "stageInfo") {
 		n, _ := evNum(st, "star")
 		stars += n
 	}
+	return stars
+}
+
+// claimSkyBattleChapter claims one chapter's reached boxes; false when a claim failed.
+func claimSkyBattleChapter(b *evBatch, stageType int32, chapter int64, thresholds []int64, info *sfs.SFSObject) bool {
+	if info == nil {
+		return true
+	}
+	stars := skyBattleChapterStars(info)
 	got := evNums(info, "rewardedTarget")
 	due := skyBattleBoxesDue(thresholds, stars, got)
 	if len(due) == 0 {

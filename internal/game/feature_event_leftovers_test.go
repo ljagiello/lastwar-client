@@ -218,8 +218,10 @@ func TestSkyBattleModesMatchTheChapterTables(t *testing.T) {
 func TestSkyBattleBoxesStopWhenAClaimChangesNothing(t *testing.T) {
 	withEvNow(t, evTestNow)
 	withSkyBattleGrowthRow(t)
+	// The normal window alone: with the growth activity open too, the normal chapters are not
+	// read (wp9-r3 #1).
 	open := func(hq int32) *Init {
-		return skyBattleWindow(evInit(hq, evActivity(skyBattleGrowthTestID)), evTestNow.Add(-time.Hour), evTestNow.Add(time.Hour))
+		return skyBattleWindow(evInit(hq), evTestNow.Add(-time.Hour), evTestNow.Add(time.Hour))
 	}
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		r := evOK()
@@ -271,9 +273,11 @@ func TestSkyBattleBoxesReadOnlyOpenModes(t *testing.T) {
 		{"neither open (40413: no type-371 row in init)", func() *Init { return evInit(14) }, nil},
 		{"normal window open", func() *Init { return skyBattleWindow(evInit(14), evTestNow.Add(-hour), evTestNow.Add(hour)) }, []int32{0}},
 		{"growth activity open", func() *Init { return evInit(14, open) }, []int32{1}},
+		// The city bubble opens the growth view whenever growth is open (BuildBubbleManager.lua:
+		// 3773-3781), so the normal chapters are not read then (wp9-r3 #1).
 		{"both open", func() *Init {
 			return skyBattleWindow(evInit(14, open), evTestNow.Add(-hour), evTestNow.Add(hour))
-		}, []int32{0, 1}},
+		}, []int32{1}},
 		{"normal window starts now", func() *Init { return skyBattleWindow(evInit(14), evTestNow, evTestNow.Add(hour)) }, []int32{0}},
 		{"normal window ends now", func() *Init { return skyBattleWindow(evInit(14), evTestNow.Add(-hour), evTestNow) }, []int32{0}},
 		{"normal window ended 1 ms ago", func() *Init {
@@ -297,8 +301,13 @@ func TestSkyBattleBoxesReadOnlyOpenModes(t *testing.T) {
 			return in
 		}, nil},
 		{"growth activity ended past the tolerance", func() *Init { return evInit(14, growth(evTestNow.Add(-2*time.Second))) }, nil},
+		// The bubble's growth test is the activity alone (LWSkyBattleGrowthChapterManager.lua:717-724),
+		// so at HQ 7 it still opens the growth view, whose chapters start at HQ 8: nothing is read.
 		{"HQ 7: growth below its lowest chapter", func() *Init {
 			return skyBattleWindow(evInit(7, open), evTestNow.Add(-hour), evTestNow.Add(hour))
+		}, nil},
+		{"HQ 7: normal window only", func() *Init {
+			return skyBattleWindow(evInit(7), evTestNow.Add(-hour), evTestNow.Add(hour))
 		}, []int32{0}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

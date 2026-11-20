@@ -302,9 +302,24 @@ func runBaseBubbles(conn *session.GameConn, in *Init) error {
 			}
 		}
 	}
+	// Bases go by their first expiry, then point. On one base the bubble taps its statuses by type2
+	// descending, then id ascending (BuildingRewardBubbleEffect.lua:150-155), and the next tap
+	// takes the next one, so a base's picks keep that order (wp7-r2 #2).
+	firstExpiry := map[int32]int64{}
+	for _, bb := range picks {
+		if e, ok := firstExpiry[bb.base.PointID]; !ok || bb.status.ExpireTime < e {
+			firstExpiry[bb.base.PointID] = bb.status.ExpireTime
+		}
+	}
+	type2 := func(bb baseBubble) int {
+		if bb.own {
+			return 35 // the Valentine bubble's lw_status type2
+		}
+		return 31 // StatusType2.BuildingRewardBubble (Thanksgiving)
+	}
 	slices.SortStableFunc(picks, func(a, b baseBubble) int {
-		return cmp.Or(cmp.Compare(a.status.ExpireTime, b.status.ExpireTime), cmp.Compare(a.base.PointID, b.base.PointID),
-			cmp.Compare(a.status.ID, b.status.ID))
+		return cmp.Or(cmp.Compare(firstExpiry[a.base.PointID], firstExpiry[b.base.PointID]),
+			cmp.Compare(a.base.PointID, b.base.PointID), cmp.Compare(type2(b), type2(a)), cmp.Compare(a.status.ID, b.status.ID))
 	})
 	got, sent := 0, 0
 	pace := func() { // a pause before every request but the first
