@@ -259,7 +259,10 @@ func TestChatCardsReadsOncePerRunWithTheInitIdentityAndSwitches(t *testing.T) {
 		dc.PutUtfString("CheckChatNewLine", "1")
 		dc.PutInt("room_join_control", 1)
 		raw.PutSFSObject("dataConfig", dc)
-		raw.PutLong("immediate_toggle", 1<<chatUseNewLineBit|1)
+		// ServerSwitch.ChatUseNewLine = 12 (EnumType.lua:10779), tested as
+		// immediate_toggle & 1 << 12 > 0 (FunctionOnManager.lua:104-106). A literal, so a wrong
+		// chatUseNewLineBit fails here.
+		raw.PutLong("immediate_toggle", 1<<12|1)
 	})
 	c := withRPChat(t, &chat.Result{RoomID: "alliance_7_al1", Granted: true}, nil)
 	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
