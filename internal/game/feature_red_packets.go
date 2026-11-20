@@ -63,8 +63,9 @@ import (
 // packet's claimer list on the chat card.
 //
 // chat-scan is read-only: it logs every red packet, firework card (693/695) and treasure-dug card
-// (600) of that read with its verdict. Claims from the firework and treasure cards belong next to
-// the fireworks and alliance-treasures features, which can read the same cached chatCards.
+// (600) of that read with its verdict. The firework and treasure cards are claimed by the opt-in
+// fireworks-chat and alliance-treasures-chat (feature_fireworks_chat.go,
+// feature_alliance_treasures_chat.go), which read the same cached chatCards.
 //
 // Not done: the country, season and alliance-friend rooms (internal/chat explains why), the legacy
 // alliance red envelopes, red.packet.detail (the window's details button), and sending or copying
@@ -134,11 +135,18 @@ func init() {
 	})
 }
 
-// chatSelf is what the verdicts need about the player.
+// chatSelf is what the verdicts need about the player: PlayerInfo:GetSelfServerId and
+// GetSourceServerId (PlayerInfo.lua:794-812).
 type chatSelf struct {
 	uid          string
 	sourceServer int64
+	selfServer   int64
 }
+
+// atLoginSource is PlayerInfo:IsLoginSourceServer (PlayerInfo.lua:832-834): init
+// user.crossFightSrcServerId absent or < 0, or equal to user.serverId, which is the source server
+// being the self server.
+func (me chatSelf) atLoginSource() bool { return me.sourceServer == me.selfServer }
 
 // chatRunRead is one run's chat read.
 type chatRunRead struct {
@@ -166,7 +174,7 @@ func chatCards(conn *session.GameConn, in *Init) (*chat.Result, chatSelf, error)
 	c := &chatRunRead{conn: conn, in: in}
 	chatReadLast = c
 	id, why := chatIdentity(in)
-	c.me = chatSelf{uid: id.UID, sourceServer: id.SourceServerID}
+	c.me = chatSelf{uid: id.UID, sourceServer: id.SourceServerID, selfServer: id.SelfServerID}
 	if why != "" {
 		slog.Info("chat: not reading chat", "reason", why)
 		return nil, c.me, nil

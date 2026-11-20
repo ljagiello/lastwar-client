@@ -18,7 +18,9 @@ import (
 // Alliance firework chests (FIREWORKS.md), static-only. When an ally sets off a firework at a base,
 // that HQ's world tile carries the chests it dropped (BuildInfo.fireWorksGiftList, field 54), and
 // the real client claims one when the player taps the box over the base
-// (FireworkWorldBuildBubble.lua:117-131). No chat is involved. Over SFS:
+// (FireworkWorldBuildBubble.lua:117-131). No chat is involved; the chat's firework cards are the
+// opt-in twin fireworks-chat (feature_fireworks_chat.go), which shares this run's claim state
+// (tileClaims) and claims through claimChests. Over SFS:
 //
 //  1. al.rank {allianceId: Utf} lists the members with their HQ pointId (AlRankMessage.lua:3-7;
 //     AllianceMemberInfo.lua:67-94). The client sends it with init alliance.uid
@@ -53,8 +55,9 @@ import (
 //
 // Not done: the auto-like of the launcher the claim window plays for configs with
 // firework.auto_like (UIFireworkGiftGotShowItemRender.lua:104-120; visible to other players),
-// setting off fireworks, find.fireworks.gift.world.point (camera only), and the season big map
-// (3000 tiles, UpdateLWAoi_Big3000), whose point ids exceed 1,000,000 and are skipped.
+// setting off fireworks, and the season big map (3000 tiles, UpdateLWAoi_Big3000), whose point ids
+// exceed 1,000,000 and are skipped. find.fireworks.gift.world.point, the chat card's camera jump,
+// is sent by fireworks-chat only.
 //
 // Unverified live: whether the server answers world.get.block, with field 54, for a session that
 // never entered the world scene. A firework claim scores in no Alliance Duel score row
@@ -557,6 +560,33 @@ func sharedAllianceTileScan(conn *session.GameConn, in *Init, who string) (*fwSc
 // block within radius blocks of each, logging as name. It returns nil when there is nothing to
 // scan, and a partial scan with the error when some block request failed.
 func allianceTileScan(conn *session.GameConn, in *Init, name string, radius int) (*fwScan, error) {
+	sc, err := newTileScan(conn, in, name, nil, true)
+	if sc == nil {
+		return nil, err
+	}
+	slog.Info(name+": alliance roster", "members", sc.roster.listed, "hqsToScan", len(sc.roster.points),
+		"noPoint", sc.roster.noPoint, "onOtherServer", sc.roster.away, "outsideMap", sc.roster.outsideMap, "server", sc.server)
+	reqs := fwPlanBlocksAround(sc.roster.points, radius)
+	if len(reqs) == 0 {
+		slog.Info(name + ": no member HQ on this server's map to read")
+		return nil, nil
+	}
+	err = sc.readBlocks(conn, reqs)
+	slog.Info(name+": member HQ tiles read", "requests", sc.requests, "failedRequests", sc.failed, "blocks", sc.blocks,
+		"blockRadius", radius, "points", sc.points, "alInfos", sc.alInfos, "decodeErrors", sc.decodeErrors, "buildings", sc.buildings,
+		"memberHQs", len(sc.memberHQs), "hqsScanned", len(sc.roster.points), "field54Present", sc.giftLists > 0,
+		"giftLists", sc.giftLists, "fireworkShows", sc.shows, "chests", len(sc.boxes), "treasurePoints", len(sc.treasures),
+		"hqsWithStatuses", len(sc.bases), "serverClock", sc.serverClock)
+	return sc, err
+}
+
+// newTileScan starts a scan logging as name: the player's alliance and uid, the scan clock, the
+// own server and the alliance roster. With base (this run's shared scan) the server and roster are
+// base's; otherwise, with rank, al.rank {allianceId} lists the members, and the server is init
+// user.serverId, else the player's own al.rank entry. Without either the roster is empty. It
+// returns nil when there is nothing to scan: no init, no alliance, an al.rank failure (err) or no
+// known own server.
+func newTileScan(conn *session.GameConn, in *Init, name string, base *fwScan, rank bool) (*fwScan, error) {
 	if in == nil || in.Raw == nil {
 		slog.Info(name + ": no init push; skipping")
 		return nil, nil
@@ -567,16 +597,23 @@ func allianceTileScan(conn *session.GameConn, in *Init, name string, radius int)
 		slog.Info(name + ": not in an alliance; skipping")
 		return nil, nil
 	}
-	p := sfs.NewSFSObject()
-	p.PutUtfString("allianceId", sc.allianceID)
-	resp, code, err := fwRequest(conn, name+": alliance member list", fireworksRankCmd, p)
-	if err != nil {
-		return nil, err
+	if base != nil {
+		sc.server, sc.roster = base.server, base.roster
+		return sc, nil
 	}
-	if code != "" {
-		return nil, fmt.Errorf("%s: %s: errorCode=%s", name, fireworksRankCmd, code)
+	var list []*sfs.SFSObject
+	if rank {
+		p := sfs.NewSFSObject()
+		p.PutUtfString("allianceId", sc.allianceID)
+		resp, code, err := fwRequest(conn, name+": alliance member list", fireworksRankCmd, p)
+		if err != nil {
+			return nil, err
+		}
+		if code != "" {
+			return nil, fmt.Errorf("%s: %s: errorCode=%s", name, fireworksRankCmd, code)
+		}
+		list = evObjects(resp, "list")
 	}
-	list := evObjects(resp, "list")
 	server, ok := fwOwnServer(in, list, sc.ownUID)
 	if !ok {
 		slog.Warn(name + ": own server unknown (no init user.serverId); skipping")
@@ -584,13 +621,13 @@ func allianceTileScan(conn *session.GameConn, in *Init, name string, radius int)
 	}
 	sc.server = server
 	sc.roster = fwParseRoster(list, server)
-	slog.Info(name+": alliance roster", "members", sc.roster.listed, "hqsToScan", len(sc.roster.points),
-		"noPoint", sc.roster.noPoint, "onOtherServer", sc.roster.away, "outsideMap", sc.roster.outsideMap, "server", server)
-	reqs := fwPlanBlocksAround(sc.roster.points, radius)
-	if len(reqs) == 0 {
-		slog.Info(name + ": no member HQ on this server's map to read")
-		return nil, nil
-	}
+	return sc, nil
+}
+
+// readBlocks sends world.get.block for reqs on the scan's server, fwBlockPace apart, the first
+// with clearUuidSet, and reads each reply into sc. It returns the failed requests' errors, and
+// stops at a dead connection.
+func (sc *fwScan) readBlocks(conn *session.GameConn, reqs []fwBlockRequest) error {
 	var errs []error
 	for i, r := range reqs {
 		if i > 0 {
@@ -598,8 +635,8 @@ func allianceTileScan(conn *session.GameConn, in *Init, name string, radius int)
 		}
 		sc.blocks += len(r.Index)
 		sc.requests++
-		label := fmt.Sprintf("%s: world blocks %d/%d", name, i+1, len(reqs))
-		resp, code, err := fwRequest(conn, label, fireworksBlockCmd, fwBlockParams(r, server, i == 0, evNow()))
+		label := fmt.Sprintf("%s: world blocks %d/%d", sc.name, i+1, len(reqs))
+		resp, code, err := fwRequest(conn, label, fireworksBlockCmd, fwBlockParams(r, sc.server, i == 0, evNow()))
 		if err != nil {
 			sc.failed++
 			errs = append(errs, err)
@@ -611,18 +648,92 @@ func allianceTileScan(conn *session.GameConn, in *Init, name string, radius int)
 		if code != "" {
 			sc.failed++
 			slog.Warn(label+" failed", "cmd", fireworksBlockCmd, "errorCode", code)
-			errs = append(errs, fmt.Errorf("%s: %s: errorCode=%s", name, fireworksBlockCmd, code))
+			errs = append(errs, fmt.Errorf("%s: %s: errorCode=%s", sc.name, fireworksBlockCmd, code))
 			continue
 		}
 		sc.read(resp)
 	}
-	slog.Info(name+": member HQ tiles read", "requests", sc.requests, "failedRequests", sc.failed, "blocks", sc.blocks,
-		"blockRadius", radius, "points", sc.points, "alInfos", sc.alInfos, "decodeErrors", sc.decodeErrors, "buildings", sc.buildings,
-		"memberHQs", len(sc.memberHQs), "hqsScanned", len(sc.roster.points), "field54Present", sc.giftLists > 0,
-		"giftLists", sc.giftLists, "fireworkShows", sc.shows, "chests", len(sc.boxes), "treasurePoints", len(sc.treasures),
-		"hqsWithStatuses", len(sc.bases), "serverClock", sc.serverClock)
-	return sc, errors.Join(errs...)
+	return errors.Join(errs...)
 }
+
+// thisRunsTileScan is this run's shared alliance tile scan when one ran on (conn, in); it never
+// starts one.
+func thisRunsTileScan(conn *session.GameConn, in *Init) *fwScan {
+	fwScanMu.Lock()
+	defer fwScanMu.Unlock()
+	if r := fwScanCache; r != nil && r.conn == conn && r.in == in {
+		return r.sc
+	}
+	return nil
+}
+
+// allianceTilePoints reads, logging as name, the world blocks holding points (one request per
+// cluster of adjacent blocks, as fwPlanBlocks plans them) on the own server, for the chat-driven
+// twins of fireworks and alliance-treasures. It is a scan of its own, like a camera that jumps to
+// a chat card's point: its first request carries clearUuidSet, and it never reads or replaces
+// this run's shared scan, whose blocks and points the tile features reuse. The server and roster
+// come from this run's shared scan when one ran; otherwise rank sends al.rank for the roster
+// (the type-0 firework check needs the member list). Points off the 1000-tile map are dropped:
+// the caller checks them first. It returns nil when there is nothing to read.
+func allianceTilePoints(conn *session.GameConn, in *Init, name string, points []int64, rank bool) (*fwScan, error) {
+	sc, err := newTileScan(conn, in, name, thisRunsTileScan(conn, in), rank)
+	if sc == nil {
+		return nil, err
+	}
+	reqs := fwPlanBlocks(points)
+	if len(reqs) == 0 {
+		slog.Info(name + ": no point on this server's map to read")
+		return nil, nil
+	}
+	err = sc.readBlocks(conn, reqs)
+	slog.Info(name+": world blocks read", "points", len(points), "requests", sc.requests, "failedRequests", sc.failed,
+		"blocks", sc.blocks, "pointsDecoded", sc.points, "alInfos", sc.alInfos, "decodeErrors", sc.decodeErrors,
+		"buildings", sc.buildings, "chests", len(sc.boxes), "treasurePoints", len(sc.treasures),
+		"rosterMembers", sc.roster.listed, "serverClock", sc.serverClock)
+	return sc, err
+}
+
+// tileClaimState is one run's claim state of a tile feature and its chat twin (fireworks and
+// fireworks-chat, alliance-treasures and alliance-treasures-chat): the uuids already answered,
+// and the errorCode that stopped the claims ("" while none did). The twin runs after the tile
+// feature (RunFeatures orders a phase by name), so it neither re-claims what the tile feature
+// answered nor claims after the tile feature was told to stop. A new (conn, in) starts empty.
+type tileClaimState struct {
+	answered map[int64]bool
+	stop     string
+}
+
+type tileClaimRun struct {
+	conn  *session.GameConn
+	in    *Init
+	state map[string]*tileClaimState
+}
+
+var (
+	tileClaimMu   sync.Mutex
+	tileClaimLast *tileClaimRun
+)
+
+// tileClaims returns the run's claim state of family ("fireworks", "alliance-treasures").
+func tileClaims(conn *session.GameConn, in *Init, family string) *tileClaimState {
+	tileClaimMu.Lock()
+	defer tileClaimMu.Unlock()
+	if r := tileClaimLast; r == nil || r.conn != conn || r.in != in {
+		tileClaimLast = &tileClaimRun{conn: conn, in: in, state: map[string]*tileClaimState{}}
+	}
+	st := tileClaimLast.state[family]
+	if st == nil {
+		st = &tileClaimState{answered: map[int64]bool{}}
+		tileClaimLast.state[family] = st
+	}
+	return st
+}
+
+// Claim families of tileClaims.
+const (
+	fireworksFamily        = "fireworks"
+	allianceTreasureFamily = "alliance-treasures"
+)
 
 // read takes one world.get.block reply: one object, or one per server under serverPointArr
 // (HandleViewPointsReply, A-CS:179920-179993). Its timeStamp (server ms) becomes the scan's clock.
@@ -776,13 +887,24 @@ func runFireworks(conn *session.GameConn, in *Init) error {
 		return err
 	}
 	errs := []error{err}
-	claimed := map[int64]bool{}
+	st := tileClaims(conn, in, fireworksFamily)
+	claimed := st.answered
 	picks := sc.review(claimed)
 	if len(picks) > fwMaxClaimsPerRun {
 		slog.Info("fireworks: more eligible chests than the per-run cap; the rest wait for the next run", "eligible", len(picks), "cap", fwMaxClaimsPerRun)
 		picks = picks[:fwMaxClaimsPerRun]
 	}
-	got := 0
+	got, cerrs := sc.claimChests(conn, "fireworks", picks, st)
+	errs = append(errs, cerrs...)
+	slog.Info("fireworks: claims done", "claimed", got, "answered", len(claimed), "eligible", len(picks))
+	return errors.Join(errs...)
+}
+
+// claimChests sends get.fireworks.gift {uuid: Long, ownerUid: Utf, type: Int} for picks,
+// fireworksClaimPace apart, logging as name. Every answered chest goes into st.answered; the daily
+// cap (firework_tips_1009) and a slow-down (firework_tips_1017) stop the claims and are kept in
+// st.stop. got counts the chests claimed.
+func (sc *fwScan) claimChests(conn *session.GameConn, name string, picks []fwBox, st *tileClaimState) (got int, errs []error) {
 claims:
 	for i, b := range picks {
 		if i > 0 {
@@ -792,7 +914,7 @@ claims:
 		p.PutLong("uuid", b.UUID)
 		p.PutUtfString("ownerUid", b.OwnerUID)
 		p.PutInt("type", fwType(b.ConfigID))
-		resp, code, err := fwRequest(conn, "fireworks: chest claim", fireworksGiftCmd, p)
+		resp, code, err := fwRequest(conn, name+": chest claim", fireworksGiftCmd, p)
 		if err != nil {
 			errs = append(errs, err)
 			if session.ContainsNonTimeoutNetError(err) {
@@ -800,29 +922,30 @@ claims:
 			}
 			continue
 		}
-		claimed[b.UUID] = true
+		st.answered[b.UUID] = true
 		who := []any{"uuid", b.UUID, "owner", sc.ref(b.OwnerUID), "configId", b.ConfigID}
 		switch {
 		case code == "":
 			got++
-			slog.Info("fireworks: claimed a chest", append(who, "isDouble", evBool(resp, "isDouble"), "reward", fwReward(resp),
+			slog.Info(name+": claimed a chest", append(who, "isDouble", evBool(resp, "isDouble"), "reward", fwReward(resp),
 				"replyKeys", resp.Keys())...)
 		case fireworksBenignCodes[code] != "":
-			slog.Info("fireworks: chest not claimable (expected)", append(who, "errorCode", code, "meaning", fireworksBenignCodes[code])...)
+			slog.Info(name+": chest not claimable (expected)", append(who, "errorCode", code, "meaning", fireworksBenignCodes[code])...)
 		case code == fwDailyCapCode:
-			slog.Warn("fireworks: daily chest cap reached; stopping this run", append(who, "errorCode", code)...)
+			st.stop = code
+			slog.Warn(name+": daily chest cap reached; stopping this run", append(who, "errorCode", code)...)
 			break claims
 		case code == fwSlowDownCode:
-			slog.Warn("fireworks: the server asked to slow down; stopping this run", append(who, "errorCode", code)...)
-			errs = append(errs, fmt.Errorf("fireworks: %s: errorCode=%s (slow down)", fireworksGiftCmd, code))
+			st.stop = code
+			slog.Warn(name+": the server asked to slow down; stopping this run", append(who, "errorCode", code)...)
+			errs = append(errs, fmt.Errorf("%s: %s: errorCode=%s (slow down)", name, fireworksGiftCmd, code))
 			break claims
 		default:
-			slog.Error("fireworks: chest claim failed", append(who, "errorCode", code)...)
-			errs = append(errs, fmt.Errorf("fireworks: %s uuid %d: errorCode=%s", fireworksGiftCmd, b.UUID, code))
+			slog.Error(name+": chest claim failed", append(who, "errorCode", code)...)
+			errs = append(errs, fmt.Errorf("%s: %s uuid %d: errorCode=%s", name, fireworksGiftCmd, b.UUID, code))
 		}
 	}
-	slog.Info("fireworks: claims done", "claimed", got, "answered", len(claimed), "eligible", len(picks))
-	return errors.Join(errs...)
+	return got, errs
 }
 
 // fwReward formats the claim reply's reward for the log; it holds items, not player data.
