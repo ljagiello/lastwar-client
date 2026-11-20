@@ -35,7 +35,10 @@ type eventFreebie struct {
 //
 // Not claimed: Bounty Hunter (350, bounty.hunter.receive.free.reward). Its pack exists only when
 // table activity_hunter.box_reward > 0 (BountyHunterActData.lua:210-213), and every 1.0.364 row is
-// 0, so the real client never shows it.
+// 0, so the real client never shows it. The other boxes these panels offer are opt-in features
+// that read the same replies: event-milestone-boxes (Lucky Roll stages, Blue Store and slot
+// machine boxes), gift-box-free-draw and gift-box-score-boxes, food-event-boxes (Cooking and
+// Banquet) and decoration-gacha-boxes.
 var eventFreebies = []eventFreebie{
 	// LuckyRoll: get.lucky.roll.info {activityId: Int}; rollInfo.lastReceiveFreeTime in ms; the pack
 	// is Lucky_roulette_reward (ActLuckyRollInfo.lua:24-33, 89, 182-190). The field is copied only

@@ -63,10 +63,13 @@ import (
 //     flowerTrainArr entries that arrived (arrived 1, or now >= arriveTime)
 //     (BaseSingleFlowerTrainData.lua:60-70, 273-279).
 //
-// Not sent: meteorite rewards (reward ids depend on a client-side season mapping),
-// alliance.challenge.new.reward.get (it consumes keys) and banquet v2 (only partly traced). Zone
-// mobilization and torch-relay tasks are the opt-in zone-mobilization and torch-relay features
-// (feature_zone_mobilization.go, feature_torch_relay.go), off until validated live.
+// Not sent: meteorite rewards (reward ids depend on a client-side season mapping) and
+// alliance.challenge.new.reward.get (it consumes keys). Zone mobilization and torch-relay tasks are
+// the opt-in zone-mobilization and torch-relay features (feature_zone_mobilization.go,
+// feature_torch_relay.go); the Bounty Hunter milestones and scene chests, Banquet v2, and the
+// hero-exchange guide reward are the opt-in bounty-hunter-milestones, bounty-hunter-chests,
+// banquet-v2-claims and hero-exchange-reward features (feature_bounty_hunter.go,
+// feature_food_events.go, feature_hero_exchange_reward.go); all are off until validated live.
 const (
 	redBossProgressCmd     = "red.boss.get.progress"
 	redBossAchievementCmd  = "red.boss.get.achievement.info"

@@ -38,7 +38,9 @@ import (
 //   - goods.auto.convert: no caller in 1.0.364, and it consumes items;
 //   - receive.building.growval.reward and receive.hero.bounty.task.reward: their buildings have no
 //     1.0.364 table rows;
-//   - hero.wish.preview.reward: a one-time claim with a season-day window from recruit_wish_config.
+//   - hero.wish.preview.reward: a one-time claim with a season-day window from recruit_wish_config;
+//   - berserk.boss.reward, a dead world boss's kill chest: the opt-in world-boss-kill-rewards
+//     feature (feature_world_boss_kills.go).
 const (
 	whistleBoxCmd       = "claim.whistle.box.reward"
 	noticeListCmd       = "get.notice.list"
