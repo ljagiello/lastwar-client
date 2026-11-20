@@ -20,8 +20,8 @@ func seasonScoreUser(score int64, targets []int64, opened []int32, kv ...any) *s
 	return u
 }
 
-// boxIndexes returns the Int index of each cmd request, checking its type.
-func boxIndexes(t *testing.T, fake *evFake, cmd string) []int32 {
+// seasonBoxIndexes returns the Int index of each cmd request, checking its type.
+func seasonBoxIndexes(t *testing.T, fake *evFake, cmd string) []int32 {
 	t.Helper()
 	var out []int32
 	for _, r := range fake.only(cmd) {
@@ -44,7 +44,7 @@ func TestSeasonOutpostBoxes(t *testing.T) {
 	if err := runSeasonOutpostBoxes(conn, evWithSeason(evInit(30, evActivity(1200108)), 6)); err != nil {
 		t.Fatal(err)
 	}
-	if got := boxIndexes(t, fake, seasonOutpostBoxCmd); !slices.Equal(got, []int32{1, 2}) {
+	if got := seasonBoxIndexes(t, fake, seasonOutpostBoxCmd); !slices.Equal(got, []int32{1, 2}) {
 		t.Errorf("claimed %v, want [1 2]", got)
 	}
 }
@@ -165,7 +165,7 @@ func TestCrossThroneRewards(t *testing.T) {
 				t.Errorf("sent %q\nwant %q", got, c.want)
 			}
 			if name == "score boxes" {
-				if got := boxIndexes(t, fake, crossThroneBoxCmd); !slices.Equal(got, []int32{1}) {
+				if got := seasonBoxIndexes(t, fake, crossThroneBoxCmd); !slices.Equal(got, []int32{1}) {
 					t.Errorf("boxes %v, want [1]", got)
 				}
 			}

@@ -1,7 +1,7 @@
 package sfs
 
 // Request keys put on the wire by the 1.0.370 audit's season package (WP10): season-achievements
-// (internal/game/feature_season_dailies.go: user.season.achievement.v2.info/.reward),
+// (internal/game/feature_season_achievements.go: user.season.achievement.v2.info/.reward),
 // bloody-night-tasks (internal/game/feature_season_event_tasks.go: view.blood.night.task,
 // blood.night.task.get.reward), season-trends (internal/game/feature_season_trends.go:
 // lw.season.trend.reward) and gold-tree-prayer (internal/game/feature_gold_tree.go:
