@@ -44,7 +44,7 @@ type LoginOptions struct {
 	// pf). -cs-ios sets it. Left false, this path stays Android.
 	IOSMode bool
 	// AppVersion/VersionCode, when non-empty, replace the build this login claims. Empty keeps
-	// the platform default (the iOS capture's 1.0.344/786 under IOSMode).
+	// the platform default (the audited 1.0.370/918 under IOSMode, 1.0.370/1911 on Android).
 	AppVersion  string
 	VersionCode string
 }

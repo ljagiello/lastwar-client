@@ -1674,8 +1674,10 @@ func runCrossServerTest(o crossServerTestOpts) {
 		adoptLookup(srv)
 		lookedUp = true
 	case refreshed:
-		// This run's GSL call was the refresh: the client makes one per cold start, and its
-		// opt=refresh reply is the one it takes the server list from.
+		// This run's GSL call was the refresh, and the client makes one per cold start. The
+		// session config's refresh (auth.RefreshTokens) keeps only the tokens, so the Login goes
+		// to the configured address; a refresh that can't reach it is followed by the lookup below.
+		// (-cs-rt never gets here: lookup is nil, and its reply's server list is the address.)
 	default:
 		// A configured address is the fallback. The lookup failing in any way, a 211/212 included,
 		// keeps it and changes nothing else (1.0.370 audit B40; what a 211/212 should stop is the
@@ -1815,8 +1817,13 @@ func runCrossServerTest(o crossServerTestOpts) {
 		ResVersion: resVersion,
 		NoZstd:     !cv.NewPacketZstd(),
 		Device:     o.device,
-		Android:    androidInstallFor(ident.Android, shumeiInstall, deviceID),
-		DialGame:   o.dialGame,
+		// The Android install (afuid, distinct_id, ta #install_time) is this client's one install per
+		// state directory, sent for every Android deviceId it logs in as, a -cs-deviceid or a
+		// captured one included, as the rest of the Android device is this client's
+		// (shumei.HardwareFor). It is not the real phone's for a captured session: no Android capture
+		// records those values (1.0.370 audit B31; review M4). Ignored under iosMode.
+		Android:  androidInstallFor(ident.Android, shumeiInstall, deviceID),
+		DialGame: o.dialGame,
 	}
 	switch {
 	case !o.iosMode:
@@ -1952,13 +1959,22 @@ func runCrossServerTest(o crossServerTestOpts) {
 					if shumeiInstall != (shumei.Install{}) {
 						savedInstall, _ = shumeiInstall.For(deviceID)
 					}
+					// An access token typed as -cs-at is this run's, not the session's: the config
+					// keeps its own and its time, or the one a GSL lookup saved there
+					// (saveLookupTokens). A refresh's token is the session's and is saved.
+					savedAt, savedAtTime := result.AccessTok, accessTokTime
+					if o.atExplicit && result.AccessTok == o.at {
+						if onDisk, err := LoadSessionConfig(o.configSavePath); err == nil {
+							savedAt, savedAtTime = onDisk.AccessToken, onDisk.AccessTokenTime
+						}
+					}
 					updated := &SessionConfig{
 						IP: savedIP, Port: newPort, Zone: result.Zone,
 						GameUid: result.GameUid, DeviceID: deviceID,
 						// The configured shumeiBoxId, not a minted one: that lives in
 						// ShumeiInstall, and storing it here would stop later runs registering.
-						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
-						AccessTokenTime: accessTokTime, RefreshToken: refreshTok, RefreshTokenTime: refreshTokTime,
+						ShumeiBoxId: o.shumeiBoxId, AccessToken: savedAt,
+						AccessTokenTime: savedAtTime, RefreshToken: refreshTok, RefreshTokenTime: refreshTokTime,
 						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
 						Device: o.device, ShumeiID: o.shumeiID,
 						Features: o.features, DuelPolicy: o.duelPolicy, ShumeiInstall: savedInstall,
