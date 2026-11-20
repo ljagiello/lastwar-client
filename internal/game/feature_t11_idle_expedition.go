@@ -55,7 +55,8 @@ func init() {
 // (SeasonUtil.GetSeason: init playerServerSeasonInfo.seasonId) is above t11GateSeason, or equal with
 // the season day (now - seasonStartTime) // 1 day + 1 (GetSeasonDayByOpenServerZero, SeasonUtil.lua:
 // 324-332; SeasonDataManager.lua:1098-1103) at t11GateSeasonDay or later. known is false when init
-// lacks an input (no buildings, no playerServerSeasonInfo, or season 4 without a seasonStartTime).
+// lacks an input (no buildings or no military camp among them, no playerServerSeasonInfo, or season
+// 4 without a seasonStartTime). The 27/4/64 are tables 40413's; live ran 40460 when this was written.
 func t11Gate(in *Init) (open, known bool, why string) {
 	if len(in.Buildings) == 0 {
 		return false, false, "init has no buildings"
@@ -65,6 +66,10 @@ func t11Gate(in *Init) (open, known bool, why string) {
 		if b.BId() == t11MilitaryCampID && b.Level() > camp {
 			camp = b.Level()
 		}
+	}
+	if camp == 0 {
+		// Every city has a camp from the start, so none in init is an anomaly, not a closed gate.
+		return false, false, "init buildings have no military camp"
 	}
 	if camp < t11GateCampLevel {
 		return false, true, fmt.Sprintf("military camp level %d is below %d", camp, t11GateCampLevel)

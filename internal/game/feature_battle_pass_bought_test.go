@@ -231,12 +231,12 @@ func eventTableDump(t *testing.T, name string) map[string]map[string]any {
 				row[col] = vals[p]
 			}
 		}
-		out[strings.TrimSuffix(strings.TrimSuffix(jsonScalar(r[0]), ".0"), " ")] = row
+		out[strings.TrimSuffix(strings.TrimSuffix(eventDumpScalar(r[0]), ".0"), " ")] = row
 	}
 	return out
 }
 
-func jsonScalar(v any) string {
+func eventDumpScalar(v any) string {
 	switch x := v.(type) {
 	case string:
 		return x
@@ -253,7 +253,7 @@ func TestBattlePassScoreItemsMatchTheDump(t *testing.T) {
 	rows := eventTableDump(t, "activity")
 	n := 0
 	for key, r := range rows {
-		if jsonScalar(r["type"]) != "142" {
+		if eventDumpScalar(r["type"]) != "142" {
 			continue
 		}
 		n++
@@ -261,7 +261,7 @@ func TestBattlePassScoreItemsMatchTheDump(t *testing.T) {
 		if err != nil {
 			t.Fatalf("activity key %q", key)
 		}
-		want, err := strconv.ParseInt(jsonScalar(r["para_5"]), 10, 64)
+		want, err := strconv.ParseInt(eventDumpScalar(r["para_5"]), 10, 64)
 		if err != nil {
 			t.Errorf("activity %d para_5 %v is not an item id", id, r["para_5"])
 			continue

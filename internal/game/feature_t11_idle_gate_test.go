@@ -1,6 +1,7 @@
 package game
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestT11GateBeforeTheMainRead(t *testing.T) {
 		send bool
 	}{
 		{"camp 26", t11GateInit(26, 5, 0, "t11_idle_game_open"), false},
-		{"no camp", t11GateInit(0, 5, 0, "t11_idle_game_open"), false},
+		{"unknown: no camp among the buildings", t11GateInit(0, 5, 0, "t11_idle_game_open"), true},
 		{"season 3", t11GateInit(27, 3, 0, "t11_idle_game_open"), false},
 		{"season 4 day 63", t11GateInit(27, 4, 63, "t11_idle_game_open"), false},
 		{"season 4 day 64", t11GateInit(27, 4, 64, "t11_idle_game_open"), true},
@@ -119,5 +120,18 @@ func TestT11IdleExpeditionPrefersTheChangeLevelPool(t *testing.T) {
 		if got := strings.Join(fake.cmds(), ","); got != c.want {
 			t.Errorf("%s: sent %s, want %s", c.name, got, c.want)
 		}
+	}
+}
+
+// TestT11GateMatchesTheDump pins t11GateCampLevel, t11GateSeason and t11GateSeasonDay to table
+// item's idle_game_para k1 ("militaryCampLv;seasonNum;seasonDay", T11IdleGameManager.lua:37-49).
+func TestT11GateMatchesTheDump(t *testing.T) {
+	row, ok := eventTableDump(t, "item")["idle_game_para"]
+	if !ok {
+		t.Fatal("table item has no idle_game_para row")
+	}
+	want := strconv.Itoa(t11GateCampLevel) + ";" + strconv.Itoa(t11GateSeason) + ";" + strconv.Itoa(t11GateSeasonDay)
+	if got := eventDumpScalar(row["k1"]); got != want {
+		t.Errorf("idle_game_para k1 = %q, want %q", got, want)
 	}
 }

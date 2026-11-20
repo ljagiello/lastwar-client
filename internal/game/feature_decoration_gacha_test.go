@@ -10,8 +10,8 @@ import (
 func decorationReply(score int32, claimed []int32, pity, wishScore, wishItem int32, wishNum bool) *sfs.SFSObject {
 	r := sfs.NewSFSObject()
 	r.PutInt("totalScore", score)
-	r.PutSFSArray("boxRewards", milestoneObjs([]string{"index", "target"}, []int32{10, 100}, []int32{20, 300}, []int32{30, 600}))
-	r.PutSFSArray("boxReceive", intArray(claimed...))
+	r.PutSFSArray("boxRewards", eventBoxObjs([]string{"index", "target"}, []int32{10, 100}, []int32{20, 300}, []int32{30, 600}))
+	r.PutSFSArray("boxReceive", eventBoxInts(claimed...))
 	r.PutInt("pity", pity)
 	r.PutInt("wishScore", wishScore)
 	r.PutInt("wishItem", wishItem)

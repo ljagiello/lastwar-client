@@ -9,7 +9,7 @@ import (
 	"lastwar-client/internal/sfs"
 )
 
-func milestoneObjs(fields []string, rows ...[]int32) *sfs.SFSArray {
+func eventBoxObjs(fields []string, rows ...[]int32) *sfs.SFSArray {
 	a := sfs.NewSFSArray()
 	for _, r := range rows {
 		o := sfs.NewSFSObject()
@@ -21,7 +21,7 @@ func milestoneObjs(fields []string, rows ...[]int32) *sfs.SFSArray {
 	return a
 }
 
-func intArray(v ...int32) *sfs.SFSArray {
+func eventBoxInts(v ...int32) *sfs.SFSArray {
 	a := sfs.NewSFSArray()
 	for _, n := range v {
 		a.AddInt(n)
@@ -42,17 +42,17 @@ func TestEventMilestoneBoxes(t *testing.T) {
 			ri := sfs.NewSFSObject()
 			ri.PutInt("totalLotteryCount", 25)
 			r.PutSFSObject("rollInfo", ri)
-			r.PutSFSArray("stageArr", milestoneObjs([]string{"stage", "needLotteryNum", "state"},
+			r.PutSFSArray("stageArr", eventBoxObjs([]string{"stage", "needLotteryNum", "state"},
 				[]int32{1, 10, 1}, []int32{2, 20, 0}, []int32{3, 30, 0}))
 		case "hero.event.info.get":
 			switch p.GetString("activityId") {
 			case "5301": // Blue Store
 				r.PutInt("totalScore", 600)
-				r.PutSFSArray("boxRewards", milestoneObjs([]string{"index", "target"}, []int32{1, 100}, []int32{2, 500}, []int32{3, 900}))
-				r.PutSFSArray("boxReceive", intArray(1))
+				r.PutSFSArray("boxRewards", eventBoxObjs([]string{"index", "target"}, []int32{1, 100}, []int32{2, 500}, []int32{3, 900}))
+				r.PutSFSArray("boxReceive", eventBoxInts(1))
 			case "99050": // Slots, tableInfoType 1
 				r.PutInt("totalScore", 150)
-				r.PutSFSArray("rewardProcess", intArray(0))
+				r.PutSFSArray("rewardProcess", eventBoxInts(0))
 				r.PutSFSArray("taskArr", eventTasks("taskId", map[string]int32{"901": 1}))
 			}
 		default:
@@ -97,7 +97,7 @@ func TestEventMilestoneBoxesErrorStops(t *testing.T) {
 		if cmd == "hero.event.info.get" {
 			r := sfs.NewSFSObject()
 			r.PutInt("totalScore", 600)
-			r.PutSFSArray("boxRewards", milestoneObjs([]string{"index", "target"}, []int32{1, 100}, []int32{2, 500}))
+			r.PutSFSArray("boxRewards", eventBoxObjs([]string{"index", "target"}, []int32{1, 100}, []int32{2, 500}))
 			return r
 		}
 		return evErr(evAlreadyExecuted)
@@ -120,7 +120,7 @@ func TestSlotsScoreThresholdsMatchTheDump(t *testing.T) {
 	}
 	for key, r := range rows {
 		var got []int64
-		for _, part := range strings.Split(jsonScalar(r["score_reward"]), "|") {
+		for _, part := range strings.Split(eventDumpScalar(r["score_reward"]), "|") {
 			n, err := strconv.ParseInt(strings.Split(part, ";")[0], 10, 64)
 			if err != nil {
 				t.Fatalf("row %s score_reward %v", key, r["score_reward"])

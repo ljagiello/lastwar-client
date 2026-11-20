@@ -155,7 +155,7 @@ func TestBountyHunterPhaseScoresMatchTheDump(t *testing.T) {
 	}
 	for key, r := range rows {
 		var got []int64
-		for _, part := range strings.Split(jsonScalar(r["score_reward"]), "|") {
+		for _, part := range strings.Split(eventDumpScalar(r["score_reward"]), "|") {
 			f := strings.Split(part, ";")
 			if len(f) != 2 {
 				continue
@@ -169,7 +169,7 @@ func TestBountyHunterPhaseScoresMatchTheDump(t *testing.T) {
 		if !slices.Equal(got, bountyPhaseScores) {
 			t.Errorf("row %s thresholds %v, want %v", key, got, bountyPhaseScores)
 		}
-		if shows := strings.Split(jsonScalar(r["score_reward_show"]), "|"); len(shows) < len(got) {
+		if shows := strings.Split(eventDumpScalar(r["score_reward_show"]), "|"); len(shows) < len(got) {
 			t.Errorf("row %s has %d score_reward_show entries for %d thresholds", key, len(shows), len(got))
 		}
 	}

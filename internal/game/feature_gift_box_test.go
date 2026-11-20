@@ -185,15 +185,15 @@ func TestGiftBoxOpenRowsMatchTheDump(t *testing.T) {
 	rows := eventTableDump(t, "activity_boxopen")
 	acts := map[int32]bool{}
 	for key, r := range rows {
-		id, err := strconv.ParseInt(jsonScalar(r["activity"]), 10, 32)
+		id, err := strconv.ParseInt(eventDumpScalar(r["activity"]), 10, 32)
 		if err != nil {
 			t.Fatalf("row %s activity %v", key, r["activity"])
 		}
 		acts[int32(id)] = true
-		if f := jsonScalar(r["cost_1_free"]); f != strconv.Itoa(giftBoxFreeDraws) {
+		if f := eventDumpScalar(r["cost_1_free"]); f != strconv.Itoa(giftBoxFreeDraws) {
 			t.Errorf("row %s cost_1_free %s, want %d", key, f, giftBoxFreeDraws)
 		}
-		if b := jsonScalar(r["box_num"]); b != strconv.Itoa(giftBoxSlots) {
+		if b := eventDumpScalar(r["box_num"]); b != strconv.Itoa(giftBoxSlots) {
 			t.Errorf("row %s box_num %s, want %d", key, b, giftBoxSlots)
 		}
 	}
