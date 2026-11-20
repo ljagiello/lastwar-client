@@ -42,6 +42,10 @@ type GameServer struct {
 
 	AccessTok, RefreshTok         string // "" when the reply carried none
 	AccessTokTime, RefreshTokTime int64
+
+	// RoleNamed is true when the picked server list entry carries the looked-up gameUid. Without
+	// it the entry is GSL's lastLoggedServer or first entry, which need not be the role's server.
+	RoleNamed bool
 }
 
 func (s GameServer) String() string       { return "[REDACTED GameServer]" }
@@ -91,7 +95,7 @@ func gameServerFrom(lsr *gsl.LoginServerListRespon, gameUid, zone, accessTok str
 	if g := srv.GameUid.String(); g != "" && g != gameUid {
 		return GameServer{}, fmt.Errorf("GSL server lookup: no server list entry for gameUid %s (the fallback pick, id %s, is gameUid %s)", gameUid, srv.ID, g)
 	}
-	s := GameServer{IP: srv.IP.String(), Port: srv.Port.Int("port"), Zone: zone}
+	s := GameServer{IP: srv.IP.String(), Port: srv.Port.Int("port"), Zone: zone, RoleNamed: srv.GameUid.String() == gameUid}
 	if _, err := baseZoneLoginAddrs(s.IP, s.Port); err != nil {
 		return GameServer{}, fmt.Errorf("GSL server lookup: %w", err)
 	}

@@ -201,6 +201,12 @@ func TestRunCrossServerTestLooksUpBeforeEveryLogin(t *testing.T) {
 		{"GSL lists another server", lookupReply(), "gw-a.example:10783", lookupGateways},
 		{"GSL refuses (211)", gsl.LoginServerListRespon{Code: "211"}, "10.0.0.1:17783", ""},
 		{"GSL lists no server (E120)", gsl.LoginServerListRespon{Code: "0"}, "10.0.0.1:17783", ""},
+		// An entry without the role's gameUid is GSL's lastLoggedServer or first entry, not the
+		// role's server: the configured address stays.
+		{"GSL lists another server without the role's gameUid", gsl.LoginServerListRespon{
+			Code:       "0",
+			ServerList: []gsl.LoginServerInfo{{ID: "901", IP: "other.example", Port: testutil.FlexPort(10901), Zone: "APS901"}},
+		}, "10.0.0.1:17783", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

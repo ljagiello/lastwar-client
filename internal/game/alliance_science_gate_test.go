@@ -442,6 +442,64 @@ func TestDonateAllRecoversFromATimeoutInTheCore(t *testing.T) {
 	}
 }
 
+// TestDonationChargeReadRefusedAtTheReset: the day-reset refusal (120836) or used-up charges
+// (120471) answering the charge read ends the run's donations without a run error, as they do on
+// al.science.donate; any other code stays an error.
+func TestDonationChargeReadRefusedAtTheReset(t *testing.T) {
+	const id = 10011900
+	for _, c := range []struct {
+		code    string
+		wantErr bool
+	}{
+		{"120836", false},
+		{"120471", false},
+		{"999999", true},
+	} {
+		t.Run(c.code, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client, server := session.NewPipeGameConnPair(t)
+				srv := &scriptedServer{}
+				go func() {
+					for {
+						msg, err := session.ReadNextExtension(server)
+						if err != nil {
+							return
+						}
+						srv.mu.Lock()
+						srv.reqs = append(srv.reqs, msg)
+						srv.mu.Unlock()
+						out := obj()
+						switch msg.Cmd {
+						case "science.data.refresh":
+							out = allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", int64(8000000), "level", 3))
+						case "al.science.refreshNum":
+							out = obj("errorCode", c.code)
+						}
+						if v, ok := msg.Params.Get("_id"); ok {
+							out.PutValue("_id", v)
+						}
+						if err := server.SendExtension(msg.Cmd, out); err != nil {
+							return
+						}
+					}
+				}()
+				in := inAllianceInit()
+				errCore := donateRecommendedAllianceTech(client, in)
+				if (errCore != nil) != c.wantErr {
+					t.Errorf("core donation error = %v, want error %v", errCore, c.wantErr)
+				}
+				if err := donateAllAllianceTech(client, in); err != nil {
+					t.Errorf("donateAllAllianceTech() = %v", err)
+				}
+				want := []string{"science.data.refresh", "al.science.refreshNum"}
+				if got := srv.cmds(); !slices.Equal(got, want) {
+					t.Errorf("requests = %v, want %v", got, want)
+				}
+			})
+		})
+	}
+}
+
 // donateStep is the fake server's answer to one al.science.donate: pushes sent before the reply,
 // then the reply.
 type donateStep struct {

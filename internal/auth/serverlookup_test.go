@@ -27,20 +27,21 @@ func TestGameServerFromPicksTheRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (GameServer{IP: "c.example|d.example", Port: 10783, Zone: "APS783"}); s != want {
+	if want := (GameServer{IP: "c.example|d.example", Port: 10783, Zone: "APS783", RoleNamed: true}); s != want {
 		t.Errorf("server = %+v, want %+v", s, want)
 	}
 }
 
 // TestGameServerFromKeepsZoneAndAcceptsUnnamedEntry: an entry without a zone keeps the session's,
-// and an entry without a gameUid can't be told apart from the role's, so it is used.
+// and an entry without a gameUid can't be told apart from the role's, so it is used, marked as not
+// naming the role (the pre-Login lookup then keeps a configured address).
 func TestGameServerFromKeepsZoneAndAcceptsUnnamedEntry(t *testing.T) {
 	lsr := gslReply(t, `{"code":0,"serverList":[{"id":"1","ip":"h.example","port":"10001"}]}`)
 	s, err := gameServerFrom(lsr, "uid-1", "APS1", "at-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (GameServer{IP: "h.example", Port: 10001, Zone: "APS1"}); s != want {
+	if want := (GameServer{IP: "h.example", Port: 10001, Zone: "APS1", RoleNamed: false}); s != want {
 		t.Errorf("server = %+v, want %+v", s, want)
 	}
 }

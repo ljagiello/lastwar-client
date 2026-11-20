@@ -205,9 +205,10 @@ placeholder `GoClient` model and the run warns to recapture; a captured device w
 `-session-out` keeps every key it doesn't write (`features`, `duelPolicy`, `shumeiInstall` and any
 other), drops `accessTokenTime` when the token changed and the refresh token when the `deviceId`
 changed, and refuses a file that isn't a JSON object. So a recapture can go straight onto the live
-config, with no hand merge. A run also saves the `shumeiId` a `push.shumei.id` brings into the
-config as the push arrives, as the app does, so a run that then fails or is kicked keeps it; it is
-saved for the run's own `deviceId` only, and the next iOS `Login` sends it as `ta` `lw_shumei_id`.
+config, with no hand merge (a run's own saves write only the keys the session config models, so a
+key goclient doesn't know is dropped at the first one). A run also saves the `shumeiId` a
+`push.shumei.id` brings into the config as the push arrives, as the app does, so a run that then
+fails or is kicked keeps it; it is saved for the run's own `deviceId` only, and the next iOS `Login` sends it as `ta` `lw_shumei_id`.
 Recording the build matters: a token is bound to it, so once the real app updates, a
 fresh token only works if the Login claims that same build. A config without these two fields
 keeps claiming the build such configs always had, 1.0.344/786 on iOS or 1.0.364/1892 on Android,
@@ -255,12 +256,11 @@ this repo or commit it anywhere).
 # -run of a held feature on a day that doesn't list its types is refused; -run-anyway runs it.
 ./lastwar-client -run radar-claims -run-anyway
 
-# A duel or dig spend, supplies-search or free-research-finish that sees the diamond balance
-# fall writes <session config>.tripwire.json. While that file exists every duel spend, the
-# Treasure Hunt pickaxe digs, treasure-digs' brick opens, supplies-search and
-# free-research-finish refuse to run, in later runs too (each run warns at startup; a -collect
-# run exits 1). Free dig claims still run. Check the account, then remove the file (for -config,
-# or the default session config) and exit:
+# A duel or dig spend or supplies-search that sees the diamond balance fall writes
+# <session config>.tripwire.json. While that file exists every duel spend, the Treasure Hunt
+# pickaxe digs, treasure-digs' brick opens and supplies-search refuse to run, in later runs
+# too (each run warns at startup; a -collect run exits 1). Free dig claims still run. Check the
+# account, then remove the file (for -config, or the default session config) and exit:
 ./lastwar-client -clear-tripwire
 
 # Stay connected and issue ad-hoc test commands without re-authenticating. NOTE: since
@@ -323,16 +323,14 @@ parameter, and stop for the rest of the process if a reply shows the diamond bal
 `duel-gacha-draw` spends only the gacha's own score balance. See
 [docs/alliance-duel.mdx](docs/alliance-duel.mdx) for the wire details.
 
-`finished-timers` and `free-research-finish` hold each completion inside the run rather than
-through `Feature.Duel`, so `-list-features` shows `duel:-` for both and `duelPolicy` doesn't
-apply to them. A held research keeps its Tech Center's queue idle until a day that scores
+`finished-timers` holds each completion inside the run rather than through `Feature.Duel`, so
+`-list-features` shows `duel:-` for it and `duelPolicy` doesn't apply to it. A held research keeps its Tech Center's queue idle until a day that scores
 research power, up to four days after a Saturday finish, and a held HQ upgrade delays everything
 gated on the HQ level.
 
 | Feature | What it does |
 |---|---|
 | `finished-timers` | Enabled in the production config, not opt-in: collects ended timers for free (finished upgrades, repairs, research and healing queues, camp output). Since 1.0.370 it holds a finished upgrade until a day that scores building power (type 23: Base Expansion, Total Mobilization) and a finished research until one that scores research power (type 6: Age of Science, Total Mobilization). It finishes as before when there is no duel (no alliance, no open duel activity) and, with a Warn, when it can't read the duel. Repairs, healing and camp output are never held |
-| `free-research-finish` | OPT-IN, 1.0.370: `queue.ccd.m.new {qUUID, itemIDs: ""}` on a running research whose remaining time is inside the free research time (init effect 30100, less 30 s). Held like `finished-timers`' research. The same bytes are also the client's diamond instant finish behind its diamond confirm (`UISpeedUpConfirmView.lua:131-135`, `ArmyManager.lua:204-210`), so only the research-queue check and the free-time window keep it free; a diamond drop in the reply stops it and sets the tripwire |
 | `duel-speedups` | Applies owned speed-up items (`build.ccd.m.new`, `queue.ccd.m.new`, `building.camp.accel`, items-only form) to running jobs whose queue today's entry lists under score type 51 |
 | `duel-speedups-plan` | Read-only: logs the speed-up calls `duel-speedups` would send |
 | `duel-recruit-tickets` | Spends held hero or survivor recruit tickets (`lottery.hero.card` / `lottery.worker.card`, `useFree: 0`) on days whose entry lists recruit types 42 / 120. It keeps the tickets of a pool where the recruit window would first ask about the wish hero (no wish hero chosen, or the chosen one owned at max rank or max honor while another wish-list hero isn't) |
@@ -412,7 +410,7 @@ the duel gacha's own score balance, and `truck-reroll` uses only a truck's free 
 from one of its commands is logged and stops that claim; depending on the feature it also stops
 the rest of that activity or building, or the feature for the run, while others (`city-soldiers`,
 `radar-rescue-claims`, `supplies-search` among them) go on to their other claims. The duel,
-firework, chat and railway ones are in the tables above: the follow-up added `free-research-finish`,
+firework, chat and railway ones are in the tables above: the follow-up added
 `duel-gacha-draw` and `secret-task-assist`, `fireworks-chat` and `alliance-treasures-chat`,
 `chat-scan` and `red-packets`, and `truck-reroll`.
 

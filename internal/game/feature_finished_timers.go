@@ -16,8 +16,11 @@ import (
 // run out. None of these is an instant finish: each request carries only the uuid (or nothing),
 // and the client sends it only once the timer has ended (CheckSendBuildFinish, BuildManager.lua:
 // 3045-3118; ScienceManager.lua:131-151). The paid paths are the separate `build.ccd.*` /
-// `queue.ccd.*` speed-ups and `free.building.up.new {gold}`, never sent here (the opt-in
-// free-research-finish sends queue.ccd.m.new's free form, with no items).
+// `queue.ccd.*` speed-ups and `free.building.up.new {gold}`, never sent here. The client's free
+// research finish (queue.ccd.m.new with an empty itemIDs inside effect 30100's window,
+// QueueDataManager.lua:572-590) is not sent either: the same bytes are its diamond instant finish
+// (ArmyManager.lua:204-210), and on a 3-hour cron it would complete nothing earlier, since the
+// window is at most 3 h and the research is completed here by queue.finish on the next run anyway.
 //
 //   - Upgrades: `free.building.upgrade.finish {uuid: Long}` for each init building_new entry with
 //     uT > 0 && now >= uT (ms; BuildingDate.lua:453-456; FreeBuildingUpgradeFinishMessage.lua:3-9;
@@ -347,7 +350,7 @@ func finishedTimersChip(conn *session.GameConn, uuid int64) error {
 }
 
 // completionHold is one run's view of the Alliance Duel for the completion hold (see the comment
-// at the top of this file), read on first use. finished-timers and free-research-finish use it.
+// at the top of this file), read on first use.
 type completionHold struct {
 	feature string
 	conn    *session.GameConn

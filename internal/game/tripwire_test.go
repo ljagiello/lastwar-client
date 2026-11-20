@@ -37,7 +37,6 @@ func tripwireRestart() {
 	digsTrip.Lock()
 	digsTrip.reason = ""
 	digsTrip.Unlock()
-	freeResearchFinishTripped.Store(false)
 }
 
 func readTripwire(t *testing.T, path string) TripwireRecord {

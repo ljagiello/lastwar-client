@@ -98,7 +98,7 @@ func Run() {
 	version := fs.Bool("version", false, "print build info and exit")
 	runFeature := fs.String("run", "", "after login, run only this optional feature (see -list-features) once, even if the session config doesn't enable it, log its responses, and exit -- the live validation step before enabling a feature in the session config")
 	runAnyway := fs.Bool("run-anyway", false, "with -run, run the feature even when today's Alliance Duel holds it (it scores duel points only on other days)")
-	clearTripwire := fs.Bool("clear-tripwire", false, "remove the diamond tripwire file next to the session config (<config>.tripwire.json, for -config or the default config), and exit. A duel, dig, supplies-search or free-research-finish spend writes it when it sees the diamond balance fall, and while it exists every one of them refuses to run")
+	clearTripwire := fs.Bool("clear-tripwire", false, "remove the diamond tripwire file next to the session config (<config>.tripwire.json, for -config or the default config), and exit. A duel, dig or supplies-search spend writes it when it sees the diamond balance fall, and while it exists every one of them refuses to run")
 	listFeatures := fs.Bool("list-features", false, "list the optional features (name, default, whether the session config enables it) and exit")
 	ownDeviceSession := fs.String("own-device-session", "", "EXPERIMENTAL: trade this client's own device's loginKey (state under $LASTWAR_STATE_DIR, else the home directory) for the device's own access/refresh token pair (GSL opt=login), write them as a session config to this path (0600), and exit; run that config like any other with -config. With -email, first binds the device by email verification in the same run")
 	server := fs.String("server", "", "with -email, bind the account's role on this server (its number, e.g. 783, or its zone, APS783) instead of the one the account login names; the account's roles are logged after verification. Picking a role other than that one is EXPERIMENTAL (never tried live)")
@@ -1685,6 +1685,13 @@ func runCrossServerTest(o crossServerTestOpts) {
 		slog.Info("looking the game server up with GSL getserverlist before the Login, as the real client does on every cold start; the configured address is the fallback")
 		if srv, err := lookup(); err != nil {
 			slog.Warn("GSL server lookup failed; logging in at the configured address", "error", err)
+		} else if !srv.RoleNamed && !sameGameServer(srv, ip, port, zone) {
+			// The entry is GSL's lastLoggedServer or first entry, not one naming this role (live
+			// replies name it). The client would log in there without this gameUid or ask for a
+			// role (Assembly-CSharp.decompiled.cs:12791-12813); this client logs in with the
+			// configured gameUid, so it keeps the configured server, which that role has used.
+			slog.Warn("GSL lists a game server without this role's gameUid; logging in at the configured address", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone,
+				"configuredIP", ip, "configuredPort", port, "configuredZone", zone)
 		} else {
 			if !sameGameServer(srv, ip, port, zone) {
 				slog.Info("GSL lists a different game server than the configured one; logging in there", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone,

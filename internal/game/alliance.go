@@ -452,6 +452,21 @@ func (r *allianceScienceRun) readCharges(conn *session.GameConn) error {
 	params.PutInt("scienceId", r.tech.id)
 	msg, err := session.SendAndWait(conn, "alliance tech donation charges", allianceScienceNumCmd, params)
 	if err != nil {
+		// The day-reset refusal seen on al.science.donate may answer the charge read too: it ends
+		// the run's donations the same way, not as a run error.
+		if msg != nil && msg.Params != nil {
+			code := idString(msg.Params, "errorCode")
+			if meaning := allianceDonateStops[code]; meaning != "" {
+				r.stop = meaning
+				level := slog.LevelInfo
+				if code == allianceDonateUnavailableCode {
+					level = slog.LevelWarn
+				}
+				slog.Log(context.Background(), level, "alliance tech donation: charge read refused; no donations this run",
+					"scienceId", r.tech.id, "errorCode", code, "meaning", meaning)
+				return nil
+			}
+		}
 		r.failed("charge read failed", msg, err)
 		return err
 	}
@@ -501,6 +516,9 @@ func (r *allianceScienceRun) donate(conn *session.GameConn, who string, limit in
 		if !r.chargesRead {
 			if err := r.readCharges(conn); err != nil {
 				return err
+			}
+			if r.stop != "" { // the charge read was refused with one of allianceDonateStops
+				return nil
 			}
 			if blocked() { // the charge read's reply can fill the tech
 				return nil
