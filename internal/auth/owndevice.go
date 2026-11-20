@@ -44,7 +44,7 @@ func (s OwnDeviceSession) GoString() string { return s.String() }
 // the real client discards it after this call, but keeping it costs nothing if the server accepts
 // it again, and saves a second email code if it does.
 func BootstrapOwnDevice(httpClient *http.Client, iosMode bool) (*OwnDeviceSession, error) {
-	ident, err := LoadOrCreateDeviceIdentity()
+	ident, err := LoadOrCreateDeviceIdentity(iosMode)
 	if err != nil {
 		return nil, err
 	}

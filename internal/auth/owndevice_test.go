@@ -96,7 +96,7 @@ func (c *checkVersionPlatforms) RoundTrip(r *http.Request) (*http.Response, erro
 // as iOS and records that build; without it both stay Android.
 func TestBootstrapOwnDeviceUsesTheFlagIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	ident, err := LoadOrCreateDeviceIdentity()
+	ident, err := LoadOrCreateDeviceIdentity(true)
 	if err != nil {
 		t.Fatal(err)
 	}

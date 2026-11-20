@@ -572,7 +572,7 @@ func exitLoginFailed(err error) {
 // that already holds a loginKey is bound already: Login would take the opt=login fast path and
 // skip the email, so it is left alone and the caller trades that loginKey instead. Exits on failure.
 func bindOwnDevice(email, codePipe, server string, handshake, iosMode bool) {
-	ident, err := auth.LoadOrCreateDeviceIdentity()
+	ident, err := auth.LoadOrCreateDeviceIdentity(iosMode)
 	if err != nil {
 		slog.Error("load device identity failed", "error", err)
 		os.Exit(1)
@@ -1247,6 +1247,16 @@ func (o crossServerTestOpts) GoString() string { return o.String() }
 // rationale, shared across every credential-bearing type in this codebase.
 func (o crossServerTestOpts) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
+// androidInstallFor is the Android install a Login describes: the identity's, with the ShuMei
+// install's app install time when the session keeps one for this deviceId, so ta #install_time and
+// the ShuMei fingerprint (a125) report the same PackageInfo.firstInstallTime.
+func androidInstallFor(android auth.AndroidInstall, install shumei.Install, deviceID string) auth.AndroidInstall {
+	if in, ok := install.For(deviceID); ok && !in.FirstInstallTime.IsZero() {
+		android.InstallTime = in.FirstInstallTime
+	}
+	return android
+}
+
 // loginShumeiBoxID is the shumeiBoxId the Login carries for the configured one (-cs-shumei or the
 // session config's). The client sends the ShuMei id only while ClientSwitch 25 is on, and ""
 // otherwise (ShumeiSdkManager.GetLoginSmsdkId, Assembly-CSharp.decompiled.cs:59937, 60044-60058,
@@ -1282,7 +1292,7 @@ func (o crossServerTestOpts) mintsShumeiBoxID() bool {
 // given, first refreshes the access token via GSL opt=refresh (using that
 // device identity) before attempting the SFS reconnect.
 func runCrossServerTest(o crossServerTestOpts) {
-	ident, err := auth.LoadOrCreateDeviceIdentity()
+	ident, err := auth.LoadOrCreateDeviceIdentity(o.iosMode)
 	if err != nil {
 		slog.Error("load device identity failed", "error", err)
 		os.Exit(1)
@@ -1710,6 +1720,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 		ResVersion: resVersion,
 		NoZstd:     !cv.NewPacketZstd(),
 		Device:     o.device,
+		Android:    androidInstallFor(ident.Android, shumeiInstall, deviceID),
 		DialGame:   o.dialGame,
 	}
 	if o.iosMode && o.device.PhoneModel == "" {

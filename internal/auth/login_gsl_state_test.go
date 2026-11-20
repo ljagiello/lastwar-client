@@ -209,7 +209,7 @@ func TestLoginPicksTheAccountsServer(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			if c.persistedUid != "" {
-				ident, err := LoadOrCreateDeviceIdentity()
+				ident, err := LoadOrCreateDeviceIdentity(true)
 				if err != nil {
 					t.Fatal(err)
 				}

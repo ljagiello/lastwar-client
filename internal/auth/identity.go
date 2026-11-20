@@ -12,6 +12,7 @@ import (
 	"lastwar-client/internal/sfs"
 	"lastwar-client/internal/shumei"
 	"log/slog"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -144,6 +145,9 @@ type deviceIdentity struct {
 	// SERVER_ZONE and sends as GSL `zone` (Assembly-CSharp.decompiled.cs:77411, 77437, 1.0.370);
 	// BootstrapOwnDevice sends it. "" until a bind records one.
 	Zone string
+	// Android is the Android install's locally created values (install time, afuid, distinct_id);
+	// zero for an identity loaded in iOS mode, which never creates them.
+	Android AndroidInstall
 }
 
 // String/GoString are the round-48 regression fix for the MAJOR finding that deviceIdentity --
@@ -347,7 +351,13 @@ func loadOrCreateAndroidID() (string, error) {
 	return id, nil
 }
 
-func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
+// LoadOrCreateDeviceIdentity loads this device's persisted identity, creating what is missing.
+// iosMode is the platform a Login will claim. It shapes only what is created: a new Android
+// deviceId is the device's Android ID + "_n3d", what Udid.getUid returns without an advertising id
+// (com/sdkmanager/utils/Udid.java:75-83; DeviceManager.GetDeviceUid,
+// Assembly-CSharp.decompiled.cs:73491-73506 of the Android build), and an Android identity gets its
+// AndroidInstall. An existing deviceId is never rewritten: the server already knows it.
+func LoadOrCreateDeviceIdentity(iosMode bool) (*deviceIdentity, error) {
 	id, err := readTrimmed(deviceIDStatePath())
 	if err != nil {
 		// A non-ENOENT failure reading an EXISTING device-id file must never be treated as "no
@@ -360,13 +370,21 @@ func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 		return nil, fmt.Errorf("read device id state: %w", err)
 	}
 	if id == "" {
-		// Fallback path a real client would take if the native UDID call
-		// failed: a random unique id + "_n3d" (release build suffix).
-		raw := make([]byte, 16)
-		if _, err := rand.Read(raw); err != nil {
-			return nil, err
+		if iosMode {
+			// No 1.0.370 source gives the iOS native UDID (PM_getDeviceUDID): a random unique id
+			// + "_n3d" (release build suffix), as this client has always created.
+			raw := make([]byte, 16)
+			if _, err := rand.Read(raw); err != nil {
+				return nil, err
+			}
+			id = hex.EncodeToString(raw) + "_n3d"
+		} else {
+			androidID, err := loadOrCreateAndroidID()
+			if err != nil {
+				return nil, err
+			}
+			id = androidID + "_n3d"
 		}
-		id = hex.EncodeToString(raw) + "_n3d"
 		if err := createDeviceIDStateFile(deviceIDStatePath(), id); err != nil {
 			if os.IsExist(err) {
 				// Another invocation created the file between our read-not-exists check above
@@ -421,10 +439,18 @@ func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 	warnIfLoosePermissions(gameUidStatePath())
 	warnIfLoosePermissions(loginKeyStatePath())
 	warnIfLoosePermissions(zoneStatePath())
+	warnIfLoosePermissions(androidInstallStatePath())
 	androidID, err := loadOrCreateAndroidID()
 	if err != nil {
 		slog.Warn("failed to load or create the android id state file", "path", androidIDStatePath(), "error", err)
 		return nil, err
+	}
+	var android AndroidInstall
+	if !iosMode {
+		if android, err = loadOrCreateAndroidInstall(); err != nil {
+			slog.Warn("failed to load or create the android install state file", "path", androidInstallStatePath(), "error", err)
+			return nil, err
+		}
 	}
 	username, err := readTrimmed(usernameStatePath())
 	if err != nil {
@@ -453,6 +479,7 @@ func LoadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 		GameUid:   gameUid,
 		LoginKey:  loginKey,
 		Zone:      zone,
+		Android:   android,
 	}, nil
 }
 
@@ -589,6 +616,10 @@ type LoginParamsInput struct {
 	// the real iOS app recorded (see CapturedDevice). Ignored on Android, whose device fields come
 	// from the hardware profile the deviceId selects.
 	Device CapturedDevice
+
+	// Android is the Android install's afuid, distinct_id and install time (ta #install_time);
+	// ignored under IOSMode. A zero value sends what this client sent before it had them.
+	Android AndroidInstall
 }
 
 // The audited iOS build, 1.0.370/918 (Info.plist). A GSL-issued `at` access token is bound to the
@@ -692,6 +723,7 @@ type analyticsBlob struct {
 	DeviceModel     string `json:"#device_model"`
 	ScreenWidth     int    `json:"#screen_width"`
 	InstallTime     string `json:"#install_time"`
+	DeviceType      string `json:"#device_type,omitempty"` // Android only (BuildLoginParams)
 	LwNet           string `json:"lw_net"`
 	LwResVersion    string `json:"lw_res_version"`
 	LwBuildcode     string `json:"lw_buildcode"`
@@ -710,6 +742,17 @@ type analyticsBlob struct {
 	LwVersion       string `json:"lw_version"`
 	LwPower         int    `json:"lw_power"`
 	LwZone          string `json:"lw_zone"`
+}
+
+// androidSystemGiB is what the system partitions of a catalog phone take off its sold storage,
+// so ta #disk's total is the data volume StatFs reports.
+const androidSystemGiB = 9.0
+
+// availOfTotal formats ThinkingData's "avail/total" GiB pair: each value rounded half up to one
+// decimal (utils/q.java:111-113) and printed with one.
+func availOfTotal(avail, total float64) string {
+	round := func(d float64) float64 { return math.Floor(d*10+0.5) / 10 }
+	return fmt.Sprintf("%.1f/%.1f", round(avail), round(total))
 }
 
 // BuildLoginParams builds the full ~50-field sfs.SFSObject for the base SFS zone login (dossier §05 /
@@ -752,6 +795,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	osName, lwVersion := "Android", effectiveAppVersion
 	var manufacturer, deviceModel string
 	blobOSVersion, blobRAM, blobInstallTime, blobDeviceID := "0.0", "0.0/0.0", "2000-01-01 00:00:00.000", "00000000-0000-0000-0000-000000000000"
+	blobDisk, deviceType := "50.0/100.0", ""
 	blobFPS, screenWidth, screenHeight := 0, 0, 0
 	// dev is the captured iOS device (CapturedDevice); Android takes its device from hw.
 	var dev CapturedDevice
@@ -763,10 +807,27 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		deviceModel = hw.Model()
 		blobOSVersion = hw.AndroidVersion
 		screenWidth, screenHeight = hw.ScreenWH()
-		totalGB := float64(hw.RAMBytes) / 1e9
-		blobRAM = fmt.Sprintf("%.1f/%.1f", totalGB*0.35, totalGB)
+		// #ram and #disk are avail/total in GiB, each rounded to one decimal
+		// (cn/thinkingdata/android/j.java:374-378, 399-402; utils/q.java:111-113), so the 8 GiB
+		// catalog phone reports a total of 8.0, as ShuMei a48 describes the same RAMBytes. #disk is
+		// the data volume: the GB the phone is sold with, in GiB, less what the system partitions
+		// take.
+		const gib = 1 << 30
+		ramTotal := float64(hw.RAMBytes) / gib
+		blobRAM = availOfTotal(ramTotal*0.35, ramTotal)
+		diskTotal := float64(hw.StorageGB)*1e9/gib - androidSystemGiB
+		blobDisk = availOfTotal(diskTotal*0.45, diskTotal)
 		blobFPS = 60
 		blobDeviceID = in.AndroidID
+		// #install_time is PackageInfo.firstInstallTime as "yyyy-MM-dd HH:mm:ss.SSS" in the zone
+		// #zone_offset names, UTC here (j.java:78-79, 282-283).
+		if !in.Android.InstallTime.IsZero() {
+			blobInstallTime = in.Android.InstallTime.UTC().Format("2006-01-02 15:04:05.000")
+		}
+		// #device_type is the Android SDK's 19th preset key, "Phone" for every catalog phone
+		// (cn/thinkingdata/android/ThinkingAnalyticsSDK.java:916-918, utils/q.java:707-709). The
+		// iOS blob has none.
+		deviceType = "Phone"
 	}
 
 	// The ta analytics blob is part of the login gate for an established account. Confirmed live
@@ -789,11 +850,11 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// pattern for telemetry we have no way to observe, e.g. Carrier/LwLine below); the server
 	// accepts them blank, and their keys stay in case some check depends on them existing.
 	blob := analyticsBlob{
-		OS: osName, Disk: "50.0/100.0", DeviceID: blobDeviceID,
+		OS: osName, Disk: blobDisk, DeviceID: blobDeviceID,
 		OSVersion: blobOSVersion, SystemLanguage: "en", BundleID: build.PackageName, Carrier: "",
 		AppVersion: effectiveAppVersion, FPS: blobFPS, RAM: blobRAM, Simulator: false, ZoneOffset: 0,
 		Manufacturer: manufacturer, ScreenHeight: screenHeight, NetworkType: "WIFI", DeviceModel: deviceModel,
-		ScreenWidth: screenWidth, InstallTime: blobInstallTime,
+		ScreenWidth: screenWidth, InstallTime: blobInstallTime, DeviceType: deviceType,
 		LwNet: "wifi", LwResVersion: lwResVersion, LwBuildcode: effectiveVersionCode, LwLine: "",
 		PdDl: 0, LwAb: "0", LwPlatform: storefrontPF(in.IOSMode),
 		LwGameSessionID: "00000000-0000-0000-0000-000000000000", LwFirstLaunch: false,
@@ -814,7 +875,13 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 			"len", len(b), "max", sfs.MaxUtfStringBytes, "zoneLen", len(in.ServerID))
 	}
 	p.PutUtfString("ta", ta)
-	p.PutUtfString("distinct_id", dev.DistinctID)
+	// distinct_id and afuid are local SDK values a real Android install always has (AndroidInstall);
+	// iOS sends the captured ones, if any.
+	distinctID, afuid := dev.DistinctID, dev.Afuid
+	if !in.IOSMode {
+		distinctID, afuid = in.Android.DistinctID, in.Android.Afuid
+	}
+	p.PutUtfString("distinct_id", distinctID)
 	// phone_screen is Screen.width*Screen.height. The game's activity is locked
 	// to portrait, so that's width*height. Android reports the selected device's
 	// screen; iOS sends the captured one, else the 1920*1080 the first captured session sent.
@@ -875,8 +942,11 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p.PutUtfString("googleName", "")
 	p.PutUtfString("deeplinkParams", "")
 	p.PutUtfString("pfId", "")
+	// google_available: GooglePlayManager.isAvailable, true on a Play-store phone with Play
+	// services (com/googleplayservice/GooglePlayManager.java:77-82; Android
+	// Assembly-CSharp.decompiled.cs:83239), as every catalog phone is. The iOS Login has no such key.
 	if !in.IOSMode {
-		p.PutInt("google_available", 0) // Google Play Services is Android-only; a real iOS capture omits this key
+		p.PutInt("google_available", 1)
 	}
 	p.PutUtfString("fromCountry", orDefault(dev.FromCountry, "US"))
 	// Confirmed via live packet capture against production (real Last War
@@ -919,7 +989,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	}
 	p.PutUtfString("pf", pf)
 	p.PutUtfString("firebaseId", dev.FirebaseID)
-	p.PutUtfString("afuid", dev.Afuid)
+	p.PutUtfString("afuid", afuid)
 	// Without a captured device, iOS keeps the placeholders the cron's session has logged in with
 	// since August 2026: no 1.0.370 source gives an iOS SystemInfo.deviceModel/operatingSystem to
 	// put in their place, and runCrossServerTest warns to recapture.
@@ -946,7 +1016,15 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p.PutUtfString("KCPMode", "0")
 	p.PutInt("forbidden_froce_merge", 1)
 	p.PutUtfString("shumeiBoxId", in.ShumeiBoxId)
-	p.PutUtfString("simOp", "")
+	// simOp is TelephonyManager.getSimOperator() of the ready SIM the phone's mt already names
+	// (com/sdkmanager/AppUtilManager.java:639-652; Android Assembly-CSharp.decompiled.cs:83269).
+	// simOpName stays "" until the catalog carries each phone's SIM operator name; iOS sends both
+	// empty as before.
+	simOp := ""
+	if !in.IOSMode {
+		simOp = hw.SimOperator
+	}
+	p.PutUtfString("simOp", simOp)
 	p.PutUtfString("simOpName", "")
 	p.PutInt("delete_account_status", 0)
 	// Real client sent true; we now actually implement Zstd decode

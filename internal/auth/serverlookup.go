@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"lastwar-client/internal/gsl"
+	"lastwar-client/internal/shumei"
 	"log/slog"
 	"net/http"
 )
@@ -122,12 +123,16 @@ func gameServerFrom(lsr *gsl.LoginServerListRespon, gameUid, zone, accessTok str
 
 // formDevice is the device part of this identity's getserverlist.php form (gsl.FormDevice). An iOS
 // session sends the captured device's fromCountry and lang, which its Login sends too; without a
-// capture both stay the "US"/"en" this client has always sent.
+// capture both stay the "US"/"en" this client has always sent. An Android one sends the SIM
+// operator of the phone its deviceId selects, as its Login's simOp and mt do
+// (com/sdkmanager/AppUtilManager.java:639-652; Android Assembly-CSharp.decompiled.cs:77501).
 func formDevice(iosMode bool, deviceID string, dev CapturedDevice) gsl.FormDevice {
 	f := gsl.FormDevice{Platform: loginBuild(iosMode, "", "").Platform}
 	if iosMode {
 		dev = dev.encodable()
 		f.Country, f.Lang = dev.FromCountry, dev.Lang
+	} else {
+		f.SimOp = shumei.HardwareFor(deviceID).SimOperator
 	}
 	return f
 }

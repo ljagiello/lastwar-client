@@ -15,7 +15,7 @@ func TestBootstrapOwnDeviceSendsTheBoundZone(t *testing.T) {
 	for _, zone := range []string{"APS72", ""} {
 		t.Run("zone="+zone, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
-			ident, err := LoadOrCreateDeviceIdentity()
+			ident, err := LoadOrCreateDeviceIdentity(true)
 			if err != nil {
 				t.Fatal(err)
 			}

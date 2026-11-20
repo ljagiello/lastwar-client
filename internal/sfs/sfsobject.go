@@ -378,13 +378,13 @@ var SensitiveSFSKeys = map[string]bool{
 	// docs/live-validation.mdx's "complete Login params field list" section (IMEI, AndroidID,
 	// androidDid, gaid, afuid, firebaseId, distinct_id) and its iOS reconnect-fix section (idfa,
 	// idfv) as real fields a genuine (non-Go-client) Login request carries. identity.go's own
-	// BuildLoginParams currently only ever sends these as empty-string placeholders (this Go
-	// client doesn't have real values for them), so today's Go-client-originated traffic leaks
-	// nothing under these keys -- but decode.go's -decode-stream tool (this repo's own documented
-	// tool for decoding a REAL captured non-Go-client login) would print real values for these
-	// fields in cleartext, since StringRedacted() has no way to mask a key that isn't in this
-	// map. Not bearer credentials -- device/tracking identifiers -- added so a real captured
-	// login decoded via -decode-stream doesn't leak them.
+	// BuildLoginParams sends real values for some of them since the 1.0.370 audit: an Android
+	// identity's own afuid and distinct_id, and an iOS session's captured idfv, distinct_id, afuid
+	// and firebaseId (auth.CapturedDevice) -- and decode.go's -decode-stream tool (this repo's own
+	// documented tool for decoding a REAL captured non-Go-client login) would print real values
+	// for these fields in cleartext, since StringRedacted() has no way to mask a key that isn't in
+	// this map. Not bearer credentials -- device/tracking identifiers -- added so neither this
+	// client's own Login nor a real captured one decoded via -decode-stream leaks them.
 	"IMEI":        true,
 	"AndroidID":   true,
 	"androidDid":  true,

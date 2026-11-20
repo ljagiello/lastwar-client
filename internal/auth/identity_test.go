@@ -308,7 +308,7 @@ func TestLoadOrCreateDeviceIdentityWarnsOnLoosePermissions(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(orig)
 
-	if _, err := LoadOrCreateDeviceIdentity(); err != nil {
+	if _, err := LoadOrCreateDeviceIdentity(true); err != nil {
 		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
 	}
 	if !strings.Contains(buf.String(), "more permissive than 0600") {
@@ -333,7 +333,7 @@ func TestLoadOrCreateDeviceIdentityWarnsOnLooseGameUidPermissions(t *testing.T) 
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(orig)
 
-	if _, err := LoadOrCreateDeviceIdentity(); err != nil {
+	if _, err := LoadOrCreateDeviceIdentity(true); err != nil {
 		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
 	}
 	if !strings.Contains(buf.String(), "more permissive than 0600") {
@@ -411,7 +411,7 @@ func TestLoadOrCreateDeviceIdentityDoesNotClobberOnReadFailure(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(orig)
 
-	_, err := LoadOrCreateDeviceIdentity()
+	_, err := LoadOrCreateDeviceIdentity(true)
 	if err == nil {
 		t.Fatal("loadOrCreateDeviceIdentity: got nil error for a non-ENOENT device-id read failure, want an error -- it must not silently fabricate a replacement identity")
 	}
@@ -451,7 +451,7 @@ func TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropGameUidOnReadFailure(t *te
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(orig)
 
-	_, err := LoadOrCreateDeviceIdentity()
+	_, err := LoadOrCreateDeviceIdentity(true)
 	if err == nil {
 		t.Fatal("loadOrCreateDeviceIdentity: got nil error for a non-ENOENT gameUid read failure, want an error rather than a silently-empty GameUid")
 	}
@@ -480,7 +480,7 @@ func TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropUsernameOnReadFailure(t *t
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(orig)
 
-	_, err := LoadOrCreateDeviceIdentity()
+	_, err := LoadOrCreateDeviceIdentity(true)
 	if err == nil {
 		t.Fatal("loadOrCreateDeviceIdentity: got nil error for a non-ENOENT username read failure, want an error rather than a silently-empty Username")
 	}
@@ -509,7 +509,7 @@ func TestLoadOrCreateDeviceIdentityDoesNotSilentlyDropLoginKeyOnReadFailure(t *t
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(orig)
 
-	_, err := LoadOrCreateDeviceIdentity()
+	_, err := LoadOrCreateDeviceIdentity(true)
 	if err == nil {
 		t.Fatal("loadOrCreateDeviceIdentity: got nil error for a non-ENOENT loginKey read failure, want an error rather than a silently-empty LoginKey")
 	}
@@ -546,7 +546,7 @@ func TestLoadOrCreateDeviceIdentitySelfHealsStaleEmptyDeviceIDFile(t *testing.T)
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(orig)
 
-	got, err := LoadOrCreateDeviceIdentity()
+	got, err := LoadOrCreateDeviceIdentity(true)
 	if err != nil {
 		t.Fatalf("loadOrCreateDeviceIdentity: got error %v, want a self-healed identity instead of the old permanent failure", err)
 	}
@@ -580,7 +580,7 @@ func TestLoadOrCreateDeviceIdentitySelfHealsStaleEmptyDeviceIDFile(t *testing.T)
 
 	// A second load must reuse the self-healed id rather than self-healing (or fabricating)
 	// again.
-	second, err := LoadOrCreateDeviceIdentity()
+	second, err := LoadOrCreateDeviceIdentity(true)
 	if err != nil {
 		t.Fatalf("loadOrCreateDeviceIdentity (reload): %v", err)
 	}
@@ -625,7 +625,7 @@ func TestLoadOrCreateDeviceIdentityUsesGenuineConcurrentWriterContent(t *testing
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(orig)
 
-	got, err := LoadOrCreateDeviceIdentity()
+	got, err := LoadOrCreateDeviceIdentity(true)
 	if err != nil {
 		t.Fatalf("loadOrCreateDeviceIdentity: %v", err)
 	}
@@ -659,7 +659,7 @@ func TestLoadOrCreateDeviceIdentityRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	first, err := LoadOrCreateDeviceIdentity()
+	first, err := LoadOrCreateDeviceIdentity(true)
 	if err != nil {
 		t.Fatalf("loadOrCreateDeviceIdentity (create): %v", err)
 	}
@@ -679,7 +679,7 @@ func TestLoadOrCreateDeviceIdentityRoundTrip(t *testing.T) {
 		t.Fatalf("SaveUsername: %v", err)
 	}
 
-	second, err := LoadOrCreateDeviceIdentity()
+	second, err := LoadOrCreateDeviceIdentity(true)
 	if err != nil {
 		t.Fatalf("loadOrCreateDeviceIdentity (reload): %v", err)
 	}

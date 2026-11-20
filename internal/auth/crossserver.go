@@ -77,6 +77,8 @@ type CrossServerLoginParams struct {
 	NoZstd      bool   // see LoginParamsInput.NoZstd
 	// Device is the captured iOS device the Login describes; see LoginParamsInput.Device.
 	Device CapturedDevice
+	// Android is the Android install's values; see LoginParamsInput.Android.
+	Android AndroidInstall
 
 	// DialGame, if non-nil, replaces the package-level dialGame (ultimately session.DialGame) used
 	// to open the game socket -- and is used for every redial in the serverInfo-redirect loop, not
@@ -227,6 +229,7 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			ResVersion:  p.ResVersion,
 			NoZstd:      p.NoZstd,
 			Device:      p.Device,
+			Android:     p.Android,
 		})
 		loginContent := sfs.NewSFSObject()
 		loginContent.PutUtfString("zn", zone)

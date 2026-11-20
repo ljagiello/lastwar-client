@@ -8,6 +8,7 @@ import (
 	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
+	"lastwar-client/internal/shumei"
 	"lastwar-client/internal/testutil"
 	"log/slog"
 	"net/http"
@@ -348,5 +349,29 @@ func TestExitLoginFailedForcedUpdateExits5(t *testing.T) {
 	code, stderr := runRefreshHelper(t, "TestExitLoginFailedForcedUpdateExits5")
 	if code != exitCodeForcedUpdate {
 		t.Errorf("exit code = %d, want %d; stderr=%s", code, exitCodeForcedUpdate, stderr)
+	}
+}
+
+// TestAndroidInstallFor: ta #install_time and the ShuMei fingerprint's app install time describe
+// one install when the session keeps a ShuMei install for this deviceId (1.0.370 audit B95).
+func TestAndroidInstallFor(t *testing.T) {
+	own := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	fp := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	base := auth.AndroidInstall{InstallTime: own, Afuid: "1-2", DistinctID: "d"}
+	cases := []struct {
+		name    string
+		install shumei.Install
+		want    time.Time
+	}{
+		{"install bound to this device", shumei.Install{DeviceID: "dev_n3d", FirstInstallTime: fp}, fp},
+		{"install not bound yet", shumei.Install{FirstInstallTime: fp}, fp},
+		{"another device's install", shumei.Install{DeviceID: "other_n3d", FirstInstallTime: fp}, own},
+		{"no install time", shumei.Install{DeviceID: "dev_n3d"}, own},
+	}
+	for _, c := range cases {
+		got := androidInstallFor(base, c.install, "dev_n3d")
+		if !got.InstallTime.Equal(c.want) || got.Afuid != base.Afuid || got.DistinctID != base.DistinctID {
+			t.Errorf("%s: install time %v, want %v (other fields kept)", c.name, got.InstallTime, c.want)
+		}
 	}
 }

@@ -272,7 +272,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 
 	// The identity first: its deviceId picks check-version's gate host list, as the client's
 	// device uid does (gsl.CheckVersionAs).
-	ident, err := LoadOrCreateDeviceIdentity()
+	ident, err := LoadOrCreateDeviceIdentity(opts.IOSMode)
 	if err != nil {
 		return nil, err
 	}
@@ -442,6 +442,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			AppVersion:  opts.AppVersion,
 			VersionCode: opts.VersionCode,
 			NoZstd:      !cv.NewPacketZstd(),
+			Android:     ident.Android,
 		})
 		loginPF = loginParams.GetString("pf")
 		loginContent := sfs.NewSFSObject()
