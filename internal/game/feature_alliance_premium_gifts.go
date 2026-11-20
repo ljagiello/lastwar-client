@@ -41,7 +41,7 @@ const (
 	premiumGiftsListCmd    = "alliance.reward.list"
 	premiumGiftsReceiveCmd = "alliance.reward.receive"
 	// premiumGiftsMaxPerRun bounds one run's claims (at the pace below, under half a minute). The
-	// window lists up to DataConfig alliance_gift.k4 gifts (200, table item 39879); a backlog past
+	// window lists up to DataConfig alliance_gift.k4 gifts (200, table item 39879 and 40413); a backlog past
 	// 50 waits for the next run.
 	premiumGiftsMaxPerRun = 50
 )

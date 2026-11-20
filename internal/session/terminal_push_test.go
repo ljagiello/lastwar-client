@@ -32,24 +32,91 @@ func assertSessionEnded(t *testing.T, err, want error) {
 	}
 }
 
-func TestTerminalPushError(t *testing.T) {
-	cases := map[string]error{
-		"push.user.off":    ErrKicked,
-		"push.server.stop": ErrServerStopped,
-		"init.error":       ErrInitFailed,
+// ownDevice is a session's Login deviceId, in the client's "<udid>_n3d" shape (GetDeviceUid,
+// Assembly-CSharp.decompiled.cs:73414); ownAirKey is its SetDeviceUidToTranscoding form,
+// "lwDid_" + base64 of the id (73443-73447), computed outside Go with base64(1).
+const (
+	ownDevice = "6F1C2D3E-4A5B-6C7D-8E9F-0A1B2C3D4E5F_n3d"
+	ownAirKey = "lwDid_NkYxQzJEM0UtNEE1Qi02QzdELThFOUYtMEExQjJDM0Q0RTVGX24zZA=="
+)
+
+// pushParams builds a push's params from key/value pairs, all UtfStrings.
+func pushParams(kv ...string) *sfs.SFSObject {
+	p := sfs.NewSFSObject()
+	for i := 0; i+1 < len(kv); i += 2 {
+		p.PutUtfString(kv[i], kv[i+1])
 	}
-	for cmd, want := range cases {
-		err := TerminalPushError(cmd)
-		assertSessionEnded(t, err, want)
-		var ended *SessionEndedError
-		if !errors.As(err, &ended) || ended.Cmd != cmd {
-			t.Errorf("TerminalPushError(%q) = %#v, want a *SessionEndedError with Cmd %q", cmd, err, cmd)
+	return p
+}
+
+func TestTerminalPushError(t *testing.T) {
+	cases := []struct {
+		name   string
+		cmd    string
+		params *sfs.SFSObject
+		want   error
+	}{
+		{"kicked", "push.user.off", nil, ErrKicked},
+		{"server stop", "push.server.stop", nil, ErrServerStopped},
+		{"init error", "init.error", nil, ErrInitFailed},
+		// PushUserGMOffMessage.lua:9-16 quits or reloads whatever the push carries.
+		{"GM kick", "push.user.gm.off", nil, ErrGMKicked},
+		{"GM kick with a code", "push.user.gm.off", pushParams("errorCode", "E130023"), ErrGMKicked},
+		{"refund restart", "push.refund.restart", sfs.NewSFSObject(), ErrRefundRestart},
+		{"refund restart, no params", "push.refund.restart", nil, ErrRefundRestart},
+		{"this device removed", "push.account.device.del", pushParams("deviceId", ownDevice), ErrDeviceRemoved},
+		{"this device removed, by airKey", "push.account.device.del", pushParams("airKey", ownAirKey), ErrDeviceRemoved},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := TerminalPushError(c.cmd, c.params, ownDevice)
+			assertSessionEnded(t, err, c.want)
+			var ended *SessionEndedError
+			if !errors.As(err, &ended) || ended.Cmd != c.cmd {
+				t.Errorf("TerminalPushError(%q) = %#v, want a *SessionEndedError with Cmd %q", c.cmd, err, c.cmd)
+			}
+		})
+	}
+
+	notTerminal := []struct {
+		name, cmd   string
+		params      *sfs.SFSObject
+		ownDeviceID string
+	}{
+		// push.server.tostop is the maintenance countdown toast, not the stop itself.
+		{"init", "init", nil, ownDevice},
+		{"maintenance countdown", "push.server.tostop", nil, ownDevice},
+		{"lookalike cmd", "push.user.off.extra", nil, ownDevice},
+		{"empty cmd", "", nil, ownDevice},
+		// With an errorCode the refund and device pushes only show a tip (lua :10-12 of each).
+		{"refund restart with a code", "push.refund.restart", pushParams("errorCode", "120001"), ownDevice},
+		{"device push with a code", "push.account.device.del", pushParams("errorCode", "120001", "deviceId", ownDevice), ownDevice},
+		// Another device: the client refreshes its device list (PushAccountDeviceDelMessage.lua:22).
+		{"another device", "push.account.device.del", pushParams("deviceId", "11111111-2222_n3d"), ownDevice},
+		{"another device's airKey", "push.account.device.del", pushParams("airKey", "lwDid_MTExMTExMTEtMjIyMl9uM2Q="), ownDevice},
+		{"no device named", "push.account.device.del", sfs.NewSFSObject(), ownDevice},
+		{"empty device id", "push.account.device.del", pushParams("deviceId", ""), ownDevice},
+		{"own device unknown", "push.account.device.del", pushParams("deviceId", ownDevice), ""},
+		{"own device unknown, empty pushed id", "push.account.device.del", pushParams("deviceId", ""), ""},
+	}
+	for _, c := range notTerminal {
+		if err := TerminalPushError(c.cmd, c.params, c.ownDeviceID); err != nil {
+			t.Errorf("%s: TerminalPushError(%q, %s, %q) = %v, want nil", c.name, c.cmd, c.params.StringRedacted(), c.ownDeviceID, err)
 		}
 	}
-	// push.server.tostop is the maintenance countdown toast, not the stop itself.
-	for _, cmd := range []string{"init", "push.server.tostop", "push.user.off.extra", ""} {
-		if err := TerminalPushError(cmd); err != nil {
-			t.Errorf("TerminalPushError(%q) = %v, want nil", cmd, err)
+}
+
+// TestDeviceRemovedIsAlsoAnAuthRejection: an own-device removal ends the session like a kick
+// (ErrSessionEnded, checked by assertSessionEnded above) and also voids the stored login, so
+// main.go can send the operator to a new bind or capture (exit 2) by checking it first.
+func TestDeviceRemovedIsAlsoAnAuthRejection(t *testing.T) {
+	err := TerminalPushError("push.account.device.del", pushParams("deviceId", ownDevice), ownDevice)
+	if !errors.Is(err, ErrDeviceRemoved) || !errors.Is(err, ErrAuthRejected) || !errors.Is(err, ErrSessionEnded) {
+		t.Errorf("err = %v, want ErrDeviceRemoved, ErrAuthRejected and ErrSessionEnded", err)
+	}
+	for _, other := range []error{ErrGMKicked, ErrRefundRestart, ErrKicked} {
+		if errors.Is(other, ErrAuthRejected) {
+			t.Errorf("%v wraps ErrAuthRejected; only a removed device voids the login", other)
 		}
 	}
 }
@@ -122,7 +189,72 @@ func TestReadEnvelopeEndsSessionOnTerminalPush(t *testing.T) {
 	}
 }
 
-// TestReadEnvelopePassesOrdinaryPushesThrough: only the three terminal cmds end the session; the
+// TestReadEnvelopeEndsSessionOnClientQuitPushes (B66): the GM kick, a refund restart and the
+// removal of this session's device end the session at the read choke point, like push.user.off,
+// so the run stops sending instead of carrying on until the server drops the socket.
+func TestReadEnvelopeEndsSessionOnClientQuitPushes(t *testing.T) {
+	cases := []struct {
+		cmd    string
+		params *sfs.SFSObject
+		want   error
+	}{
+		{"push.user.gm.off", sfs.NewSFSObject(), ErrGMKicked},
+		{"push.refund.restart", sfs.NewSFSObject(), ErrRefundRestart},
+		{"push.account.device.del", pushParams("deviceId", ownDevice, "airKey", ownAirKey), ErrDeviceRemoved},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			client, server := NewPipeGameConnPair(t)
+			client.SetDeviceID(ownDevice)
+			sendPush(server, tc.cmd, tc.params)
+
+			env, err := client.ReadEnvelope()
+			if env != nil {
+				t.Errorf("ReadEnvelope returned an envelope (%+v) along with the terminal error", env)
+			}
+			assertSessionEnded(t, err, tc.want)
+			if err := client.SendExtension("al.help.all", nil); !errors.Is(err, tc.want) {
+				t.Errorf("SendExtension after the end = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestReadEnvelopePassesConditionalPushesThrough: a refund or device push with an errorCode, a
+// device push naming another device, and any device push before SetDeviceID are ordinary pushes.
+func TestReadEnvelopePassesConditionalPushesThrough(t *testing.T) {
+	cases := []struct {
+		name, cmd string
+		params    *sfs.SFSObject
+		ownDevice string
+	}{
+		{"refund with a code", "push.refund.restart", pushParams("errorCode", "120001"), ownDevice},
+		{"device push with a code", "push.account.device.del", pushParams("errorCode", "120001", "deviceId", ownDevice), ownDevice},
+		{"another device", "push.account.device.del", pushParams("deviceId", "11111111-2222_n3d"), ownDevice},
+		{"own device not yet known", "push.account.device.del", pushParams("deviceId", ownDevice), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := NewPipeGameConnPair(t)
+			if tc.ownDevice != "" {
+				client.SetDeviceID(tc.ownDevice)
+			}
+			sendPush(server, tc.cmd, tc.params)
+			env, err := client.ReadEnvelope()
+			if err != nil {
+				t.Fatalf("ReadEnvelope = %v, want the %s envelope", err, tc.cmd)
+			}
+			if msg, ok := env.AsExtension(); !ok || msg.Cmd != tc.cmd {
+				t.Fatalf("got %+v, want %s", env, tc.cmd)
+			}
+			if e := client.ended.Load(); e != nil {
+				t.Errorf("connection marked ended (%v) by a non-terminal push", e)
+			}
+		})
+	}
+}
+
+// TestReadEnvelopePassesOrdinaryPushesThrough: only the terminal cmds end the session; the
 // maintenance countdown (push.server.tostop) and everything else arrive as normal envelopes.
 func TestReadEnvelopePassesOrdinaryPushesThrough(t *testing.T) {
 	client, server := NewPipeGameConnPair(t)

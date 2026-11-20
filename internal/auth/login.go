@@ -44,7 +44,7 @@ type LoginOptions struct {
 	// pf). -cs-ios sets it. Left false, this path stays Android.
 	IOSMode bool
 	// AppVersion/VersionCode, when non-empty, replace the build this login claims. Empty keeps
-	// the platform default (the iOS capture's 1.0.344/786 under IOSMode).
+	// the platform default (the audited 1.0.370/918 under IOSMode, 1.0.370/1911 on Android).
 	AppVersion  string
 	VersionCode string
 }
@@ -270,11 +270,18 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	httpClient := gsl.DefaultHTTPClient()
 
+	// The identity first: its deviceId picks check-version's gate host list, as the client's
+	// device uid does (gsl.CheckVersionAs).
+	ident, err := LoadOrCreateDeviceIdentity(opts.IOSMode)
+	if err != nil {
+		return nil, err
+	}
+
 	slog.Info("check-version: fetch RSA pubkey and pick gate host", "iosMode", opts.IOSMode)
 	// No zone yet: the persisted identity doesn't record one, so `server` stays empty, as on a
 	// real client's first launch. The request claims the same build the Login will.
 	build := loginBuild(opts.IOSMode, opts.AppVersion, opts.VersionCode)
-	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "")
+	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "", ident.DeviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -287,10 +294,6 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	}
 	slog.Info("RSA pubkey", "bits", crypto.RSAModulusBitLen(pub))
 
-	ident, err := LoadOrCreateDeviceIdentity()
-	if err != nil {
-		return nil, err
-	}
 	slog.Info("device identity", "deviceIdLen", len(ident.DeviceID), "iosMode", opts.IOSMode)
 	slog.Info("air key", "airKeyLen", len(ident.AirKey()))
 	// Not "username": ident.Username -- that would print the operator's real persisted account
@@ -302,7 +305,7 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	// The access token GSL issues is bound to this platform. An iOS Login with an Android-issued
 	// token is refused (ec=28/E005), so -cs-ios has to start here, not only at BuildLoginParams.
 	slog.Info("step 2: GSL getserverlist", "opt", opt.Opt, "platform", build.Platform)
-	lsr, err := gsl.GetServerListAs(httpClient, gateHost, pub, build.Platform, ident.DeviceID, opt, "", ident.GameUid)
+	lsr, err := gsl.GetServerListFor(httpClient, gateHost, pub, FormDevice(opts.IOSMode, ident.DeviceID, CapturedDevice{}), ident.DeviceID, opt, "", ident.GameUid)
 	if err != nil {
 		return nil, err
 	}
@@ -438,6 +441,8 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 			IOSMode:     opts.IOSMode,
 			AppVersion:  opts.AppVersion,
 			VersionCode: opts.VersionCode,
+			NoZstd:      !cv.NewPacketZstd(),
+			Android:     ident.Android,
 		})
 		loginPF = loginParams.GetString("pf")
 		loginContent := sfs.NewSFSObject()
@@ -478,8 +483,14 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		un := env.Content.GetString("un")
 		slog.Info("login OK", "usernameLen", len(un))
 		claimed := loginParams.GetString("appVersion")
-		logLoginUpdateGate(env.Content, "base-zone Login", claimed)
+		if err := checkLoginUpdateGate(env.Content, "base-zone Login", claimed); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
 		conn.SetAppVersion(claimed)
+		// The deviceId the Login sent is the client's DEVICE_ID, which a push.account.device.del
+		// must name to end the session (PushAccountDeviceDelMessage.lua:8-25; 1.0.370 audit B66).
+		conn.SetDeviceID(loginParams.GetString("deviceId"))
 		if un != "" && un != ident.Username {
 			if err := ident.SaveUsername(un); err != nil {
 				slog.Warn("failed to persist username", "error", err)
@@ -661,28 +672,45 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED (push): errorCode=%v gameUid=%s loginKey=%s: %w",
 			ec.Val, msg2.Params.GetString("gameUid"), sfs.Redact(msg2.Params.GetString("loginKey")), session.ErrAuthRejected)
 	}
+	// No gameUid means no account was logged in, whatever else the push carries: the client shows
+	// status's message and stops before it reads loginKey or accountArr
+	// (AccountManager:AccountLoginHandle, DataCenter/AccountData/AccountManager.lua:193-206, 1.0.370;
+	// status absent -> 280061, 1 -> 280112, 2 -> 280081). Nothing is saved. As in Lua, only an
+	// absent or empty gameUid counts; a wrong-typed one is warned about below and not persisted.
+	if v, ok := msg2.Params.Get("gameUid"); !ok || v.Val == nil || v.Val == "" {
+		_ = conn.Close()
+		return nil, fmt.Errorf("LOGIN-WITH-CODE FAILED (push): push.account.login.new carries no gameUid, so no account was bound (status=%q; nothing was saved): %w",
+			scalarString(msg2.Params, "status"), session.ErrAuthRejected)
+	}
 	// Not msg2.Params.String() -- the full response carries loginKey (and
 	// accountArr) in cleartext, and String() does no field-level redaction.
 	slog.Info("login success", "gameUid", msg2.Params.GetString("gameUid"), "loginKey", sfs.Redact(msg2.Params.GetString("loginKey")))
 	result.Account = msg2.Params
 
-	// The account's roles. -server binds the picked role's gameUid instead of the top-level one,
-	// with the entry's own loginKey when it carries one, else the account's (see accountRole:
-	// binding a role other than the top-level one is static analysis only).
+	// The account's roles. -server binds the picked role's gameUid instead of the top-level one
+	// (binding a role other than the top-level one is static analysis only). Every role binds with
+	// the account's top-level loginKey: the client gives each RolesInfo that key
+	// (AccountManager.lua:207-215) and RolesInfo.Parse reads none of its own.
 	roles := accountRoles(msg2.Params)
 	logAccountRoles(roles)
 	loginKey, gameUid, username := msg2.Params.GetString("loginKey"), msg2.Params.GetString("gameUid"), msg2.Params.GetString("gameUserName")
+	// roleZone is the bound role's, which the client's role picker caches as SERVER_ZONE
+	// (UIRoleLoginView.lua:110-120) and every later GSL call sends; BootstrapOwnDevice reads it.
+	roleZone := ""
+	for _, r := range roles {
+		if r.GameUid == gameUid {
+			roleZone = r.Zone
+			break
+		}
+	}
 	if opts.Server != "" {
 		role, err := pickRole(roles, opts.Server)
 		if err != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("login: -server: %w (the email code is spent and nothing was saved: bind again from a fresh LASTWAR_STATE_DIR with one of the servers listed above)", err)
 		}
-		slog.Info("binding the role on the requested server", "server", role.ServerID, "zone", role.Zone, "gameUid", role.GameUid, "ownLoginKey", role.LoginKey != "")
-		gameUid, username = role.GameUid, role.Name
-		if role.LoginKey != "" {
-			loginKey = role.LoginKey
-		}
+		slog.Info("binding the role on the requested server", "server", role.ServerID, "zone", role.Zone, "gameUid", role.GameUid)
+		gameUid, username, roleZone = role.GameUid, role.Name, role.Zone
 	}
 
 	// session.WarnIfWrongTypedField below adds a diagnostic for the "field present but wrong-typed"
@@ -708,6 +736,11 @@ func Login(opts LoginOptions) (*LoginResult, error) {
 	if un := username; un != "" {
 		if err := ident.SaveUsername(un); err != nil {
 			slog.Warn("failed to persist username", "error", err)
+		}
+	}
+	if roleZone != "" {
+		if err := ident.SaveZone(roleZone); err != nil {
+			slog.Warn("failed to persist the bound role's zone", "error", err)
 		}
 	}
 
@@ -783,10 +816,10 @@ func waitForInitPush(conn *session.GameConn, timeout time.Duration) ([]game.Buil
 		if !sentActivePull && !time.Now().Before(halfway) {
 			sentActivePull = true
 			slog.Info("halfway through init-wait window; sending login.init as active-pull fallback")
-			req := sfs.NewSFSObject()
-			req.PutInt("_id", 2)
-			req.PutUtfString("dataConfigMd5", "")
-			if err := conn.SendExtension("login.init", req); err != nil {
+			// The 1.0.370 request is built in Lua with no params (Net/Msgs/LoginInitCommand.lua,
+			// sent by UI/UIDisconnect/View/UIDisconnectView.lua:16-22): only the _id SendExtension
+			// adds. The C# builder that would add dataConfigMd5 has no caller.
+			if err := conn.SendExtension("login.init", nil); err != nil {
 				// Same terminal treatment as a failed ReadEnvelope below: a failed send is a
 				// definite, already-observed connection failure, not something to merely log and
 				// keep waiting past -- see this function's doc comment for why falling through
@@ -866,6 +899,15 @@ func waitForInitPush(conn *session.GameConn, timeout time.Duration) ([]game.Buil
 		msg, ok := env.AsExtension()
 		if ok && msg.Cmd == "init" {
 			return dedupeBuildings(game.ParseInitBuildings(msg.Params)), dedupeVisitors(game.ParseInitVisitors(msg.Params)), true, nil
+		}
+		// The login.init reply is the init data itself unless it carries an errorCode
+		// (LoginInitCommand.CSHandleResponse, Assembly-CSharp.decompiled.cs:83023-83030, 1.0.370).
+		if ok && msg.Cmd == "login.init" {
+			if !msg.Params.Has("errorCode") {
+				slog.Info("got the init data in the login.init reply")
+				return dedupeBuildings(game.ParseInitBuildings(msg.Params)), dedupeVisitors(game.ParseInitVisitors(msg.Params)), true, nil
+			}
+			slog.Warn("login.init reply carries an errorCode; still waiting for init", "params", msg.Params.StringRedacted())
 		}
 		// maxNonMatchingEnvelopesPerWait (round-53 fix, doc comment above): a non-extension
 		// envelope (!ok, e.g. the client's own background heartbeat pong) and a well-formed but

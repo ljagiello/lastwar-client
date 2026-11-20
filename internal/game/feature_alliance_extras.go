@@ -19,8 +19,10 @@ import (
 //     present and false (AllianceStarManager.lua:365-375).
 //
 // Not sent: the legacy red envelopes (get.alliance.red.packet -> get.red.pack). The client still
-// lists them at login, but nothing in 1.0.364 opens the window that claims them; chat red packets
-// need the chat WebSocket.
+// lists them at login, but nothing in 1.0.364 or 1.0.370 opens the window that claims them. The
+// red packets posted in alliance chat (post 611) are the opt-in feature red-packets
+// (feature_red_packets.go). The ceremony's emoji (thumbs) reward box is the separate opt-in
+// feature alliance-star-emoji.
 const (
 	allianceStarActivityCmd = "alliance.star.gain.activity.info.new"
 	allianceStarInfoCmd     = "alliance.star.gain.ceremony.info.new"
@@ -49,7 +51,10 @@ func evInAlliance(in *Init) bool {
 	return evString(in.Object("user"), "allianceId") != ""
 }
 
-func runAllianceExtras(conn *session.GameConn, in *Init) error {
+// allianceStarCeremony applies the ceremony gates above and returns the
+// alliance.star.gain.ceremony.info.new reply, or nil when there is no ceremony or a send failed
+// (recorded in b). alliance-extras and alliance-star-emoji both read the ceremony through it.
+func allianceStarCeremony(b *evBatch, in *Init) *session.ExtensionMessage {
 	if in == nil || in.Raw == nil || !evInAlliance(in) || !evSwitchOn(in, "alliance_star") {
 		return nil
 	}
@@ -57,14 +62,18 @@ func runAllianceExtras(conn *session.GameConn, in *Init) error {
 	if !ok || evNow().UnixMilli() >= end {
 		return nil
 	}
-	b := &evBatch{conn: conn}
 	if !evBool(in.Raw, "allianceStarNotify") {
 		msg := b.send("alliance star activity", allianceStarActivityCmd, sfs.NewSFSObject())
 		if msg == nil || !evBool(msg.Params, "hasCeremony") {
-			return b.err()
+			return nil
 		}
 	}
-	msg := b.send("alliance star ceremony", allianceStarInfoCmd, sfs.NewSFSObject())
+	return b.send("alliance star ceremony", allianceStarInfoCmd, sfs.NewSFSObject())
+}
+
+func runAllianceExtras(conn *session.GameConn, in *Init) error {
+	b := &evBatch{conn: conn}
+	msg := allianceStarCeremony(b, in)
 	if msg == nil {
 		return b.err()
 	}

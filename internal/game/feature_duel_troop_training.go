@@ -8,15 +8,21 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"time"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
 )
 
-// Alliance Duel troop training (DUEL.md §4.2 "Starts", §7.2-7.3). OPT-IN: it spends food and iron.
+// Alliance Duel troop training (docs/alliance-duel.mdx). OPT-IN: it spends food and iron.
 // It trains only when today's theme is Total Mobilization (110004, Fri) or Enemy Buster (110005,
 // Sat) AND today scores training (type 4) or training speed-ups (type 51, value 4). The scheduler
-// releases the feature on any day that scores either type, so Run checks the theme again.
+// releases the feature on any day that scores either type, so Run checks the theme again. A day
+// that scores training speed-ups but not training itself (Enemy Buster: heroevent#110005 lists
+// 90501, 51/4, and no type-4 row, tables 40413) earns nothing for the batch but the speed-up items
+// applied to it later; duel-speedups reads its jobs from init, so that is on a later run. Such a
+// day starts a batch only while a training speed-up item (200230-200235) is held and another run
+// (duelTrainRunInterval) still fits before the day ends; otherwise the camps are left idle.
 //
 // Every idle Military Camp (init building_new bId 10103000) gets what the camp panel's Train
 // button sends (UILWMilitaryCampPanelView.lua:863-872; BuildingCampTrainingMessage.lua:4-9):
@@ -32,8 +38,9 @@ import (
 //     train_need_barrack and the science train_need_science is researched (T10 and T11: init
 //     science_new itemId 120011100 at level > 0, ScienceManager.lua:152-155). T11 also needs
 //     effect train_need_buff (90031 UNLOCK_T11) > 0, and the camp shows it only from season 4 day
-//     64 on (soldier_eleven_param k1 "4|64", T11Util.lua:311-333). T11 is trained here only past
-//     season 4, because the season day isn't read. sLevel is the tier, soldier_lv 1-11
+//     64 on (soldier_eleven_param k1 "4|64", T11Util.IfShowT11InCamp, T11Util.lua:345-363). The
+//     season day is duelSeasonDay's, from init playerServerSeasonInfo.seasonStartTime; without it
+//     T11 is trained only past season 4. sLevel is the tier, soldier_lv 1-11
 //     (GetSoldierLevelById, SoldierDataManager.lua:208-214; soldier_lv, SoldierDataTemplate.lua:57).
 //   - Count: the slider maximum is floor((para1 + worker TrainLimitNum) * (1 + rate)), where rate
 //     is the worker TrainLimitRate plus effect 50105 (:628-648). Here it is floor(para1 * (1 + init
@@ -61,6 +68,11 @@ import (
 // The tables are 1.0.364 lw_soldier 3005-3015 and building 10103001-10103035 para1. building_B
 // has the same para1, and both tables are unchanged in live 39516 (coverage/reports/tables.md).
 // Static-only: not sent live yet.
+// duelTrainRunInterval is the time to the next scheduled run (the cron runs every 3 hours). A
+// batch started for its speed-ups only is worth starting when a run that time later is still
+// inside the duel day, minus duel-speedups' own end margin.
+const duelTrainRunInterval = 3 * time.Hour
+
 const (
 	duelTrainCmd        = "building.camp.training"
 	duelTrainScience    = "120011100" // science_id of train_need_science 120011101 (APS_science)
@@ -68,6 +80,7 @@ const (
 	duelTrainLimitRate  = "50105"     // WorkerEffectDefine.TrainLimitRate
 	duelTrainCostRate   = "50106"     // WorkerEffectDefine.TrainCostRate
 	duelTrainT11Season  = 4           // soldier_eleven_param k1 "4|64"
+	duelTrainT11Day     = 64          // soldier_eleven_param k1 "4|64"
 	duelTrainResIron    = "metal"
 	duelTrainResFood    = "money"
 	duelTrainBasisPoint = 10000
@@ -178,9 +191,16 @@ func duelIdleCamps(in *Init) []duelCamp {
 
 // duelTrainUnlocks is what the unit unlocks depend on besides the camp level.
 type duelTrainUnlocks struct {
-	science bool  // science 120011100 researched
-	t11Buff bool  // init effect 90031 > 0
-	season  int64 // init playerServerSeasonInfo.seasonId
+	science   bool  // science 120011100 researched
+	t11Buff   bool  // init effect 90031 > 0
+	season    int64 // init playerServerSeasonInfo.seasonId
+	seasonDay int64 // duelSeasonDay's day, 0 when unknown
+}
+
+// t11Shown is T11Util.IfShowT11InCamp (T11Util.lua:345-363) with soldier_eleven_param k1 "4|64",
+// plus the unit's own unlock, effect 90031: past season 4, or in season 4 from day 64 on.
+func (u duelTrainUnlocks) t11Shown() bool {
+	return u.t11Buff && (u.season > duelTrainT11Season || u.season == duelTrainT11Season && u.seasonDay >= duelTrainT11Day)
 }
 
 func duelTrainUnlocksOf(in *Init) duelTrainUnlocks {
@@ -193,7 +213,11 @@ func duelTrainUnlocksOf(in *Init) duelTrainUnlocks {
 	if f, ok := duelFloat(in.Object("effect"), duelTrainT11Buff); ok && f > 0 {
 		u.t11Buff = true
 	}
-	u.season, _ = evNum(in.Object("playerServerSeasonInfo"), "seasonId")
+	var dayOK bool
+	u.season, u.seasonDay, dayOK = duelSeasonDay(in, evNow())
+	if !dayOK {
+		u.seasonDay = 0
+	}
 	return u
 }
 
@@ -204,12 +228,27 @@ func duelTopUnit(lv int64, u duelTrainUnlocks) (duelUnit, bool) {
 		switch {
 		case lv < unit.camp:
 		case unit.science && !u.science:
-		case unit.t11 && (!u.t11Buff || u.season <= duelTrainT11Season):
+		case unit.t11 && !u.t11Shown():
 		default:
 			return unit, true
 		}
 	}
 	return duelUnit{}, false
+}
+
+// duelTrainSpeedupsOnlyHold says why a day that scores training speed-ups but not training holds
+// the batch, or "" when it goes ahead: a training speed-up item is held (duelSpeedupsInventory) and
+// the next run, duelTrainRunInterval from now, still falls before the day's end less
+// duelSpeedupsEndMargin.
+func duelTrainSpeedupsOnlyHold(in *Init, d *DuelDay) string {
+	owned := duelSpeedupsInventory(in)
+	if !slices.ContainsFunc(duelSpeedupSpecific[duelSpeedupTraining], func(id int64) bool { return owned[id] > 0 }) {
+		return "no training speed-up item (200230-200235) is held"
+	}
+	if !evNow().Add(duelTrainRunInterval).Before(d.End.Add(-duelSpeedupsEndMargin)) {
+		return "no later run fits before the duel day ends"
+	}
+	return ""
 }
 
 // duelBasisPoints is f in units of 1/10000, rounded down (the client rounds the rates to 4
@@ -248,6 +287,13 @@ func runDuelTroopTraining(conn *session.GameConn, in *Init) error {
 	if !d.Scores(DuelScoreTrainUnit, "") && !d.Scores(DuelScoreSpeedUp, DuelQueueTraining) {
 		slog.Info(feature+": today's duel scores neither training nor training speed-ups; held", "theme", d.ThemeName())
 		return nil
+	}
+	if !d.Scores(DuelScoreTrainUnit, "") {
+		if why := duelTrainSpeedupsOnlyHold(in, d); why != "" {
+			slog.Info(feature+": today's duel scores training speed-ups but not training; held: "+why, "theme", d.ThemeName(),
+				"dayEnds", d.End)
+			return nil
+		}
 	}
 	res := in.Object("resource")
 	iron, okIron := evNum(res, duelTrainResIron)

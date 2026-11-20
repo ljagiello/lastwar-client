@@ -15,9 +15,9 @@ import (
 // `al.call.help {uuid: Long, type: Int, qType: Int, itemId: UtfString}` (AllianceCallHelpMessage.lua:
 // 4-10) is free and is what the city help bubbles send (BuildBubbleManager.lua:1327-1365,
 // 3033-3041, 3434-3442, 3854-3861). AllianceHelpType is 0 building, 1 queue, 2 repair
-// (EnumType.lua:5265-5270); a building's help field is a bitfield, 1 upgrade helped, 2 repair
-// helped (:9745-9750). A building's bubbles run only while it is not folded (state != 2,
-// BuildingStateType, EnumType.lua:3299-3305): the upgrade bubble while dStT <= 0 and the repair
+// (Global/EnumType.lua:5299-5304); a building's help field is a bitfield, 1 upgrade helped, 2
+// repair helped (AllianceHelpState, :9792-9797). A building's bubbles run only while it is not
+// folded (state != 2, BuildingStateType, :3305-3311): the upgrade bubble while dStT <= 0 and the repair
 // bubble while dStT > 0 (BuildBubbleManager.lua:935, 3417; WorldBuildBubbleManager.lua:121, 237).
 // Requests, each sent once per timer (the server then sets help/isHelped):
 //   - upgrade: {building uuid, 0, 0, ""} while lv > 0 && dStT <= 0 && now < uT && help ∈ {0, 2}
@@ -72,7 +72,9 @@ func runAllianceCallHelp(conn *session.GameConn, in *Init) error {
 			continue
 		}
 		help, _ := claimInt(b, "help")
-		uT, _ := claimInt(b, "uT")
+		// The build queue on the building, when there is one, carries the upgrade end the client
+		// uses (BuildQueueManager.lua:18-55; 1.0.370 audit B72).
+		uT, _ := buildingUpgradeTime(in, b)
 		upgradeDone := uT > 0 && now >= uT
 		if dStT, _ := claimInt(b, "dStT"); dStT <= 0 {
 			if uT > 0 && !upgradeDone && (help == 0 || help == 2) {

@@ -33,6 +33,18 @@ const (
 	refreshedRtTime = 1791900001
 )
 
+// configuredServerReply is a no-opt lookup reply naming the server these tests configure
+// (10.0.0.1:10783) and carrying no token, as a live lookup does: the pre-Login lookup (1.0.370
+// audit B40) then changes nothing.
+func configuredServerReply() gsl.LoginServerListRespon {
+	return gsl.LoginServerListRespon{
+		Code: "0",
+		ServerList: []gsl.LoginServerInfo{
+			{ID: "783", IP: "10.0.0.1", Port: testutil.FlexPort(lookupPort), Zone: lookupZone, GameUid: lookupGameUid},
+		},
+	}
+}
+
 // refreshReply is a GSL opt=refresh reply: the role's server plus a fresh at and a rotated rt.
 func refreshReply() gsl.LoginServerListRespon {
 	r := lookupReply()
@@ -114,10 +126,11 @@ func wantRefreshedTokens(t *testing.T, path string) SessionConfig {
 
 // TestRunCrossServerTestRefreshesAfterE011: a Login rejected with E011 is followed by one GSL
 // opt=refresh with the session config's refresh token and one more Login with the fresh access
-// token, as in the real client, and the new pair lands in the session config.
+// token, as in the real client, and the new pair lands in the session config. The first GSL call is
+// the pre-Login lookup.
 func TestRunCrossServerTestRefreshesAfterE011(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	client := testutil.UseInMemoryGSL(t, refreshReply())
+	client := testutil.UseInMemoryGSL(t, configuredServerReply(), refreshReply())
 	gslCalls := countGetServerList(client)
 	var seen loginAts
 	dial, dialed := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer(refreshedAt, &seen)})
@@ -140,8 +153,8 @@ func TestRunCrossServerTestRefreshesAfterE011(t *testing.T) {
 	if got, want := seen.get(), []string{"at-old", refreshedAt}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("Login access tokens = %v, want %v", got, want)
 	}
-	if n := gslCalls(); n != 1 {
-		t.Errorf("getserverlist requests = %d, want 1 (the refresh)", n)
+	if n := gslCalls(); n != 2 {
+		t.Errorf("getserverlist requests = %d, want 2 (the lookup, then the refresh)", n)
 	}
 	if got := dialed(); len(got) != 2 {
 		t.Errorf("dialed %v, want the configured server twice", got)
@@ -194,10 +207,11 @@ func TestRunCrossServerTestRefreshesBeforeLogin(t *testing.T) {
 }
 
 // TestRunCrossServerTestFreshTokenNeedsNoRefresh: a working access token younger than 30 days is
-// used as it is, with no GSL call, and nothing is rewritten.
+// used as it is, with no refresh, and nothing is rewritten. The one GSL call is the pre-Login
+// lookup, which lists the configured server.
 func TestRunCrossServerTestFreshTokenNeedsNoRefresh(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	client := testutil.UseInMemoryGSL(t, refreshReply())
+	client := testutil.UseInMemoryGSL(t, configuredServerReply())
 	gslCalls := countGetServerList(client)
 	var seen loginAts
 	dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer("at-old", &seen)})
@@ -215,8 +229,8 @@ func TestRunCrossServerTestFreshTokenNeedsNoRefresh(t *testing.T) {
 	if got := seen.get(); fmt.Sprint(got) != fmt.Sprint([]string{"at-old"}) {
 		t.Errorf("Login access tokens = %v, want [at-old]", got)
 	}
-	if n := gslCalls(); n != 0 {
-		t.Errorf("getserverlist requests = %d, want 0", n)
+	if n := gslCalls(); n != 1 {
+		t.Errorf("getserverlist requests = %d, want 1 (the lookup)", n)
 	}
 	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
 		t.Errorf("session config written although nothing changed (stat err = %v)", err)
@@ -280,7 +294,7 @@ func runRefreshHelper(t *testing.T, name string, env ...string) (int, string) {
 func TestRunCrossServerTestRefreshSavedBeforeLogin(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
-		client := testutil.UseInMemoryGSL(t, refreshReply())
+		client := testutil.UseInMemoryGSL(t, configuredServerReply(), refreshReply())
 		var seen loginAts
 		dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer("never", &seen)})
 		runCrossServerTest(crossServerTestOpts{
@@ -347,11 +361,12 @@ func TestRunCrossServerTestRefreshRejectedExits2(t *testing.T) {
 }
 
 // TestRunCrossServerTestNoRefreshTokenKeepsRecaptureHint: without a refresh token an E011 still
-// exits 2 with the recapture instructions and no GSL call, as before.
+// exits 2 with the recapture instructions and no GSL call after the Login, as before. The one GSL
+// call is the pre-Login lookup.
 func TestRunCrossServerTestNoRefreshTokenKeepsRecaptureHint(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
-		client := testutil.UseInMemoryGSL(t, refreshReply())
+		client := testutil.UseInMemoryGSL(t, configuredServerReply())
 		var seen loginAts
 		dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer("never", &seen)})
 		runCrossServerTest(crossServerTestOpts{
@@ -364,8 +379,8 @@ func TestRunCrossServerTestNoRefreshTokenKeepsRecaptureHint(t *testing.T) {
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2; stderr=%s", code, stderr)
 	}
-	if !strings.Contains(stderr, "Recapture:") || strings.Contains(stderr, "GSL getserverlist") {
-		t.Errorf("want the recapture hint and no GSL call; stderr=%s", stderr)
+	if !strings.Contains(stderr, "Recapture:") || strings.Count(stderr, "GSL getserverlist: looking up the game server") != 1 || strings.Contains(stderr, "refreshing the access token") {
+		t.Errorf("want the recapture hint, the one pre-Login lookup and no refresh; stderr=%s", stderr)
 	}
 }
 
@@ -382,7 +397,8 @@ func banningServer(server *session.GameConn) {
 
 // TestRunCrossServerTestBannedExits4: a banned role exits 4 with the stop-the-runs message, with no
 // recapture hint and no GSL refresh even though the config holds a refresh token. Any getserverlist
-// request fails, so a refresh would end the run with 1, not 4.
+// request fails: the pre-Login lookup falls back to the configured address, and a refresh would end
+// the run with 1, not 4.
 func TestRunCrossServerTestBannedExits4(t *testing.T) {
 	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
 		t.Setenv("HOME", t.TempDir())
@@ -448,7 +464,14 @@ func TestMainUsesSessionConfigRefreshToken(t *testing.T) {
 			reply = noRtReply()
 		}
 		reply.ServerList = []gsl.LoginServerInfo{{ID: "783", IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: lookupZone, GameUid: lookupGameUid}}
-		testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, reply))
+		replies := []gsl.LoginServerListRespon{reply}
+		if os.Getenv("LASTWAR_TEST_LOOKUP_NO_TOKENS") != "" {
+			// The pre-Login lookup's reply carries no token, as a live one doesn't.
+			lookup := reply
+			lookup.At, lookup.Rt = nil, nil
+			replies = []gsl.LoginServerListRespon{lookup, reply}
+		}
+		testutil.UseFakeGSLServer(t, testutil.NewFakeGSLServer(t, replies...))
 		cfgPath := os.Getenv("LASTWAR_TEST_CFG")
 		if os.Getenv("LASTWAR_TEST_SET_ADDR") == "1" {
 			cfg := readSessionConfig(t, cfgPath)
@@ -488,7 +511,7 @@ func TestMainUsesSessionConfigRefreshToken(t *testing.T) {
 			[]string{"LASTWAR_TEST_GOOD=at-explicit", "LASTWAR_TEST_SET_ADDR=1", "LASTWAR_TEST_ARGS=-cs-at at-explicit"}, 0, "[at-explicit]", false},
 		{"-cs-deviceid ignores the config's refresh token",
 			SessionConfig{Zone: lookupZone, GameUid: lookupGameUid, DeviceID: "dev_n3d", RefreshToken: "rt-old", AccessToken: "at-old"},
-			[]string{"LASTWAR_TEST_GOOD=" + refreshedAt, "LASTWAR_TEST_SET_ADDR=1", "LASTWAR_TEST_ARGS=-cs-deviceid other_n3d"}, 2, "", false},
+			[]string{"LASTWAR_TEST_GOOD=" + refreshedAt, "LASTWAR_TEST_SET_ADDR=1", "LASTWAR_TEST_ARGS=-cs-deviceid other_n3d", "LASTWAR_TEST_LOOKUP_NO_TOKENS=1"}, 2, "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			cfgPath := writeSessionConfig(t, c.cfg)
@@ -679,13 +702,14 @@ func TestRunCrossServerTestRefreshWithoutRtKeepsTheRefreshToken(t *testing.T) {
 		at         string
 		staleAt    bool
 		wantLogins []string
+		replies    []gsl.LoginServerListRespon // the pre-Login lookup's first, when there is one
 	}{
-		{"after E011", "at-old", false, []string{"at-old", refreshedAt}},
-		{"before the Login", "at-old", true, []string{refreshedAt}},
+		{"after E011", "at-old", false, []string{"at-old", refreshedAt}, []gsl.LoginServerListRespon{configuredServerReply(), noRtReply()}},
+		{"before the Login", "at-old", true, []string{refreshedAt}, []gsl.LoginServerListRespon{noRtReply()}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
-			client := testutil.UseInMemoryGSL(t, noRtReply())
+			client := testutil.UseInMemoryGSL(t, c.replies...)
 			var seen loginAts
 			dial, _ := recordingDial(map[string]func(*session.GameConn){"10.0.0.1:10783": tokenCheckingServer(refreshedAt, &seen)})
 			cfgPath := writeSessionConfig(t, SessionConfig{IP: "10.0.0.1", Port: lookupPort, Zone: lookupZone, GameUid: lookupGameUid, AccessToken: c.at, RefreshToken: "rt-old", RefreshTokenTime: 42})

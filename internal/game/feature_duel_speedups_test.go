@@ -3,6 +3,7 @@ package game
 import (
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -488,7 +489,7 @@ func TestDuelSpeedupsCheckParamsRefusesUnsafeRequests(t *testing.T) {
 		p.PutUtfString("itemIDs", "200213;2")
 		return p
 	}
-	if err := duelSpeedupsCheckParams(duelSpeedupsBuildCmd, ok(), owned); err != nil {
+	if err := duelSpeedupsCheckParams(duelSpeedupsBuildCmd, ok(), owned, 2*time.Hour.Milliseconds()); err != nil {
 		t.Fatalf("a valid request was refused: %v", err)
 	}
 	bad := map[string]func(p *sfs.SFSObject){
@@ -505,7 +506,7 @@ func TestDuelSpeedupsCheckParamsRefusesUnsafeRequests(t *testing.T) {
 	for name, mutate := range bad {
 		p := ok()
 		mutate(p)
-		if err := duelSpeedupsCheckParams(duelSpeedupsBuildCmd, p, owned); err == nil {
+		if err := duelSpeedupsCheckParams(duelSpeedupsBuildCmd, p, owned, 2*time.Hour.Milliseconds()); err == nil {
 			t.Errorf("%s: request was not refused", name)
 		}
 	}
@@ -513,12 +514,59 @@ func TestDuelSpeedupsCheckParamsRefusesUnsafeRequests(t *testing.T) {
 	camp.PutLong("uuid", 1)
 	camp.PutUtfString("itemId", "200213;1")
 	camp.PutInt("useGold", 1)
-	if err := duelSpeedupsCheckParams(duelSpeedupsCampCmd, camp, owned); err == nil {
+	if err := duelSpeedupsCheckParams(duelSpeedupsCampCmd, camp, owned, time.Hour.Milliseconds()); err == nil {
 		t.Error("building.camp.accel with useGold was not refused")
 	}
-	if err := duelSpeedupsCheckParams("item.buyAndUse", ok(), owned); err == nil {
+	if err := duelSpeedupsCheckParams("item.buyAndUse", ok(), owned, 2*time.Hour.Milliseconds()); err == nil {
 		t.Error("a non-speed-up command was not refused")
 	}
+	// MASTER B50: two 1-hour items fit a job with 2 h - 119 s left (the picker's 59 s and 60 s
+	// allowances), not one with less.
+	if err := duelSpeedupsCheckParams(duelSpeedupsBuildCmd, ok(), owned, 2*time.Hour.Milliseconds()-119_000); err != nil {
+		t.Errorf("items within remaining + 119 s were refused: %v", err)
+	}
+	if err := duelSpeedupsCheckParams(duelSpeedupsBuildCmd, ok(), owned, 2*time.Hour.Milliseconds()-119_001); err == nil {
+		t.Error("items beyond remaining + 119 s were not refused")
+	}
+}
+
+func TestDuelSpeedupsLeavesJobsWithAnAbsurdEnd(t *testing.T) {
+	// MASTER B50: an end of LongMaxValue (QueueDataManager.lua:579) or past a year is never a
+	// target; before, the picker would have spent every owned item on it. The HQ 34 upgrade's
+	// 149 days (building 10100034, tables 40413) is a real job and stays one.
+	if !duelSpeedupsSaneEnd(evTestNow.Add(150*24*time.Hour).UnixMilli(), evTestNow.UnixMilli()) {
+		t.Error("a 150-day job must stay a target")
+	}
+	clearSpeedTrip(t)
+	c := speedInit{
+		jobs:  []speedJob{{kind: duelSpeedupBuild, uuid: 1, left: 366 * 24 * time.Hour}, {kind: duelSpeedupBuild, uuid: 2, left: time.Hour}},
+		items: map[int64]int64{build1h: 5, 200217: 9},
+		gold:  100,
+		extraRaw: func(raw *sfs.SFSObject) {
+			q := sfs.NewSFSObject()
+			q.PutLong("uuid", 3)
+			q.PutInt("type", finishedTimersQueueResearch)
+			q.PutLong("sT", evTestNow.Add(-time.Hour).UnixMilli())
+			q.PutLong("uT", math.MaxInt64)
+			arr := sfs.NewSFSArray()
+			arr.AddSFSObject(q)
+			raw.PutSFSArray("queue_new", arr)
+		},
+	}
+	jobs := duelSpeedupsJobs(c.build(), evTestNow.UnixMilli())
+	if len(jobs) != 1 || jobs[0].uuid != 2 {
+		var got []int64
+		for _, j := range jobs {
+			got = append(got, j.uuid)
+		}
+		t.Fatalf("jobs %v, want only job 2", got)
+	}
+	f := newSpeedFake(speedTue(), c)
+	sent, err := runSpeed(t, f, c, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSent(t, sent, "build.ccd.m.new 2 200213;1")
 }
 
 func TestDuelSpeedupsBaseExpansionUsesConstructionItemsOnly(t *testing.T) {

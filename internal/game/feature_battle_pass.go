@@ -2,7 +2,9 @@ package game
 
 import (
 	"fmt"
+	"log/slog"
 	"strconv"
+	"strings"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -18,14 +20,25 @@ import (
 //   - Tasks with state 1 (claimable) are claimed one at a time, as the task cells do:
 //     receive.battlepass.task.reward {activityId: Int, taskId: Int} for type 27,
 //     bp.task.reward {activityId: Int, taskId: UtfString} for type 142
-//     (UIBattlePassNormalNewTaskCell.lua:77-105). State 2 with a locked premium pass opens the
-//     purchase popup in the client and is never sent.
+//     (UIBattlePassNormalNewTaskCell.lua:82-103, 255-266). A task in state 2 (free half claimed)
+//     with premium exp left (payExp != 0) is claimed the same way when a track was bought (unlock 1,
+//     or high_unlock 1 as the season cell allows, UISeasonBattlePassTaskItem.lua:249-257): the
+//     client's counter adds it (ActBattlePassInfo.lua:425-426) and its cell sends it. With no
+//     track bought the cell opens the purchase popup instead, so that case is never sent. payExp is
+//     the task's wire field, except in a BattlePass_new reply (activityType 142), where it is the
+//     count of the activity's score item (table activity para_5) in the task's payReward, 0 when
+//     there is none (ParseTaskArr, :73-140, 244-249).
 //   - Levels: receive.battlepass.all.reward / receive.bpv2.all.reward {activityId: Int} when a
-//     reached level's free row is unclaimed (ActBattlePassInfo:GetRedNum, :374-435; the one-click
-//     button, UIBattlePass.lua:858-868). The request has no track parameter: the server pays the
-//     premium rows only when the pass was bought (unlock 1), so it never buys anything; its handler
-//     never touches gold, unlike buy.battle.pass.level, which this never sends. Whether the server
-//     also pays the overflow box is unverified.
+//     reached level's free row is unclaimed (ActBattlePassInfo:GetRedNum, :348-435; the one-click
+//     button, UIBattlePass.lua:946-957), when a bought pass (unlock 1) has a reached premium row
+//     unclaimed, or, for a pass with a high tier (the reply's highExchangeId set, HaveHighPayStage
+//     :622-624) bought (high_unlock 1), a reached row whose special2State is present and 0 (:398-400;
+//     the client defaults a missing one to 0, :60, but a pass without the tier never sends it). The
+//     high rows count only on the general pass views, not the login or seven-day ones (showUiType
+//     2, 3, 6, 9; :356-385). The request has no track parameter: the server pays the premium rows
+//     only when the pass was bought, so it never buys anything; its handler never touches gold,
+//     unlike buy.battle.pass.level, which this never sends. Whether the server also pays the
+//     overflow box is unverified.
 //
 // receive.season.battlepass.all.reward is not sent: its only sender (SeasonPassManager:
 // ClaimAllLevelRewardsReq) has no callers in 1.0.364, and the season pass UI uses the commands above.
@@ -36,8 +49,14 @@ const (
 	battlePassAllCmd     = "receive.battlepass.all.reward"
 	battlePassV2AllCmd   = "receive.bpv2.all.reward"
 	battlePassTaskReady  = 1 // task state CanReceive
+	battlePassTaskDone   = 2 // task state Received: the free half claimed
 	battlePassRowPending = 0 // stateInfo normalState: unclaimed
 )
+
+// battlePassNoHighRowViews are the BattlePassType showUiTypes whose GetRedNum branch counts no high
+// row: SevenDayLogin 2, ActSevenDay 3, NewYearSevenDayLogin 6, ValentineLogin 9 (EnumType.lua:
+// 14210-14222; ActBattlePassInfo.lua:356-385).
+var battlePassNoHighRowViews = map[int32]bool{2: true, 3: true, 6: true, 9: true}
 
 func init() {
 	registerFeature(Feature{
@@ -81,12 +100,24 @@ func claimBattlePass(s *ActivitySweep, b *evBatch, a Activity) {
 	pass := evObject(info, "battlePass")
 	level, _ := evNum(pass, "level")
 	unlock, _ := evNum(pass, "unlock")
+	highUnlock, _ := evNum(pass, "high_unlock")
+	// The cells of the views with a high tier claim a state-2 task with either track bought
+	// (UIBattlePassTaskCellNewYear.lua:248, UIBattlePassTaskCellSeason.lua:248,
+	// UISeasonBattlePassTaskItem.lua:249); the views without one (UIBattlePassTaskCell.lua:248,
+	// UIBattlePassNormalNewTaskCell.lua:247) test unlock only, and they have no high track to buy,
+	// so high_unlock is never 1 there.
+	bought := unlock == 1 || highUnlock == 1
 
 	for _, t := range evObjects(info, "taskArr") {
 		if b.dead {
 			return
 		}
-		if st, _ := evNum(t, "state"); st != battlePassTaskReady {
+		switch st, _ := evNum(t, "state"); {
+		case st == battlePassTaskReady:
+		case st == battlePassTaskDone && bought && battlePassTaskPayExp(info, t) != 0:
+			slog.Info("battle pass: claiming a finished task's premium exp (bought pass)", "activity", a.ID,
+				"taskId", evString(t, "taskId"), "unlock", unlock, "high_unlock", highUnlock)
+		default:
 			continue
 		}
 		id := evString(t, "taskId")
@@ -113,6 +144,7 @@ func claimBattlePass(s *ActivitySweep, b *evBatch, a Activity) {
 		}
 	}
 
+	highRows := highUnlock == 1 && evString(info, "highExchangeId") != "" && !battlePassNoHighRowViews[a.ShowUIType()]
 	pending := false
 	for _, r := range evObjects(info, "stateInfo") {
 		l, ok := evNum(r, "level")
@@ -125,6 +157,9 @@ func claimBattlePass(s *ActivitySweep, b *evBatch, a Activity) {
 		if st, ok := evNum(r, "specialState"); ok && unlock == 1 && st == battlePassRowPending {
 			pending = true // a bought pass: its premium rows are a free claim too
 		}
+		if st, ok := evNum(r, "special2State"); ok && highRows && st == battlePassRowPending {
+			pending = true // the bought high tier's rows, likewise
+		}
 	}
 	if !pending || b.dead {
 		return
@@ -134,4 +169,43 @@ func claimBattlePass(s *ActivitySweep, b *evBatch, a Activity) {
 		cmd = battlePassV2AllCmd
 	}
 	b.send(fmt.Sprintf("battle pass levels (activity %d)", a.ID), cmd, evActivityIDParam(a))
+}
+
+// battlePassTaskPayExp is the client's param.payExp of a task (ActBattlePassInfo:ParseTaskArr,
+// ActBattlePassInfo.lua:73-140). A BattlePass_new reply (activityType 142) replaces the wire
+// field by the count of the score item, table activity para_5 of the reply's activityId (:244-249),
+// in the task's payReward, and by 0 when the activity has none or the reply names no activity. Any
+// other reply keeps the wire payExp; an absent one counts as 0 here (the client's nil ~= 0 would
+// show the button, so this only stays on the safe side).
+func battlePassTaskPayExp(info, task *sfs.SFSObject) int64 {
+	if t, _ := evNum(info, "activityType"); t != int64(actTypeBattlePassNew) {
+		n, _ := evNum(task, "payExp")
+		return n
+	}
+	id, ok := evNum(info, "activityId")
+	item := battlePassScoreItem(int32(id))
+	if !ok || item == 0 {
+		return 0
+	}
+	for _, g := range decodeRewardGrants(task, "payReward") {
+		if (g.Type == rewardTypeGoods || g.Type == rewardTypeItemEffect) && g.ItemID == item {
+			if g.HasGained {
+				return g.Gained
+			}
+			return g.Total
+		}
+	}
+	return 0
+}
+
+// battlePassScoreItem is a BattlePass_new pass's score item, tonumber(para_5) of the reply's activity
+// (ActBattlePassInfo.lua:244-249): its count in a task's payReward is the task's premium exp
+// (:103-135). 0 when the table lacks the row or the cell is no number.
+func battlePassScoreItem(id int32) int64 {
+	r, _ := activityRowOf(id)
+	n, err := strconv.ParseInt(strings.TrimSpace(r.para5), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }

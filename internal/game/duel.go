@@ -2,6 +2,7 @@ package game
 
 import (
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -12,17 +13,60 @@ import (
 
 // Alliance Duel ("VS") scheduling. The duel runs one theme per server day (Mon radar, Tue base
 // expansion, Wed science, Thu heroes, Fri total mobilization, Sat enemy buster, Sun rest), and each
-// day's hero.event.info.get {activityId:"55000"} reply lists the score ids that earn points today.
+// day's hero.event.info.get {activityId:"70000"} reply (the entry's activityid, not its id 55000) lists
+// the score ids that earn points today.
 // Features that earn duel points declare the score types they earn (Feature.Duel); a held feature
 // (Feature.Hold) runs only on a day that scores one of them, so the work is saved for a day it
-// counts. See DUEL.md for the data model, tables and evidence.
+// counts. See docs/alliance-duel.mdx for the data model, tables and evidence.
 
+// The generator also reads lw_hero.json and officer_recruit.json from ${LASTWAR_TABLES}.
 //go:generate go run ./genduelscores -in ${LASTWAR_TABLES}/score.json -version ${LASTWAR_TABLE_VERSION} -out duel_scores_gen.go
 
 type duelScoreRow struct {
 	typ    int32
 	value  string
 	points int64
+}
+
+// duelHeroRow is one lw_hero row (duelHeroTable): what HeroInfo takes from the row.
+type duelHeroRow struct {
+	quality       int8
+	maxRank       int32
+	maxHonorLevel int32
+}
+
+// duelRecruitRow is one officer_recruit row (duelRecruitTable): what LotteryInfo takes from the row.
+type duelRecruitRow struct {
+	typ      int32
+	timeType string
+	wishList []int32
+}
+
+// duelHero returns the lw_hero row of a hero id; ok is false for an id the table lacks.
+func duelHero(id int64) (duelHeroRow, bool) {
+	if id <= 0 || id > math.MaxInt32 {
+		return duelHeroRow{}, false
+	}
+	row, ok := duelHeroTable[int32(id)]
+	return row, ok
+}
+
+// duelSeasonDay returns the account's season and season day the way SeasonUtil does: the season is
+// init playerServerSeasonInfo.seasonId (the first value of SeasonUtil.GetSeason, SeasonUtil.lua:
+// 286-298, from SeasonDataManager:GetUserSeasonInfo, SeasonDataManager.lua:1022-1024), and the day
+// is (now - seasonStartTime) // 86400000 + 1 (SeasonUtil.GetSeasonDay, SeasonUtil.lua:308-316),
+// seasonStartTime (ms) from the same object (SeasonInfoTemplate.lua:23, 660-661). dayOK is false
+// when the season is 0 (the client then counts the server's open days instead) or init carries no
+// positive seasonStartTime (the client then falls back to nextSeasonStartTime or a far-future
+// time, which only lowers the day).
+func duelSeasonDay(in *Init, now time.Time) (season, day int64, dayOK bool) {
+	info := in.Object("playerServerSeasonInfo")
+	season, _ = evNum(info, "seasonId")
+	start, ok := evNum(info, "seasonStartTime")
+	if season <= 0 || !ok || start <= 0 {
+		return season, 0, false
+	}
+	return season, (now.UnixMilli()-start)/86_400_000 + 1, true
 }
 
 // DuelScore names one kind of duel-scoring action: Type is the score table's type (ScoreType,
@@ -33,7 +77,7 @@ type DuelScore struct {
 	Value string
 }
 
-// Score types and speed-up queues (EnumType.lua:15728-15744; DUEL.md §2).
+// Score types and speed-up queues (Global/EnumType.lua:15799-15809; docs/alliance-duel.mdx).
 const (
 	DuelScoreTrainUnit       int32 = 4   // train one unit (value = unit tier item 3005-3015)
 	DuelScoreRecruitHero     int32 = 42  // one hero recruitment
@@ -49,7 +93,7 @@ const (
 	DuelQueueHeal     = "9"
 )
 
-// Duel themes: the day's heroevent row (TB:heroactivity#70000, DUEL.md §1.2).
+// Duel themes: the day's heroevent row (TB:heroactivity#70000, docs/alliance-duel.mdx).
 const (
 	DuelThemeRadar        int32 = 110000
 	DuelThemeBase         int32 = 110001

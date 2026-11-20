@@ -12,8 +12,8 @@ import (
 // Hardware is the device-specific half of the device identity this client
 // reports: the fields a real phone derives from its build, SoC, screen and
 // sensors. It drives both the ShuMei `aNN` fingerprint (deviceData fills the
-// a10/a32/a33/a34/a36/a37/a45/a46/a47/a48/a56/a57/a143/a154/a18/a131/a132
-// slots from it) and the Login's device fields (auth.BuildLoginParams turns it
+// a10/a18/a29/a32/a34/a36/a45/a46/a47/a48/a92/a131/a132/a143/a154 slots from
+// it and sizes a69-a71 by it) and the Login's device fields (auth.BuildLoginParams turns it
 // into phone_model, osVersion, device_string, mt, AndroidID and IMEI), so both
 // describe the same phone.
 //
@@ -24,25 +24,25 @@ import (
 // model, brand, board, fingerprint, SoC, screen and RAM must all describe the
 // same phone, the way Build/build.prop would on the real device.
 type Hardware struct {
-	AndroidVersion string            // a10, Build.VERSION.RELEASE ("12")
-	APILevel       string            // Build.VERSION.SDK_INT ("31")
-	Screen         string            // a36, "width,height,dpi"; a92 is the "width,height" prefix
-	DeviceName     string            // Build.DEVICE (the IMEI dump's device component)
-	SoC            string            // a143/a33, ro.board.platform (ro.hardware)
-	MaxFreq        int               // a34, CPU max frequency in kHz
-	Cores          int               // a32, CPU core count
-	RAMBytes       int64             // a48, total RAM in bytes
-	StorageGB      int               // a37, storage in GB
-	CertSubject    string            // a56, the self-signed cert's DN
-	CertHash       int               // a57, its hash
-	Build          map[string]string // a46: board, model, brand, manufacturer, fingerprint, cpu_abi, cpu_abi2, radioVersion
-	Props          map[string]string // a18: ro.debuggable, ro.boot.hardware, gsm.sim.state, gsm.operator.alpha, sys.usb.state
-	Sensors        []string          // a47: "index,vendor"
-	Launcher       map[string]string // a154: pkg, label, versionName
-	Locale         string            // a131/a132
-	GPUModel       string            // SystemInfo.graphicsDeviceName
-	GPUVendor      string            // SystemInfo.graphicsDeviceVendor
-	SimOperator    string            // a45, TelephonyManager.getSimOperator(): MCC+MNC
+	AndroidVersion    string            // a10, Build.VERSION.RELEASE ("12")
+	APILevel          string            // Build.VERSION.SDK_INT ("31")
+	Screen            string            // a36, "width,height,dpi"; a92 is the "width,height" prefix
+	DeviceName        string            // Build.DEVICE (the IMEI dump's device component)
+	SoC               string            // a143, /proc/cpuinfo's "Hardware" line (ro.board.platform)
+	MaxFreq           int               // a34, CPU max frequency in kHz
+	Cores             int               // a32, CPU core count
+	RAMBytes          int64             // a48, total RAM in bytes
+	StorageGB         int               // flash size in GB; a69/a70/a71 (StatFs of /data) are sized from it
+	Build             map[string]string // a46: board, model, brand, manufacturer, fingerprint, cpu_abi, cpu_abi2, radioVersion
+	Props             map[string]string // a18: ro.debuggable, ro.boot.hardware, gsm.sim.state, gsm.operator.alpha, sys.usb.state
+	Sensors           []string          // a47: "type,vendor" for each sensor of getSensorList(TYPE_ALL)
+	Launcher          map[string]string // a154: pkg, label, ver (the home app's versionName)
+	GPUModel          string            // SystemInfo.graphicsDeviceName
+	GPUVendor         string            // SystemInfo.graphicsDeviceVendor
+	SimOperator       string            // a45, TelephonyManager.getSimOperator(): MCC+MNC
+	SimOperatorName   string            // TelephonyManager.getSimOperatorName(): the SIM's carrier name
+	SimCountryISO     string            // a131, TelephonyManager.getSimCountryIso()
+	NetworkCountryISO string            // a132, TelephonyManager.getNetworkCountryIso()
 }
 
 // Model returns Build.MODEL, SystemInfo.deviceModel, and the Login's
@@ -147,17 +147,34 @@ func (h Hardware) ScreenWH() (w, height int) {
 }
 
 // hardwareCatalog is a set of internally-consistent real Android 12 device
-// signatures. Each one's build fingerprint, board, SoC, screen, RAM and sensor
-// list all belong to the same phone, so the fingerprint reads as one real
-// device rather than a patchwork. The build IDs are Android 12 (SP1A.*),
-// matching androidVersion "12". Model numbers, SoC platforms, RAM, storage,
-// screen resolutions and CPU clocks are the devices' published specifications.
+// signatures. Each one's build fingerprint, board, SoC, screen and RAM all
+// belong to the same phone, so the fingerprint reads as one real device rather
+// than a patchwork. The build IDs are Android 12 (SP1A.*), matching
+// androidVersion "12". Model numbers, SoC platforms, RAM, storage, screen
+// resolutions and CPU clocks are the devices' published specifications.
+//
+// Every entry has a US SIM on a US network (T-Mobile 310260, AT&T 310410 or
+// Verizon 311480) and an English launcher, so the phone agrees with the
+// Login's fromCountry "US" and lang "en": the real client sends the device
+// locale's country there (SdkManager.java:199-222, AND-CS:83240), and the
+// cron's iOS account keeps those values. Some build fingerprints are a
+// regional firmware (the EEA builds, and the Korean G988N one under model
+// SM-G988B); a European phone on a US SIM is possible, so they stay as they
+// are until the catalog is next refreshed with US or unlocked builds, which
+// would change an existing install's fingerprint.
+//
+// The sensor lists name only a few of each phone's sensors. A real phone's
+// getSensorList(TYPE_ALL) has dozens, and each entry's first field is the
+// sensor type (l1l11I111l.java:16-17); every list has a light sensor (type 5),
+// which the game's emulator test looks for (SdkManager.java:995-1003). The
+// light sensor's vendor is a placeholder on some models (TDK and AKM make
+// those phones' motion and magnetic sensors, not their light sensors). A full
+// list per model needs a dump from that phone.
 var hardwareCatalog = []Hardware{
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1440,3200,511", DeviceName: "z3q", SoC: "exynos990",
 		MaxFreq: 2730000, Cores: 8, RAMBytes: 12884901888, StorageGB: 256,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "z3q", "model": "SM-G988B", "brand": "samsung", "manufacturer": "samsung",
 			"fingerprint": "samsung/z3qksx/z3q:12/SP1A.210812.016/G988NKSU3FVK1:user/release-keys",
@@ -165,20 +182,19 @@ var hardwareCatalog = []Hardware{
 		},
 		Props: map[string]string{
 			"ro.debuggable": "0", "ro.boot.hardware": "exynos990", "gsm.sim.state": "READY",
-			"gsm.operator.alpha": "SKTelecom", "sys.usb.state": "android,adb",
+			"gsm.operator.alpha": "AT&T", "sys.usb.state": "android,adb",
 		},
 		Sensors: []string{"1,STMicroelectronics", "2,AKM", "4,STMicroelectronics", "5,ams", "6,STMicroelectronics"},
 		Launcher: map[string]string{
-			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.5.01.7",
+			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "ver": "14.5.01.7",
 		},
-		Locale:   "ko",
-		GPUModel: "Mali-G77 MP11", GPUVendor: "ARM", SimOperator: "45005",
+		GPUModel: "Mali-G77 MP11", GPUVendor: "ARM", SimOperator: "310410",
+		SimOperatorName: "AT&T", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1080,2400,421", DeviceName: "o1s", SoC: "exynos2100",
 		MaxFreq: 2900000, Cores: 8, RAMBytes: 8589934592, StorageGB: 128,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "o1s", "model": "SM-G991B", "brand": "samsung", "manufacturer": "samsung",
 			"fingerprint": "samsung/o1sxeea/o1s:12/SP1A.210812.016/G991BXXU4CVD2:user/release-keys",
@@ -186,20 +202,19 @@ var hardwareCatalog = []Hardware{
 		},
 		Props: map[string]string{
 			"ro.debuggable": "0", "ro.boot.hardware": "exynos2100", "gsm.sim.state": "READY",
-			"gsm.operator.alpha": "Play", "sys.usb.state": "android,adb",
+			"gsm.operator.alpha": "T-Mobile", "sys.usb.state": "android,adb",
 		},
 		Sensors: []string{"1,STMicroelectronics", "2,AKM", "4,STMicroelectronics", "5,ams", "6,STMicroelectronics"},
 		Launcher: map[string]string{
-			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.1.01.7",
+			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "ver": "14.1.01.7",
 		},
-		Locale:   "en",
-		GPUModel: "Mali-G78 MP14", GPUVendor: "ARM", SimOperator: "26006",
+		GPUModel: "Mali-G78 MP14", GPUVendor: "ARM", SimOperator: "310260",
+		SimOperatorName: "T-Mobile", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1080,2340,425", DeviceName: "r0s", SoC: "exynos2200",
 		MaxFreq: 2803000, Cores: 8, RAMBytes: 8589934592, StorageGB: 128,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "r0s", "model": "SM-S901B", "brand": "samsung", "manufacturer": "samsung",
 			"fingerprint": "samsung/r0sxeea/r0s:12/SP1A.210812.016/S901BXXU1AVC6:user/release-keys",
@@ -207,20 +222,19 @@ var hardwareCatalog = []Hardware{
 		},
 		Props: map[string]string{
 			"ro.debuggable": "0", "ro.boot.hardware": "exynos2200", "gsm.sim.state": "READY",
-			"gsm.operator.alpha": "EE", "sys.usb.state": "android,adb",
+			"gsm.operator.alpha": "Verizon", "sys.usb.state": "android,adb",
 		},
 		Sensors: []string{"1,STMicroelectronics", "2,AKM", "4,STMicroelectronics", "5,ams", "6,STMicroelectronics"},
 		Launcher: map[string]string{
-			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.0.02.10",
+			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "ver": "14.0.02.10",
 		},
-		Locale:   "en",
-		GPUModel: "ANGLE (Samsung Xclipse 920)", GPUVendor: "Samsung Electronics Co., Ltd.", SimOperator: "23410",
+		GPUModel: "ANGLE (Samsung Xclipse 920)", GPUVendor: "Samsung Electronics Co., Ltd.", SimOperator: "311480",
+		SimOperatorName: "Verizon", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1080,2400,411", DeviceName: "oriole", SoC: "gs101",
 		MaxFreq: 2802000, Cores: 8, RAMBytes: 8589934592, StorageGB: 128,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "slider", "model": "Pixel 6", "brand": "google", "manufacturer": "Google",
 			"fingerprint": "google/oriole/oriole:12/SD1A.210817.036/7805805:user/release-keys",
@@ -230,18 +244,17 @@ var hardwareCatalog = []Hardware{
 			"ro.debuggable": "0", "ro.boot.hardware": "slider", "gsm.sim.state": "READY",
 			"gsm.operator.alpha": "T-Mobile", "sys.usb.state": "android,adb",
 		},
-		Sensors: []string{"1,STMicroelectronics", "4,Bosch", "9,Bosch", "13,ams"},
+		Sensors: []string{"1,STMicroelectronics", "4,Bosch", "9,Bosch", "5,ams"},
 		Launcher: map[string]string{
-			"pkg": "com.google.android.apps.nexuslauncher", "label": "Pixel Launcher", "versionName": "12",
+			"pkg": "com.google.android.apps.nexuslauncher", "label": "Pixel Launcher", "ver": "12",
 		},
-		Locale:   "en",
 		GPUModel: "Mali-G78 MP20", GPUVendor: "ARM", SimOperator: "310260",
+		SimOperatorName: "T-Mobile", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1440,3120,512", DeviceName: "raven", SoC: "gs101",
 		MaxFreq: 2802000, Cores: 8, RAMBytes: 12884901888, StorageGB: 128,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "raven", "model": "Pixel 6 Pro", "brand": "google", "manufacturer": "Google",
 			"fingerprint": "google/raven/raven:12/SD1A.210817.036/7805805:user/release-keys",
@@ -251,18 +264,17 @@ var hardwareCatalog = []Hardware{
 			"ro.debuggable": "0", "ro.boot.hardware": "raven", "gsm.sim.state": "READY",
 			"gsm.operator.alpha": "AT&T", "sys.usb.state": "android,adb",
 		},
-		Sensors: []string{"1,STMicroelectronics", "4,Bosch", "9,Bosch", "13,ams"},
+		Sensors: []string{"1,STMicroelectronics", "4,Bosch", "9,Bosch", "5,ams"},
 		Launcher: map[string]string{
-			"pkg": "com.google.android.apps.nexuslauncher", "label": "Pixel Launcher", "versionName": "12",
+			"pkg": "com.google.android.apps.nexuslauncher", "label": "Pixel Launcher", "ver": "12",
 		},
-		Locale:   "en",
 		GPUModel: "Mali-G78 MP20", GPUVendor: "ARM", SimOperator: "310410",
+		SimOperatorName: "AT&T", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1080,2400,395", DeviceName: "amber", SoC: "mt6893",
 		MaxFreq: 3000000, Cores: 8, RAMBytes: 8589934592, StorageGB: 128,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "amber", "model": "21081111RG", "brand": "Xiaomi", "manufacturer": "Xiaomi",
 			"fingerprint": "Xiaomi/amber_global/amber:12/SP1A.210812.016/V13.0.2.0.SKWMIXM:user/release-keys",
@@ -270,20 +282,19 @@ var hardwareCatalog = []Hardware{
 		},
 		Props: map[string]string{
 			"ro.debuggable": "0", "ro.boot.hardware": "mt6893", "gsm.sim.state": "READY",
-			"gsm.operator.alpha": "Play", "sys.usb.state": "android,adb",
+			"gsm.operator.alpha": "T-Mobile", "sys.usb.state": "android,adb",
 		},
-		Sensors: []string{"1,Bosch", "4,Bosch", "9,STMicroelectronics", "13,TDK"},
+		Sensors: []string{"1,Bosch", "4,Bosch", "9,STMicroelectronics", "5,TDK"},
 		Launcher: map[string]string{
-			"pkg": "com.miui.home", "label": "System launcher", "versionName": "ALPHA-4.23.0.2350-12211819",
+			"pkg": "com.miui.home", "label": "System launcher", "ver": "ALPHA-4.23.0.2350-12211819",
 		},
-		Locale:   "pl",
-		GPUModel: "Mali-G77 MC9", GPUVendor: "ARM", SimOperator: "26006",
+		GPUModel: "Mali-G77 MC9", GPUVendor: "ARM", SimOperator: "310260",
+		SimOperatorName: "T-Mobile", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1440,3200,515", DeviceName: "venus", SoC: "lahaina",
 		MaxFreq: 2842000, Cores: 8, RAMBytes: 8589934592, StorageGB: 128,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "venus", "model": "M2011K2G", "brand": "Xiaomi", "manufacturer": "Xiaomi",
 			"fingerprint": "Xiaomi/venus/venus:12/SP1A.210812.016/V13.0.4.0.SKBMIXM:user/release-keys",
@@ -291,20 +302,19 @@ var hardwareCatalog = []Hardware{
 		},
 		Props: map[string]string{
 			"ro.debuggable": "0", "ro.boot.hardware": "lahaina", "gsm.sim.state": "READY",
-			"gsm.operator.alpha": "Plus", "sys.usb.state": "android,adb",
+			"gsm.operator.alpha": "AT&T", "sys.usb.state": "android,adb",
 		},
-		Sensors: []string{"1,Bosch", "4,Bosch", "9,STMicroelectronics", "13,AKM"},
+		Sensors: []string{"1,Bosch", "4,Bosch", "9,STMicroelectronics", "5,AKM"},
 		Launcher: map[string]string{
-			"pkg": "com.miui.home", "label": "System launcher", "versionName": "RELEASE-4.26.0.2742-12111057",
+			"pkg": "com.miui.home", "label": "System launcher", "ver": "RELEASE-4.26.0.2742-12111057",
 		},
-		Locale:   "pl",
-		GPUModel: "Adreno (TM) 660", GPUVendor: "Qualcomm", SimOperator: "26001",
+		GPUModel: "Adreno (TM) 660", GPUVendor: "Qualcomm", SimOperator: "310410",
+		SimOperatorName: "AT&T", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1080,2400,402", DeviceName: "OnePlus9", SoC: "lahaina",
 		MaxFreq: 2842000, Cores: 8, RAMBytes: 12884901888, StorageGB: 256,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "lahaina", "model": "LE2115", "brand": "OnePlus", "manufacturer": "OnePlus",
 			"fingerprint": "OnePlus/OnePlus9_NA/OnePlus9:12/SP1A.210812.016/L.202205122255:user/release-keys",
@@ -314,18 +324,17 @@ var hardwareCatalog = []Hardware{
 			"ro.debuggable": "0", "ro.boot.hardware": "lahaina", "gsm.sim.state": "READY",
 			"gsm.operator.alpha": "Verizon", "sys.usb.state": "android,adb",
 		},
-		Sensors: []string{"1,STMicroelectronics", "4,Bosch", "9,Bosch", "13,AMS"},
+		Sensors: []string{"1,STMicroelectronics", "4,Bosch", "9,Bosch", "5,AMS"},
 		Launcher: map[string]string{
-			"pkg": "net.oneplus.launcher", "label": "OnePlus Launcher", "versionName": "5.4.9.220608151019.99bc7a5",
+			"pkg": "net.oneplus.launcher", "label": "OnePlus Launcher", "ver": "5.4.9.220608151019.99bc7a5",
 		},
-		Locale:   "en",
 		GPUModel: "Adreno (TM) 660", GPUVendor: "Qualcomm", SimOperator: "311480",
+		SimOperatorName: "Verizon", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1440,3088,496", DeviceName: "c1s", SoC: "exynos990",
 		MaxFreq: 2730000, Cores: 8, RAMBytes: 12884901888, StorageGB: 256,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "c1s", "model": "SM-N986B", "brand": "samsung", "manufacturer": "samsung",
 			"fingerprint": "samsung/c1sxeea/c1s:12/SP1A.210812.016/N986BXXU4FVC5:user/release-keys",
@@ -333,20 +342,19 @@ var hardwareCatalog = []Hardware{
 		},
 		Props: map[string]string{
 			"ro.debuggable": "0", "ro.boot.hardware": "exynos990", "gsm.sim.state": "READY",
-			"gsm.operator.alpha": "EE", "sys.usb.state": "android,adb",
+			"gsm.operator.alpha": "Verizon", "sys.usb.state": "android,adb",
 		},
 		Sensors: []string{"1,STMicroelectronics", "2,AKM", "4,STMicroelectronics", "5,ams", "6,STMicroelectronics"},
 		Launcher: map[string]string{
-			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "versionName": "14.5.01.7",
+			"pkg": "com.sec.android.app.launcher", "label": "One UI Home", "ver": "14.5.01.7",
 		},
-		Locale:   "en",
-		GPUModel: "Mali-G77 MP11", GPUVendor: "ARM", SimOperator: "23430",
+		GPUModel: "Mali-G77 MP11", GPUVendor: "ARM", SimOperator: "311480",
+		SimOperatorName: "Verizon", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1080,2340,432", DeviceName: "redfin", SoC: "lito",
 		MaxFreq: 2400000, Cores: 8, RAMBytes: 8589934592, StorageGB: 128,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "redfin", "model": "Pixel 5", "brand": "google", "manufacturer": "Google",
 			"fingerprint": "google/redfin/redfin:12/SP1A.210812.015/7671068:user/release-keys",
@@ -358,16 +366,15 @@ var hardwareCatalog = []Hardware{
 		},
 		Sensors: []string{"1,Bosch", "2,AKM", "4,Bosch", "5,ams"},
 		Launcher: map[string]string{
-			"pkg": "com.google.android.apps.nexuslauncher", "label": "Pixel Launcher", "versionName": "12",
+			"pkg": "com.google.android.apps.nexuslauncher", "label": "Pixel Launcher", "ver": "12",
 		},
-		Locale:   "en",
 		GPUModel: "Adreno (TM) 620", GPUVendor: "Qualcomm", SimOperator: "310260",
+		SimOperatorName: "T-Mobile", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 	{
 		AndroidVersion: "12", APILevel: "31",
 		Screen: "1080,2400,402", DeviceName: "OnePlus8T", SoC: "kona",
 		MaxFreq: 2842000, Cores: 8, RAMBytes: 8589934592, StorageGB: 128,
-		CertSubject: "CN=Android, OU=Android, O=Google Inc., L=Mountain View, ST=California, C=US", CertHash: -1802451281,
 		Build: map[string]string{
 			"board": "kebab", "model": "KB2003", "brand": "OnePlus", "manufacturer": "OnePlus",
 			"fingerprint": "OnePlus/OnePlus8T_EEA/OnePlus8T:12/SP1A.210812.016/KB2003_11_F.13:user/release-keys",
@@ -375,14 +382,14 @@ var hardwareCatalog = []Hardware{
 		},
 		Props: map[string]string{
 			"ro.debuggable": "0", "ro.boot.hardware": "kona", "gsm.sim.state": "READY",
-			"gsm.operator.alpha": "EE", "sys.usb.state": "android,adb",
+			"gsm.operator.alpha": "T-Mobile", "sys.usb.state": "android,adb",
 		},
 		Sensors: []string{"1,STMicroelectronics", "2,AKM", "4,STMicroelectronics", "5,ams"},
 		Launcher: map[string]string{
-			"pkg": "net.oneplus.launcher", "label": "OnePlus Launcher", "versionName": "5.4.10.220407150435.64ec0c2",
+			"pkg": "net.oneplus.launcher", "label": "OnePlus Launcher", "ver": "5.4.10.220407150435.64ec0c2",
 		},
-		Locale:   "en",
-		GPUModel: "Adreno (TM) 650", GPUVendor: "Qualcomm", SimOperator: "23430",
+		GPUModel: "Adreno (TM) 650", GPUVendor: "Qualcomm", SimOperator: "310260",
+		SimOperatorName: "T-Mobile", SimCountryISO: "us", NetworkCountryISO: "us",
 	},
 }
 

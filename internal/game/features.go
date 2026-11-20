@@ -73,11 +73,14 @@ const (
 // phaseAction entries are the actions named in MASTER B3 (aud-events F2, aud-dailies F3) and every
 // feature with a Duel field; they are listed so the table shows what the progress claims follow.
 // The phaseProgress entries are B3's five claims and the opt-in progress claims added with the
-// 1.0.367 audit. battle-pass-overflow must follow battle-pass, which changes the pass's exp and
+// 1.0.367 and 1.0.370 audits. battle-pass-overflow must follow battle-pass, which changes the pass's exp and
 // level; it does, by name within the phase.
 var featurePhases = map[string]int{
 	"finished-timers":    phaseCapacity,
 	"secret-tasks-claim": phaseCapacity,
+	// truck-reroll rerolls a parked low truck for free, so it must run before truck-deploy, which
+	// sends it if it came out UR (both would otherwise sort by name in phaseAction, deploy first).
+	"truck-reroll": phaseCapacity,
 
 	"duel-recruit-tickets": phaseAction,
 	"duel-speedups":        phaseAction,
@@ -103,6 +106,52 @@ var featurePhases = map[string]int{
 	"torch-relay":            phaseProgress,
 	"tower-up-first-rewards": phaseProgress,
 	"zone-mobilization":      phaseProgress,
+
+	// 1.0.370 audit: the opt-in duel gacha (G20) runs once a run after arms-race-chests (its opt-in
+	// score draw after the pity claim), and the
+	// opt-in progress claims of WP5, WP7, WP8, WP9 and WP10. A -plan feature runs where the claims it
+	// previews do. gift-box-free-draw and military-rank-up stay actions, so the score boxes and the
+	// season-dailies salary they feed come after them.
+	"alliance-star-emoji":      phaseProgress,
+	"banquet-v2-claims":        phaseProgress,
+	"banquet-v2-claims-plan":   phaseProgress,
+	"bloody-night-tasks":       phaseProgress,
+	"bounty-hunter-milestones": phaseProgress,
+	"city-first-occupation":    phaseProgress,
+	"counter-attack-rounds":    phaseProgress,
+	"crazy-rock-tasks":         phaseProgress,
+	"cross-throne-rewards":     phaseProgress,
+	"decoration-gacha-boxes":   phaseProgress,
+	"doomsday-quests":          phaseProgress,
+	"duel-gacha":               phaseProgress,
+	"duel-gacha-draw":          phaseProgress,
+	"duel-gacha-plan":          phaseProgress,
+	"event-milestone-boxes":    phaseProgress,
+	"food-event-boxes":         phaseProgress,
+	"food-event-boxes-plan":    phaseProgress,
+	"front-break-tasks":        phaseProgress,
+	"gift-box-score-boxes":     phaseProgress,
+	"hero-trial-stage":         phaseProgress,
+	"hero-wish-claim":          phaseProgress,
+	"jungle-trial-rewards":     phaseProgress,
+	"leading-quest-tasks":      phaseProgress,
+	"mastery-newbie-reward":    phaseProgress,
+	"newbie-arena-rewards":     phaseProgress,
+	"offseason-tasks":          phaseProgress,
+	"parkour-tasks":            phaseProgress,
+	"s0-alliance-boss":         phaseProgress,
+	"sand-worm-tasks":          phaseProgress,
+	"season-achievements":      phaseProgress,
+	"season-outpost-boxes":     phaseProgress,
+	"season-trends":            phaseProgress,
+	"sky-battle-boxes":         phaseProgress,
+	"sunrise-foundation":       phaseProgress,
+	"survivor-pack":            phaseProgress,
+	"tactical-card-box-points": phaseProgress,
+	"tactical-card-collection": phaseProgress,
+	"theme-prenotice":          phaseProgress,
+	"world-boss-kill-rewards":  phaseProgress,
+	"zone-mobilization-tasks":  phaseProgress,
 }
 
 // featurePhase returns name's run phase.

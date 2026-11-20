@@ -43,9 +43,11 @@ func TestEventClaimsActivities(t *testing.T) {
 		switch cmd {
 		case redBossProgressCmd:
 			r.PutInt("claimableCount", 2)
+			r.PutInt("season", 0) // init has no playerServerSeasonInfo: season 0
 		case redBossAchievementCmd:
 			r.PutSFSArray("tasks", eventTasks("id", map[string]int32{"a": 2}))
 		case redBossMarchCmd:
+			r.PutUtfString("activityId", "80152")
 			r.PutInt("dailyRewardTarget", 5)
 			r.PutInt("dailyAtkCount", 5)
 			r.PutInt("dailyRewardClaimed", 0)
@@ -121,7 +123,7 @@ func TestEventClaimsActivities(t *testing.T) {
 	}
 	got := strings.Join(fake.cmds(), ",")
 	want := strings.Join([]string{
-		"red.boss.get.progress", "red.boss.claim.all", "red.boss.get.achievement.info", "red.boss.get.march", "red.boss.claim.daily.reward",
+		"red.boss.get.march", "red.boss.get.progress", "red.boss.claim.all", "red.boss.get.achievement.info", "red.boss.claim.daily.reward",
 		"winter.storm.reward.info", "winter.storm.reward.get.all",
 		"get.seven.day.act.info", "receive.seven.day.act.reward", "get.seven.day.act.info", "receive.seven.day.act.all.reward",
 		"seven.day.v2.info", "seven.day.v2.receive.task", "seven.day.v2.receive.task", "seven.day.v2.info", "seven.day.v2.receive.score",
@@ -261,11 +263,14 @@ func TestEventClaimsGaleArenaBoxesReadTopLevel(t *testing.T) {
 
 func TestEventClaimsCrystalBossSilentErrorIsBenign(t *testing.T) {
 	withEvNow(t, evTestNow)
-	conn, _ := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		r := sfs.NewSFSObject()
 		switch cmd {
+		case redBossMarchCmd:
+			r.PutUtfString("activityId", "80152")
 		case redBossProgressCmd:
 			r.PutInt("claimableCount", 1)
+			r.PutInt("season", 0)
 		case redBossClaimAllCmd:
 			return evErr(redBossSilentError)
 		}
@@ -273,6 +278,9 @@ func TestEventClaimsCrystalBossSilentErrorIsBenign(t *testing.T) {
 	})
 	if err := runEventClaims(conn, evInit(30, evActivity(80152))); err != nil {
 		t.Errorf("E100172 on red.boss.claim.all must be benign, got %v", err)
+	}
+	if n := len(fake.only(redBossClaimAllCmd)); n != 1 {
+		t.Errorf("red.boss.claim.all sent %d times, want 1 (the benign reply must come from a real claim)", n)
 	}
 }
 

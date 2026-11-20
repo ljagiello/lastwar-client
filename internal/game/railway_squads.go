@@ -120,7 +120,24 @@ type railwaySquad struct {
 	heroes  []railwayHero
 	squadNo int32 // team buff 1..4 (localSquadNo)
 	chip    int32 // chipEquipGroup, sent only when 1..4
-	soldier int32 // template soldierType; 0 means the highest trainable unit
+	soldier int32 // soldierType; with soldierSet false, the highest trainable unit instead
+	// soldierSet is true when the wire carried soldierType; a value without a lw_soldier row (0
+	// included) then adds no soldiers (see readSoldier).
+	soldierSet bool
+}
+
+// readSoldier reads o's soldierType the way ArenaArmyFormationInfo:ParseData does
+// (ArenaArmyFormationInfo.lua:128-133): a present value is kept as is, 0 included (0 is true in
+// Lua), and ConscriptSoldier finds no lw_soldier row for 0 and adds no soldiers (:30-36). Only an
+// absent soldierType takes the highest trainable unit (RecalculateMaxLevelSoldier, :208-214).
+func (s *railwaySquad) readSoldier(o *sfs.SFSObject) {
+	if v, ok := o.Get("soldierType"); !ok || v.Val == nil {
+		return
+	}
+	s.soldierSet = true
+	if n, ok := claimInt(o, "soldierType"); ok && n > 0 && n <= math.MaxInt32 {
+		s.soldier = int32(n)
+	}
 }
 
 // mainHeroes counts the heroes in slots 1..5; the client refuses a squad without one (457564).
@@ -183,20 +200,33 @@ func railwayHeroesOf(f *sfs.SFSObject, withOverlord bool) []railwayHero {
 }
 
 // railwaySquads returns the truck squads of one set (railwayDefenceAction or railwayAttackAction)
-// in slot order, as LWMyStationDataManager:InitArmyFormationListData parses formation_template:
-//   - only templates of unlocked slots;
-//   - a slot 1..5 hero kept in the lowest slot when two squads of the set share it
-//     (CheckIfHasMultiHero walks localHeroes, which never holds the Overlord; the client's pairs
-//     order is not deterministic);
-//   - team buffs filled by InitTeamUsingBuff;
+// in slot order, as LWMyStationDataManager:InitArmyFormationListData parses formation_template
+// (LWMyStationDataManager.lua:509-550). It walks the templates in wire order and inserts each
+// squad as it goes, so every step sees only the squads inserted before it:
+//   - only templates of unlocked slots are inserted (of two templates for one slot, which the
+//     server isn't expected to send, only the later one is kept);
+//   - a missing team buff is filled by InitTeamUsingBuff before the insert: the squad's own slot
+//     unless an inserted squad uses it, else the first buff 1..4 none does (:1155-1166,
+//     1181-1194);
+//   - a slot 1..5 hero shared by two squads stays in the first one in that order
+//     (CheckIfHasMultiHero walks the inserted list, :493-507; localHeroes never holds the
+//     Overlord);
 //   - chip set 1 when the template has none (ArmyFormationInfo default), and none sent when it has
-//     one outside 1..4.
+//     one outside 1..4;
+//   - soldierType as readSoldier reads it.
 //
-// When the set has no template for an unlocked slot at all, the client copies the world squads'
-// heroes instead (InitTruckFormationWithoutServerHelper), with squadNo and chip = slot.
+// An unlocked slot without a template has no squad here: the client saves an empty one, with no
+// hero to send. When the set has no template for an unlocked slot at all, the client copies the
+// world squads' heroes instead (InitTruckFormationWithoutServerHelper, :1024-1057), with squadNo
+// and chip = slot.
 func railwaySquads(in *Init, action int32) []railwaySquad {
 	unlocked := railwayUnlockedSquads(in)
-	bySlot := map[int32]*sfs.SFSObject{}
+	type template struct {
+		slot int32
+		obj  *sfs.SFSObject
+	}
+	var templates []template
+	last := map[int32]int{} // slot -> index in templates of its last template
 	for _, t := range claimObjectsOrMap(in.Raw, "formation_template") {
 		idx, _ := claimInt(t, "index")
 		s := int32(idx) - action
@@ -204,11 +234,12 @@ func railwaySquads(in *Init, action int32) []railwaySquad {
 			continue
 		}
 		if _, open := unlocked[s]; open {
-			bySlot[s] = t
+			last[s] = len(templates)
+			templates = append(templates, template{s, t})
 		}
 	}
 	var out []railwaySquad
-	if len(bySlot) == 0 {
+	if len(templates) == 0 {
 		for s := int32(1); s <= 4; s++ {
 			if heroes, ok := unlocked[s]; ok {
 				out = append(out, railwaySquad{slot: s, heroes: heroes, squadNo: s, chip: s})
@@ -218,13 +249,12 @@ func railwaySquads(in *Init, action int32) []railwaySquad {
 	}
 	used := map[int64]bool{}
 	buffs := map[int32]bool{}
-	for s := int32(1); s <= 4; s++ {
-		t, ok := bySlot[s]
-		if !ok {
-			continue // the client saves an empty squad here; it has no hero to send
+	for i, t := range templates {
+		if last[t.slot] != i {
+			continue
 		}
-		sq := railwaySquad{slot: s, chip: 1}
-		for _, h := range railwayHeroesOf(t, true) {
+		sq := railwaySquad{slot: t.slot, chip: 1}
+		for _, h := range railwayHeroesOf(t.obj, true) {
 			if h.index != railwayOverlordSlot {
 				if used[h.uuid] {
 					continue
@@ -233,42 +263,33 @@ func railwaySquads(in *Init, action int32) []railwaySquad {
 			}
 			sq.heroes = append(sq.heroes, h)
 		}
-		if n, ok := claimInt(t, "squadNo"); ok && n >= 1 && n <= 4 {
+		if n, ok := claimInt(t.obj, "squadNo"); ok && n >= 1 && n <= 4 {
 			sq.squadNo = int32(n)
 		}
-		if n, ok := claimInt(t, "chipEquipGroup"); ok {
+		if n, ok := claimInt(t.obj, "chipEquipGroup"); ok {
 			sq.chip = 0
 			if n >= 1 && n <= 4 {
 				sq.chip = int32(n)
 			}
 		}
-		if n, ok := claimInt(t, "soldierType"); ok && n > 0 {
-			sq.soldier = int32(n)
+		sq.readSoldier(t.obj)
+		if sq.squadNo == 0 {
+			sq.squadNo = sq.slot
+			if buffs[sq.slot] {
+				sq.squadNo = 0 // stays 0 when every buff is taken
+				for b := int32(1); b <= 4 && sq.squadNo == 0; b++ {
+					if !buffs[b] {
+						sq.squadNo = b
+					}
+				}
+			}
 		}
 		if sq.squadNo != 0 {
 			buffs[sq.squadNo] = true
 		}
 		out = append(out, sq)
 	}
-	for i := range out {
-		if out[i].squadNo != 0 {
-			continue
-		}
-		pick := out[i].slot
-		if buffs[pick] {
-			pick = 0
-			for b := int32(1); b <= 4; b++ {
-				if !buffs[b] {
-					pick = b
-					break
-				}
-			}
-		}
-		if pick != 0 {
-			out[i].squadNo = pick
-			buffs[pick] = true
-		}
-	}
+	slices.SortFunc(out, func(a, b railwaySquad) int { return cmp.Compare(a.slot, b.slot) })
 	return out
 }
 
@@ -322,9 +343,13 @@ const (
 // Overlord power), so the estimate never exceeds what the client would show:
 //   - heroes: floor(effect 100000) per hero in slots 1..5;
 //   - soldiers: floor(leadership) virtual soldiers per hero (and the Overlord), each worth
-//     SoldierDataManager:CalcSoldierPower with the init game effects. The unit is the template's
-//     soldierType, or the highest one the camps can train when the template names none. A
-//     soldierType this table doesn't know (e.g. a Mummy unit) adds no soldier power.
+//     SoldierDataManager:CalcSoldierPower with the init game effects. The unit is the squad's
+//     soldierType, or the highest one the camps can train when the wire carried none
+//     (readSoldier). A soldierType this table doesn't know (0, or e.g. a Mummy unit) adds no
+//     soldier power. The client's truck-rob panel recalculates the unit to the highest trainable
+//     one (UIHeroFakePVPFormationPanelView.lua:2023-2025), so for a truck attack a template's
+//     lower unit only makes this figure lower than the panel's; the KOF train lineup has no such
+//     recalculation.
 //
 // strict is railway-plunder's mode. Power comes only from hero.init.detail.get, and any slot 1..5
 // hero it doesn't cover makes the result 0 (unknown), because a template copy can be stale and
@@ -332,7 +357,7 @@ const (
 // strict (truck-deploy, which only ranks squads), the template copies stand in.
 func railwayPower(in *Init, sq railwaySquad, stats map[int64]railwayHeroStat, strict bool) int64 {
 	soldier := sq.soldier
-	if soldier == 0 {
+	if !sq.soldierSet && soldier == 0 {
 		var lv int64
 		for _, b := range in.Objects("building_new") {
 			if id, _ := evNum(b, "bId"); id == railwayMilitaryCamp {
@@ -387,7 +412,8 @@ func railwayHeroArray(sq railwaySquad) *sfs.SFSArray {
 }
 
 // railwaySaveSquad sends formation.save.template for sq, as the client does before every
-// train.send (action 4) and train.attack (action 8) (LWMyStationDataManager:TrySaveTruckFormation,
+// train.send (action 4, LWMyStationDataManager.lua:323) and train.attack (action 8,
+// UIHeroFakePVPFormationPanelView.lua:434-436) (TrySaveTruckFormation, :433-438;
 // FormationSaveMessage).
 func railwaySaveSquad(conn *session.GameConn, feature string, sq railwaySquad, action int32) error {
 	p := sfs.NewSFSObject()
@@ -404,9 +430,20 @@ func railwaySaveSquad(conn *session.GameConn, feature string, sq railwaySquad, a
 	return err
 }
 
-// railwayStation is the fresh station state from train.data (GetMyStationDataMessage): the
-// fields sit at the top level of the reply. It falls back to init trainData when the call fails.
+// railwayStation is the station state: the fresh train.data reply (GetMyStationDataMessage), whose
+// fields sit at the top level, or init trainData. TryGetMyStationData asks for train.data only
+// out of the city fog and while a TruckActivity (type 110) is open (LWMyStationDataManager.lua:
+// 207-214; the client checks the first one, this any); otherwise the client has only init
+// trainData, and so does this. Init trainData is also the fallback when the call fails.
 func railwayStation(conn *session.GameConn, in *Init, feature string) *sfs.SFSObject {
+	switch {
+	case !railwayOutOfFog(in):
+		slog.Info(feature + ": the station is in the city fog; train.data not asked for, as the client does")
+		return in.Object("trainData")
+	case len(Activities(conn, in).Open(actTypeTruckActivity)) == 0:
+		slog.Info(feature + ": no open truck activity; train.data not asked for, using the login init as the client does")
+		return in.Object("trainData")
+	}
 	msg, err := session.SendAndWait(conn, feature+" station data", "train.data", sfs.NewSFSObject())
 	if err == nil && msg != nil && !msg.Params.Has("errorCode") && msg.Params.Has("myTrainList") {
 		return msg.Params
@@ -415,11 +452,13 @@ func railwayStation(conn *session.GameConn, in *Init, feature string) *sfs.SFSOb
 	return in.Object("trainData")
 }
 
-// railwayStationOpen is GetRailwayStationState past FirstReward: out of the fog, the activity
-// started (openTime and now > openTime), and the opening reward taken. Trucks can't leave and the
-// enemy list doesn't open before that.
+// railwayStationOpen is GetRailwayStationState past FirstReward (LWMyStationDataManager.lua:
+// 718-743): out of the fog, the activity started (openTime and now > openTime), and the opening
+// reward taken. RefreshMyStationData sets hasFirstReward = (openReward == 0) (:566), so only a
+// present 0 holds the station; an absent openReward counts as taken, as in the client. Trucks
+// can't leave and the enemy list doesn't open before that.
 func railwayStationOpen(in *Init, station *sfs.SFSObject, nowMs int64) bool {
 	at, ok := claimInt(station, "openTime")
-	open, _ := claimInt(station, "openReward")
-	return railwayOutOfFog(in) && ok && nowMs > at && open != 0
+	open, known := claimInt(station, "openReward")
+	return railwayOutOfFog(in) && ok && nowMs > at && (!known || open != 0)
 }

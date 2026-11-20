@@ -3,6 +3,7 @@ package game
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -25,7 +26,7 @@ type eventFreebie struct {
 	// sends for the type, ActivityListDataManager.lua:154-932); nil means hero.event.info.get.
 	info func(s *ActivitySweep, a Activity) (*sfs.SFSObject, error)
 	// due reports whether the pack exists and is unclaimed today.
-	due func(in *Init, info *sfs.SFSObject) bool
+	due func(in *Init, a Activity, info *sfs.SFSObject) bool
 	// params builds the claim; nil means {activityId: Int}.
 	params func(a Activity, info *sfs.SFSObject) (*sfs.SFSObject, bool)
 }
@@ -34,29 +35,34 @@ type eventFreebie struct {
 //
 // Not claimed: Bounty Hunter (350, bounty.hunter.receive.free.reward). Its pack exists only when
 // table activity_hunter.box_reward > 0 (BountyHunterActData.lua:210-213), and every 1.0.364 row is
-// 0, so the real client never shows it.
+// 0, so the real client never shows it. The other boxes these panels offer are opt-in features
+// that read the same replies: event-milestone-boxes (Lucky Roll stages, Blue Store and slot
+// machine boxes), gift-box-free-draw and gift-box-score-boxes, food-event-boxes (Cooking and
+// Banquet) and decoration-gacha-boxes.
 var eventFreebies = []eventFreebie{
 	// LuckyRoll: get.lucky.roll.info {activityId: Int}; rollInfo.lastReceiveFreeTime in ms; the pack
-	// is Lucky_roulette_reward (ActLuckyRollInfo.lua:28, 85, 169-178).
+	// is Lucky_roulette_reward (ActLuckyRollInfo.lua:24-33, 89, 182-190). The field is copied only
+	// from a present rollInfo, with no default, and the only sender divides it first
+	// (UILuckyRollShopItem.lua:42-47), so without it the client cannot claim: evLastFreeDue.
 	{typ: actTypeLuckyRoll, claim: "roll.receive.free.reward",
 		info: evIntInfo("lucky roll info response", "get.lucky.roll.info", "activityId"),
-		due: func(in *Init, info *sfs.SFSObject) bool {
-			return evNonEmpty(info, "Lucky_roulette_reward") && evNotToday(in, evObject(info, "rollInfo"), "lastReceiveFreeTime")
+		due: func(in *Init, a Activity, info *sfs.SFSObject) bool {
+			return evNonEmpty(info, "Lucky_roulette_reward") && evLastFreeDue(in, a, evObject(info, "rollInfo"), "rollInfo.lastReceiveFreeTime")
 		}},
 	// GiftBox: get.activity.gift.box.info {activityId: Int}; ActivityFreeRewardData state flag
 	// (ActGiftBoxInfo.lua:102), which ignores `reward` for this type.
 	{typ: actTypeGiftBox, claim: "gift.box.free.reward",
 		info: evIntInfo("gift box info response", "get.activity.gift.box.info", "activityId"),
-		due:  func(_ *Init, info *sfs.SFSObject) bool { return evFreeFlagDue(info, false) }},
+		due:  func(_ *Init, _ Activity, info *sfs.SFSObject) bool { return evFreeFlagDue(info, false) }},
 	// LuckyShop: hero.event.info.get (activityType 134) -> LuckyShopData:ParseData -> the same flag
 	// (LuckyShopManager.lua:38-60).
 	{typ: actTypeLuckyShop, claim: "discount.free.reward",
-		due: func(_ *Init, info *sfs.SFSObject) bool { return evFreeFlagDue(info, true) }},
+		due: func(_ *Init, _ Activity, info *sfs.SFSObject) bool { return evFreeFlagDue(info, true) }},
 	// Cooking: activity.mak.food.info {aid: Int}; the client reads only info[0], whose id is the
 	// claim's id (ActivityMakeFoodInfoMessage.lua:14; ActCookingData.lua:24-45).
 	{typ: actTypeCooking, claim: "activity.mak.food.free.reward",
 		info: evIntInfo("cooking info response", "activity.mak.food.info", "aid"),
-		due: func(_ *Init, info *sfs.SFSObject) bool {
+		due: func(_ *Init, _ Activity, info *sfs.SFSObject) bool {
 			return evFreeFlagDue(evFirstInfo(info), true)
 		},
 		params: evAidIDParams},
@@ -64,14 +70,20 @@ var eventFreebies = []eventFreebie{
 	// ActBanquetData.lua:45-70).
 	{typ: actTypeBanquet, claim: "activity.food.party.reward.free",
 		info: evIntInfo("banquet info response", "activity.food.party.info", "aid"),
-		due: func(_ *Init, info *sfs.SFSObject) bool {
+		due: func(_ *Init, _ Activity, info *sfs.SFSObject) bool {
 			return evFreeFlagDue(evFirstInfo(info), true)
 		},
 		params: evAidIDParams},
 	// Monopoly: top-level lastReceiveFreeTime in seconds, pack dayReward (ActMonopolyData.lua:173-178, 272-278).
 	{typ: actTypeMonopoly, claim: "rich.man.day.reward", due: evDayRewardDue},
-	// Bargain Shop: same fields, seconds (ActBargainShopInfo.lua:61-68, 111-129).
-	{typ: actTypeBargainShop, claim: "bargain.day.reward", due: evDayRewardDue},
+	// Bargain Shop: same fields, seconds (ActBargainShopInfo.lua:64-72, 117-140). Unlike the
+	// others its data class has no default: a reply without lastReceiveFreeTime aborts the parse
+	// before the pack row is built (:138; ActBargainShopData.lua:26-40), so the pack is due only
+	// with the field present (evLastFreeDue).
+	{typ: actTypeBargainShop, claim: "bargain.day.reward",
+		due: func(in *Init, a Activity, info *sfs.SFSObject) bool {
+			return evNonEmpty(info, "dayReward") && evLastFreeDue(in, a, info, "lastReceiveFreeTime")
+		}},
 	// Titanium Blue Store: same fields, seconds (LWTitaniumBlueStoreManager.lua:72-79, 170).
 	{typ: actTypeBlueStore, claim: "blue.shop.day.reward", due: evDayRewardDue},
 	// Slot machine: same field name but ms (ActSlotMachineData.lua:78-82, 124-130).
@@ -79,7 +91,7 @@ var eventFreebies = []eventFreebie{
 	// Decoration gacha: freeReward present and (nextResetTime, seconds, has passed or freeState is
 	// 0) (ActivityDecorationGachaData.lua:18-29).
 	{typ: actTypeDecorationGacha, claim: "decoration.free.reward",
-		due: func(_ *Init, info *sfs.SFSObject) bool {
+		due: func(_ *Init, _ Activity, info *sfs.SFSObject) bool {
 			if !evNonEmpty(info, "freeReward") {
 				return false
 			}
@@ -90,12 +102,16 @@ var eventFreebies = []eventFreebie{
 	// Torch relay: lastReceiveFreeTime in ms, absent meaning never claimed; all three
 	// activity_torch_relay rows have free_iap_reward > 0 (ActivityTorchRelayData.lua:201-212).
 	{typ: actTypeTorchRelay, claim: "torch.relay.daily.reward",
-		due: func(in *Init, info *sfs.SFSObject) bool { return evNotToday(in, info, "lastReceiveFreeTime") }},
+		due: func(in *Init, _ Activity, info *sfs.SFSObject) bool {
+			return evNotToday(in, info, "lastReceiveFreeTime")
+		}},
 	// Survival VIP gift: survival.vip.gift.get.info {activityId: Int}; claimable while isShow is not
-	// false and freeReceived is not true (VipGiftActDataManager.lua:444-455, 592-608).
+	// hidden and freeReceived is not true (VipGiftActDataManager.lua:444-455, 592-608). OnGetInfo
+	// keeps a Bool as it is and reads anything else through string.lower(tostring(isShow)), hidden
+	// when "0" or "false" (:610-616), so an integer 0 hides it too.
 	{typ: actTypeSurvivalVipGift, claim: "survival.vip.gift.receive.free",
 		info: evIntInfo("survival vip gift info response", "survival.vip.gift.get.info", "activityId"),
-		due: func(_ *Init, info *sfs.SFSObject) bool {
+		due: func(_ *Init, _ Activity, info *sfs.SFSObject) bool {
 			if v, ok := info.Get("isShow"); ok {
 				switch s := v.Val.(type) {
 				case bool:
@@ -103,7 +119,11 @@ var eventFreebies = []eventFreebie{
 						return false
 					}
 				case string:
-					if s == "0" || s == "false" {
+					if l := strings.ToLower(s); l == "0" || l == "false" {
+						return false
+					}
+				case int64, int32, int16, byte:
+					if n, _ := evNum(info, "isShow"); n == 0 {
 						return false
 					}
 				}
@@ -140,6 +160,15 @@ func runEventShopFreebies(conn *session.GameConn, in *Init) error {
 			if b.dead {
 				return b.err()
 			}
+			// The Torch Relay free pack needs the activity's activity_torch_relay row with
+			// free_iap_reward > 0 (CanClaimFreePackage, ActivityTorchRelayData.lua:220-224); every row
+			// of tables 40413 has one, so an activity whose row is unknown is skipped, as
+			// claimTorchRelay skips it (1.0.370 audit B61).
+			if f.typ == actTypeTorchRelay && !torchRelayKnown(a) {
+				slog.Info("event-shop-freebies: Torch Relay activity has no known activity_torch_relay row; skipped",
+					"activity", a.ID, "tableVersion", tableVersion)
+				continue
+			}
 			fetch := f.info
 			if fetch == nil {
 				fetch = (*ActivitySweep).EventInfo
@@ -149,7 +178,7 @@ func runEventShopFreebies(conn *session.GameConn, in *Init) error {
 				b.add(err)
 				continue
 			}
-			if !f.due(in, info) {
+			if !f.due(in, a, info) {
 				continue
 			}
 			params := evActivityIDParam(a)
@@ -189,10 +218,25 @@ func evNotToday(in *Init, o *sfs.SFSObject, key string) bool {
 	return ok && !claimed
 }
 
-// evDayRewardDue is the Monopoly/Bargain/Blue Store/Slots rule: dayReward non-empty and
-// lastReceiveFreeTime not today.
-func evDayRewardDue(in *Init, info *sfs.SFSObject) bool {
+// evDayRewardDue is the Monopoly/Blue Store/Slots rule: dayReward non-empty and
+// lastReceiveFreeTime not today, absent meaning never claimed (each data class defaults the field to
+// 0: ActMonopolyData.lua:19, ActSlotMachineData.lua:11, LWTitaniumBlueStoreManager.lua:17).
+func evDayRewardDue(in *Init, _ Activity, info *sfs.SFSObject) bool {
 	return evNonEmpty(info, "dayReward") && evNotToday(in, info, "lastReceiveFreeTime")
+}
+
+// evLastFreeDue is evNotToday for the Lucky Roll and Bargain Shop packs, whose client cannot claim
+// without the last-claim time: an absent field (or, for Lucky Roll, an absent rollInfo) is not due
+// and logs a Warn naming the activity and the field, so a live run shows whether a reply ever
+// lacks it. A present 0 is never claimed and stays due, as on the client.
+func evLastFreeDue(in *Init, a Activity, o *sfs.SFSObject, field string) bool {
+	key := field[strings.LastIndex(field, ".")+1:]
+	if _, ok := evNum(o, key); !ok {
+		slog.Warn("event-shop-freebies: the detail reply has no last free claim time; the client cannot claim the pack then, so it is skipped",
+			"activity", a.ID, "type", a.Type, "missing", field)
+		return false
+	}
+	return evNotToday(in, o, key)
 }
 
 // evFreeFlagDue is ActivityFreeRewardData's rule (ActivityFreeRewardData.lua:3-10, 21-84), used by

@@ -23,8 +23,45 @@ func cardInit(monthEnd, monthLast time.Time, spy int32) *Init {
 	priv.PutSFSArray("freeReward", sfs.NewSFSArray())
 	priv.PutSFSArray("vipReward", freebieReward())
 	in.Raw.PutSFSObject("truckMonthCardPrivilege", priv)
+	stage := sfs.NewSFSObject() // the truck function is out of the fog (railwayOutOfFog)
+	stage.PutInt("stageId", railwayFogStage-1)
+	in.Raw.PutSFSObject("monopolyStageInfo", stage)
 	in.Buildings = append(in.Buildings, NewTestBuilding(2, golloesCampBuildingID, 3))
 	return in
+}
+
+// TestCardDailiesTruckPrivilegeWaitsForTheFog is MASTER 1.0.370 B75 (cov-ui-military F8): the
+// truck insurance entry is shown only while the truck function is out of the fog
+// (IsOpenTruckInsurance, MonthCardNewManager.lua:242-249; IsTruckFunctionLock,
+// LWMyStationDataManager.lua:792-795), so a fogged station, or an init without the Monopoly stage
+// the client reads it from, sends no truck claim. Every other card claim is unchanged.
+func TestCardDailiesTruckPrivilegeWaitsForTheFog(t *testing.T) {
+	withEvNow(t, evTestNow)
+	yesterday := evTestTomorrow.Add(-25 * time.Hour)
+	for name, stageID := range map[string]int32{"fogged": railwayFogStage - 2, "no stage in init": -1, "out of the fog": railwayFogStage - 1} {
+		t.Run(name, func(t *testing.T) {
+			conn, fake := startEvFake(t, cardReplies(yesterday, nil))
+			in := cardInit(evTestNow.Add(24*time.Hour), yesterday, 0)
+			stage := sfs.NewSFSObject()
+			if stageID >= 0 {
+				stage.PutInt("stageId", stageID)
+			}
+			in.Raw.PutSFSObject("monopolyStageInfo", stage)
+			if err := runCardDailies(conn, in); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if name == "out of the fog" {
+				want = 1
+			}
+			if n := len(fake.only(truckPrivilegeCmd)); n != want {
+				t.Errorf("sent %d truck privilege claims, want %d (all: %v)", n, want, fake.cmds())
+			}
+			if n := len(fake.only(monthCardRewardCmd)); n != 1 {
+				t.Errorf("month card claims = %d, want 1: the fog gates only the truck claim", n)
+			}
+		})
+	}
 }
 
 func cardReplies(weekLast time.Time, heroStates []int32) func(string, *sfs.SFSObject) *sfs.SFSObject {

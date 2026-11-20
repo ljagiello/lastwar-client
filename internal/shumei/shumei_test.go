@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,7 @@ var testInstall = Install{
 	AppUID:           "u0_a123",
 	FirstInstallTime: time.UnixMilli(1775000000000),
 	LastUpdateTime:   time.UnixMilli(1789000000000),
+	BootCount:        37,
 }
 
 // testAndroidID is the pinned device ANDROID_ID (a24) the test devices use.
@@ -122,6 +124,8 @@ func testDevice() Device {
 		Now: time.UnixMilli(1790882444713), BootTime: time.UnixMilli(1790000000000),
 		AndroidID: testAndroidID, Install: testInstall, CollectTime: 287 * time.Millisecond,
 		AppVersion: testAppVersion,
+		brightness: 142, battery: battery{Status: batteryDischarging, Level: 64, Scale: 100, Temp: 301, Voltage: 3998},
+		storageUsed: 7 << 20,
 	}
 }
 
@@ -347,8 +351,6 @@ func TestDeviceData(t *testing.T) {
 	}
 	m := decodeDeviceData(t, s)
 	for key, want := range map[string]string{
-		"a2":   id,
-		"a97":  id,
 		"a9":   "1790882444713",
 		"a40":  "1790000000000",
 		"a171": "882444713",
@@ -366,6 +368,23 @@ func TestDeviceData(t *testing.T) {
 		// versionName: the build the Login claims, not a fixed one.
 		"a38": testAppVersion,
 		"a39": "com.fun.lastwar.gp",
+		// The 1.0.370 manifest's targetSdkVersion and its granted permissions,
+		// and SmSdkManager's options (HTTPS, a callback, a notCollect set).
+		"a90": "36",
+		"a83": "0001100",
+		"a86": "1101110",
+		// The app's own signing certificate, not the phone's.
+		"a56": "O=LCYD",
+		"a57": "2110632754",
+		// One display: a141 is a primitive 0.
+		"a141": "0",
+		// The run's readings: brightness and battery.
+		"a37": "142",
+		"a72": "map[level:64 scale:100 status:3 temp:301 vol:3998]",
+		// A first start and collection on a phone whose boot count Fill set.
+		"a4":   "1",
+		"a130": "1",
+		"a127": "37",
 	} {
 		if got := fmt.Sprint(m[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
@@ -385,8 +404,30 @@ func TestDeviceData(t *testing.T) {
 			t.Errorf("%s = %v, want it absent: a real Last War install reads no Wi-Fi details", key, v)
 		}
 	}
-	if v, ok := m["a126"]; ok {
-		t.Errorf("a126 = %v, want it absent before the install's first registration", v)
+	for _, key := range []string{"a126", "a2", "a97"} {
+		if v, ok := m[key]; ok {
+			t.Errorf("%s = %v, want it absent before the install's first registration: the SDK has no smid stored", key, v)
+		}
+	}
+	// The game never hands the SDK its deviceId, so it appears nowhere.
+	if strings.Contains(s, id) {
+		t.Errorf("deviceData carries the Login deviceId %q:\n%s", id, s)
+	}
+	// a5 is the never-set channel, a156 the display list of a multi-display
+	// phone, a33 a cpuinfo line the catalog doesn't have.
+	for _, key := range []string{"a5", "a156", "a33"} {
+		if v, ok := m[key]; ok {
+			t.Errorf("%s = %v, want it absent", key, v)
+		}
+	}
+	// One StatFs: available <= free <= total.
+	avail, free, total := jsonInt(t, m["a69"]), jsonInt(t, m["a70"]), jsonInt(t, m["a71"])
+	if avail <= 0 || avail > free || free > total {
+		t.Errorf("a69 = %d, a70 = %d, a71 = %d, want 0 < available <= free <= total", avail, free, total)
+	}
+	traffic, _ := m["a120"].(map[string]any)
+	if tr, mr := jsonInt(t, traffic["tr"]), jsonInt(t, traffic["mr"]); tr <= 0 || mr > tr {
+		t.Errorf("a120 = %v, want total received above zero and at least the mobile part", traffic)
 	}
 	for key, v := range m {
 		if isEmpty(v) {
@@ -418,12 +459,18 @@ func TestDeviceData(t *testing.T) {
 	if _, err := deviceData(id, unset); err == nil {
 		t.Error("deviceData with no install values = nil error, want an error")
 	}
+	noReadings := d
+	noReadings.battery, noReadings.storageUsed = battery{}, 0
+	if _, err := deviceData(id, noReadings); err == nil {
+		t.Error("deviceData without the run's readings = nil error, want an error")
+	}
 	for name, unsetOne := range map[string]func(*Install){
 		"mediaDrmId":       func(in *Install) { in.MediaDrmID = "" },
 		"puuid":            func(in *Install) { in.PUUID = "" },
 		"appUid":           func(in *Install) { in.AppUID = "" },
 		"firstInstallTime": func(in *Install) { in.FirstInstallTime = time.Time{} },
 		"lastUpdateTime":   func(in *Install) { in.LastUpdateTime = time.Time{} },
+		"bootCount":        func(in *Install) { in.BootCount = 0 },
 	} {
 		partial := d
 		unsetOne(&partial.Install)
@@ -458,6 +505,9 @@ func TestDeviceDataRegistered(t *testing.T) {
 		"a126": "Bsmid-earlier",
 		"a167": "1789500000123",
 		"a168": "1789500000123",
+		// The smid without getDeviceId()'s "B" (l111l11I1IIIl.java:29-35).
+		"a2":  "smid-earlier",
+		"a97": "smid-earlier",
 	} {
 		if got := fmt.Sprint(m[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
@@ -467,8 +517,8 @@ func TestDeviceDataRegistered(t *testing.T) {
 
 // TestDeviceDataHardware checks the device-specific half is deterministic per
 // deviceId and internally consistent: the build's model/brand/board match the
-// catalog entry, a143/a33 carry the SoC, a92 is a36 without its dpi, and every
-// catalog entry describes one coherent phone (no NRD90M-style cross-generation
+// catalog entry, a143 carries the SoC, a92 is a36 without its dpi, and every
+// catalog entry describes one coherent US phone (no NRD90M-style cross-generation
 // mismatch).
 func TestDeviceDataHardware(t *testing.T) {
 	const id = "0123456789abcdef0123456789abcdef_n3d"
@@ -477,7 +527,7 @@ func TestDeviceDataHardware(t *testing.T) {
 	// Deterministic: the same deviceId reports the same phone every time.
 	first := decodeDeviceData(t, mustDeviceData(t, id, d))
 	second := decodeDeviceData(t, mustDeviceData(t, id, d))
-	for _, key := range []string{"a46", "a143", "a33", "a34", "a32", "a48", "a37", "a36", "a92", "a56", "a57", "a47", "a18", "a154", "a131", "a132", "a10", "a45"} {
+	for _, key := range []string{"a46", "a143", "a34", "a32", "a48", "a36", "a92", "a56", "a57", "a47", "a18", "a154", "a131", "a132", "a10", "a45", "a29", "a69", "a70", "a71", "a120"} {
 		if fmt.Sprint(first[key]) != fmt.Sprint(second[key]) {
 			t.Errorf("%s = %v then %v, want it stable for one deviceId", key, first[key], second[key])
 		}
@@ -494,21 +544,15 @@ func TestDeviceDataHardware(t *testing.T) {
 	if got := fmt.Sprint(first["a92"]); got != screenPrefix(hw.Screen) {
 		t.Errorf("a92 = %s, want %s (a36 minus dpi)", got, screenPrefix(hw.Screen))
 	}
-	for _, key := range []string{"a143", "a33"} {
-		if got := fmt.Sprint(first[key]); got != hw.SoC {
-			t.Errorf("%s = %s, want %s", key, got, hw.SoC)
-		}
-	}
 	for key, want := range map[string]string{
+		"a143": hw.SoC,
 		"a34":  fmt.Sprint(hw.MaxFreq),
 		"a32":  fmt.Sprint(hw.Cores),
 		"a48":  fmt.Sprint(hw.RAMBytes),
-		"a37":  fmt.Sprint(hw.StorageGB),
-		"a57":  fmt.Sprint(hw.CertHash),
 		"a45":  hw.SimOperator,
-		"a56":  hw.CertSubject,
-		"a131": hw.Locale,
-		"a132": hw.Locale,
+		"a131": hw.SimCountryISO,
+		"a132": hw.NetworkCountryISO,
+		"a29":  hw.Build["radioVersion"],
 	} {
 		if got := fmt.Sprint(first[key]); got != want {
 			t.Errorf("%s = %s, want %s", key, got, want)
@@ -561,7 +605,49 @@ func TestDeviceDataHardware(t *testing.T) {
 		if hw.Cores <= 0 || hw.MaxFreq <= 0 || hw.RAMBytes <= 0 || hw.StorageGB <= 0 {
 			t.Errorf("catalog[%d] has a zero hardware metric: %+v", i, hw)
 		}
+		// A US SIM on its home network, matching the Login's fromCountry "US":
+		// the operator's MCC is a US one, both country codes are "us", and the
+		// SIM's carrier name is the registered network's.
+		if mcc := hw.SimOperator[:min(3, len(hw.SimOperator))]; mcc < "310" || mcc > "316" {
+			t.Errorf("catalog[%d] SIM operator %q has a non-US MCC", i, hw.SimOperator)
+		}
+		if hw.SimCountryISO != "us" || hw.NetworkCountryISO != "us" {
+			t.Errorf("catalog[%d] SIM/network country = %q/%q, want us/us", i, hw.SimCountryISO, hw.NetworkCountryISO)
+		}
+		if hw.SimOperatorName == "" || hw.SimOperatorName != hw.Props["gsm.operator.alpha"] {
+			t.Errorf("catalog[%d] SIM operator name %q, network %q, want the same carrier", i, hw.SimOperatorName, hw.Props["gsm.operator.alpha"])
+		}
+		// a154's version key is "ver" (l11l111l11Il.java:23).
+		if _, ok := hw.Launcher["ver"]; !ok || len(hw.Launcher) != 3 {
+			t.Errorf("catalog[%d] launcher = %v, want pkg, label and ver", i, hw.Launcher)
+		}
+		// Each a47 entry is "type,vendor", and every phone has a light sensor.
+		hasLight := false
+		for _, sensor := range hw.Sensors {
+			typ, vendor, ok := strings.Cut(sensor, ",")
+			if _, err := strconv.Atoi(typ); !ok || err != nil || vendor == "" {
+				t.Errorf("catalog[%d] sensor %q is not \"type,vendor\"", i, sensor)
+			}
+			hasLight = hasLight || typ == "5"
+		}
+		if !hasLight {
+			t.Errorf("catalog[%d] sensors %v have no light sensor (type 5)", i, hw.Sensors)
+		}
 	}
+}
+
+// jsonInt reads a json.Number from a decodeDeviceData map as an int64.
+func jsonInt(t *testing.T, v any) int64 {
+	t.Helper()
+	n, ok := v.(json.Number)
+	if !ok {
+		t.Fatalf("%v (%T) is not a JSON number", v, v)
+	}
+	i, err := n.Int64()
+	if err != nil {
+		t.Fatalf("%v is not an integer: %v", n, err)
+	}
+	return i
 }
 
 // TestHardwareForDistribution checks HardwareFor is a pure function of the

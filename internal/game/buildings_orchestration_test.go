@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1061,6 +1062,55 @@ func TestCollectIdleRewardSuccess(t *testing.T) {
 	}
 	if len(gotActions) != 2 || gotActions[0] != 0 || gotActions[1] != 1 {
 		t.Errorf("got actions %v, want [0 1] (peek then claim, in order)", gotActions)
+	}
+}
+
+// TestCollectIdleRewardSkipsClaimWhenPeekShowsEmptyPools covers B46: the peek reply's reward and
+// dominatorReward are the two pools the panel's Receive button checks
+// (UIZombieBattleHangUpRewardView.lua:101-106, HangUpRewardMessage.lua:20-21). Both empty means no
+// claim; anything else, including a reply without the fields or with a field of another type,
+// still claims.
+func TestCollectIdleRewardSkipsClaimWhenPeekShowsEmptyPools(t *testing.T) {
+	pool := []*sfs.SFSObject{obj("type", 27, "value", obj("itemId", 630011, "rewardAdd", 3))}
+	none := []*sfs.SFSObject{}
+	cases := []struct {
+		name      string
+		peek      *sfs.SFSObject
+		wantClaim bool
+	}{
+		{"both pools empty", obj("reward", none, "dominatorReward", none), false},
+		{"truck pool empty, no overlord track", obj("reward", none), false},
+		{"truck pool full", obj("reward", pool, "dominatorReward", none), true},
+		{"overlord pool full", obj("reward", none, "dominatorReward", pool), true},
+		{"no pool fields", obj("lastIdleRewardTimeStamp", int64(1_790_000_000_000)), true},
+		{"reward of another type", obj("reward", "[]", "dominatorReward", none), true},
+		{"dominatorReward of another type", obj("reward", none, "dominatorReward", 0), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			client, stop := serveVisitorCmds(t, func(req visitorRequest) *sfs.SFSObject {
+				if req.params.GetInt("action") == 0 {
+					return c.peek
+				}
+				return obj("reward", pool)
+			})
+			err := CollectIdleReward(client)
+			got := stop()
+			if err != nil {
+				t.Fatalf("CollectIdleReward() = %v, want nil", err)
+			}
+			var actions []int32
+			for _, r := range got {
+				actions = append(actions, r.params.GetInt("action"))
+			}
+			want := []int32{0}
+			if c.wantClaim {
+				want = []int32{0, 1}
+			}
+			if !slices.Equal(actions, want) {
+				t.Errorf("actions sent = %v, want %v", actions, want)
+			}
+		})
 	}
 }
 

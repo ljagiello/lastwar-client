@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bufio"
 	"net"
 	"testing"
 	"time"
@@ -19,11 +18,14 @@ func NewPipeGameConnPair(t *testing.T) (client, server *GameConn) {
 		_ = c1.Close()
 		_ = c2.Close()
 	})
-	return &GameConn{conn: c1, reader: bufio.NewReaderSize(c1, 4096)}, &GameConn{conn: c2, reader: bufio.NewReaderSize(c2, 4096)}
+	server = newGameConn(c2, 4096)
+	server.fakeServer = true
+	return newGameConn(c1, 4096), server
 }
 
-// readAndReply is the fake-server half used by the sendAndWait tests below: read one request off
-// server, then reply to it with the given cmd/params. Run in a goroutine since net.Pipe is
+// ReadAndReply is the fake-server half used by the sendAndWait tests: read one request off
+// server, then reply to it with the given cmd/params and the request's `_id`, as the real server
+// echoes it (unless replyParams sets its own). Run in a goroutine since net.Pipe is
 // unbuffered/synchronous -- the client's send and this read rendezvous directly. Takes no
 // *testing.T: it runs in a background goroutine that may still be alive after the test function
 // returns (unblocked by testutil.NewPipeGameConnPair's t.Cleanup), and calling T methods from a goroutine
@@ -41,7 +43,15 @@ func ReadAndReply(server *GameConn, replyCmd string, replyParams *sfs.SFSObject)
 	if cmd == "" {
 		cmd = msg.Cmd
 	}
-	_ = server.SendExtension(cmd, replyParams)
+	reply := sfs.NewSFSObject()
+	for _, k := range replyParams.Keys() {
+		v, _ := replyParams.Get(k)
+		reply.PutValue(k, v)
+	}
+	if id, ok := msg.Params.Get("_id"); ok && !reply.Has("_id") {
+		reply.PutValue("_id", id)
+	}
+	_ = server.SendExtension(cmd, reply)
 }
 
 // NewFakeGameListener opens a TCP listener on 127.0.0.1 for a fake game server and registers
@@ -95,9 +105,13 @@ func ServeFakeGameServer(ln net.Listener, handler func(*GameConn)) {
 // newFakeServerConn wraps the server end of a fake game connection. Its ReadEnvelope drops the
 // client's heartbeat pings: StartHeartbeat sends one before Login, and fake handlers read the
 // first envelope as the Login request and count later ones as the requests they answer.
+//
+// Like NewPipeGameConnPair's server end, it is a fakeServer: its replies carry no `_id` of its own
+// counter's making, only one a handler puts there.
 func newFakeServerConn(c net.Conn) *GameConn {
 	gc := NewGameConnForTest(c)
 	gc.skipClientPings = true
+	gc.fakeServer = true
 	return gc
 }
 

@@ -16,13 +16,13 @@ import (
 	"lastwar-client/internal/sfs"
 )
 
-// Radar execute half (DUEL.md §5.2): run the radar tasks the client finishes without a real march,
+// Radar execute half (docs/alliance-duel.mdx): run the radar tasks the client finishes without a real march,
 // so they sit FINISHED (state 1) and stop expiring until a day whose Alliance Duel scores radar
 // tasks (score type 82, Mon/Wed/Fri). The duel points land at the claim, not at the finish: the
 // client's Claim-All warning says so on off days (en:45902, detect_quick_reward_confirm_text;
 // DetectEventCompleteOneClickBtnView.lua:262-305), and the client lists FINISHED tasks whatever
 // their endTime while it hides an unstarted one past it (RadarCenterDataManager.lua:55-79). That
-// the server keeps returning a FINISHED task past its endTime is unverified (DUEL.md §8 1a).
+// the server keeps returning a FINISHED task past its endTime is unverified (docs/alliance-duel.mdx).
 //
 // The flow is the client's Quick Execute (DetectEventCompleteOneClickBtnView.lua:104-231,
 // RadarFakeUIMarchManager.lua:52-77), which runs every march-free task at once:

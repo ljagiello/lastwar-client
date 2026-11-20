@@ -2,7 +2,10 @@ package auth
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -24,7 +27,7 @@ func captureAuthLog(t *testing.T) *bytes.Buffer {
 
 // loginReplyWithUpdate is a game-server Login reply carrying updateType (Int) and new_version
 // (UtfString), the fields LoginMessage.CSHandleResponse reads (Assembly-CSharp.decompiled.cs:
-// 82878-82896), on the reply itself or, underP, on its p object.
+// 83236-83254, 1.0.370), on the reply itself or, underP, on its p object.
 func loginReplyWithUpdate(updateType int32, newVersion string, underP bool) *sfs.SFSObject {
 	o := sfs.NewSFSObject()
 	o.PutInt("updateType", updateType)
@@ -72,12 +75,12 @@ func TestReadLoginUpdateGate(t *testing.T) {
 	}
 }
 
-func TestLogLoginUpdateGate(t *testing.T) {
+func TestCheckLoginUpdateGate(t *testing.T) {
 	for _, c := range []struct {
-		name     string
-		reply    *sfs.SFSObject
-		wantInfo []string
-		wantWarn bool
+		name       string
+		reply      *sfs.SFSObject
+		wantInfo   []string
+		wantForced bool
 	}{
 		// The live 2026-10-04 Login for iOS 1.0.344 (docs/bootstrap.mdx): proceed, and a newer
 		// new_version is no warning.
@@ -88,7 +91,7 @@ func TestLogLoginUpdateGate(t *testing.T) {
 		{"absent", sfs.NewSFSObject(), []string{"updateType=absent", "newVersion=absent"}, false},
 	} {
 		logs := captureAuthLog(t)
-		logLoginUpdateGate(c.reply, "cross-server Login", "1.0.344")
+		err := checkLoginUpdateGate(c.reply, "cross-server Login", "1.0.344")
 		out := logs.String()
 		if !strings.Contains(out, "level=INFO") || !strings.Contains(out, "login reply: update gate") {
 			t.Errorf("%s: log %q, want the Info line", c.name, out)
@@ -98,19 +101,25 @@ func TestLogLoginUpdateGate(t *testing.T) {
 				t.Errorf("%s: log %q, want %s", c.name, out, w)
 			}
 		}
-		if got := strings.Contains(out, "level=WARN"); got != c.wantWarn {
-			t.Errorf("%s: warned = %v, want %v (log %q)", c.name, got, c.wantWarn, out)
+		if got := errors.Is(err, gsl.ErrForcedUpdate); got != c.wantForced {
+			t.Errorf("%s: err = %v, want forced update %v", c.name, err, c.wantForced)
 		}
-		if c.wantWarn && !strings.Contains(out, "real client stops here") {
-			t.Errorf("%s: warning %q, want it to say the real client stops", c.name, out)
+		if !c.wantForced && err != nil {
+			t.Errorf("%s: err = %v, want nil", c.name, err)
+		}
+		if got := strings.Contains(out, "level=ERROR"); got != c.wantForced {
+			t.Errorf("%s: logged an error = %v, want %v (log %q)", c.name, got, c.wantForced, out)
+		}
+		if c.wantForced && !strings.Contains(out, "real client stops here") {
+			t.Errorf("%s: error %q, want it to say the real client stops", c.name, out)
 		}
 	}
 }
 
-// TestDoCrossServerLoginLogsForcedUpdateAndCarriesOn: a Login reply with updateType 2 is logged and
-// warned about, and the login still succeeds (no exit; enforcing it is a separate decision). The
-// connection records the appVersion the Login claimed.
-func TestDoCrossServerLoginLogsForcedUpdateAndCarriesOn(t *testing.T) {
+// TestDoCrossServerLoginStopsOnForcedUpdate: a Login reply with updateType 2 ends the run, as the
+// client's loading error 9 does (Assembly-CSharp.decompiled.cs:71486-71494): no connection is
+// handed back and the error wraps gsl.ErrForcedUpdate (1.0.370 audit B16).
+func TestDoCrossServerLoginStopsOnForcedUpdate(t *testing.T) {
 	logs := captureAuthLog(t)
 	addr := session.StartFakeGameServer(t, func(server *session.GameConn) {
 		if _, err := server.ReadEnvelope(); err != nil {
@@ -123,18 +132,74 @@ func TestDoCrossServerLoginLogsForcedUpdateAndCarriesOn(t *testing.T) {
 		IP: host, Port: port, Zone: "APS1", GameUid: "uid-1", DeviceID: "dev-1", AirKey: "airkey-1", AccessTok: "tok-1",
 		IOSMode: true, AppVersion: "1.0.344",
 	})
-	if err != nil {
-		t.Fatalf("DoCrossServerLogin: %v", err)
+	if !errors.Is(err, gsl.ErrForcedUpdate) {
+		t.Fatalf("DoCrossServerLogin err = %v, want ErrForcedUpdate", err)
 	}
-	defer func() { _ = result.Conn.Close() }()
+	if result != nil {
+		t.Errorf("result = %v, want nil after a forced update", result)
+	}
 	out := logs.String()
-	for _, w := range []string{"updateType=2", "newVersion=1.0.367", "appVersion=1.0.344", "level=WARN"} {
+	for _, w := range []string{"updateType=2", "newVersion=1.0.367", "appVersion=1.0.344", "level=ERROR"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("log %q, want %s", out, w)
 		}
 	}
-	if got := result.Conn.AppVersion(); got != "1.0.344" {
-		t.Errorf("Conn.AppVersion() = %q, want the claimed 1.0.344", got)
+}
+
+// TestLoginStopsOnForcedUpdateReply: the base-zone Login moves to AppUpdate on updateType 2
+// (Assembly-CSharp.decompiled.cs:13666-13669) and never waits for init.
+func TestLoginStopsOnForcedUpdateReply(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LASTWAR_STATE_DIR", "")
+	addr := session.StartFakeGameServer(t, func(server *session.GameConn) {
+		if _, err := server.ReadEnvelope(); err != nil {
+			return
+		}
+		if err := server.SendEnvelope(session.ControllerSystem, session.ActionLogin, loginReplyWithUpdate(2, "1.0.371", false)); err != nil {
+			return
+		}
+		_ = server.SendExtension("init", sfs.NewSFSObject())
+	})
+	host, port := testutil.SplitHostPortInt(t, addr)
+	fake := testutil.NewFakeGSLServer(t, gsl.LoginServerListRespon{
+		Code:       "0",
+		ServerList: []gsl.LoginServerInfo{{IP: gsl.FlexString(host), Port: testutil.FlexPort(port), Zone: "APS1", GameUid: "uid-1"}},
+		At:         &gsl.LoginToken{Token: "tok-1"},
+	})
+	testutil.UseFakeGSLServer(t, fake)
+
+	result, err := Login(LoginOptions{})
+	if !errors.Is(err, gsl.ErrForcedUpdate) {
+		t.Fatalf("Login err = %v, want ErrForcedUpdate", err)
+	}
+	if result != nil {
+		t.Errorf("result = %v, want nil after a forced update", result)
+	}
+}
+
+// TestLoginStopsOnForcedUpdateCheckVersion: a check-version reply with updateType 2 stops the client
+// before GSL (Assembly-CSharp.decompiled.cs:9619-9626), so Login makes no getserverlist call.
+func TestLoginStopsOnForcedUpdateCheckVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LASTWAR_STATE_DIR", "")
+	var gslCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "getlsu3dversion.php"):
+			_, _ = w.Write([]byte(`{"updateType":"2","downloadurl":"https://store.invalid/app"}`))
+		default:
+			gslCalls++
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	testutil.UseFakeGSLServer(t, server)
+
+	if _, err := Login(LoginOptions{IOSMode: true}); !errors.Is(err, gsl.ErrForcedUpdate) {
+		t.Fatalf("Login err = %v, want ErrForcedUpdate", err)
+	}
+	if gslCalls != 0 {
+		t.Errorf("GSL was called %d times after a forced update", gslCalls)
 	}
 }
 

@@ -167,7 +167,12 @@ func TestDuelTopUnit(t *testing.T) {
 		{30, duelTrainUnlocks{science: true}, 10},
 		{35, duelTrainUnlocks{science: true, t11Buff: true, season: 5}, 11},
 		{35, duelTrainUnlocks{science: true, t11Buff: true, season: 4}, 10}, // season day unread
-		{35, duelTrainUnlocks{science: true, season: 6}, 10},                // no UNLOCK_T11
+		// MASTER B57: T11Util.IfShowT11InCamp shows T11 in season 4 from day 64 (k1 "4|64").
+		{35, duelTrainUnlocks{science: true, t11Buff: true, season: 4, seasonDay: 63}, 10},
+		{35, duelTrainUnlocks{science: true, t11Buff: true, season: 4, seasonDay: 64}, 11},
+		{35, duelTrainUnlocks{science: true, season: 4, seasonDay: 70}, 10}, // no UNLOCK_T11
+		{35, duelTrainUnlocks{science: true, t11Buff: true, season: 3, seasonDay: 90}, 10},
+		{35, duelTrainUnlocks{science: true, season: 6}, 10}, // no UNLOCK_T11
 		{34, duelTrainUnlocks{science: true, t11Buff: true, season: 6}, 10},
 	} {
 		got, ok := duelTopUnit(c.lv, c.u)
@@ -189,6 +194,34 @@ func TestDuelTroopTrainingT11FromInit(t *testing.T) {
 	}
 	if got := trainingsOf(t, f); !slices.Equal(got, []string{"1:T11:600"}) {
 		t.Errorf("trainings %v, want T11 x600", got)
+	}
+}
+
+func TestDuelTroopTrainingT11InSeason4FromDay64(t *testing.T) {
+	// MASTER B57: the season day is (now - seasonStartTime) // 86400000 + 1 (SeasonUtil.lua:308-316),
+	// seasonStartTime from init playerServerSeasonInfo (SeasonInfoTemplate.lua:23, 660-661).
+	for name, c := range map[string]struct {
+		season map[string]any
+		want   string
+	}{
+		"day 64":             {map[string]any{"seasonId": 4, "seasonStartTime": evTestNow.Add(-63 * 24 * time.Hour).UnixMilli()}, "1:T11:600"},
+		"day 63":             {map[string]any{"seasonId": 4, "seasonStartTime": evTestNow.Add(-63*24*time.Hour + time.Minute).UnixMilli()}, "1:T10:600"},
+		"no seasonStartTime": {map[string]any{"seasonId": 4}, "1:T10:600"},
+	} {
+		in := duelTrainInit(100_000_000, 100_000_000, true, map[string]float64{duelTrainT11Buff: 1}, duelCampSFS(1, 35, false))
+		info := sfs.NewSFSObject()
+		info.PutInt("seasonId", int32(c.season["seasonId"].(int)))
+		if st, ok := c.season["seasonStartTime"]; ok {
+			info.PutLong("seasonStartTime", st.(int64))
+		}
+		in.Raw.PutSFSObject("playerServerSeasonInfo", info)
+		conn, f := startDuelSpendFake(t, duelTestDay(DuelThemeMobilization, duelTestMobilize), duelTrainServer(1000))
+		if err := runDuelTroopTraining(conn, in); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := trainingsOf(t, f); !slices.Equal(got, []string{c.want}) {
+			t.Errorf("%s: trainings %v, want %s", name, got, c.want)
+		}
 	}
 }
 
@@ -263,20 +296,32 @@ func TestDuelTroopTrainingEffects(t *testing.T) {
 }
 
 func TestDuelTroopTrainingThemeGate(t *testing.T) {
+	// Enemy Buster scores training speed-ups (90501) but no type-4 row: the batch is started only
+	// with a training speed-up item held and a later run inside the day (MASTER B51).
+	busterLong := duelEntry(DuelThemeEnemyBuster, duelTestEnemyBuster, evTestNow.Add(-time.Hour), evTestNow.Add(6*time.Hour))
+	busterEnding := duelEntry(DuelThemeEnemyBuster, duelTestEnemyBuster, evTestNow.Add(-time.Hour), evTestNow.Add(3*time.Hour+time.Minute))
 	for name, c := range map[string]struct {
-		day   *sfs.SFSObject
-		train bool
+		day        *sfs.SFSObject
+		trainItems bool
+		train      bool
 	}{
-		"total mobilization":         {duelTestDay(DuelThemeMobilization, duelTestMobilize), true},
-		"enemy buster":               {duelTestDay(DuelThemeEnemyBuster, duelTestEnemyBuster), true},
-		"enemy buster, no train ids": {duelTestDay(DuelThemeEnemyBuster, "90203|90602|90000"), false},
-		"base expansion":             {duelTestDay(DuelThemeBase, duelTestBase), false},
-		"train heroes":               {duelTestDay(DuelThemeHeroes, duelTestHeroes), false},
+		"total mobilization":                    {duelTestDay(DuelThemeMobilization, duelTestMobilize), false, true},
+		"enemy buster":                          {busterLong, true, true},
+		"enemy buster, no training items":       {busterLong, false, false},
+		"enemy buster, no later run in the day": {busterEnding, true, false},
+		"enemy buster, no train ids":            {duelTestDay(DuelThemeEnemyBuster, "90203|90602|90000"), true, false},
+		"base expansion":                        {duelTestDay(DuelThemeBase, duelTestBase), true, false},
+		"train heroes":                          {duelTestDay(DuelThemeHeroes, duelTestHeroes), true, false},
 		// A season variant could make another theme score training: still held.
-		"radar with training": {duelTestDay(DuelThemeRadar, "90402|90502|90501"), false},
-		"no duel day":         {nil, false},
+		"radar with training": {duelTestDay(DuelThemeRadar, "90402|90502|90501"), true, false},
+		"no duel day":         {nil, true, false},
 	} {
 		in := duelTrainInit(100_000_000, 100_000_000, true, nil, duelCampSFS(1, 30, false))
+		if c.trainItems {
+			items := sfs.NewSFSArray()
+			items.AddSFSObject(duelObj("uuid", "s1", "itemId", "200233", "count", 2))
+			in.Raw.PutSFSArray("items", items)
+		}
 		conn, f := startDuelSpendFake(t, c.day, duelTrainServer(1000))
 		if err := runDuelTroopTraining(conn, in); err != nil {
 			t.Fatalf("%s: %v", name, err)

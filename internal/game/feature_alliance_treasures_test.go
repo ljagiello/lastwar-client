@@ -165,12 +165,13 @@ func atClaimOK(p *sfs.SFSObject) *sfs.SFSObject {
 func startAtFake(t *testing.T, block *sfs.SFSObject, claim func(n int, p *sfs.SFSObject) *sfs.SFSObject) (*session.GameConn, *evFake) {
 	t.Helper()
 	n := 0
+	blocks := fwBlockAnswer(t, block)
 	return startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		switch cmd {
 		case fireworksRankCmd:
 			return fwRankReply()
 		case fireworksBlockCmd:
-			return block
+			return blocks()
 		case allianceTreasureClaimCmd:
 			n++
 			if claim != nil {
@@ -180,6 +181,15 @@ func startAtFake(t *testing.T, block *sfs.SFSObject, claim func(n int, p *sfs.SF
 		}
 		return evErr("unexpected command")
 	})
+}
+
+// TestWP7LeavesTheAllianceTreasureBoxesUnregistered: claiming a siege, invasion or alliance-boss
+// sandbox box (MASTER G41) takes one of its shared slots where alliance mates see it, so it waits
+// for the user's ruling.
+func TestWP7LeavesTheAllianceTreasureBoxesUnregistered(t *testing.T) {
+	if _, ok := featureRegistry["alliance-treasure-boxes"]; ok {
+		t.Error("alliance-treasure-boxes is registered; its claim is visible to alliance mates and waits for the user's decision")
+	}
 }
 
 func TestRadarTreasureCaps(t *testing.T) {
@@ -223,17 +233,21 @@ func TestAllianceTreasureBlocksAroundHQs(t *testing.T) {
 	if r := fwPlanBlocksAround([]int64{1000000}, 3); len(r) != 1 || len(r[0].Index) != 16 || r[0].Index[0] != 9696 {
 		t.Errorf("far corner plan %+v", r)
 	}
-	// Edge HQs: a corner (16 blocks), two edge middles (28) and the centre (49), in one request.
-	if r := fwPlanBlocksAround([]int64{1, 500, 500001, 500500, 999001}, 3); len(r) != 1 || len(r[0].Index) != 16+28+28+49+16 {
-		t.Errorf("plan sizes %d", len(r[0].Index))
+	// Edge HQs: two corners (16 blocks), two edge middles (28) and the centre (49), each its own
+	// viewport (MASTER B34): together they would span the map.
+	edges := []int64{1, 500, 500001, 500500, 999001}
+	r := fwPlanBlocksAround(edges, 3)
+	total := 0
+	for _, q := range r {
+		total += len(q.Index)
 	}
-	// 16 + 3 x 49 = 163 blocks split at 160.
-	var spread []int64
-	for i := range 4 {
-		spread = append(spread, int64(i*100*fwMapTiles+i*100+1))
+	if len(r) != 5 || total != 16+28+28+49+16 {
+		t.Errorf("edge plan: %d requests, %d blocks", len(r), total)
 	}
-	if r := fwPlanBlocksAround(spread, 3); len(r) != 2 || len(r[0].Index) != fwMaxBlocksPerRequest {
-		t.Errorf("spread plan: %d requests", len(r))
+	checkFwPlan(t, "edges", edges, 3, r)
+	// Two HQs two blocks apart: one 9x7 viewport, not two overlapping 7x7 ones.
+	if r := fwPlanBlocksAround([]int64{347513, 347533}, 3); len(r) != 1 || len(r[0].Index) != 63 {
+		t.Errorf("neighbours plan %+v", r)
 	}
 	if atChebyshev(347520, 347540) != 20 || atChebyshev(347513, 352513) != 5 || atChebyshev(0, 1) != -1 {
 		t.Error("tile distances")
@@ -247,15 +261,20 @@ func TestAllianceTreasuresPlanIsReadOnly(t *testing.T) {
 	if err := runAllianceTreasuresPlan(conn, fwTestInit()); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(fake.cmds(), ","); got != "al.rank,world.get.block" {
+	if got := strings.Join(fake.cmds(), ","); got != "al.rank,world.get.block,world.get.block" {
 		t.Fatalf("alliance-treasures-plan sent %s; it may send only al.rank and world.get.block", got)
 	}
-	blk := fake.only(fireworksBlockCmd)[0].Params
-	idx, _ := blk.Get("index")
-	// Self and ally A share block 3451, ally B is in 5000: 49 + 28 blocks (x 0-3 at the map's edge).
-	if got := idx.Val.([]int32); len(got) != 77 || !slices.Contains(got, 3451) || !slices.Contains(got, 5000) || !slices.Contains(got, 3148) {
-		t.Errorf("index has %d blocks", len(got))
+	// Self and ally A share block 3451, ally B is in 5000: 49 + 28 blocks (x 0-3 at the map's
+	// edge), one viewport each.
+	var all []int32
+	for _, r := range fake.only(fireworksBlockCmd) {
+		idx, _ := r.Params.Get("index")
+		all = append(all, idx.Val.([]int32)...)
 	}
+	if len(all) != 77 || !slices.Contains(all, 3451) || !slices.Contains(all, 5000) || !slices.Contains(all, 3148) {
+		t.Errorf("index has %d blocks", len(all))
+	}
+	blk := fake.only(fireworksBlockCmd)[0].Params
 	if blk.GetInt("clearUuidSet") != 1 || blk.GetInt("viewLvl") != 0 || blk.GetInt("serverId") != fwServer {
 		t.Errorf("world.get.block params %s", blk.StringRedacted())
 	}
@@ -316,7 +335,7 @@ func TestAllianceTreasuresClaimsOnlyEligible(t *testing.T) {
 	if err := runAllianceTreasures(conn, fwTestInit()); err != nil {
 		t.Fatal(err)
 	}
-	want := "al.rank,world.get.block," + strings.Repeat(allianceTreasureClaimCmd+",", 3)
+	want := "al.rank,world.get.block,world.get.block," + strings.Repeat(allianceTreasureClaimCmd+",", 3)
 	if got := strings.Join(fake.cmds(), ","); got != strings.TrimSuffix(want, ",") {
 		t.Fatalf("sent %s", got)
 	}

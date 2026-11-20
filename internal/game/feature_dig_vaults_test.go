@@ -261,6 +261,90 @@ func TestSeasonDigClaimsPersonalAndOpensAllianceVault(t *testing.T) {
 	digsAssertSafe(t, fake)
 }
 
+// TestSeasonDigSeason7Maps: in Season 7 the activity is 1201010 (type 241, para 7000) and the
+// vaults are lw_season_digging_game group 7000 (tables 40413): 17001-17042 single (type 1),
+// 17043-17052 alliance (type 2, 10x12, relics 10011-10020) and 17053-17062 single (type 3). The
+// client reads any of them from the table (DiggingDataTemplateManager.lua:24; DiggingInfoData.lua:
+// 30-34); before 40413 Go rejected every one.
+func TestSeasonDigSeason7Maps(t *testing.T) {
+	withEvNow(t, evTestNow)
+	single := newVault(31, 17001)
+	single.rewardState = 1
+	single.typ, single.uid = digVaultSingle, "1001"
+	single3 := newVault(32, 17053) // type 3: a single-player vault too
+	single3.rewardState = 1
+	single3.uid = "1001"
+	alliance := newVault(33, 17043)
+	alliance.typ, alliance.uid = digVaultAlliance, "3003"
+	alliance.blocks = [][2]int64{{10019, 9}} // a 3x4 relic on the 10-wide grid
+	f := &vaultFake{vaults: map[int64]*vaultState{31: single, 32: single3, 33: alliance}}
+	conn, fake := startEvFake(t, f.reply)
+	if err := runSeasonDigs(conn, evWithSeason(digsInit(0, evActivity(1201010)), 7), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(fake.only(seasonDigPersonalCmd)); got != 2 {
+		t.Errorf("personal claims = %d, want 2 (17001 type 1 and 17053 type 3); sent %v", got, fake.cmds())
+	}
+	infos := fake.only(seasonDigInfoCmd)
+	types := map[int64]int32{}
+	for _, r := range infos {
+		types[r.Params.GetLong("uuid")] = r.Params.GetInt("type")
+	}
+	if types[31] != digVaultSingle || types[32] != digVaultSingle || types[33] != digVaultAlliance {
+		t.Errorf("info types by vault = %v, want 31 and 32 single (1), 33 alliance (2)", types)
+	}
+	opens := fake.only(seasonDigOpenCmd)
+	if len(opens) != 1 || opens[0].Params.GetLong("uuid") != 33 || opens[0].Params.GetInt("pos") != 9 {
+		t.Fatalf("opens = %v, want one stone of vault 33 on the revealed relic (stone 9)", fake.cmds())
+	}
+	if c := fake.only(seasonDigBlockCmd); len(c) != 1 || c[0].Params.GetInt("pos") != 9 {
+		t.Errorf("relic claims = %v, want vault 33 stone 9", fake.cmds())
+	}
+	digsAssertSafe(t, fake)
+}
+
+// TestSeasonDigSkipsMapsTheTableLacks: a listed season vault whose map is not a vault row of
+// lw_season_digging_game gets no request with a guessed type (the client would send type 0).
+func TestSeasonDigSkipsMapsTheTableLacks(t *testing.T) {
+	withEvNow(t, evTestNow)
+	unknown := newVault(41, 99999)
+	unknown.rewardState = 1
+	board := newVault(42, 11001) // a Secret Vault stage (type 5), never a season vault
+	f := &vaultFake{vaults: map[int64]*vaultState{41: unknown, 42: board}}
+	conn, fake := startEvFake(t, f.reply)
+	if err := runSeasonDigs(conn, evWithSeason(digsInit(0, evActivity(1201010)), 7), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(fake.cmds(), ","); got != seasonDigListCmd {
+		t.Errorf("sent %s, want only the list", got)
+	}
+}
+
+func TestDigVaultMapOfReadsTheTable(t *testing.T) {
+	for _, c := range []struct {
+		id       int64
+		ok       bool
+		alliance bool
+		w, h     int64
+	}{
+		{10001, true, false, 4, 7}, {10043, true, true, 10, 12}, {15001, true, true, 10, 12}, {16001, true, true, 10, 12},
+		{17001, true, false, 4, 7}, {17043, true, true, 10, 12}, {17052, true, true, 10, 12}, {17062, true, false, 4, 7},
+		{11001, false, false, 0, 0}, {12501, false, false, 0, 0}, {99999, false, false, 0, 0}, {0, false, false, 0, 0},
+	} {
+		m, ok := digVaultMapOf(c.id)
+		if ok != c.ok || m.alliance != c.alliance || m.width != c.w || m.height != c.h {
+			t.Errorf("digVaultMapOf(%d) = %+v, %v; want alliance %v %dx%d, %v", c.id, m, ok, c.alliance, c.w, c.h, c.ok)
+		}
+	}
+	v := &digVault{layout: digVaultMap{alliance: true, width: 10, height: 12}}
+	for _, bid := range []int64{10011, 60015, 70010} {
+		size := digBlockSizes[int32(bid)]
+		if got := len(v.cells(digVaultBlock{bid, 1})); got != size.w*size.h || got == 0 {
+			t.Errorf("relic %d covers %d stones, want %dx%d from lw_season_block", bid, got, size.w, size.h)
+		}
+	}
+}
+
 func TestSeasonDigNeedsSeasonAndActivity(t *testing.T) {
 	withEvNow(t, evTestNow)
 	f := &vaultFake{vaults: map[int64]*vaultState{1: newVault(1, 10043)}}

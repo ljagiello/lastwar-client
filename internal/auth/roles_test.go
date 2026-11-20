@@ -126,17 +126,6 @@ func TestValidServerRejectsNonNumbers(t *testing.T) {
 	}
 }
 
-// TestAccountRolesReadsAnEntrysOwnLoginKey: the live one-role reply had no per-entry loginKey, but
-// the 1.0.364 role picker reads param.loginKey, so an entry that carries one keeps it.
-func TestAccountRolesReadsAnEntrysOwnLoginKey(t *testing.T) {
-	e := liveShapeRole(72, "APS72", "uid-72", "Alt")
-	e.PutUtfString("loginKey", "lk-role-72")
-	roles := accountRoles(pushWithRoles(liveShapeRole(783, "APS783", "uid-783", "Main"), e))
-	if roles[0].LoginKey != "" || roles[1].LoginKey != "lk-role-72" {
-		t.Errorf("entry loginKeys = %q/%q, want \"\"/lk-role-72", roles[0].LoginKey, roles[1].LoginKey)
-	}
-}
-
 // TestPickRoleMatchesEitherField: an entry is matched by its id alone (Int, Short or String) or by
 // its zone alone, and the no-match error lists a zone-only entry by its zone's number.
 func TestPickRoleMatchesEitherField(t *testing.T) {
@@ -182,7 +171,7 @@ func TestLogAccountRolesOmitsDeviceAndHosts(t *testing.T) {
 	e.PutUtfString("loginKey", "lk-secret-role")
 	logAccountRoles(accountRoles(pushWithRoles(e)))
 	out := buf.String()
-	for _, want := range []string{"server=783", "zone=APS783", "gameUid=uid-783", "level=35", "power=247419474", "serverName=State#783", "hasOwnLoginKey=true"} {
+	for _, want := range []string{"server=783", "zone=APS783", "gameUid=uid-783", "level=35", "power=247419474", "serverName=State#783"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log lacks %s:\n%s", want, out)
 		}

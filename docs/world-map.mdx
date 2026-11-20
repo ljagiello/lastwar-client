@@ -42,11 +42,12 @@ On a season "nine palaces" map, the 1.0.364 C# sets the world size to **3000** w
 
 ## Railway trucks and alliance trains
 
-Trucks and trains are marches, but their cargo and raid state come from the railway module (1.0.364 Lua, static-analysis-only).
+Trucks and trains are marches, but their cargo and raid state come from the railway module (1.0.370 Lua, unchanged in this part since 1.0.364; static-analysis-only).
 
 - **The list:** `train.list {isRefresh: Bool}` returns other players' trucks in `ls[]`, alliance trains in `allianceTrainList[]`, and the servers you're matched against in `trainServers`, a comma-separated string. The client sends `isRefresh: true` from the list's Refresh button, and on its first call of the server day.
 - **Entry type:** each entry's `type` is `1` (truck) or `2` (alliance train), and `cfgId` is a `train_property` row. For trucks, quality 1-5 is N to UR, and quality 10 is the Reindeer Sleigh. The wire carries only `cfgId`, not the quality.
 - **Truck cargo:** `baseGoods` and `extraGoods`, each `{full, cur}`. `full` is what the truck set out with and `cur` what's left. Goods entries are `{type, value}` with a `RewardType`: 1 iron, 20 food, 31 coins, 7 an item `{id, num}`.
+- **Reroll:** `train.change {uuid: Long}` replaces a parked truck at random; the reply's `myTrain` is the new truck. Its cost in item 1520001 (`train_para` 12) is `train_para` 9 ("0,1") at index `changeCountByGold + 1`, the last entry past the end, and 1 without `changeCountByGold`, so only a truck's first reroll is free. The game asks first for the sleigh and for a truck holding the `train_para` 55 goods (2 of item 2270000 or 500105), and asks before a truck below SSR leaves with its free reroll unused. `train.batch.change` is the paid batch path (tickets or diamonds). The opt-in `truck-reroll` uses only the free one, on N, R and SR trucks, and runs before `truck-deploy`.
 - **Train cargo:** per carriage, in `marchInfo.carriageList[].trainGoods`.
 - **Past raids:** `marchInfo.plunderRecord[]`.
 - **Raid count and caps:** the count is `marchInfo.robTimes`. A truck takes at most `train_para` row 21 raids (2), the sleigh 1, and an alliance train `alliance_train.k10` (3), less one with a VIP aboard.

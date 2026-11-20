@@ -18,9 +18,10 @@ import (
 // every registration for that session reports the same phone. It belongs with
 // one Login deviceId: a different deviceId is a different install (see For).
 type Install struct {
-	// DeviceID is the Login deviceId (a2, a97) this install registers under.
-	// Empty means it isn't bound to one yet, as in a hand-written config; For
-	// binds it.
+	// DeviceID is the Login deviceId this install belongs to. The SDK never
+	// sends it (a2 and a97 carry the stored smid); it only keeps one deviceId's
+	// install from being sent under another. Empty means it isn't bound to one
+	// yet, as in a hand-written config; For binds it.
 	DeviceID string `json:"deviceId,omitempty"`
 
 	// MediaDrmID is a84: the base64 deviceUniqueId of the Widevine, ClearKey
@@ -54,16 +55,79 @@ type Install struct {
 	// writing it ("bfic"), so both carry this time. Before the first
 	// registration the file doesn't exist and both are 0.
 	BoxIDSavedAt time.Time `json:"boxIdSavedAt,omitzero"`
+
+	// Collections and AppStarts are the last a4 and a130 this install
+	// reported: the SDK's collection count, kept in its "seq" prefs and raised
+	// by one on every collection (l1l11I11l.java:134-146), and its app-start
+	// count, kept in its "auc" prefs and raised once per process
+	// (l111l11111I1l.java:13-29). Zero means none yet, so a first registration
+	// reports 1 for both.
+	Collections int `json:"collections,omitempty"`
+	AppStarts   int `json:"appStarts,omitempty"`
+
+	// BootCount is the last a127 this install reported: the phone's
+	// Settings.Global "boot_count" (l1l11I111ll.java:38-47). Fill gives a
+	// fresh install the count a phone in use has reached. LastBoot is the boot
+	// that count belongs to, so a collection after a later boot counts one
+	// more; zero means none reported yet.
+	BootCount int       `json:"bootCount,omitempty"`
+	LastBoot  time.Time `json:"lastBoot,omitzero"`
+
+	// CloudConfMD5 and CloudConfExcluded describe the cloud config the SDK
+	// cached from its last /v3/cloudconf reply ("cloudms.conf" prefs,
+	// l11l111l1Il.java): the md5 of its text, which the next request sends
+	// back, and the names its "sensitive" switches turn off, comma-separated
+	// in document order, which join notCollect in a85 and turn off the slots
+	// they gate (gateSlots). An empty CloudConfMD5 means nothing is cached, so
+	// the SDK's built-in config is in force.
+	CloudConfMD5      string `json:"cloudConfMd5,omitempty"`
+	CloudConfExcluded string `json:"cloudConfExcluded,omitempty"`
+}
+
+// cloudExcluded returns the names the cloud config in force turns off: the
+// cached one's, or the built-in config's when none is cached.
+func (in Install) cloudExcluded() []string {
+	switch {
+	case in.CloudConfMD5 == "":
+		return builtinCloudConfExcluded
+	case in.CloudConfExcluded == "":
+		return nil
+	}
+	return strings.Split(in.CloudConfExcluded, ",")
+}
+
+// withCloudConf returns in with c cached as the cloud config in force.
+func (in Install) withCloudConf(c cloudConf) Install {
+	in.CloudConfMD5, in.CloudConfExcluded = c.MD5, strings.Join(c.Excluded, ",")
+	return in
+}
+
+// rebootGap is how much later than LastBoot a boot time must be to count as a
+// new boot: a40's samples of one boot differ by milliseconds, not minutes.
+const rebootGap = time.Minute
+
+// collected returns in as one more app start and collection on a phone booted
+// at boot leaves it: Collections and AppStarts one higher, and BootCount one
+// higher when boot is a later boot than LastBoot.
+func (in Install) collected(boot time.Time) Install {
+	in.Collections++
+	in.AppStarts++
+	if !in.LastBoot.IsZero() && boot.Sub(in.LastBoot) > rebootGap {
+		in.BootCount++
+	}
+	in.LastBoot = boot.Truncate(time.Millisecond)
+	return in
 }
 
 // widevineIDLen is the length of the deviceUniqueId Widevine reports.
 const widevineIDLen = 32
 
-// NewInstall returns the values of a fresh install on the profile's Samsung
-// SM-G988N (Android 12): random IDs, the app installed 30 to 400 days before
-// now and last updated within the past 20 days, and no smid yet. Of the four
-// DRM schemes only Widevine has a deviceUniqueId: Android's ClearKey plugin
-// keeps its test ID under "deviceId", and the phone has no PlayReady.
+// NewInstall returns the values of a fresh install on one of the catalog's
+// Android 12 phones: random IDs, the app installed 30 to 400 days before now
+// and last updated within the past 20 days, a boot count of 10 to 99, and no
+// smid or SDK counters yet. Of the four DRM schemes only Widevine has a
+// deviceUniqueId: Android's ClearKey plugin keeps its test ID under
+// "deviceId", and the phone has no PlayReady.
 func NewInstall(now time.Time) Install {
 	installed := now.Add(-randDuration(30*24*time.Hour, 400*24*time.Hour)).Truncate(time.Millisecond)
 	updated := now.Add(-randDuration(time.Hour, 20*24*time.Hour)).Truncate(time.Millisecond)
@@ -73,12 +137,15 @@ func NewInstall(now time.Time) Install {
 		AppUID:           newAppUID(),
 		FirstInstallTime: installed,
 		LastUpdateTime:   updated,
+		BootCount:        10 + mrand.N(90),
 	}
 }
 
-// Fill returns in with each empty ID and install time taken from a fresh
-// install, and whether it set any. Values already there stay, so a config can
-// pin some of them, such as a real phone's Android ID.
+// Fill returns in with each empty ID, install time and the boot count taken
+// from a fresh install, and whether it set any. Values already there stay, so
+// a config can pin some of them, such as a real phone's Android ID. The SDK
+// counters (Collections, AppStarts) start at zero and only collected moves
+// them.
 func (in Install) Fill(now time.Time) (Install, bool) {
 	fresh := NewInstall(now)
 	filled := false
@@ -90,6 +157,9 @@ func (in Install) Fill(now time.Time) (Install, bool) {
 	fill(&in.MediaDrmID, fresh.MediaDrmID)
 	fill(&in.PUUID, fresh.PUUID)
 	fill(&in.AppUID, fresh.AppUID)
+	if in.BootCount == 0 {
+		in.BootCount, filled = fresh.BootCount, true
+	}
 	if in.FirstInstallTime.IsZero() {
 		in.FirstInstallTime, filled = fresh.FirstInstallTime, true
 		if !in.LastUpdateTime.IsZero() && in.LastUpdateTime.Before(in.FirstInstallTime) {
@@ -134,6 +204,7 @@ func (in Install) Registered(boxID string, t time.Time) (Install, bool) {
 var (
 	puuidRe  = regexp.MustCompile(`^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$`)
 	appUIDRe = regexp.MustCompile(`^u0_a[0-9]+$`)
+	md5HexRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 // Validate reports the first set value a real install couldn't hold. Empty
@@ -165,6 +236,15 @@ func (in Install) Validate() error {
 	}
 	if (in.BoxID == "") != in.BoxIDSavedAt.IsZero() {
 		return errors.New("boxId and boxIdSavedAt must be set together")
+	}
+	if in.Collections < 0 || in.AppStarts < 0 || in.BootCount < 0 {
+		return errors.New("collections, appStarts and bootCount can't be negative")
+	}
+	if in.CloudConfMD5 != "" && !md5HexRe.MatchString(in.CloudConfMD5) {
+		return fmt.Errorf("cloudConfMd5 (%d characters) is not an MD5 as 32 lowercase hex digits", len(in.CloudConfMD5))
+	}
+	if in.CloudConfMD5 == "" && in.CloudConfExcluded != "" {
+		return errors.New("cloudConfExcluded needs the cloudConfMd5 of the config it came from")
 	}
 	return nil
 }

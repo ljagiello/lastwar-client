@@ -7,6 +7,7 @@ import (
 	"lastwar-client/internal/sfs"
 	"log/slog"
 	"net"
+	"slices"
 	"time"
 )
 
@@ -48,7 +49,7 @@ type Visitor struct {
 	Raw *sfs.SFSObject
 	// greeted is set by GreetVisitors, in the caller's slice, once the server answered this
 	// visitor's visitor.operate without an errorCode: the client then removes the visitor from
-	// its queue (DeleteVisitor, CityVisitorManager.lua:505-520), and visitor-fresh, which reads
+	// its queue (DeleteVisitor, CityVisitorManager.lua:528-543), and visitor-fresh, which reads
 	// the same init list later in the run, no longer counts it.
 	greeted bool
 }
@@ -62,22 +63,24 @@ func (v Visitor) VisitorId() int32 { return v.Raw.GetInt("visitorId") }
 func (v Visitor) StartTime() int64 { return v.Raw.GetLong("startTime") }
 
 // QueueType is the list entry's own `type` field: the client's queue type (Scene/CityVisitor/
-// Const.lua:10-24, e.g. 0 GEN_BY_TIME), not the behaviour type GreetVisitors filters on (see
+// Const.lua:10-25, e.g. 0 GEN_BY_TIME), not the behaviour type GreetVisitors filters on (see
 // visitorBehaviourType).
 func (v Visitor) QueueType() int32 { return v.Raw.GetInt("type") }
 
 //go:generate go run ./gen_visitor_types -table ${LASTWAR_TABLES}/lw_base_visitor_event.json -version ${LASTWAR_TABLE_VERSION} -out visitor_types_gen.go
 
 // Visitor behaviour types: lw_base_visitor_event.type for the visitor's eventId, which the client
-// picks the visitor's class by (global VisitorType, Global/EnumType.lua:11985-12007; dispatch in
-// Scene/CityVisitor/CityVisitorManager.lua:108-139). visitorTypeNames has the full list.
+// picks the visitor's class by (global VisitorType, Global/EnumType.lua:12039-12062; dispatch in
+// Scene/CityVisitor/CityVisitorManager.lua:109-142). visitorTypeNames has the full list.
 const (
-	visitorTypeGift          int32 = 2
-	visitorTypeRecruitment   int32 = 3
-	visitorTypeDominator     int32 = 9
-	visitorTypeSeasonDayGift int32 = 10
-	visitorTypeActivity      int32 = 11
-	visitorTypeSystemGift    int32 = 30
+	visitorTypeGift                int32 = 2
+	visitorTypeRecruitment         int32 = 3
+	visitorTypeDominator           int32 = 9
+	visitorTypeSeasonDayGift       int32 = 10
+	visitorTypeActivity            int32 = 11
+	visitorTypeDominatorCockatrice int32 = 13
+	visitorTypeSystemGift          int32 = 30
+	visitorTypeBattlePlanCaptive   int32 = 40
 )
 
 var visitorTypeNames = map[int32]string{
@@ -86,6 +89,7 @@ var visitorTypeNames = map[int32]string{
 	11: "VisitorActivity", 12: "ALLIANCE_INVITE", 13: "DOMINATOR_COCKATRICE",
 	14: "AllianceCongratulation", 15: "AD_REMINDER", 16: "SKY_BATTLE", 17: "PLANE_FEATURE",
 	18: "S0_ALLIANCE_BOSS", 19: "SURVIVOR_PACK_GiFT", 20: "ProtectCoverVisitor", 30: "SystemGift",
+	40: "BattlePlanCaptive",
 }
 
 func visitorTypeName(t int32) string {
@@ -121,7 +125,10 @@ func visitorBehaviourType(eventId int32) (t int32, ok bool) {
 //     shows one gift item addressed to the player, and its only button sends operate:1.
 //     Static-only.
 //
-// Every other type is skipped and left for the player, never declined with operate:0. Notably:
+// Every other type is skipped and left for the player, never declined with operate:0. Two more
+// free accepts are opt-in features of their own, not on this list (greetOptInVisitors):
+// DOMINATOR_COCKATRICE (13, cockatrice-visitors) and BattlePlanCaptive (40, captive-visitors).
+// Notably skipped:
 // MERCHANT, where operate:1 buys para "item;count;resourceType;price" (VisitorMerchant.lua:36-56);
 // WORKER_LOTTERY, an invitation to the paid worker lottery that the client only dismisses with
 // operate:1 (VisitorWorkerLottery.lua:34-53); SKY_BATTLE and PLANE_FEATURE, VisitorGift too but
@@ -189,9 +196,9 @@ const MaxVisitorsUpperBound = 300
 // bootstrap push's `visitor.list` field -- a sibling of `building_new` in
 // the same payload, see the Visitor doc comment above.
 //
-// The client keeps every list entry (InitData, CityVisitorManager.lua:341-357). maxNum bounds only
-// Queue1, the timed queue visitor.fresh refills (GetNewVisitorInfo, :187-205); Queue2 holds the
-// queue types 2, 4, 7, 8, 11 and 19 (Const.lua:25-41), a SystemGift (8) for one, so a real list
+// The client keeps every list entry (InitData, CityVisitorManager.lua:344-360). maxNum bounds only
+// Queue1, the timed queue visitor.fresh refills (GetNewVisitorInfo, :190-208); Queue2 holds the
+// queue types 2, 4, 7, 8, 11 and 19 (Const.lua:27-43), a SystemGift (8) for one, so a real list
 // can be longer than maxNum. The list is therefore not cut at maxNum (visitor-fresh applies it to
 // the Queue1 count), and a list longer than maxNum is logged at Info.
 //
@@ -313,4 +320,61 @@ func greetVisitors(conn *session.GameConn, visitors []Visitor, now time.Time) er
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// greetOptInVisitors is GreetVisitors for one behaviour type outside greetableVisitorTypes, run by
+// that type's opt-in feature: it sends `visitor.operate {uid: Long, operate: Int 1}` for each
+// in.Visitors entry of behaviour type typ that has arrived and that nothing greeted earlier in the
+// run, and marks it greeted (for visitor-fresh, which runs after these features). On a reply
+// without an errorCode, cleared(reply) names further uids the server removed with it (one captive
+// accept can clear several), which are marked greeted too and not sent. visitor_err_coming (benign
+// for visitor.operate) leaves the visitor and goes on; any other failure is logged by SendAndWait
+// and stops the feature, since the command has not been seen live for these types.
+func greetOptInVisitors(conn *session.GameConn, in *Init, feature string, typ int32, now time.Time,
+	cleared func(reply *sfs.SFSObject) []int64) error {
+	if in == nil {
+		return nil
+	}
+	var due int
+	for i := range in.Visitors {
+		v := in.Visitors[i]
+		if v.greeted {
+			continue
+		}
+		if t, ok := visitorBehaviourType(v.EventId()); !ok || t != typ {
+			continue
+		}
+		if !visitorArrived(v, now) {
+			slog.Info(feature+": visitor has not arrived yet", "uid", v.Uid(), "eventId", v.EventId(), "startTime", v.StartTime())
+			continue
+		}
+		due++
+		slog.Info(feature+": accepting visitor", "uid", v.Uid(), "eventId", v.EventId(), "type", typ,
+			"typeName", visitorTypeName(typ), "visitorId", v.VisitorId(), "queueType", v.QueueType())
+		params := sfs.NewSFSObject()
+		params.PutLong("uid", v.Uid())
+		params.PutInt("operate", 1)
+		resp, err := session.SendAndWait(conn, fmt.Sprintf("%s: visitor accept (uid %d)", feature, v.Uid()), "visitor.operate", params)
+		if err != nil {
+			return err
+		}
+		if resp == nil || resp.Params.Has("errorCode") {
+			continue
+		}
+		in.Visitors[i].greeted = true
+		if cleared == nil {
+			continue
+		}
+		gone := cleared(resp.Params)
+		for j := range in.Visitors {
+			if !in.Visitors[j].greeted && slices.Contains(gone, in.Visitors[j].Uid()) {
+				in.Visitors[j].greeted = true
+				slog.Info(feature+": the accept also cleared this visitor", "uid", in.Visitors[j].Uid(), "acceptedUid", v.Uid())
+			}
+		}
+	}
+	if due == 0 {
+		slog.Info(feature+": no visitor of this type to accept", "type", typ, "typeName", visitorTypeName(typ))
+	}
+	return nil
 }

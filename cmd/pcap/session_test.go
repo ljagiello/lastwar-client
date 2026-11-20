@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"lastwar-client/internal/app"
+	"lastwar-client/internal/auth"
 	"lastwar-client/internal/sfs"
 )
 
@@ -141,6 +143,130 @@ func TestRunSessionOutWritesAcceptedLogin(t *testing.T) {
 	}
 }
 
+// TestRunSessionOutKeepsTheExistingConfigsOtherKeys: -session-out onto an existing session config
+// writes the capture's keys and keeps every key it doesn't write, the features, the duel policy and
+// a key SessionConfig doesn't model among them (a recapture used to drop them all). Two kept keys
+// describe what the capture replaces: accessTokenTime goes with a new access token, and the refresh
+// token and its time go with a new deviceId (they were issued to the old one).
+func TestRunSessionOutKeepsTheExistingConfigsOtherKeys(t *testing.T) {
+	in := loginCapture(t, true)
+	existing := func(deviceID, at string) string {
+		return `{
+  "ip": "198.51.100.1", "port": 1, "zone": "APS1", "gameUid": "old-uid", "deviceId": "` + deviceID + `",
+  "shumeiBoxId": "old-box", "accessToken": "` + at + `", "iosMode": false, "appVersion": "1.0.300", "versionCode": "700",
+  "device": {"phone_model": "iPhone1,1", "ta": "{}"}, "shumeiId": "old-shumei-id",
+  "refreshToken": "rt-old", "accessTokenTime": 1700000000, "refreshTokenTime": 1700000001,
+  "features": {"daily-quests": true, "radar-claims": false},
+  "duelPolicy": {"radar-claims": "always"},
+  "shumeiInstall": {"deviceId": "` + deviceID + `", "androidId": "0123456789abcdef"},
+  "note": "recaptured by hand"
+}`
+	}
+	cases := []struct {
+		name, deviceID, at string
+		wantKept, wantGone []string
+	}{
+		{"same device, new token", testDevice, "old-at",
+			[]string{"features", "duelPolicy", "shumeiInstall", "note", "refreshToken", "refreshTokenTime"},
+			[]string{"accessTokenTime", "device", "shumeiId"}},
+		{"same device, same token", testDevice, testToken,
+			[]string{"features", "duelPolicy", "shumeiInstall", "note", "refreshToken", "refreshTokenTime", "accessTokenTime"},
+			[]string{"device", "shumeiId"}},
+		{"another device", "old-device_n3d", "old-at",
+			[]string{"features", "duelPolicy", "shumeiInstall", "note"},
+			[]string{"accessTokenTime", "refreshToken", "refreshTokenTime", "device", "shumeiId"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "session.json")
+			old := existing(tc.deviceID, tc.at)
+			if err := os.WriteFile(dst, []byte(old), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var runErr error
+			captureStdout(t, func() { runErr = runSessionOut(in, -1, "", dst) })
+			if runErr != nil {
+				t.Fatalf("runSessionOut: %v", runErr)
+			}
+			b, err := os.ReadFile(dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, before map[string]json.RawMessage
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(old), &before); err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range tc.wantKept {
+				if v, ok := got[k]; !ok || compactJSON(t, v) != compactJSON(t, before[k]) {
+					t.Errorf("%s = %s, want it kept as %s", k, got[k], before[k])
+				}
+			}
+			for _, k := range tc.wantGone {
+				if v, ok := got[k]; ok {
+					t.Errorf("%s = %s, want it gone (the capture has none, or it described what the capture replaced)", k, v)
+				}
+			}
+			// The capture's own keys (loginCapture: an iOS Login with no device fields, no shumeiId).
+			for k, want := range map[string]string{
+				"ip": `"203.0.113.5"`, "port": "10783", "zone": `"APS783"`, "gameUid": `"1000000000000783"`, "deviceId": `"` + testDevice + `"`,
+				"shumeiBoxId": `"` + testShumei + `"`, "accessToken": `"` + testToken + `"`, "iosMode": "true",
+				"appVersion": `"1.0.344"`, "versionCode": `"786"`,
+			} {
+				if string(got[k]) != want {
+					t.Errorf("%s = %s, want %s from the capture", k, got[k], want)
+				}
+			}
+		})
+	}
+}
+
+// TestRunSessionOutRefusesAnUnreadableConfig: an existing file that isn't a JSON object is left
+// as it is, since writing over it would lose whatever it holds; an empty file is no config.
+func TestRunSessionOutRefusesAnUnreadableConfig(t *testing.T) {
+	in := loginCapture(t, true)
+	for _, tc := range []struct {
+		name, content string
+		wantErr       bool
+	}{
+		{"not JSON", `{"features": {"daily-quests": true},`, true},
+		{"a list", `["features"]`, true},
+		{"empty", "", false},
+		{"whitespace", " \n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), "session.json")
+			if err := os.WriteFile(dst, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var runErr error
+			captureStdout(t, func() { runErr = runSessionOut(in, -1, "", dst) })
+			b, _ := os.ReadFile(dst)
+			if tc.wantErr {
+				if runErr == nil || string(b) != tc.content {
+					t.Errorf("err = %v, file = %q; want an error and the file untouched", runErr, b)
+				}
+				return
+			}
+			if runErr != nil || !strings.Contains(string(b), testDevice) {
+				t.Errorf("err = %v; want the capture written over an empty file", runErr)
+			}
+		})
+	}
+}
+
+// compactJSON is raw with insignificant whitespace removed, as encoding/json writes it.
+func compactJSON(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var b bytes.Buffer
+	if err := json.Compact(&b, raw); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
 // TestRunSessionOutRecordsProbedGateways mirrors the real client's connect race: an a=29 probe to a
 // second gateway that answered but lost, plus one to a gateway that never answered. Only the one
 // that answered joins the fallback list, after the gateway the accepted Login used.
@@ -253,5 +379,121 @@ func TestRunSessionOutErrors(t *testing.T) {
 				t.Errorf("%s: expected an error, got nil", c.name)
 			}
 		})
+	}
+}
+
+// TestAcceptedLoginRecordsCapturedDevice: an iOS capture's device fields are recorded for the
+// reconnect to replay (1.0.370 audit B15); an Android capture's are not, and the summary names the
+// recorded fields without their values.
+func TestAcceptedLoginRecordsCapturedDevice(t *testing.T) {
+	login := func(platform string) []byte {
+		params := sfs.NewSFSObject()
+		params.PutUtfString("deviceId", testDevice)
+		params.PutUtfString("gameUid", "1000000000000783")
+		params.PutUtfString("platform", platform)
+		params.PutUtfString("at", testToken)
+		for k, v := range map[string]string{
+			"phone_model": "iPhone15,2", "osVersion": "iOS 18.1", "mt": "mt-1", "idfv": "IDFV-SECRET", "distinct_id": "d-1",
+			"fromCountry": "PL", "lang": "pl", "phone_screen": "1179*2556", "afuid": "af-1", "firebaseId": "fb-1",
+		} {
+			params.PutUtfString(k, v)
+		}
+		req := sfs.NewSFSObject()
+		req.PutUtfString("zn", "APS783")
+		req.PutSFSObject("p", params)
+		return framedEnvelope(t, 0, 1, req)
+	}
+	ok := sfs.NewSFSObject()
+	ok.PutShort("rs", 0)
+	reply := framedEnvelope(t, 0, 1, ok)
+
+	cfg, reason := acceptedLogin(login("0"), reply)
+	if cfg == nil {
+		t.Fatalf("acceptedLogin: %s", reason)
+	}
+	want := auth.CapturedDevice{
+		PhoneModel: "iPhone15,2", OSVersion: "iOS 18.1", HandSetInfo: "mt-1", Idfv: "IDFV-SECRET", DistinctID: "d-1",
+		FromCountry: "PL", Lang: "pl", PhoneScreen: "1179*2556", Afuid: "af-1", FirebaseID: "fb-1",
+	}
+	if cfg.Device != want {
+		t.Error("the recorded device differs from the captured Login's fields")
+	}
+	const wantFields = "phone_model,osVersion,mt,idfv,distinct_id,fromCountry,lang,phone_screen,afuid,firebaseId"
+	if got := strings.Join(capturedDeviceFields(cfg.Device), ","); got != wantFields {
+		t.Errorf("summary fields = %s, want %s", got, wantFields)
+	}
+	if cfg, _ := acceptedLogin(login("1"), reply); cfg == nil || !cfg.Device.IsZero() {
+		t.Error("an Android capture recorded device fields")
+	}
+}
+
+// shumeiPush frames a server push.shumei.id extension message (c=1) with the given params.
+func shumeiPush(t *testing.T, params *sfs.SFSObject) []byte {
+	t.Helper()
+	msg := sfs.NewSFSObject()
+	msg.PutUtfString("c", "push.shumei.id")
+	msg.PutSFSObject("p", params)
+	return framedEnvelope(t, 1, 13, msg)
+}
+
+// TestAcceptedLoginRecordsTaAndShumeiID: an iOS capture's ta is recorded with its device, and the
+// shumeiId the client will report next is the last push.shumei.id after the Login reply that
+// carries no errorCode and a non-empty shumeiId (PushShumeiIdMessage.lua:10-18), else the
+// captured ta's lw_shumei_id. An Android capture records the shumeiId too, but no device.
+func TestAcceptedLoginRecordsTaAndShumeiID(t *testing.T) {
+	const ta = `{"#os":"iOS","lw_device_id":"secret-device-id_n3d","lw_shumei_id":"cached-shumei-id"}`
+	login := func(platform string) []byte {
+		params := sfs.NewSFSObject()
+		params.PutUtfString("deviceId", testDevice)
+		params.PutUtfString("gameUid", "1000000000000783")
+		params.PutUtfString("platform", platform)
+		params.PutUtfString("at", testToken)
+		params.PutUtfString("phone_model", "iPhone99,9")
+		params.PutUtfString("ta", ta)
+		req := sfs.NewSFSObject()
+		req.PutUtfString("zn", "APS783")
+		req.PutSFSObject("p", params)
+		return framedEnvelope(t, 0, 1, req)
+	}
+	ok := sfs.NewSFSObject()
+	ok.PutShort("rs", 0)
+	reply := framedEnvelope(t, 0, 1, ok)
+	push := func(id string, errorCode bool) []byte {
+		p := sfs.NewSFSObject()
+		p.PutUtfString("shumeiId", id)
+		if errorCode {
+			p.PutUtfString("errorCode", "100001")
+		}
+		return shumeiPush(t, p)
+	}
+	cat := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+
+	cases := []struct {
+		name, platform string
+		server         []byte
+		want           string
+	}{
+		{"the last good push", "0", cat(reply, push("first-pushed", false), push("pushed-shumei-id", false), push("refused", true), push("", false)), "pushed-shumei-id"},
+		{"no push: the ta's cached id", "0", reply, "cached-shumei-id"},
+		{"only refused pushes", "0", cat(reply, push("refused", true)), "cached-shumei-id"},
+		{"a push before the Login reply is not this Login's", "0", cat(push("before", false), reply), "cached-shumei-id"},
+		{"Android", "1", cat(reply, push("pushed-shumei-id", false)), "pushed-shumei-id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, reason := acceptedLogin(login(tc.platform), tc.server)
+			if cfg == nil {
+				t.Fatalf("acceptedLogin: %s", reason)
+			}
+			if cfg.ShumeiID != tc.want {
+				t.Errorf("shumeiId = %q, want %q", cfg.ShumeiID, tc.want)
+			}
+			if wantTa := map[string]string{"0": ta, "1": ""}[tc.platform]; cfg.Device.Ta != wantTa {
+				t.Errorf("platform %s: device ta = %q, want %q", tc.platform, cfg.Device.Ta, wantTa)
+			}
+		})
+	}
+	if cfg, _ := acceptedLogin(login("0"), reply); cfg == nil || strings.Join(capturedDeviceFields(cfg.Device), ",") != "phone_model,ta" {
+		t.Error("the summary should name phone_model and ta")
 	}
 }

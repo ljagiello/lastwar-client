@@ -44,7 +44,7 @@ func (s OwnDeviceSession) GoString() string { return s.String() }
 // the real client discards it after this call, but keeping it costs nothing if the server accepts
 // it again, and saves a second email code if it does.
 func BootstrapOwnDevice(httpClient *http.Client, iosMode bool) (*OwnDeviceSession, error) {
-	ident, err := LoadOrCreateDeviceIdentity()
+	ident, err := LoadOrCreateDeviceIdentity(iosMode)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func BootstrapOwnDevice(httpClient *http.Client, iosMode bool) (*OwnDeviceSessio
 	// bound to that platform, and the session config records the identity so the next reconnect
 	// matches.
 	build := loginBuild(iosMode, "", "")
-	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "")
+	cv, gateHost, err := gsl.CheckVersionAs(httpClient, build, "", ident.DeviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -63,8 +63,12 @@ func BootstrapOwnDevice(httpClient *http.Client, iosMode bool) (*OwnDeviceSessio
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("own device: trading loginKey", "platform", build.Platform, "iosMode", iosMode)
-	lsr, err := gsl.GetServerListAs(httpClient, gateHost, pub, build.Platform, ident.DeviceID, gsl.GSLOpt{Opt: "login", LoginKey: ident.LoginKey}, "", ident.GameUid)
+	// zone is the bound role's: the client's role picker caches it as SERVER_ZONE before this
+	// opt=login call, which sends it (UIRoleLoginView.lua:110-120; Assembly-CSharp.decompiled.cs:
+	// 77411, 77437, 1.0.370). "" for a device bound before the zone was recorded.
+	slog.Info("own device: trading loginKey", "platform", build.Platform, "iosMode", iosMode, "zone", ident.Zone)
+	lsr, err := gsl.GetServerListFor(httpClient, gateHost, pub, FormDevice(iosMode, ident.DeviceID, CapturedDevice{}), ident.DeviceID,
+		gsl.GSLOpt{Opt: "login", LoginKey: ident.LoginKey}, ident.Zone, ident.GameUid)
 	if err != nil {
 		return nil, err
 	}

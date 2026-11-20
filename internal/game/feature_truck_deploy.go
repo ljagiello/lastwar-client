@@ -36,7 +36,7 @@ import (
 //     uuid) the next squad is tried.
 //
 // The Alliance Duel scores a UR dispatch (type 98, value "5") on Tue and Sat, but unused sends are
-// lost at the daily reset, so this always runs (DUEL.md §7).
+// lost at the daily reset, so this always runs (docs/alliance-duel.mdx).
 const (
 	truckDeployFeature   = "truck-deploy"
 	truckDeploySendCmd   = "train.send"

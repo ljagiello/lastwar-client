@@ -11,8 +11,8 @@ import (
 // T11 idle expedition surprise box and finished task events (gap T11, MASTER.md §3.2 #6),
 // OPT-IN, claims only.
 //
-// The idle.game.main {} reply (the same read the t11-idle-expedition feature sends, gated the same
-// way) carries surpriseBoxGainTime and canReceiveEventNum at the top level, and again under
+// The idle.game.main {} reply (the same read the t11-idle-expedition feature sends, behind the same
+// switch and camp/season gate, t11Available) carries surpriseBoxGainTime and canReceiveEventNum at the top level, and again under
 // changeLevel.idleGameMain after a level change (T11IdleGameMainData:UpdateData,
 // T11IdleGameMainData.lua:26-55; OnGetIdleGameMainMessage, T11IdleGameDataManager.lua:97-112).
 //
@@ -54,7 +54,7 @@ func init() {
 }
 
 func runT11IdleEvents(conn *session.GameConn, in *Init) error {
-	if in == nil || in.Raw == nil || !evSwitchOn(in, "t11_idle_game_open") {
+	if in == nil || in.Raw == nil || !t11Available(in, t11IdleEventsFeature) {
 		return nil
 	}
 	msg, err := session.SendAndWait(conn, t11IdleEventsFeature+": main", t11MainCmd, sfs.NewSFSObject())

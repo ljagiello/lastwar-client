@@ -163,3 +163,44 @@ func TestRadarClaimsIsHeldForRadarDays(t *testing.T) {
 		t.Errorf("radar-claims must be held for radar-scoring days: %+v", f)
 	}
 }
+
+func TestDuelTablesAreTables40413(t *testing.T) {
+	// MASTER B53, B52, B54: duel_scores_gen.go is generated from tables 40413 (genduelscores).
+	if len(duelScoreTable) != 1486 || duelScoreTable[350] != (duelScoreRow{typ: 416, value: "5005", points: 2}) {
+		t.Errorf("score: %d rows, #350 %+v; want 1486 and the 40413 row {416, 5005, 2}", len(duelScoreTable), duelScoreTable[350])
+	}
+	if len(duelHeroTable) != 398 || duelHeroTable[50006] != (duelHeroRow{quality: 5, maxRank: 26, maxHonorLevel: 600}) {
+		t.Errorf("lw_hero: %d rows, #50006 %+v; want 398 and {5, 26, 600}", len(duelHeroTable), duelHeroTable[50006])
+	}
+	if r := duelRecruitTable["401100"]; len(duelRecruitTable) != 30 || r.typ != 9 || duelRecruitTable["301112"].timeType != "10" {
+		t.Errorf("officer_recruit: %d rows, 401100 %+v; want 30, type 9, and 301112 with time_type 10", len(duelRecruitTable), r)
+	}
+}
+
+func TestDuelSeasonDay(t *testing.T) {
+	// SeasonUtil.GetSeasonDay: (now - seasonStartTime) // 86400000 + 1, from init
+	// playerServerSeasonInfo (SeasonInfoTemplate.lua:23, 660-661).
+	at := func(kv ...any) *Init {
+		in := evInit(10)
+		in.Raw.PutSFSObject("playerServerSeasonInfo", duelObj(kv...))
+		return in
+	}
+	start := evTestNow.Add(-10*24*time.Hour - time.Second)
+	for name, c := range map[string]struct {
+		in          *Init
+		season, day int64
+		ok          bool
+	}{
+		"day 11":        {at("seasonId", 4, "seasonStartTime", start.UnixMilli()), 4, 11, true},
+		"first day":     {at("seasonId", 2, "seasonStartTime", evTestNow.UnixMilli()), 2, 1, true},
+		"no start time": {at("seasonId", 4), 4, 0, false},
+		"start time 0":  {at("seasonId", 4, "seasonStartTime", int64(0)), 4, 0, false},
+		"season 0":      {at("seasonId", 0, "seasonStartTime", start.UnixMilli()), 0, 0, false},
+		"no season":     {evInit(10), 0, 0, false},
+	} {
+		season, day, ok := duelSeasonDay(c.in, evTestNow)
+		if season != c.season || ok != c.ok || (ok && day != c.day) {
+			t.Errorf("%s: season %d day %d ok %v, want %d %d %v", name, season, day, ok, c.season, c.day, c.ok)
+		}
+	}
+}

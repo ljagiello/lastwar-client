@@ -15,12 +15,12 @@ import (
 // The client offers the free buy while today's free buys (init konbiniInfo.freeBuyCount, or 0 when
 // its lastBuyTime is not today) are below the building level's para2 plus effect 30025
 // (KONBINI_EXTRA_FREE_COUNT) (PlayerInfo.lua:172-174, 1135-1144). The konbini (729000) has no rows in
-// the 1.0.364 building tables, so para2 is unknown here: this counts only effect 30025, a lower bound
-// on the free buys, so it never sends useFree when no free buy is left. In 1.0.364 the building
-// does not exist and this never fires.
+// the building tables (still none in 40413), so para2 is unknown here: this counts only effect
+// 30025, a lower bound on the free buys, so it never sends useFree when no free buy is left. In
+// 1.0.370 the building still does not exist and this never fires.
 const (
 	konbiniBuyCmd        = "buy.in.konbini"
-	konbiniBuildingID    = 729000 // FUN_BUILD_KONBINI (EnumType.lua:3550)
+	konbiniBuildingID    = 729000 // FUN_BUILD_KONBINI (Global/EnumType.lua:3556)
 	konbiniExtraFreeFX   = 30025  // KONBINI_EXTRA_FREE_COUNT
 	konbiniFirstSlotIdx  = 1      // 1-based slot; every slot shares one daily free counter
 	konbiniUseFreeAlways = true
@@ -29,7 +29,7 @@ const (
 func init() {
 	registerFeature(Feature{
 		Name:    "konbini-free",
-		Summary: "OPT-IN: take the konbini's free buy (useFree:true only, never paid); dormant in 1.0.364; static-only",
+		Summary: "OPT-IN: take the konbini's free buy (useFree:true only, never paid); dormant in 1.0.370 (tables 40413); static-only",
 		Run:     runKonbiniFree,
 	})
 	session.RegisterBenignErrorCode(evAlreadyExecuted, konbiniBuyCmd)

@@ -20,7 +20,9 @@ import (
 	"time"
 )
 
-// shumeiReply is a shumei.Client that answers every device-profile POST with body, counting calls.
+// shumeiReply is a shumei.Client that answers every POST with body, counting calls. Register sends
+// two per run, the cloud config request and then the device profile; body is no cloud config, so
+// the first changes nothing.
 type shumeiReply struct {
 	body  string
 	calls int
@@ -62,34 +64,39 @@ func sameInstall(a, b shumei.Install) bool {
 
 // TestMintShumeiBoxIDKeepsInstall checks the first -cs-shumei-gen run for a session fills its
 // install values, binds them to the run's deviceId and saves them, with the minted box ID, to the
-// session config without touching the file's other fields. A later run getting the same smid back
-// leaves the file alone; one getting a new smid saves it.
+// session config without touching the file's other fields. Every run counts one SDK start and one
+// collection (a4, a130), so every run saves the install again, with the same smid back too, and a
+// new smid is saved with its time.
 func TestMintShumeiBoxIDKeepsInstall(t *testing.T) {
 	path := writeTestSessionConfig(t, &SessionConfig{
 		DeviceID: "dev-1", AccessToken: "tok-1", RefreshToken: "rt-1", RefreshTokenTime: 42,
 	})
 	client := &shumeiReply{body: shumeiSmid1}
 
-	boxID, install := mintShumeiBoxID(client, "dev-1", mintDevice, shumei.Install{}, path)
+	boxID, install := mintShumeiBoxID(client, "dev-1", mintDevice, shumei.Install{}, time.Time{}, path)
 	if boxID != "Bsmid-1" {
 		t.Fatalf("boxID = %q, want Bsmid-1", boxID)
 	}
 	if install.DeviceID != "dev-1" || install.BoxID != "Bsmid-1" || install.BoxIDSavedAt.IsZero() || install.PUUID == "" {
 		t.Errorf("install = %+v, want filled values bound to dev-1, and the minted box ID with its save time", install)
 	}
+	if install.AppStarts != 1 || install.Collections != 1 {
+		t.Errorf("install counts %d starts, %d collections; want 1 and 1 after the first registration", install.AppStarts, install.Collections)
+	}
 	saved, err := LoadSessionConfig(path)
 	if err != nil {
 		t.Fatalf("LoadSessionConfig: %v", err)
 	}
-	if !sameInstall(saved.ShumeiInstall, install) {
+	if !sameInstall(saved.ShumeiInstall, install) || saved.ShumeiInstall.AppStarts != 1 {
 		t.Errorf("saved shumeiInstall = %+v, want %+v", saved.ShumeiInstall, install)
 	}
 	if saved.AccessToken != "tok-1" || saved.RefreshToken != "rt-1" || saved.RefreshTokenTime != 42 || saved.ShumeiBoxId != "" {
 		t.Errorf("saving the install changed other fields: %+v", *saved)
 	}
 
-	// Same phone, same smid back: nothing changed, so nothing is written. The file is rewritten
-	// as compact JSON first; a save would indent it again, as the first one did.
+	// Same phone, same smid back: the box ID and its time stay, but the start and collection
+	// counters moved, so the install is written again. The file is rewritten as compact JSON
+	// first; a save indents it again, as the first one did.
 	indented, err := os.ReadFile(path)
 	if err != nil || !bytes.Contains(indented, []byte("\n  ")) {
 		t.Fatalf("first save wrote %q (read error %v), want indented JSON for the check below to mean anything", indented, err)
@@ -101,25 +108,28 @@ func TestMintShumeiBoxIDKeepsInstall(t *testing.T) {
 	if err := os.WriteFile(path, compact, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	boxID, again := mintShumeiBoxID(client, "dev-1", mintDevice, saved.ShumeiInstall, path)
-	if boxID != "Bsmid-1" || !sameInstall(again, install) {
-		t.Errorf("second run = %q, %+v; want Bsmid-1 and the install unchanged", boxID, again)
+	boxID, again := mintShumeiBoxID(client, "dev-1", mintDevice, saved.ShumeiInstall, time.Time{}, path)
+	if boxID != "Bsmid-1" || !sameInstall(again, install) || again.AppStarts != 2 || again.Collections != 2 {
+		t.Errorf("second run = %q, %+v; want Bsmid-1, the install's values and save time unchanged, 2 starts and collections", boxID, again)
 	}
-	if after, err := os.ReadFile(path); err != nil || string(after) != string(compact) {
-		t.Errorf("second run rewrote the session config (read error %v); want it untouched", err)
+	if after, err := os.ReadFile(path); err != nil || string(after) == string(compact) {
+		t.Errorf("second run left the session config as it was (read error %v); want the moved counters saved", err)
+	}
+	if saved, err := LoadSessionConfig(path); err != nil || saved.ShumeiInstall.AppStarts != 2 || saved.ShumeiInstall.Collections != 2 {
+		t.Errorf("after the second run the config holds %+v (load error %v), want 2 starts and collections", saved.ShumeiInstall, err)
 	}
 
 	// A new smid, what the live server returns on every registration, is saved with its time.
 	client.body = shumeiSmid2
-	boxID, next := mintShumeiBoxID(client, "dev-1", mintDevice, again, path)
+	boxID, next := mintShumeiBoxID(client, "dev-1", mintDevice, again, time.Time{}, path)
 	if boxID != "Bsmid-2" || next.BoxID != "Bsmid-2" || next.BoxIDSavedAt.Before(install.BoxIDSavedAt) {
 		t.Errorf("third run = %q, %+v; want Bsmid-2 saved no earlier than %v", boxID, next, install.BoxIDSavedAt)
 	}
 	if saved, err := LoadSessionConfig(path); err != nil || !sameInstall(saved.ShumeiInstall, next) {
 		t.Errorf("after a new smid the config holds %+v (load error %v), want %+v", saved.ShumeiInstall, err, next)
 	}
-	if client.calls != 3 {
-		t.Errorf("device-profile calls = %d, want 3: every run registers, as the SDK does on each launch", client.calls)
+	if client.calls != 6 {
+		t.Errorf("ShuMei calls = %d, want 6: every run sends the cloud config request and registers, as the SDK does on each launch", client.calls)
 	}
 }
 
@@ -127,14 +137,14 @@ func TestMintShumeiBoxIDKeepsInstall(t *testing.T) {
 // another. A run whose -cs-deviceid overrides the config's registers a fresh install and leaves the
 // config's alone; a config whose deviceId itself changed gets a fresh install saved for it.
 func TestMintShumeiBoxIDOtherDeviceID(t *testing.T) {
-	_, d1Install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", mintDevice, shumei.Install{}, "")
+	_, d1Install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", mintDevice, shumei.Install{}, time.Time{}, "")
 
 	path := writeTestSessionConfig(t, &SessionConfig{DeviceID: "dev-1", ShumeiInstall: d1Install})
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, got := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-2", mintDevice, d1Install, path)
+	_, got := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-2", mintDevice, d1Install, time.Time{}, path)
 	if got.DeviceID != "dev-2" || got.PUUID == d1Install.PUUID || got.BoxID != "Bsmid-2" {
 		t.Errorf("install for dev-2 = %+v, want a fresh one bound to dev-2, not dev-1's %+v", got, d1Install)
 	}
@@ -143,7 +153,7 @@ func TestMintShumeiBoxIDOtherDeviceID(t *testing.T) {
 	}
 
 	path = writeTestSessionConfig(t, &SessionConfig{DeviceID: "dev-2", ShumeiInstall: d1Install})
-	_, got = mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-2", mintDevice, d1Install, path)
+	_, got = mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-2", mintDevice, d1Install, time.Time{}, path)
 	if saved, err := LoadSessionConfig(path); err != nil || saved.ShumeiInstall.DeviceID != "dev-2" || !sameInstall(saved.ShumeiInstall, got) {
 		t.Errorf("config moved to dev-2 holds %+v (load error %v), want the fresh dev-2 install %+v", saved.ShumeiInstall, err, got)
 	}
@@ -154,7 +164,7 @@ func TestMintShumeiBoxIDOtherDeviceID(t *testing.T) {
 // another deviceId can't replace it.
 func TestMintShumeiBoxIDConfigWithoutDeviceID(t *testing.T) {
 	path := writeTestSessionConfig(t, &SessionConfig{AccessToken: "tok-1"})
-	_, install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", mintDevice, shumei.Install{}, path)
+	_, install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", mintDevice, shumei.Install{}, time.Time{}, path)
 	saved, err := LoadSessionConfig(path)
 	if err != nil || saved.ShumeiInstall.DeviceID != "dev-1" || !sameInstall(saved.ShumeiInstall, install) {
 		t.Fatalf("config without a deviceId holds %+v (load error %v), want the dev-1 install %+v", saved.ShumeiInstall, err, install)
@@ -164,7 +174,7 @@ func TestMintShumeiBoxIDConfigWithoutDeviceID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, other := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-2", mintDevice, saved.ShumeiInstall, path)
+	_, other := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-2", mintDevice, saved.ShumeiInstall, time.Time{}, path)
 	if other.DeviceID != "dev-2" || other.PUUID == install.PUUID {
 		t.Errorf("install for dev-2 = %+v, want a fresh one, not dev-1's", other)
 	}
@@ -173,7 +183,7 @@ func TestMintShumeiBoxIDConfigWithoutDeviceID(t *testing.T) {
 	}
 
 	// The install's own deviceId keeps saving: a later dev-1 run's new smid is stored.
-	_, next := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-1", mintDevice, saved.ShumeiInstall, path)
+	_, next := mintShumeiBoxID(&shumeiReply{body: shumeiSmid2}, "dev-1", mintDevice, saved.ShumeiInstall, time.Time{}, path)
 	if again, err := LoadSessionConfig(path); err != nil || again.ShumeiInstall.BoxID != "Bsmid-2" || !sameInstall(again.ShumeiInstall, next) {
 		t.Errorf("after dev-1's next run the config holds %+v (load error %v), want %+v with Bsmid-2", again.ShumeiInstall, err, next)
 	}
@@ -184,13 +194,18 @@ func TestMintShumeiBoxIDConfigWithoutDeviceID(t *testing.T) {
 func TestMintShumeiBoxIDFailure(t *testing.T) {
 	path := writeTestSessionConfig(t, &SessionConfig{DeviceID: "dev-1"})
 	client := &shumeiReply{body: `{"code":1902,"detail":{}}`}
-	boxID, install := mintShumeiBoxID(client, "dev-1", mintDevice, shumei.Install{}, path)
+	boxID, install := mintShumeiBoxID(client, "dev-1", mintDevice, shumei.Install{}, time.Time{}, path)
 	if boxID != "" || install.BoxID != "" {
 		t.Errorf("boxID = %q, install.BoxID = %q; want both empty after a 1902", boxID, install.BoxID)
 	}
-	// The 1902 reply must be what failed, not a check before the request.
-	if client.calls != 1 {
-		t.Errorf("deviceprofile requests = %d, want 1", client.calls)
+	// The 1902 reply must be what failed, not a check before the request: the cloud config
+	// request, then the device profile.
+	if client.calls != 2 {
+		t.Errorf("ShuMei requests = %d, want 2", client.calls)
+	}
+	// The failed upload still counted the SDK's start and collection, and they are saved.
+	if install.AppStarts != 1 || install.Collections != 1 {
+		t.Errorf("install counts %d starts, %d collections after a failed upload; want 1 and 1", install.AppStarts, install.Collections)
 	}
 	saved, err := LoadSessionConfig(path)
 	if err != nil {
@@ -205,7 +220,7 @@ func TestMintShumeiBoxIDFailure(t *testing.T) {
 // run its box ID: saving is best effort.
 func TestMintShumeiBoxIDSaveFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "no-such-dir", "session.json")
-	boxID, install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", mintDevice, shumei.Install{}, path)
+	boxID, install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", mintDevice, shumei.Install{}, time.Time{}, path)
 	if boxID != "Bsmid-1" || install.BoxID != "Bsmid-1" {
 		t.Errorf("mintShumeiBoxID = %q, %+v; want Bsmid-1 despite the failed save", boxID, install)
 	}
@@ -217,7 +232,7 @@ func TestMintShumeiBoxIDSaveFails(t *testing.T) {
 // TestMintShumeiBoxIDNoConfig checks a run without a session config still mints, from a fresh
 // install it can't keep.
 func TestMintShumeiBoxIDNoConfig(t *testing.T) {
-	boxID, install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", mintDevice, shumei.Install{}, "")
+	boxID, install := mintShumeiBoxID(&shumeiReply{body: shumeiSmid1}, "dev-1", mintDevice, shumei.Install{}, time.Time{}, "")
 	if boxID != "Bsmid-1" || install.PUUID == "" || install.DeviceID != "dev-1" {
 		t.Errorf("mintShumeiBoxID = %q, %+v; want Bsmid-1 and a fresh install for dev-1", boxID, install)
 	}
@@ -313,10 +328,16 @@ func runSaveBackWith(t *testing.T, o crossServerTestOpts, server func(*session.G
 		ServerList: []gsl.LoginServerInfo{{IP: "10.9.8.7", Port: testutil.FlexPort(20443), Zone: "APS-REAL", GameUid: "uid-real"}},
 		At:         &gsl.LoginToken{Token: "fresh-access-token"},
 	})
+	// ClientSwitch 25 on: the client asks the ShuMei SDK only then (1.0.370 audit B41).
+	withCheckVersionFields(t, gslClient, map[string]any{"client_config": clientConfig(25)})
 	inner := gslClient.Transport
 	o.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if strings.HasSuffix(r.URL.Path, "/deviceprofile/v4") {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/deviceprofile/v4"):
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(shumeiSmid1)), Header: http.Header{}}, nil
+		case strings.HasSuffix(r.URL.Path, "/v3/cloudconf"):
+			// No cloud config: Register logs it and keeps the one in force.
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
 		}
 		return inner.RoundTrip(r)
 	})}
@@ -388,7 +409,7 @@ func TestRunCrossServerTestShumeiAppVersion(t *testing.T) {
 	// from the default's.
 	for _, appVersion := range []string{"9.9.9", ""} {
 		var registered []shumei.Device
-		registerShumeiDevice = func(client shumei.Client, deviceID string, dev shumei.Device) (string, error) {
+		registerShumeiDevice = func(client shumei.Client, deviceID string, dev shumei.Device) (string, shumei.Install, error) {
 			registered = append(registered, dev)
 			return register(client, deviceID, dev)
 		}

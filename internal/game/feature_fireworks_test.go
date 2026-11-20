@@ -139,17 +139,36 @@ func fwClaimOK(p *sfs.SFSObject) *sfs.SFSObject {
 	return r
 }
 
-// startFwFake answers al.rank and world.get.block with the fixtures and every claim with claim(n),
-// n counting claims from 1 (fwClaimOK when claim is nil).
+// fwBlockAnswer answers the n-th world.get.block (from 1): block for the first and for every
+// errorCode fixture, an empty reply for later requests, so a fixture read by a scan of several
+// requests counts once. It also stops the pause between block requests for the test.
+func fwBlockAnswer(t *testing.T, block *sfs.SFSObject) func() *sfs.SFSObject {
+	t.Helper()
+	saved := fwBlockSleep
+	fwBlockSleep = func(time.Duration) {}
+	t.Cleanup(func() { fwBlockSleep = saved })
+	n := 0
+	return func() *sfs.SFSObject {
+		n++
+		if n > 1 && !block.Has("errorCode") {
+			return sfs.NewSFSObject()
+		}
+		return block
+	}
+}
+
+// startFwFake answers al.rank and world.get.block with the fixtures (fwBlockAnswer) and every
+// claim with claim(n), n counting claims from 1 (fwClaimOK when claim is nil).
 func startFwFake(t *testing.T, block *sfs.SFSObject, claim func(n int, p *sfs.SFSObject) *sfs.SFSObject) (*session.GameConn, *evFake) {
 	t.Helper()
 	n := 0
+	blocks := fwBlockAnswer(t, block)
 	return startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		switch cmd {
 		case fireworksRankCmd:
 			return fwRankReply()
 		case fireworksBlockCmd:
-			return block
+			return blocks()
 		case fireworksGiftCmd:
 			n++
 			if claim != nil {
@@ -237,27 +256,116 @@ func TestFireworksBlockArithmetic(t *testing.T) {
 		t.Errorf("off-map points planned %+v", reqs)
 	}
 
-	// Two HQs in block 3451 and one in 5000: one request, blocks deduplicated and sorted, the
-	// rectangle spanning both: tiles (0, 340) to (520, 510).
+	// Two HQs in block 3451 and one in 5000: two viewports (MASTER B34), not one rectangle from
+	// tile (0, 340) to (520, 510) that sees neither block from its centre.
 	reqs := fwPlanBlocks([]int64{500001, 347513, 347520})
-	if len(reqs) != 1 || !slices.Equal(reqs[0].Index, []int32{3451, 5000}) || reqs[0].LeftBottom != 340001 ||
-		reqs[0].RightTop != 510521 || reqs[0].X != 260 || reqs[0].Y != 425 {
+	if len(reqs) != 2 || !slices.Equal(reqs[0].Index, []int32{3451}) || reqs[0].LeftBottom != 340511 || reqs[0].RightTop != 350521 ||
+		!slices.Equal(reqs[1].Index, []int32{5000}) || reqs[1].LeftBottom != 500001 || reqs[1].RightTop != 510011 {
 		t.Errorf("plan = %+v", reqs)
 	}
 }
 
-func TestFireworksPlanSplitsAt160Blocks(t *testing.T) {
-	var points []int64
+// fwRequestRect is the block rectangle between a request's leftBottom and rightTop tiles (the
+// rightTop tile is the corner after the last block, clamped to 999).
+func fwRequestRect(r fwBlockRequest) fwRect {
+	lx, ly, _ := fwTilePos(int64(r.LeftBottom))
+	rx, ry, _ := fwTilePos(int64(r.RightTop))
+	return fwRect{lx / fwBlockSize, ly / fwBlockSize, (rx+fwBlockSize-1)/fwBlockSize - 1, (ry+fwBlockSize-1)/fwBlockSize - 1}
+}
+
+// clientMaxBlocksPerRequest is the client's cap on one world.get.block: it sends at most 160 of
+// the blocks it wants, `_addViewIndex.GetRange(0, 160)` (A-CS:179830-179843, 179934-179947). A
+// literal, so the test does not compare fwMaxBlocksPerRequest with itself.
+const clientMaxBlocksPerRequest = 160
+
+// checkFwPlan checks MASTER B34's invariants: every wanted block is read exactly once, each
+// request reads at most 160 blocks of its own rectangle, row by row, with the camera tile inside.
+func checkFwPlan(t *testing.T, name string, points []int64, radius int, reqs []fwBlockRequest) {
+	t.Helper()
+	want := map[int32]bool{}
+	for _, p := range points {
+		x, y, ok := fwTilePos(p)
+		if !ok {
+			continue
+		}
+		bx, by := x/fwBlockSize, y/fwBlockSize
+		for ny := max(by-radius, 0); ny <= min(by+radius, fwBlockCount-1); ny++ {
+			for nx := max(bx-radius, 0); nx <= min(bx+radius, fwBlockCount-1); nx++ {
+				want[int32(ny*fwBlockCount+nx)] = true
+			}
+		}
+	}
+	seen := map[int32]bool{}
+	for i, r := range reqs {
+		rc := fwRequestRect(r)
+		if len(r.Index) == 0 || len(r.Index) > clientMaxBlocksPerRequest || rc.area() > clientMaxBlocksPerRequest {
+			t.Errorf("%s: request %d reads %d blocks of a %d-block rectangle", name, i, len(r.Index), rc.area())
+		}
+		if !slices.IsSorted(r.Index) {
+			t.Errorf("%s: request %d index is not row by row: %v", name, i, r.Index)
+		}
+		for _, b := range r.Index {
+			bx, by := int(b)%fwBlockCount, int(b)/fwBlockCount
+			if bx < rc.x0 || bx > rc.x1 || by < rc.y0 || by > rc.y1 {
+				t.Errorf("%s: request %d block %d is outside its rectangle %+v", name, i, b, rc)
+			}
+			if seen[b] {
+				t.Errorf("%s: block %d is read twice", name, b)
+			}
+			seen[b] = true
+		}
+		lx, ly, _ := fwTilePos(int64(r.LeftBottom))
+		rx, ry, _ := fwTilePos(int64(r.RightTop))
+		if int(r.X) < lx || int(r.X) > rx || int(r.Y) < ly || int(r.Y) > ry {
+			t.Errorf("%s: request %d camera (%d, %d) is outside (%d, %d)-(%d, %d)", name, i, r.X, r.Y, lx, ly, rx, ry)
+		}
+	}
+	for b := range want {
+		if !seen[b] {
+			t.Errorf("%s: wanted block %d is never read", name, b)
+		}
+	}
+}
+
+func TestFireworksPlanIsViewportShaped(t *testing.T) {
+	var row []int64 // 161 HQs: every block of block row 0 and the first 61 of row 1
 	for i := range 161 {
 		bx, by := i%fwBlockCount, i/fwBlockCount
-		points = append(points, int64(bx*fwBlockSize+by*fwBlockSize*fwMapTiles+1))
+		row = append(row, int64(bx*fwBlockSize+by*fwBlockSize*fwMapTiles+1))
 	}
-	reqs := fwPlanBlocks(points)
-	if len(reqs) != 2 || len(reqs[0].Index) != 160 || len(reqs[1].Index) != 1 || reqs[1].Index[0] != 160 {
-		t.Fatalf("plan: %d requests, sizes %d", len(reqs), len(reqs[0].Index))
+	var town []int64 // 30 HQs a few tiles apart around (500, 500)
+	for i := range 30 {
+		town = append(town, int64(fwTileIndex(470+(i%6)*12, 480+(i/6)*9)))
 	}
-	if reqs[0].LeftBottom != 1 || reqs[0].RightTop != fwTileIndex(1000, 20) {
-		t.Errorf("first rectangle %d..%d, want rows 0-1 of blocks", reqs[0].LeftBottom, reqs[0].RightTop)
+	var spread []int64 // HQs across the whole map
+	for i := range 12 {
+		spread = append(spread, int64(fwTileIndex(i*83%1000, i*157%1000)))
+	}
+	var grid []int64 // 36 HQs 3 blocks apart: radius 3 wants one 22x22 area of 484 blocks
+	for i := range 36 {
+		grid = append(grid, int64(fwTileIndex(405+(i%6)*30, 405+(i/6)*30)))
+	}
+	for _, c := range []struct {
+		name    string
+		points  []int64
+		radius  int
+		minReqs int
+		maxReqs int
+	}{
+		{"one HQ", []int64{347513}, 3, 1, 1},
+		{"two HQs in one block", []int64{347513, 347520}, 3, 1, 1},
+		{"a row of 161 blocks", row, 0, 2, 2},
+		{"a town", town, 3, 1, 4},
+		{"a town, own blocks only", town, 0, 1, 2},
+		{"spread over the map", spread, 3, 1, 12},
+		{"corners", []int64{1, 1000, 999001, 1000000}, 3, 4, 4},
+		{"a dense 6x6 grid", grid, 3, 4, 4},
+	} {
+		reqs := fwPlanBlocksAround(c.points, c.radius)
+		checkFwPlan(t, c.name, c.points, c.radius, reqs)
+		if len(reqs) < c.minReqs || len(reqs) > c.maxReqs {
+			t.Errorf("%s: %d requests, want %d to %d", c.name, len(reqs), c.minReqs, c.maxReqs)
+		}
 	}
 }
 
@@ -295,20 +403,121 @@ func TestFireworksScanIsReadOnly(t *testing.T) {
 	if err := runFireworksScan(conn, fwTestInit()); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(fake.cmds(), ","); got != "al.rank,world.get.block" {
+	if got := strings.Join(fake.cmds(), ","); got != "al.rank,world.get.block,world.get.block" {
 		t.Fatalf("fireworks-scan sent %s; it may send only al.rank and world.get.block", got)
 	}
 	rank := fake.only(fireworksRankCmd)[0].Params
 	if v, _ := rank.Get("allianceId"); v.Type != sfs.SFSUtfString || v.Val != fwAlliance {
 		t.Errorf("al.rank allianceId = %#v", v)
 	}
-	blk := fake.only(fireworksBlockCmd)[0].Params
-	if v, _ := blk.Get("index"); !slices.Equal(v.Val.([]int32), []int32{3451, 5000}) {
-		t.Errorf("index = %v; the member on another server and the off-map one must not be read", v.Val)
+	// The shared scan reads 3 blocks around each HQ (MASTER B34): the 7x7 blocks around 3451 and
+	// the 4x7 around 5000 at the map's edge, one viewport each; the member on another server and
+	// the off-map one are not read.
+	blks := fake.only(fireworksBlockCmd)
+	first, second := blks[0].Params, blks[1].Params
+	i1, _ := first.Get("index")
+	i2, _ := second.Get("index")
+	if got := i1.Val.([]int32); len(got) != 49 || got[0] != 3148 || got[48] != 3754 || !slices.Contains(got, 3451) {
+		t.Errorf("first index = %v", got)
 	}
-	if blk.GetInt("serverId") != fwServer || blk.GetInt("leftBottom") != 340001 || blk.GetInt("rightTop") != 510521 ||
-		blk.GetInt("clearUuidSet") != 1 || blk.GetInt("blockSize") != 10 {
-		t.Errorf("world.get.block params %s", blk.StringRedacted())
+	if got := i2.Val.([]int32); len(got) != 28 || got[0] != 4700 || got[27] != 5303 || !slices.Contains(got, 5000) {
+		t.Errorf("second index = %v", got)
+	}
+	if first.GetInt("serverId") != fwServer || first.GetInt("leftBottom") != fwTileIndex(480, 310) || first.GetInt("rightTop") != fwTileIndex(550, 380) ||
+		first.GetInt("x") != 515 || first.GetInt("y") != 345 || first.GetInt("clearUuidSet") != 1 || first.GetInt("blockSize") != 10 {
+		t.Errorf("first world.get.block params %s", first.StringRedacted())
+	}
+	if second.Has("clearUuidSet") || second.GetInt("leftBottom") != fwTileIndex(0, 470) || second.GetInt("rightTop") != fwTileIndex(40, 540) {
+		t.Errorf("second world.get.block params %s; clearUuidSet goes out once", second.StringRedacted())
+	}
+}
+
+// TestAllianceTileScanRunsOncePerRun pins MASTER B34's shared scan: fireworks-scan, fireworks,
+// alliance-treasures-plan and alliance-treasures on one (conn, init) send al.rank and the block
+// requests once, with one pause between the block requests; a scan error is returned to the
+// first feature only; a new init scans again.
+func TestAllianceTileScanRunsOncePerRun(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withFwPace(t)
+	conn, fake := startFwFake(t, fwBlockReply(evTestNow), nil)
+	var paused []time.Duration
+	fwBlockSleep = func(d time.Duration) { paused = append(paused, d) }
+	in := fwTestInit()
+	for _, run := range []func(*session.GameConn, *Init) error{runAllianceTreasures, runAllianceTreasuresPlan, runFireworksScan, runFireworks} {
+		if err := run(conn, in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Join(fake.cmds(), ","); got != "al.rank,world.get.block,world.get.block,get.fireworks.gift,get.fireworks.gift" {
+		t.Errorf("sent %s", got)
+	}
+	if !slices.Equal(paused, []time.Duration{fwBlockPace}) {
+		t.Errorf("paused %v between block requests, want one %v", paused, fwBlockPace)
+	}
+	if err := runFireworksScan(conn, fwTestInit()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(fake.only(fireworksRankCmd)); n != 2 {
+		t.Errorf("a new init sent al.rank %d times in all, want 2", n)
+	}
+
+	errConn, errFake := startFwFake(t, evErr("world_tips_1005"), nil)
+	if err := runAllianceTreasures(errConn, in); err == nil {
+		t.Error("the first feature must get the scan error")
+	}
+	if err := runFireworks(errConn, in); err != nil {
+		t.Errorf("a later feature got the scan error again: %v", err)
+	}
+	if n := len(errFake.only(fireworksRankCmd)); n != 1 {
+		t.Errorf("al.rank sent %d times, want once", n)
+	}
+}
+
+// TestSharedTileScanReportsAnEarlierFailure (wp7-r2 #3.7): a later feature of a run whose shared
+// scan failed (here al.rank refused, so no scan at all) says the scan failed, not that it found
+// nothing; a scan with nothing to read still says so.
+func TestSharedTileScanReportsAnEarlierFailure(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withFwPace(t)
+	logs := captureFwLogs(t)
+	errConn, _ := startEvFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "al.rank" {
+			return evErr("world_tips_1005")
+		}
+		return evErr("unexpected command")
+	})
+	in := fwTestInit()
+	if err := runAllianceTreasures(errConn, in); err == nil {
+		t.Fatal("the first feature must get the scan error")
+	}
+	if err := runFireworks(errConn, in); err != nil {
+		t.Fatalf("a later feature got the scan error again: %v", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `msg="fireworks: this run's alliance tile scan failed, so there is nothing to read; not scanning again"`) ||
+		!strings.Contains(out, "world_tips_1005") {
+		t.Errorf("the later feature does not report the failed scan:\n%s", out)
+	}
+	if strings.Contains(out, "fireworks: this run's alliance tile scan found nothing to read") {
+		t.Errorf("a failed scan is logged as one that found nothing:\n%s", out)
+	}
+
+	noAlliance := evInit(30)
+	u := sfs.NewSFSObject()
+	u.PutUtfString("uid", fwSelf)
+	u.PutInt("serverId", fwServer)
+	noAlliance.Raw.PutSFSObject("user", u)
+	conn, fake := startFwFake(t, fwBlockReply(evTestNow), nil)
+	for _, run := range []func(*session.GameConn, *Init) error{runAllianceTreasures, runFireworks} {
+		if err := run(conn, noAlliance); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := len(fake.cmds()); n != 0 {
+		t.Errorf("sent %v without an alliance", fake.cmds())
+	}
+	if !strings.Contains(logs.String(), "fireworks: this run's alliance tile scan found nothing to read") {
+		t.Errorf("an empty scan is no longer logged as one that found nothing:\n%s", logs.String())
 	}
 }
 
@@ -357,9 +566,13 @@ func TestFireworksEligibilityEdges(t *testing.T) {
 		{"no max", box(fwChest(1, 661501, 0, 0, time.Minute, ""), fwAllyA, fwAlliance), nil, "full"},
 		{"answered this run", box(fwChest(1, 661501, 0, 10, time.Minute, ""), fwAllyA, fwAlliance), map[int64]bool{1: true}, "already answered this run"},
 		{"no uuid", box(fwChest(0, 661501, 0, 10, time.Minute, ""), fwAllyA, fwAlliance), nil, "no uuid"},
-		{"no owner", box(fwChest(1, 661501, 0, 10, time.Minute, ""), "", fwAlliance), nil, "owner not an alliance member"},
+		{"no owner", box(fwChest(1, 661501, 0, 10, time.Minute, ""), "", fwAlliance), nil, "no owner"},
+		{"type 1 without an owner", box(fwChest(1, 671005, 0, 100, time.Minute, ""), "", fwAlliance), nil, "no owner"},
+		{"type 0 of a non-member", box(fwChest(1, 661501, 0, 10, time.Minute, ""), fwStranger, fwAlliance), nil, "owner not an alliance member"},
 		{"type 0 needs no alliance match", box(fwChest(1, 661501, 0, 10, time.Minute, ""), fwAllyA, "al-other"), nil, ""},
 		{"type 1 same alliance", box(fwChest(1, 671005, 0, 100, time.Minute, ""), fwAllyA, fwAlliance), nil, ""},
+		// MASTER B36: type 1 tests the building's alliance only (FireworkWorldBuildBubble.lua:281-296).
+		{"type 1 on an own-alliance building of a non-member", box(fwChest(1, 671005, 0, 100, time.Minute, ""), fwStranger, fwAlliance), nil, ""},
 		{"type 1 untagged building", box(fwChest(1, 671005, 0, 100, time.Minute, ""), fwAllyA, ""), nil, "type 1 from another alliance"},
 		{"sendTime in seconds", box(fireworkGift{UUID: 1, ConfigID: 661501, Max: 10, SendTime: evTestNow.Add(-time.Minute).Unix()}, fwAllyA, fwAlliance), nil, ""},
 	}
@@ -383,7 +596,7 @@ func TestFireworksClaimsOnlyEligibleChests(t *testing.T) {
 	if err := runFireworks(conn, fwTestInit()); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(fake.cmds(), ","); got != "al.rank,world.get.block,get.fireworks.gift,get.fireworks.gift" {
+	if got := strings.Join(fake.cmds(), ","); got != "al.rank,world.get.block,world.get.block,get.fireworks.gift,get.fireworks.gift" {
 		t.Fatalf("sent %s", got)
 	}
 	claims := fake.only(fireworksGiftCmd)

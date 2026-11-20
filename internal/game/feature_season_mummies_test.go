@@ -43,6 +43,32 @@ func TestSeasonMummiesClaimsOnlyWithYardAndWaitingTroops(t *testing.T) {
 	}
 }
 
+// TestSeasonMummiesSeason7Yard pins B20: Season 7 (MummyV2) uses yard 858000; S6's yard there is
+// a past season's building and does not count.
+func TestSeasonMummiesSeason7Yard(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for name, c := range map[string]struct {
+		yard, lv int32
+		want     string
+	}{
+		"S7 yard 858000":           {858000, 1, seasonMummyCmd},
+		"only the S6 yard 851000":  {851000, 1, ""},
+		"S7 yard not built (lv 0)": {858000, 0, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+			in := mummiesWaiting(evWithSeason(evInit(30), 7), 40)
+			in.Buildings = append(in.Buildings, NewTestBuilding(9, c.yard, c.lv))
+			if err := runSeasonMummies(conn, in); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(fake.cmds(), ","); got != c.want {
+				t.Errorf("sent %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestSeasonMummiesIsOptIn(t *testing.T) {
 	f, ok := featureRegistry["season-mummies"]
 	if !ok || f.DefaultOn || !strings.HasPrefix(f.Summary, "OPT-IN:") {

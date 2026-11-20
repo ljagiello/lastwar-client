@@ -81,6 +81,14 @@ func TestArmsRaceNothingReachedOrStageOver(t *testing.T) {
 			i.PutLong("stage_end_time", evTestNow.Add(-time.Second).Unix())
 			return i
 		}()},
+		// MASTER B74: IsCurDataStageExpired (ActivityPersonalArmsDataManager.lua:165-184) treats 0,
+		// and an absent field, as an expired stage.
+		{"stage_end_time 0", func() *sfs.SFSObject {
+			i := armsRaceTestInfo(5000, []int32{0, 0, 0}, 20, []int32{0, 0, 0})
+			i.PutLong("stage_end_time", 0)
+			return i
+		}()},
+		{"no stage_end_time", duelWithoutKey(armsRaceTestInfo(5000, []int32{0, 0, 0}, 20, []int32{0, 0, 0}), "stage_end_time")},
 	} {
 		conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject { return c.info })
 		if err := runArmsRaceChests(conn, evInit(30, evActivity(17))); err != nil {

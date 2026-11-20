@@ -11,14 +11,15 @@ import (
 )
 
 // Activity-stage quests (OPT-IN, MASTER.md §3.2 #13 STAGEQ; cov-ui-activity F3 and its verdict).
-// Static-only: from the 833 Lua and tables 39879, not sent live yet.
+// Static-only: from the 833 Lua, its stage and activity maps re-derived from the 1.0.370 tables
+// 40413 (MASTER 1.0.370 B18), not sent live yet.
 //
 // The quests feature leaves every activity_stage.stage_quest id to its activity
 // (questStageRanges, feature_quests.go). The free stage events claim theirs with the same
 // task.reward.get {id: UtfString} when the quest's TaskManager state is 1 (TaskState.CanReceive),
 // with no purchase gate: Strongest Commander (UIStageMissionItem.lua:20-26 via
 // UIActivityCenterTableCtrl.lua:177-179), task events (TaskActivityItem.lua:170-176), Lockhart
-// (LockhartActivityMain.lua:186-199, 282-284) and the King's personal targets
+// (LockhartActivityMain.lua:187-197, 282-284) and the King's personal targets
 // (PersonalTargetItem.lua:118-122). TaskManager holds init task[] {id, num, state}
 // (TaskManager.lua:27-35), so the state is already in init and no detail request is needed.
 //
@@ -27,15 +28,14 @@ import (
 // PersonalTargetView.lua:92-96), and lists only that activity's own stage: its subType, which is
 // the table's tableInfoType (ActivityInfoData.lua:231; LockhartActivityMain.lua:189-197,
 // StrongestCommanderDataManager.lua:139-145, TaskActivity.lua:157-164). So an id is claimed only
-// while an activity whose stage lists it is valid. An activity id newer than tables 39879 has no
-// known stage and claims nothing. The first refusal that is not benign stops the run.
+// while an activity whose stage lists it is valid. An activity id newer than tables tableVersion
+// has no known stage and claims nothing. The first refusal that is not benign stops the run.
 //
 // Left out on purpose: Growth Foundation (127, stage types 3 and 5: 8000001-8000010,
 // 8000101-8000112) pays only after the foundation was bought (UILWGrowFoundationTargetItem.lua:
 // 131-136); Hero Trial (133, stage types 6-27: 8010101-8010108, 8010201-8010208, 8010301-8010344)
-// claims its stages with hero.experiment.reward, never task.reward.get (UIHeroTrial.lua:447-453);
-// stage type 200's 8010018 has no activity row. Follow-up quests in a reply's tasks[] are
-// not chased: those belong to the quests feature.
+// claims its stages with hero.experiment.reward, never task.reward.get (UIHeroTrial.lua:447-453).
+// Follow-up quests in a reply's tasks[] are not chased: those belong to the quests feature.
 const stageQuestsFeature = "stage-quests"
 
 // The activity types (EnumActivity, Global/EnumType.lua:6290-6343) whose stage quests are claimed.
@@ -54,8 +54,8 @@ type stageQuestRange struct {
 	stages []int64
 }
 
-// stageQuestRanges are the claimable stage quests in tables 39879, exactly as activity_stage lists
-// them (the gaps between runs are not stage quests).
+// stageQuestRanges are the claimable stage quests in tables tableVersion, exactly as
+// activity_stage lists them (the gaps between runs are not stage quests).
 var stageQuestRanges = []stageQuestRange{
 	// Strongest Commander (105), stages 1 and 101.
 	{2201001, 2201005, []int64{1}}, {2202001, 2202005, []int64{1}}, {2203001, 2203005, []int64{1}},
@@ -68,18 +68,21 @@ var stageQuestRanges = []stageQuestRange{
 	{2400000, 2400000, []int64{2}}, {2400001, 2400001, []int64{94011}}, {2400002, 2400002, []int64{940141}},
 	{2400003, 2400003, []int64{94023}}, {2400004, 2400004, []int64{1000085}}, {2400005, 2400005, []int64{1200018}},
 	{2400006, 2400006, []int64{1200067}}, {2400007, 2400007, []int64{1200126}},
+	{2400008, 2400008, []int64{1201025}},
 	// King personal targets (200), stage 100.
 	{2500001, 2500005, []int64{100}},
-	// Task events (129): stage 4 (8010012-8010015 are also stage 200's, which no activity uses),
-	// 98002 and 98006 (the same quests), 98003, 98501, 98505, 98509; TaskActivity2 (135): 7002.
-	{8010011, 8010015, []int64{4}},
+	// Task events (129): stage 4; stage 200 (activity_stage row 302: 8010018 and 8010012-8010015,
+	// listed by task event 1071011); 98002 and 98006 (the same quests), 98003, 98501, 98505, 98509;
+	// TaskActivity2 (135): 7002.
+	{8010011, 8010011, []int64{4}}, {8010012, 8010015, []int64{4, 200}}, {8010018, 8010018, []int64{200}},
 	{9010001, 9010008, []int64{98002, 98006}}, {9010101, 9010107, []int64{98003}},
 	{9100000, 9100149, []int64{98501}}, {9100300, 9100449, []int64{98505}}, {9100600, 9100749, []int64{98509}},
 	{9010201, 9010207, []int64{7002}},
 }
 
-// stageQuestActivityStage is every table activity row 39879 of the five types: id -> its
-// tableInfoType (tableInfo activity_stage for all of them), the stage its panel lists.
+// stageQuestActivityStage is every table activity row (tables tableVersion) of the five
+// types: id -> its tableInfoType (tableInfo activity_stage for all of them), the stage its panel
+// lists (ActivityInfoData.lua:231).
 var stageQuestActivityStage = map[int32]int64{
 	// Strongest Commander (105)
 	11: 1, 12: 1, 94016: 1,
@@ -89,19 +92,20 @@ var stageQuestActivityStage = map[int32]int64{
 	94011: 94011, 94018: 94011, 94019: 94011, 94020: 94011, 94021: 94011,
 	94023: 94023,
 	94024: 940141, 940141: 940141, 940142: 940141,
-	1000085: 1000085, 1200018: 1200018, 1200067: 1200067, 1200126: 1200126,
+	1000085: 1000085, 1200018: 1200018, 1200067: 1200067, 1200126: 1200126, 1201025: 1201025,
 	// Task events (129)
 	3008: 4, 5103: 4, 6003: 4, 6005: 4, 14002: 4, 94303: 4, 1000225: 4, 1000226: 4, 1000227: 4, 1000271: 4,
 	1000272: 4, 1000288: 4, 1000290: 4, 1000292: 4, 1000294: 4, 1000312: 4, 1000509: 4, 1010235: 4, 1010236: 4,
 	1010239: 4, 1010240: 4, 1020215: 4, 1030215: 4, 1041013: 4, 1051013: 4, 8129001: 4, 8129002: 4, 8129003: 4,
 	8129004: 4,
 	98002:   98002, 98003: 98003, 98006: 98006, 98501: 98501, 98505: 98505, 98509: 98509,
+	1071011: 200,
 	// TaskActivity2 (135)
 	7002: 7002,
 	// King (200)
 	85000: 100, 85001: 100, 1000008: 100, 1000020: 100, 1000042: 100, 1000057: 100, 1000076: 100, 1000077: 100,
 	1000081: 100, 1000082: 100, 1000083: 100, 1000084: 100, 1000090: 100, 1200013: 100, 1200014: 100,
-	1200056: 100, 1200057: 100, 1200122: 100, 1200123: 100,
+	1200056: 100, 1200057: 100, 1200122: 100, 1200123: 100, 1201016: 100, 1201017: 100,
 }
 
 func init() {
@@ -164,8 +168,8 @@ func runStageQuests(conn *session.GameConn, in *Init) error {
 		}
 		stage, ok := stageQuestActivityStage[a.ID]
 		if !ok {
-			slog.Info(stageQuestsFeature+": running activity not in tables 39879; its stage quests wait for a table update",
-				"activityId", a.ID, "activityType", a.Type)
+			slog.Info(stageQuestsFeature+": running activity not in the stage map; its stage quests wait for a table update",
+				"activityId", a.ID, "activityType", a.Type, "tableVersion", tableVersion)
 			continue
 		}
 		valid[stage] = true

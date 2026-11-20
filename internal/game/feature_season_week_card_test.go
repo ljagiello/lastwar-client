@@ -67,6 +67,10 @@ func TestSeasonWeekCardID(t *testing.T) {
 		"S1 card, started after the swap":             {act(1000021, evTestNow.Add(-48*time.Hour)), 10008},
 		"S1 card, started before the swap":            {act(1000021, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)), 10002},
 		"no start time keeps para":                    {Activity{ID: 1200052, Raw: sfs.NewSFSObject()}, 10006},
+		// B19: 1201008 has para 10014 and no condition_giftbag, so it never swaps (a zero swap
+		// date must not turn it into card 0).
+		"S7 card, started after every swap date": {act(1201008, evTestNow.Add(-48*time.Hour)), 10014},
+		"S7 card, started before the swap date":  {act(1201008, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)), 10014},
 	} {
 		got, ok := seasonWeekCardID(c.a, dayStart)
 		if !ok || got != c.want {
@@ -94,6 +98,21 @@ func TestSeasonWeekCardClaimsFreeChestWithoutCard(t *testing.T) {
 	}
 }
 
+// TestSeasonWeekCardSeason7 pins B19: in Season 7 the open card activity 1201008 reads card 10014.
+func TestSeasonWeekCardSeason7(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, seasonWeekCardReply(10014, time.Time{}, time.Time{}, time.Time{}))
+	if err := runSeasonWeekCard(conn, evWithSeason(evInit(30, evActivity(1201008)), 7)); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(fake.cmds(), ","); got != "lw.season.week.card.info,lw.season.week.card.free.reward" {
+		t.Fatalf("sent %s", got)
+	}
+	for _, r := range fake.requests() {
+		seasonParamIs(t, r.Params, "card_id", sfs.SFSInt, int32(10014))
+	}
+}
+
 func TestSeasonWeekCardClaimsBoughtCardDailyFirst(t *testing.T) {
 	withEvNow(t, evTestNow)
 	yesterday := evTestTomorrow.Add(-25 * time.Hour)
@@ -113,7 +132,7 @@ func TestSeasonWeekCardSkips(t *testing.T) {
 	yesterday := evTestTomorrow.Add(-25 * time.Hour)
 	switchOff := seasonWeekCardInit()
 	dc := sfs.NewSFSObject()
-	dc.PutInt(freeChestSwitch, 0)
+	dc.PutInt("free_chest_receive", 0) // a literal, so a wrong freeChestSwitch fails
 	switchOff.Raw.PutSFSObject("dataConfig", dc)
 	for name, c := range map[string]struct {
 		in    *Init

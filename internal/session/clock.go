@@ -91,13 +91,16 @@ func (c *GameConn) ServerNow() (now time.Time, ok bool) {
 // clock reading and is ignored.
 const clockMinServerMs = 1577836800000
 
-// notePong feeds a pong's serverTime and clientTime to the clock, as of recv, when the packet was
-// read off the socket. Pings the client sends carry no serverTime, so the fake-server side of a
-// test pair, which reads them, records nothing.
+// notePong feeds a pong's serverTime and clientTime to the clock, as of recv, when the packet came
+// off the socket (arrivalReader). Pings the client sends carry no serverTime, so the fake-server
+// side of a test pair, which reads them, records nothing. Any pong arms WaitFor's silence
+// watchdog, as the client's IsPingPongTimeOut stays off until lastPingPongTime is first set
+// (BaseUtils.decompiled.cs:36021-36024).
 func (c *GameConn) notePong(env *Envelope, recv time.Time) {
 	if env.Controller != ControllerSystem || env.Action != ActionPingPong || env.Content == nil {
 		return
 	}
+	c.pongSeen.Store(true)
 	serverMs, ok1 := pongMs(env.Content, "serverTime")
 	clientMs, ok2 := pongMs(env.Content, "clientTime")
 	if !ok1 || !ok2 || serverMs < clockMinServerMs {

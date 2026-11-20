@@ -16,9 +16,9 @@ import (
 )
 
 // Secret Tasks (hero dispatch), start half: start today's not-started UR tasks with idle heroes,
-// because a task left unstarted is gone after the daily reset (en:456211; DUEL.md §5) and "Perform
+// because a task left unstarted is gone after the daily reset (en:456211; docs/alliance-duel.mdx) and "Perform
 // a UR secret task" (score 90204, type 99 value 5) is worth 75,000 duel points on Tuesday and
-// Saturday (DUEL.md §2.2, §2.6, §4.2). The claim half is secret-tasks-claim. Static-only: not
+// Saturday (docs/alliance-duel.mdx). The claim half is secret-tasks-claim. Static-only: not
 // sent live yet.
 //
 // What the client does, and what this copies (Lua under SP/lua/src):
@@ -38,8 +38,8 @@ import (
 //   - Busy heroes are the heroList of every task with completionTime > 0 && rewarded == 0
 //     (GetAllUsedHeroList, :584-592), finished-but-unclaimed ones included; the client checks
 //     nothing else, marches included (en:456211 "Missions won't tie up your march queues").
-//   - Slots: max = max_taskqueue (2 in all 116 lw_dispatch_settings rows) x the number of army
-//     formations + effect LW_DISPATCH_TASK_ADD_SEQ 50212 (GetMaxMarch, :1059-1068;
+//   - Slots: max = max_taskqueue (2 in all 123 lw_dispatch_settings rows, 40413) x the number of
+//     army formations + effect LW_DISPATCH_TASK_ADD_SEQ 50212 (GetMaxMarch, :1059-1068;
 //     ArmyFormationDataManager.lua:178-190, 350-357); running = tasks with completionTime > 0 &&
 //     rewarded == 0 (:727-735). The effect is read from init effect only (evInitEffect), a lower
 //     bound, so this can leave a slot unused but never exceeds the client's limit.
@@ -92,7 +92,7 @@ func init() {
 		Summary: "OPT-IN: start today's UR Secret Tasks (hero dispatch) with idle heroes before the daily reset loses them; " +
 			"never refreshes or speeds up a task; stops on any diamond drop",
 		// UR tasks score on Tue and Sat, but an unstarted task does not survive the daily reset,
-		// so it is never held (DUEL.md §5, §7.2).
+		// so it is never held (docs/alliance-duel.mdx).
 		Duel: []DuelScore{{Type: DuelScoreURSecretTask}},
 		Run:  runSecretTaskStarts,
 	})
@@ -157,16 +157,12 @@ var secretTaskStartsCfgs = func() map[int64]secretTaskStartsCfg {
 	return out
 }()
 
-// secretTaskStartsQualityByHero maps lw_hero id to quality.
-var secretTaskStartsQualityByHero = func() map[int64]int64 {
-	out := map[int64]int64{}
-	for q, ids := range secretTaskStartsHeroQuality {
-		for _, id := range ids {
-			out[int64(id)] = int64(q)
-		}
-	}
-	return out
-}()
+// secretTaskStartsQuality is the hero's lw_hero quality (duelHeroTable, generated); ok is false
+// for an id the table lacks.
+func secretTaskStartsQuality(heroID int64) (int64, bool) {
+	row, ok := duelHero(heroID)
+	return int64(row.quality), ok
+}
 
 // secretTaskStartsConditions parses a conditions cell. ok is false when a type is one this cannot
 // evaluate (anything but 2, 3 and 4) or the cell is malformed.
@@ -203,7 +199,7 @@ func secretTaskStartsHeroes(in *Init) (heroes []secretTaskStartsHero, skipped in
 		id, ok2 := claimInt(o, "heroId")
 		lev, ok3 := claimInt(o, "lev")
 		rank, ok4 := claimInt(o, "rankLv")
-		quality, ok5 := secretTaskStartsQualityByHero[id]
+		quality, ok5 := secretTaskStartsQuality(id)
 		if !ok1 || uuid == 0 || !ok2 || !ok3 || !ok4 || !ok5 {
 			skipped++
 			continue
@@ -527,14 +523,23 @@ func secretTaskStartsDecide(t secretTaskStartsTask, heroes []secretTaskStartsHer
 	return pick, march + secretTaskStartsSerializerPad, ""
 }
 
+// errSecretTaskStartsPlaceRefused marks a placement the server answered with an errorCode.
+var errSecretTaskStartsPlaceRefused = errors.New("the server refused the placement")
+
 // secretTaskStartsPlace puts a task without a map point on the world map and returns its new point
 // from the reply, which is the task itself (UpdateOneSingleTask(message),
-// DispatchPutPointInWorldMessage.lua:8-16). The placement is free.
+// DispatchPutPointInWorldMessage.lua:8-16). The placement is free. A reply with an errorCode
+// returns errSecretTaskStartsPlaceRefused: the client sends the placement only while the main city
+// is outside the black land (DispatchTaskItem.lua:455-481, IsInBlackRange; PlayerInfo.lua:
+// 1331-1350), a test this does not replicate, so the server's refusal stands in for it.
 func secretTaskStartsPlace(conn *session.GameConn, uuid int64) (int64, error) {
 	p := sfs.NewSFSObject()
 	p.PutLong("uuid", uuid)
 	msg, err := session.SendAndWait(conn, fmt.Sprintf("secret task %d placed on the map", uuid), secretTaskStartsPlaceCmd, p)
 	if err != nil {
+		if msg != nil && msg.Params.Has("errorCode") {
+			return 0, fmt.Errorf("%w: %w", errSecretTaskStartsPlaceRefused, err)
+		}
 		return 0, err
 	}
 	point, _ := claimInt(msg.Params, "pointId")
@@ -652,6 +657,12 @@ func secretTaskStartsRun(conn *session.GameConn, in *Init, dryRun bool) error {
 				t.pointID = home // a stand-in so the hero pick can be shown; the march is computed after placement
 			} else {
 				p, err := secretTaskStartsPlace(conn, t.uuid)
+				if errors.Is(err, errSecretTaskStartsPlaceRefused) {
+					// Not a failure of the run: the client would not have sent it (see
+					// secretTaskStartsPlace), e.g. with the city in the black land.
+					note("skipped: the server refused to place it on the map", "error", err)
+					continue
+				}
 				if err != nil {
 					note("skipped: placing it on the map failed", "error", err)
 					errs = append(errs, err)
@@ -733,7 +744,7 @@ func secretTaskStartsRun(conn *session.GameConn, in *Init, dryRun bool) error {
 }
 
 // secretTaskStartsTaskRows is lw_dispatch_tasks (328 rows, tables 1.0.364, byte-identical in live
-// 39516) as "color/conditions" -> ids. Every color is kept so lowering secretTaskStartsMinColor
+// 39516 and in 40413) as "color/conditions" -> ids. Every color is kept so lowering secretTaskStartsMinColor
 // needs no new data.
 var secretTaskStartsTaskRows = map[string][]int32{
 	"3/4;100;2": {
@@ -860,56 +871,5 @@ var secretTaskStartsTaskRows = map[string][]int32{
 	},
 	"5/4;5;1": {
 		70000401, 70000402, 70000411, 70000412,
-	},
-}
-
-// secretTaskStartsHeroQuality is lw_hero.quality (393 rows, tables 1.0.364, byte-identical in live
-// 39516) as quality -> hero ids; HeroInfo takes quality from this row (HeroInfo.lua:124-128,
-// HeroTemplate.lua:96).
-var secretTaskStartsHeroQuality = map[int8][]int32{
-	1: {
-		10001, 10006, 10007, 10008, 10010, 10011, 10012, 10013, 10014, 10015, 10016, 10017, 10020, 10028,
-		10029, 10030, 10031, 10032, 10033, 10052, 10053, 10101, 10102, 10103, 10104, 100101, 100102,
-		100103, 100104, 100113, 100121, 100123, 100133, 100143, 100153, 100163, 100173, 100203, 110001,
-		310001, 400090, 500061, 2100001, 2100002, 2100003, 3100001,
-	},
-	2: {
-		10002, 20001, 20002, 30006, 30007, 30008, 30009, 30010, 100200, 120001, 320001,
-	},
-	3: {
-		10003, 30002, 30003, 30004, 30005, 130002, 130003, 130004, 280006, 330002, 330003, 330004,
-		2100004, 2100005, 2100006, 2100007, 2100008, 2100009, 2100010, 2100011, 2100012,
-	},
-	4: {
-		10004, 10005, 10009, 40006, 40007, 40008, 40009, 40010, 40012, 40013, 40015, 40016, 40017, 40018,
-		40019, 40020, 100050, 140006, 140007, 140008, 140009, 140010, 140012, 140013, 140015, 140016,
-		140017, 140018, 140019, 140020, 340006, 340007, 340008, 340009, 340010, 340012, 340013, 340015,
-		340016, 340017, 340018, 340019, 340020, 400070, 1000501,
-	},
-	5: {
-		10051, 10060, 10061, 10062, 10063, 10064, 10065, 10066, 10067, 10068, 10069, 10070, 10071, 10072,
-		10073, 10074, 10075, 10076, 10077, 40011, 40014, 50006, 50007, 50008, 50009, 50010, 50011, 50012,
-		50013, 50014, 50015, 50016, 50017, 50018, 50019, 50020, 50021, 50022, 50023, 50024, 50025, 50026,
-		50027, 50028, 50029, 90000, 90001, 90002, 90003, 90004, 90005, 140011, 140014, 150006, 150007,
-		150008, 150009, 150010, 150011, 150012, 150013, 150014, 150015, 150016, 150017, 150018, 150019,
-		150020, 150021, 150022, 150024, 150050, 150051, 150052, 150053, 150054, 150055, 150056, 150057,
-		150058, 150059, 150060, 150061, 150062, 150063, 150064, 150065, 150066, 150067, 150068, 150069,
-		200000, 200001, 200002, 200003, 200004, 200005, 200006, 200007, 200008, 250019, 250020, 250021,
-		250022, 250023, 250024, 250025, 250026, 250027, 250028, 250029, 260019, 260020, 260021, 260022,
-		260023, 260024, 260025, 260026, 260027, 260028, 260029, 270019, 270020, 270021, 270022, 270023,
-		270024, 270025, 270026, 270027, 270028, 270029, 280001, 280002, 280003, 280004, 280005, 280019,
-		340011, 340014, 350006, 350007, 350008, 350009, 350010, 350011, 350012, 350013, 350014, 350015,
-		350016, 350017, 350018, 350019, 350020, 350021, 350022, 350024, 450019, 500160, 500170, 1000000,
-		1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1100000, 1100001, 1100002,
-		1100003, 1100004, 1100005, 1100006, 1100007, 1500061, 1500071, 1500081, 1500091, 1500101,
-		1500111, 1500121, 1500131, 1500141, 1500151, 1500161, 1500171, 1500181, 1500191, 1500201,
-		1500211, 1500221, 3500061, 3500071, 3500081, 3500091, 3500101, 3500111, 3500121, 3500131,
-		3500141, 3500151, 3500161, 3500171, 3500181, 3500191, 3500201, 3500211, 3500221, 3500241,
-		3510061, 3510071, 3510081, 3510091, 3510101, 3510111, 3510121, 3510131, 3510141, 3510151,
-		3510161, 3510171, 3510181, 3510191, 3510201, 3510211, 3510221, 3510241, 3520061, 3520071,
-		3520081, 3520091, 3520101, 3520111, 3520121, 3520131, 3520141, 3520151, 3520161, 3520171,
-		3520181, 3520191, 3520201, 3520211, 3520221, 3520241, 3530061, 3530071, 3530081, 3530091,
-		3530101, 3530111, 3530121, 3530131, 3530141, 3530151, 3530161, 3530171, 3530181, 3530191,
-		3530201, 3530211, 3530221, 3530241, 4500091, 4500161, 4500171,
 	},
 }

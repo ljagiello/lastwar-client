@@ -42,9 +42,11 @@ import (
 //
 // `rewarded` is read the way the Lua reads `message.rewarded or false`: only absent or false is
 // unclaimed (a number, even 0, is truthy). Never sent: the donations (they spend item
-// zone_mobilization.k7), airship or boss placement, marches to the boss, and the daily-task and
-// supply-point claims. No benign error codes: an errorCode on a claim is logged (SendAndWait logs
-// every reply in full, at Info on success) and stops that command.
+// zone_mobilization.k7), airship or boss placement, marches to the boss, and the supply-point
+// claims (the supply and resource lists, get.zone.mobilization.task.info {action: 0}, only have a
+// go-to button, LWUIZoneMobilizationSuppliesItemRender.lua:46-53). The daily-task claims are the
+// separate opt-in feature zone-mobilization-tasks. No benign error codes: an errorCode on a claim
+// is logged (SendAndWait logs every reply in full, at Info on success) and stops that command.
 const (
 	zoneMobFeature      = "zone-mobilization"
 	zoneMobInfoCmd      = "get.zone.mobilization.info"
@@ -80,27 +82,39 @@ func init() {
 	})
 }
 
-func runZoneMobilization(conn *session.GameConn, in *Init) error {
+// zoneMobRunning applies the gate above for who: the HQ level, then get.zone.mobilization.info
+// {tabType: 4}, whose reply it returns while the event runs (endTime not past), else nil. A failed
+// send is recorded in b. zone-mobilization and zone-mobilization-tasks both start from it.
+func zoneMobRunning(b *evBatch, in *Init, who string) *sfs.SFSObject {
 	if in == nil || in.Raw == nil {
 		return nil
 	}
 	if hq := activityHQLevel(in); hq < zoneMobMinHQ {
-		slog.Info(zoneMobFeature+": HQ below the event's entrance level; skipping", "hqLevel", hq, "need", zoneMobMinHQ)
+		slog.Info(who+": HQ below the event's entrance level; skipping", "hqLevel", hq, "need", zoneMobMinHQ)
 		return nil
 	}
-	b := &evBatch{conn: conn}
 	p := sfs.NewSFSObject()
 	p.PutInt("tabType", zoneMobTabRefresh)
 	msg := b.send("zone mobilization info", zoneMobInfoCmd, p)
 	if msg == nil {
-		return b.err()
+		return nil
 	}
 	info := msg.Params
 	end, ok := evNum(info, "endTime")
 	if !ok || end < evNow().UnixMilli() {
-		slog.Info(zoneMobFeature+": event not running", "endTime", info.GetLong("endTime"), "hasEndTime", ok)
+		slog.Info(who+": event not running", "endTime", info.GetLong("endTime"), "hasEndTime", ok)
 		return nil
 	}
+	return info
+}
+
+func runZoneMobilization(conn *session.GameConn, in *Init) error {
+	b := &evBatch{conn: conn}
+	info := zoneMobRunning(b, in, zoneMobFeature)
+	if info == nil {
+		return b.err()
+	}
+	end, _ := evNum(info, "endTime")
 	attack, defend, donate := evObject(info, "attackInfo"), evObject(info, "defendInfo"), evObject(info, "donateInfo")
 	stage, _ := evNum(info, "stage")
 	slog.Info(zoneMobFeature+": event info", "stage", stage, "endTime", end,

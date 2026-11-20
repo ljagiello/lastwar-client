@@ -108,8 +108,17 @@ func claimArmsRace(s *ActivitySweep, b *evBatch, a Activity) {
 		b.add(err)
 		return
 	}
-	// GetCurData returns nil once the stage has ended (ActivityPersonalArmsDataManager.lua:155-173).
-	if end, ok := evNum(info, "stage_end_time"); ok && end > 0 && evNow().Unix() >= end {
+	// GetCurData returns nil unless the stage is current: IsCurDataStageExpired starts from
+	// "expired" and clears it only while now < stage_end_time, in seconds
+	// (ActivityPersonalArmsDataManager.lua:165-184). So a reply without the field, or with 0,
+	// offers no chest either.
+	end, ok := evNum(info, "stage_end_time")
+	if !ok {
+		slog.Info("arms race: the info reply has no stage_end_time, which the client reads as an expired stage; nothing claimed",
+			"activity", a.ID)
+		return
+	}
+	if evNow().Unix() >= end {
 		return
 	}
 	score, _ := evNum(info, "sc")

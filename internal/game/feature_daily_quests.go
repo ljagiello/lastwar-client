@@ -12,8 +12,9 @@ import (
 // Daily quests and the activity-point chests (MASTER.md §4 #4), lost at the server-day reset.
 //
 // `daily.quest.ls {}` returns dailyQuest[] {id (UtfString), state, num, totalNum, ...},
-// rewardList[] {point, info} (chest i is the i-th entry, 1-based) and curReward[] (the 1-based
-// indexes of chests already claimed) (DailyTaskManager.lua:41-84; DailyTaskInfo.lua:18-40).
+// rewardList[] {point, info | infoBuilder} (chest i is the i-th entry that has point and a reward,
+// 1-based) and curReward[] (the 1-based indexes of chests already claimed)
+// (DailyTaskManager.lua:41-84; DailyTaskInfo.lua:18-40).
 // TaskState is -2 NotExist, -1 NotStart, 0 in progress, 1 CanReceive, 2 Received
 // (EnumType.lua:5258-5264). Each CanReceive quest is claimed with
 // `daily.task.reward {taskId: UtfString}`, the id sent back unchanged
@@ -121,14 +122,29 @@ func runDailyQuests(conn *session.GameConn, in *Init) error {
 }
 
 // dailyQuestsChestReached reports whether some chest in rewardList is unclaimed (its 1-based
-// index is not in curReward) and points reach its threshold.
+// index is not in curReward) and points reach its threshold. Like the client's dailyBoxActive, the
+// chests are numbered over the rewardList entries that carry point and a reward (info or
+// infoBuilder) only; any other entry is skipped without taking an index
+// (DailyTaskManager.lua:61-80, GetBoxState :164-179; MASTER 1.0.370 B48).
 func dailyQuestsChestReached(list *sfs.SFSObject, points int64) bool {
 	claimed := claimInts(list, "curReward")
-	for i, chest := range claimObjects(list, "rewardList") {
+	index := int64(0)
+	for _, chest := range claimObjects(list, "rewardList") {
 		need, ok := claimInt(chest, "point")
-		if ok && points >= need && !slices.Contains(claimed, int64(i+1)) {
+		hasReward := dailyQuestsHasField(chest, "info") || dailyQuestsHasField(chest, "infoBuilder")
+		if !ok || !hasReward {
+			continue
+		}
+		index++
+		if points >= need && !slices.Contains(claimed, index) {
 			return true
 		}
 	}
 	return false
+}
+
+// dailyQuestsHasField is the Lua `v.key ~= nil`: the key is present with a non-null value.
+func dailyQuestsHasField(o *sfs.SFSObject, key string) bool {
+	v, ok := o.Get(key)
+	return ok && v.Val != nil
 }

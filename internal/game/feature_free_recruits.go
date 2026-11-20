@@ -28,6 +28,15 @@ import (
 // (LWChatAIManager.lua:56-67, 157-165; ai_switch rows 106, 107, 110, 111, 112, all on by default).
 // Whether the server needs either is open (MASTER.md §8.2 #10).
 //
+// Before this free pull the 1.0.370 client asks a wish confirmation where the recruit view would
+// (OnBtnRecruitOneClick, UIHeroRecruitView.lua:980-1007): herorecruit_alert1 on a wish pool with
+// no wish hero chosen (showEmptyWishConfirm), else GetWishLotterySecondConfirmKey's
+// herorecruit_alert2 or herorecruit_alert5 (LotteryInfo.lua:839-893), all as duelRecruitWishAsk
+// decides them. Go logs a Warn naming the confirmation and still pulls, as the user decided
+// (MASTER 1.0.370 B4, §6.1 #1, DECISIONS.md 2026-11-19): a free pull does not stack, and nothing
+// in the client ties the wish pity to a chosen hero (LotteryInfo.lua:798-803). The wish hero is
+// never chosen here (hero.lottery.switch.wish is the player's choice).
+//
 // Worker: `worker.lottery.info {officerId: Int}` returns nextFreeTime (ms), and
 // `lottery.worker.card {useFree: 1, isTen: 0, officerId: Int}` draws when now >= nextFreeTime
 // (WorkerLotteryInfoMessage.lua:4-7; LotteryWorkerCardMessage.lua:4-9; WorkerLotteryInfo.lua:31-35;
@@ -51,7 +60,7 @@ func init() {
 		Name:    "free-recruits",
 		Summary: "OPT-IN: take the free hero recruit and free survivor draw when the free timer allows (useFree 1 only)",
 		// The pulls score in the duel (hero Thu, survivor Tue) but a free pull does not stack, so a
-		// held one would be lost: always run (DUEL.md §5).
+		// held one would be lost: always run (docs/alliance-duel.mdx).
 		Duel: []DuelScore{{Type: DuelScoreRecruitHero}, {Type: DuelScoreRecruitSurvivor}},
 		Run:  runFreeRecruits,
 	})
@@ -100,8 +109,13 @@ func runFreeRecruits(conn *session.GameConn, in *Init) error {
 		return nil
 	}
 	var errs []error
+	owned := duelRecruitOwnedHeroes(in)
 	for _, pool := range freeRecruitsHeroDue(in) {
 		id, _ := claimString(pool, "id")
+		if ask := duelRecruitWishAsk(pool, owned); ask != "" {
+			slog.Warn("free-recruits: the recruit view would ask a wish confirmation before this free pull; "+
+				"pulling anyway (check the wish hero in the game)", "pool", id, "alert", ask)
+		}
 		p := freeRecruitsParams()
 		p.PutUtfString("id", id)
 		push := sfs.NewSFSObject()

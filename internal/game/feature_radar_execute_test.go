@@ -604,6 +604,24 @@ func TestRadarEventType(t *testing.T) {
 	}
 }
 
+// TestRadarTableSeason7CaveExploration: detect_event 700001-700033 (type 25, season 7) are new in
+// tables 40413. A cave exploration is not march-free, and radar-execute now says so instead of
+// "eventId not in the detect_event table".
+func TestRadarTableSeason7CaveExploration(t *testing.T) {
+	for _, id := range []int64{700001, 700033} {
+		if got, ok := radarEventType(id); !ok || got != 25 {
+			t.Errorf("radarEventType(%d) = %d, %v; want 25", id, got, ok)
+		}
+	}
+	if _, ok := radarEventType(700034); ok {
+		t.Error("700034 is not a detect_event row")
+	}
+	ev := parseDetectEvent(detectEv(1, 700001, radarStateNotFinish))
+	if action, why := radarExecPlan(ev, true, time.Now().UnixMilli()); action != radarSkip || why != "not march-free (march, rally, battle or mini-game)" {
+		t.Errorf("radarExecPlan(700001) = %v %q, want a skip as not march-free", action, why)
+	}
+}
+
 func TestRadarFeaturesRegistered(t *testing.T) {
 	for _, name := range []string{"radar-execute", "radar-inventory"} {
 		f, ok := featureRegistry[name]

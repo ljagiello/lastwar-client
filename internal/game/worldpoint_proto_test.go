@@ -115,6 +115,61 @@ func TestDecodeWorldPointFixture(t *testing.T) {
 	}
 }
 
+// fixtureStatus is Status{id 500521, beginTime 1791212400000, expireTime 1791298800000, layer 1,
+// extraParam "x"}, encoded by hand from the 1.0.370 Status message (CS:629512-629526).
+var fixtureStatus = []byte{
+	0x08, 0xa9, 0xc6, 0x1e, // 1 id = 500521
+	0x10, 0x80, 0xdb, 0xd0, 0xe4, 0x90, 0x34, // 2 beginTime = 1791212400000
+	0x18, 0x80, 0x93, 0xea, 0x8d, 0x91, 0x34, // 3 expireTime = 1791298800000
+	0x20, 0x01, // 4 layer = 1
+	0x2a, 0x01, 'x', // 5 extraParam = "x"
+}
+
+// pbStatus encodes s the way the server sends a BuildInfo status.
+func pbStatus(s worldStatus) []byte {
+	var b []byte
+	b = pbVarintField(b, 1, int64(s.ID))
+	b = pbVarintField(b, 2, s.BeginTime)
+	b = pbVarintField(b, 3, s.ExpireTime)
+	return pbVarintField(b, 4, int64(s.Layer))
+}
+
+// TestDecodeStatusAndSrcServer pins the fields base-bubbles reads (MASTER G7): BuildInfo field 32
+// (tag 258, bytes 82 02), repeated Status, and WorldPointInfo field 103 srcServerId (tag 824,
+// bytes b8 06).
+func TestDecodeStatusAndSrcServer(t *testing.T) {
+	want := worldStatus{ID: 500521, BeginTime: 1791212400000, ExpireTime: 1791298800000, Layer: 1}
+	if s, err := decodeStatus(fixtureStatus); err != nil || s != want {
+		t.Fatalf("status = %+v, %v", s, err)
+	}
+	if enc := pbStatus(want); !slices.Equal(enc, fixtureStatus[:len(fixtureStatus)-3]) {
+		t.Errorf("test encoder drifted from the hand fixture:\n% x\n% x", enc, fixtureStatus)
+	}
+	build := append(fixtureBuild(), 0x82, 0x02, byte(len(fixtureStatus)))
+	build = append(build, fixtureStatus...)
+	build = append(build, 0x82, 0x02, 0x02, 0x08, 0x07) // a second status {id 7}
+	b := []byte{0x08, 0xf9, 0x9a, 0x15, 0x10, 0x01, 0x1a, byte(len(build))}
+	b = append(b, build...)
+	b = append(b, 0xb0, 0x06, 0x8f, 0x06, 0xb8, 0x06, 0x8f, 0x06) // 102 serverId = 783, 103 srcServerId = 783
+	p, err := decodeWorldPoint(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ServerID != 783 || p.SrcServerID != 783 || p.Build == nil || len(p.Build.Gifts) != 1 {
+		t.Fatalf("point = %+v", p)
+	}
+	if !slices.Equal(p.Build.Statuses, []worldStatus{want, {ID: 7}}) {
+		t.Errorf("statuses = %+v", p.Build.Statuses)
+	}
+	if _, err := decodeStatus([]byte{0x0a, 0x01, 0x00}); err == nil || !strings.Contains(err.Error(), "field 1") {
+		t.Errorf("a status id with the wrong wire type: %v", err)
+	}
+	bad := append(fixtureBuild(), 0x82, 0x02, 0x02, 0x08, 0x80) // truncated id varint
+	if err := decodeBuildInfo(bad, &worldBuild{}); err == nil || !strings.Contains(err.Error(), "status") {
+		t.Errorf("a truncated status: %v", err)
+	}
+}
+
 // fixtureTreasure is TreasurePointInfo{uuid 300, ownerUid "o2", eventId "25001", completionTime
 // 1791212400000, allianceId "al1", rewardUserList ["u1", "u2"], complete true, expireTime
 // 1791241200000, type 1, createTime 1791205200000, multiple 2}, encoded by hand from proto:603-624,

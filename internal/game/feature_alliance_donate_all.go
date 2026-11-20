@@ -26,11 +26,11 @@ const allianceDonateMaxPerRun = 30
 // remaining donation charge on the recommended tech rather than one per run (see
 // DonateRecommendedAllianceTech for the charge semantics). It finds the recommended tech with
 // science.data.refresh, reads the charges left (`useNum`) with `al.science.refreshNum {scienceId}`
-// (the client sends it after every tree refresh, AllianceScienceDataManager.lua:105-121),
+// (the client sends it after every tree refresh, AllianceScienceDataManager.lua:118-134),
 // then sends `al.science.donate {scienceId, option: 1}` while useNum > 0, re-reading useNum from
-// each donate reply, at most allianceDonateMaxPerRun times. It stops at the first errorCode
-// (120471 = charges used up, benign; anything else, for example too few resources, is returned)
-// and when a reply carries no useNum.
+// each donate reply, at most allianceDonateMaxPerRun times a run. It stops at the first errorCode
+// (allianceDonateStops: 120471 = charges used up, 120836 = the day reset, both without an error;
+// anything else, for example too few resources, is returned) and when a reply carries no useNum.
 //
 // The init and tech gates of donateRecommendedAllianceTech apply before the loop, and the tech
 // gates again before every further donation: the long press stops at currentPro >= needPro
@@ -40,74 +40,34 @@ const allianceDonateMaxPerRun = 30
 // The resource ledger starts from init resource{} and goes down by lowNum per donation, or takes
 // the reply's resource{} when it has one (AlScienceDonateMessage.lua:19-21).
 //
-// Opt-in because every donation spends resources. The core run still sends its one donation
-// first (collectCore cannot see the feature config), so with this enabled a -collect run donates
-// once there and spends the rest of the charges here; -run alliance-donate-all spends them all.
+// Opt-in because every donation spends resources. collectCore cannot see the feature config, so
+// the core run still sends its one donation first. Since the 1.0.370 audit (MASTER B32) both share
+// this run's allianceScienceRun: in a -collect run this continues from the core's tree, charge read
+// and donation, so science.data.refresh and al.science.refreshNum go out once per run; -run
+// alliance-donate-all, with no core run before it, fetches both itself. A day-reset 120836 or a
+// 120471 seen by either ends the run's donations without an error. When the core's charge read or
+// donation timed out, this reads the charges again before donating (allianceScienceRun.failed).
 func donateAllAllianceTech(conn *session.GameConn, in *Init) error {
 	if !allianceScienceAllowed(in) {
 		return nil
 	}
-	tech, found, err := fetchRecommendedTech(conn)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return nil
-	}
-	ledger := newAllianceLedger(in)
-	if why := tech.blocked(claimNow(in).UnixMilli(), ledger); why != "" {
-		slog.Info("alliance-donate-all: not donating to the recommended tech", append([]any{"reason", why}, tech.logAttrs()...)...)
-		return nil
-	}
-
-	params := sfs.NewSFSObject()
-	params.PutInt("scienceId", tech.id)
-	msg, err := session.SendAndWait(conn, "alliance tech donation charges", "al.science.refreshNum", params)
-	if err != nil {
-		return err
-	}
-	charges, ok := donationCharges(msg.Params)
-	if !ok {
-		slog.Warn("al.science.refreshNum reply carries no useNum; not donating", "scienceId", tech.id)
-		return nil
-	}
-	slog.Info("alliance tech donation charges", "scienceId", tech.id, "useNum", charges, "maxNum", msg.Params.GetInt("maxNum"))
-
-	donated := 0
-	for charges > 0 && donated < allianceDonateMaxPerRun {
-		if why := tech.blocked(claimNow(in).UnixMilli(), ledger); donated > 0 && why != "" {
-			slog.Info("alliance tech donations stop", append([]any{"reason", why, "donated", donated}, tech.logAttrs()...)...)
-			return nil
-		}
-		costRes, cost, costKnown := tech.lowRes, tech.lowNum, tech.hasLowRes && tech.hasLowNum
-		msg, err := sendAllianceDonation(conn, tech)
-		if err != nil {
-			slog.Warn("alliance tech donation failed; stopping", "scienceId", tech.id, "donated", donated)
+	run := cachedAllianceScience(conn, in)
+	if run != nil {
+		slog.Info("alliance-donate-all: continuing from this run's alliance tech read", "donatedThisRun", run.donated,
+			"useNum", run.charges, "useNumKnown", run.chargesKnown, "stopped", run.stop)
+	} else {
+		var err error
+		if run, err = allianceScienceFor(conn, in); err != nil {
 			return err
 		}
-		if msg.Params.Has("errorCode") {
-			code := idString(msg.Params, "errorCode")
-			if code == allianceChargesUsedUpCode {
-				slog.Info("alliance tech donation refused; stopping", "scienceId", tech.id, "donated", donated, "errorCode", code)
-				return nil
-			}
-			slog.Error("alliance tech donation failed; stopping", "scienceId", tech.id, "donated", donated, "errorCode", code)
-			return fmt.Errorf("alliance tech donate response (scienceId %d): errorCode=%s", tech.id, code)
-		}
-		donated++
-		tech.apply(msg.Params)
-		if res := objectField(msg.Params, "resource"); res != nil {
-			ledger.set(res)
-		} else if have, ok := ledger.balance(costRes); ok && costKnown {
-			ledger[costRes] = have - cost
-		}
-		if charges, ok = donationCharges(msg.Params); !ok {
-			slog.Warn("donate reply carries no useNum; stopping", "scienceId", tech.id, "donated", donated)
-			return nil
-		}
 	}
-	slog.Info("alliance tech donations done", "scienceId", tech.id, "donated", donated, "useNumLeft", charges)
-	return nil
+	before := run.donated
+	err := run.donate(conn, "alliance-donate-all", max(allianceDonateMaxPerRun-run.donated, 0))
+	if run.tech != nil {
+		slog.Info("alliance tech donations done", "scienceId", run.tech.id, "donated", run.donated-before,
+			"donatedThisRun", run.donated, "useNumLeft", run.charges, "stopped", run.stop)
+	}
+	return err
 }
 
 // apply is update for a message about any tech: only one whose scienceId is t's changes t
@@ -127,19 +87,25 @@ func sendAllianceDonation(conn *session.GameConn, t *allianceTech) (*session.Ext
 	params := sfs.NewSFSObject()
 	params.PutInt("scienceId", t.id)
 	params.PutInt("option", 1)
-	if err := conn.SendExtension(allianceDonateCmd, params); err != nil {
+	id, err := conn.SendExtensionID(allianceDonateCmd, params)
+	if err != nil {
 		wrapped := session.SendStageError{Err: err}
 		slog.Error(label+" send failed", "cmd", allianceDonateCmd, "error", wrapped)
 		return nil, wrapped
 	}
 	var reply *session.ExtensionMessage
-	_, err := session.WaitFor(conn, session.DefaultCmdTimeout, func(e *session.Envelope) bool {
+	_, err = session.WaitFor(conn, session.DefaultCmdTimeout, func(e *session.Envelope) bool {
 		msg, ok := e.AsExtension()
 		if !ok {
 			return false
 		}
 		switch msg.Cmd {
 		case allianceDonateCmd:
+			// A late reply to an earlier donation whose wait timed out is not this one's (the
+			// client pairs replies by _id, Assembly-CSharp.decompiled.cs:82052-82056).
+			if session.StaleReply(msg, id) {
+				return false
+			}
 			reply = msg
 			return true
 		case allianceSciencePushCmd, allianceSciencePushUpdateCmd:
@@ -152,8 +118,8 @@ func sendAllianceDonation(conn *session.GameConn, t *allianceTech) (*session.Ext
 		slog.Error(label+" no response", "cmd", allianceDonateCmd, "error", err)
 		return nil, err
 	}
-	slog.Info(label, "cmd", allianceDonateCmd, "errorCode", idString(reply.Params, "errorCode"),
-		"useNum", reply.Params.GetInt("useNum"), "maxNum", reply.Params.GetInt("maxNum"), "replyKeys", reply.Params.Keys())
+	slog.Info(label, append([]any{"cmd", allianceDonateCmd, "errorCode", idString(reply.Params, "errorCode"),
+		"errorMsg", idString(reply.Params, "errorMsg")}, append(allianceChargeAttrs(reply.Params), "replyKeys", reply.Params.Keys())...)...)
 	return reply, nil
 }
 

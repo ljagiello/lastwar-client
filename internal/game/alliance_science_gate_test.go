@@ -3,6 +3,7 @@ package game
 import (
 	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"lastwar-client/internal/session"
@@ -58,8 +59,61 @@ func TestAllianceTechBlocked(t *testing.T) {
 	for _, c := range cases {
 		tech := &allianceTech{id: c.entry.GetInt("scienceId")}
 		tech.update(c.entry)
-		if got := tech.blocked(now.UnixMilli(), c.ledger); got != c.want {
+		if got := tech.blocked(now.UnixMilli(), c.ledger, false); got != c.want {
 			t.Errorf("%s: blocked = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestAllianceTechSeasonTab pins MASTER B35: a tab-3 tech of lw_alliance_science_tab (40413:
+// 10031100-10032600) is refused out of season (AlScienceDonateInfo.lua:426-430); tabs 1 and 2 and
+// unknown ids are not.
+func TestAllianceTechSeasonTab(t *testing.T) {
+	if tableVersion != "40413" || allianceScienceTab[10031100] != 3 || allianceScienceTab[10032600] != 3 ||
+		allianceScienceTab[10011100] != 1 || allianceScienceTab[10021100] != 2 {
+		t.Fatalf("generated tab column: version %s, %d %d %d %d", tableVersion, allianceScienceTab[10031100],
+			allianceScienceTab[10032600], allianceScienceTab[10011100], allianceScienceTab[10021100])
+	}
+	n := 0
+	for _, tab := range allianceScienceTab {
+		if tab == allianceScienceSeasonTab {
+			n++
+		}
+	}
+	if n != 16 || len(allianceScienceTab) != 46 {
+		t.Errorf("%d tab-3 techs of %d, want 16 of 46", n, len(allianceScienceTab))
+	}
+	for _, c := range []struct {
+		id          int32
+		outOfSeason bool
+		want        string
+	}{
+		{10031100, true, "season tech (tab 3) out of season"},
+		{10031100, false, ""},
+		{10011900, true, ""},
+		{10021100, true, ""},
+		{555, true, ""},
+	} {
+		tech := &allianceTech{id: c.id}
+		if got := tech.blocked(time.Now().UnixMilli(), nil, c.outOfSeason); got != c.want {
+			t.Errorf("tech %d outOfSeason %v: blocked = %q, want %q", c.id, c.outOfSeason, got, c.want)
+		}
+	}
+	future := time.Now().Add(24 * time.Hour).UnixMilli()
+	for _, c := range []struct {
+		name string
+		in   *Init
+		want bool
+	}{
+		{"no init", nil, false},
+		{"no raw", &Init{}, false},
+		{"no season info", inAllianceInit(), true},
+		{"season open", inAllianceInit("playerServerSeasonInfo", obj("open", 1, "seasonEndTime", future)), false},
+		{"season ended", inAllianceInit("playerServerSeasonInfo", obj("open", 1, "seasonEndTime", time.Now().Add(-time.Hour).UnixMilli())), true},
+		{"season not open", inAllianceInit("playerServerSeasonInfo", obj("open", 0, "seasonEndTime", future)), true},
+	} {
+		if got := allianceScienceOutOfSeason(c.in); got != c.want {
+			t.Errorf("%s: out of season = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -82,7 +136,7 @@ func TestAllianceTechUpdateKeepsMissingFields(t *testing.T) {
 		t.Errorf("a message without scienceId changed the record: %+v", tech)
 	}
 	tech.apply(obj("scienceId", 10011900, "currentPro", 1000))
-	if tech.currentPro != 1000 || tech.blocked(0, nil) != "fully donated" {
+	if tech.currentPro != 1000 || tech.blocked(0, nil, false) != "fully donated" {
 		t.Errorf("this tech's progress was not applied: %+v", tech)
 	}
 }
@@ -92,37 +146,53 @@ func TestAllianceTechUpdateKeepsMissingFields(t *testing.T) {
 func TestDonateRecommendedAllianceTechGating(t *testing.T) {
 	const (
 		refresh = "science.data.refresh"
+		num     = "al.science.refreshNum"
 		donate  = "al.science.donate"
 	)
 	open := techEntry(10011900, "currentPro", int64(4951850), "needPro", int64(8000000), "level", 3, "lowRes", 2, "lowNum", 400)
 	full := techEntry(10011900, "currentPro", int64(8000000), "needPro", int64(8000000), "level", 3)
+	season := techEntry(10031100, "currentPro", 0, "needPro", int64(8000000), "level", 0)
+	inSeason := obj("open", 1, "seasonEndTime", time.Now().Add(24*time.Hour).UnixMilli())
 	cases := []struct {
-		name string
-		in   *Init
-		tech *sfs.SFSObject
-		want []string
+		name   string
+		in     *Init
+		tech   *sfs.SFSObject
+		useNum int
+		want   []string
 	}{
-		{"no init: donates", nil, open, []string{refresh, donate}},
-		{"no init: a full tech is still skipped", nil, full, []string{refresh}},
-		{"in an alliance", inAllianceInit(), open, []string{refresh, donate}},
-		{"full", inAllianceInit(), full, []string{refresh}},
-		{"not in an alliance", &Init{Raw: obj("user", obj("uid", "1001"))}, open, nil},
-		{"empty alliance object", &Init{Raw: obj("alliance", obj())}, open, nil},
-		{"science switch off", inAllianceInit("dataConfig", obj(allianceScienceEntrance, 0)), open, nil},
-		{"science switch garbled", inAllianceInit("dataConfig", obj(allianceScienceEntrance, "x")), open, nil},
-		{"science switch on", inAllianceInit("dataConfig", obj(allianceScienceEntrance, "1")), open, []string{refresh, donate}},
-		{"science switch absent", inAllianceInit("dataConfig", obj("other_switch", 0)), open, []string{refresh, donate}},
-		{"too little wood", inAllianceInit("resource", obj("wood", int64(399))), open, []string{refresh}},
-		{"enough wood", inAllianceInit("resource", obj("wood", int64(400))), open, []string{refresh, donate}},
+		{"no init: donates", nil, open, 4, []string{refresh, num, donate}},
+		{"no init: a full tech is still skipped", nil, full, 4, []string{refresh}},
+		{"in an alliance", inAllianceInit(), open, 4, []string{refresh, num, donate}},
+		{"full", inAllianceInit(), full, 4, []string{refresh}},
+		{"not in an alliance", &Init{Raw: obj("user", obj("uid", "1001"))}, open, 4, nil},
+		{"empty alliance object", &Init{Raw: obj("alliance", obj())}, open, 4, nil},
+		{"science switch off", inAllianceInit("dataConfig", obj(allianceScienceEntrance, 0)), open, 4, nil},
+		{"science switch garbled", inAllianceInit("dataConfig", obj(allianceScienceEntrance, "x")), open, 4, nil},
+		{"science switch on", inAllianceInit("dataConfig", obj(allianceScienceEntrance, "1")), open, 4, []string{refresh, num, donate}},
+		{"science switch absent", inAllianceInit("dataConfig", obj("other_switch", 0)), open, 4, []string{refresh, num, donate}},
+		{"too little wood", inAllianceInit("resource", obj("wood", int64(399))), open, 4, []string{refresh}},
+		{"enough wood", inAllianceInit("resource", obj("wood", int64(400))), open, 4, []string{refresh, num, donate}},
+		// MASTER B32: the charges are read first; with none left nothing is donated.
+		{"no charges left", inAllianceInit(), open, 0, []string{refresh, num}},
+		{"no init, no charges left", nil, open, 0, []string{refresh, num}},
+		{"charge read without useNum", inAllianceInit(), open, -1, []string{refresh, num}},
+		// MASTER B35: a tab-3 tech only in season.
+		{"season tech out of season", inAllianceInit(), season, 4, []string{refresh}},
+		{"season tech in season", inAllianceInit("playerServerSeasonInfo", inSeason), season, 4, []string{refresh, num, donate}},
+		{"season tech without init", nil, season, 4, []string{refresh, num, donate}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			client, server := session.NewPipeGameConnPair(t)
+			id := c.tech.GetInt("scienceId")
 			srv := serveScripted(server, func(msg *session.ExtensionMessage) (string, *sfs.SFSObject) {
 				if msg.Cmd == refresh {
 					return "", allianceScienceRefreshResponse(allianceScienceEntry(111, 0), c.tech)
 				}
-				return "", obj("scienceId", 10011900, "useNum", 4, "maxNum", 30)
+				if c.useNum < 0 {
+					return "", obj("scienceId", id, "maxNum", 30)
+				}
+				return "", obj("scienceId", id, "useNum", c.useNum, "maxNum", 30)
 			})
 			if err := donateRecommendedAllianceTech(client, c.in); err != nil {
 				t.Fatalf("donateRecommendedAllianceTech() = %v", err)
@@ -130,13 +200,361 @@ func TestDonateRecommendedAllianceTechGating(t *testing.T) {
 			if got := srv.cmds(); !slices.Equal(got, c.want) {
 				t.Errorf("requests = %v, want %v", got, c.want)
 			}
+			for _, m := range append(srv.requests(donate), srv.requests(num)...) {
+				if m.Params.GetInt("scienceId") != id {
+					t.Errorf("%s params = %v, want scienceId %d", m.Cmd, m.Params, id)
+				}
+			}
 			for _, m := range srv.requests(donate) {
-				if m.Params.GetInt("scienceId") != 10011900 || m.Params.GetInt("option") != 1 {
+				if m.Params.GetInt("option") != 1 {
 					t.Errorf("donate params = %v", m.Params)
 				}
 			}
 		})
 	}
+}
+
+// TestDonateRecommendedAllianceTechStops pins how the core donation reads a refused donation:
+// 120471 (charges used up) and 120836 (the live day-reset answer, MASTER B33) end the run's
+// donations without an error, any other errorCode is returned.
+func TestDonateRecommendedAllianceTechStops(t *testing.T) {
+	open := techEntry(10011900, "currentPro", 0, "needPro", int64(8000000), "level", 3)
+	for _, c := range []struct {
+		code    string
+		wantErr bool
+	}{{"120471", false}, {"120836", false}, {"120020", true}} {
+		t.Run(c.code, func(t *testing.T) {
+			client, server := session.NewPipeGameConnPair(t)
+			srv := serveDonations(t, server, open, 5, []donateStep{{reply: obj("errorCode", c.code)}})
+			in := inAllianceInit()
+			err := donateRecommendedAllianceTech(client, in)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("donateRecommendedAllianceTech() = %v, want error %v", err, c.wantErr)
+			}
+			// alliance-donate-all in the same run sends nothing more after a refusal.
+			if err := donateAllAllianceTech(client, in); err != nil {
+				t.Fatalf("donateAllAllianceTech() = %v", err)
+			}
+			if got := srv.cmds(); !slices.Equal(got, []string{"science.data.refresh", "al.science.refreshNum", "al.science.donate"}) {
+				t.Errorf("requests = %v", got)
+			}
+		})
+	}
+}
+
+// TestDonationGateAfterTheChargeRead checks that the charge read's reply, which the client applies
+// to the tech (AlScienceNumFreshMessage.lua:10-19), is gated on before the first donation: a reply
+// showing the tech full stops it.
+func TestDonationGateAfterTheChargeRead(t *testing.T) {
+	const id = 10011900
+	client, server := session.NewPipeGameConnPair(t)
+	srv := serveScripted(server, func(msg *session.ExtensionMessage) (string, *sfs.SFSObject) {
+		if msg.Cmd == "science.data.refresh" {
+			return "", allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", 1000, "level", 3))
+		}
+		return "", obj("scienceId", id, "useNum", 5, "maxNum", 30, "currentPro", 1000, "needPro", 1000)
+	})
+	if err := donateRecommendedAllianceTech(client, inAllianceInit()); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.cmds(); !slices.Equal(got, []string{"science.data.refresh", "al.science.refreshNum"}) {
+		t.Errorf("requests = %v; a full tech is not donated to", got)
+	}
+}
+
+// TestAllianceDonateUnavailableIsBenign checks that 120836 is registered for al.science.donate
+// only: a SendAndWait of the donation is not a failure, of another command it is.
+func TestAllianceDonateUnavailableIsBenign(t *testing.T) {
+	conn, _ := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evErr(allianceDonateUnavailableCode) })
+	if _, err := session.SendAndWait(conn, "donate", allianceDonateCmd, sfs.NewSFSObject()); err != nil {
+		t.Errorf("120836 is not benign for %s: %v", allianceDonateCmd, err)
+	}
+	if _, err := session.SendAndWait(conn, "charges", allianceScienceNumCmd, sfs.NewSFSObject()); err == nil {
+		t.Errorf("120836 must stay a failure for %s", allianceScienceNumCmd)
+	}
+}
+
+// TestCoreDonationSharesTheRunWithDonateAll is MASTER B32's -collect sequence: the core donation
+// and alliance-donate-all on one (conn, init) fetch the tree and read the charges once, and the
+// feature continues from the core's donation until the charges run out.
+func TestCoreDonationSharesTheRunWithDonateAll(t *testing.T) {
+	const id = 10011900
+	reply := func(useNum int) *sfs.SFSObject { return obj("scienceId", id, "useNum", useNum, "maxNum", 30) }
+	open := techEntry(id, "currentPro", 0, "needPro", int64(8000000), "level", 3)
+	client, server := session.NewPipeGameConnPair(t)
+	srv := serveDonations(t, server, open, 3, []donateStep{{reply: reply(2)}, {reply: reply(1)}, {reply: reply(0)}})
+	in := inAllianceInit()
+	if err := donateRecommendedAllianceTech(client, in); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.cmds(); !slices.Equal(got, []string{"science.data.refresh", "al.science.refreshNum", "al.science.donate"}) {
+		t.Fatalf("core requests = %v", got)
+	}
+	if err := donateAllAllianceTech(client, in); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"science.data.refresh", "al.science.refreshNum", "al.science.donate", "al.science.donate", "al.science.donate"}
+	if got := srv.cmds(); !slices.Equal(got, want) {
+		t.Errorf("requests = %v, want %v", got, want)
+	}
+	// Another init (a new login) starts over.
+	if err := donateAllAllianceTech(client, inAllianceInit()); err != nil {
+		t.Fatal(err)
+	}
+	if got := srv.cmds(); len(got) != len(want)+3 || got[len(want)] != "science.data.refresh" || got[len(want)+1] != "al.science.refreshNum" {
+		t.Errorf("a new init must fetch the tree and the charges again: %v", got)
+	}
+}
+
+// TestDonationOverADeadConnectionEndsTheRunsDonations is the dead-connection branch of
+// allianceScienceRun.failed (final-r3 prod N2): the server goes away at the core's first
+// al.science.donate, so the wait fails with a non-timeout net.Error (sfs.DeadConnError). That is
+// not a timeout (waitTimedOut), so the run's donations stop with "donation failed", and
+// alliance-donate-all neither reads the charges again nor tries to send.
+func TestDonationOverADeadConnectionEndsTheRunsDonations(t *testing.T) {
+	const id = 10011900
+	synctest.Test(t, func(t *testing.T) {
+		client, server := session.NewPipeGameConnPair(t)
+		srv := &scriptedServer{}
+		go func() {
+			for {
+				msg, err := session.ReadNextExtension(server)
+				if err != nil {
+					return
+				}
+				srv.mu.Lock()
+				srv.reqs = append(srv.reqs, msg)
+				srv.mu.Unlock()
+				var out *sfs.SFSObject
+				switch msg.Cmd {
+				case "science.data.refresh":
+					out = allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", int64(8000000), "level", 3))
+				case "al.science.refreshNum":
+					out = obj("scienceId", id, "useNum", 5, "maxNum", 30)
+				default: // al.science.donate: the connection dies instead of answering
+					_ = server.Close()
+					return
+				}
+				if v, ok := msg.Params.Get("_id"); ok {
+					out.PutValue("_id", v)
+				}
+				if err := server.SendExtension(msg.Cmd, out); err != nil {
+					return
+				}
+			}
+		}()
+		in := inAllianceInit()
+		errCore := donateRecommendedAllianceTech(client, in)
+		if !session.ContainsNonTimeoutNetError(errCore) {
+			t.Fatalf("core donation error = %v, want a dead connection", errCore)
+		}
+		run := cachedAllianceScience(client, in)
+		if run == nil || run.stop != "donation failed" {
+			t.Fatalf("run state = %+v, want donations stopped with \"donation failed\"", run)
+		}
+		if err := donateAllAllianceTech(client, in); err != nil {
+			t.Errorf("donateAllAllianceTech() = %v, want nil: the run's donations already ended", err)
+		}
+		if run.stop != "donation failed" || !run.chargesRead {
+			t.Errorf("after alliance-donate-all: stop %q, chargesRead %v; want the stop kept and no charge re-read",
+				run.stop, run.chargesRead)
+		}
+		want := []string{"science.data.refresh", "al.science.refreshNum", "al.science.donate"}
+		if got := srv.cmds(); !slices.Equal(got, want) {
+			t.Errorf("requests = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestDonateAllRecoversFromATimeoutInTheCore is the -collect sequence when the server leaves one
+// request of the core donation unanswered: a timed-out charge read or donation does not end the
+// run's donations, so alliance-donate-all reads the charges again (a timed-out donation may have
+// gone through) and donates. An errorCode answer to the charge read still ends them. It runs in a
+// synctest bubble, so the 8 s DefaultCmdTimeout passes on the fake clock.
+func TestDonateAllRecoversFromATimeoutInTheCore(t *testing.T) {
+	const id = 10011900
+	for _, c := range []struct {
+		name      string
+		withhold  string // the first request of this cmd gets no reply
+		chargeErr bool   // al.science.refreshNum is answered with a genuine errorCode
+		want      []string
+	}{
+		{"charge read times out", "al.science.refreshNum", false,
+			[]string{"science.data.refresh", "al.science.refreshNum", "al.science.refreshNum", "al.science.donate"}},
+		{"first donation times out", "al.science.donate", false,
+			[]string{"science.data.refresh", "al.science.refreshNum", "al.science.donate", "al.science.refreshNum", "al.science.donate"}},
+		{"charge read refused", "", true,
+			[]string{"science.data.refresh", "al.science.refreshNum"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client, server := session.NewPipeGameConnPair(t)
+				srv := &scriptedServer{}
+				go func() {
+					held := false
+					for {
+						msg, err := session.ReadNextExtension(server)
+						if err != nil {
+							return
+						}
+						srv.mu.Lock()
+						srv.reqs = append(srv.reqs, msg)
+						srv.mu.Unlock()
+						if msg.Cmd == c.withhold && !held {
+							held = true
+							continue
+						}
+						var out *sfs.SFSObject
+						switch msg.Cmd {
+						case "science.data.refresh":
+							out = allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", int64(8000000), "level", 3))
+						case "al.science.refreshNum":
+							out = obj("scienceId", id, "useNum", 5, "maxNum", 30)
+							if c.chargeErr {
+								out = obj("errorCode", "999999")
+							}
+						case "al.science.donate":
+							out = obj("scienceId", id, "useNum", 0, "maxNum", 30)
+						default:
+							out = obj()
+						}
+						if v, ok := msg.Params.Get("_id"); ok {
+							out.PutValue("_id", v)
+						}
+						if err := server.SendExtension(msg.Cmd, out); err != nil {
+							return
+						}
+					}
+				}()
+				in := inAllianceInit()
+				errCore := donateRecommendedAllianceTech(client, in)
+				if errCore == nil || session.ContainsNonTimeoutNetError(errCore) {
+					t.Errorf("core donation error = %v, want a timeout or errorCode error", errCore)
+				}
+				if err := donateAllAllianceTech(client, in); err != nil {
+					t.Errorf("donateAllAllianceTech() = %v", err)
+				}
+				if got := srv.cmds(); !slices.Equal(got, c.want) {
+					t.Errorf("requests = %v, want %v", got, c.want)
+				}
+			})
+		})
+	}
+}
+
+// TestDonationChargeReadRefusedAtTheReset: the day-reset refusal (120836) or used-up charges
+// (120471) answering the charge read ends the run's donations without a run error, as they do on
+// al.science.donate; any other code stays an error.
+func TestDonationChargeReadRefusedAtTheReset(t *testing.T) {
+	const id = 10011900
+	for _, c := range []struct {
+		code    string
+		wantErr bool
+	}{
+		{"120836", false},
+		{"120471", false},
+		{"999999", true},
+	} {
+		t.Run(c.code, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client, server := session.NewPipeGameConnPair(t)
+				srv := &scriptedServer{}
+				go func() {
+					for {
+						msg, err := session.ReadNextExtension(server)
+						if err != nil {
+							return
+						}
+						srv.mu.Lock()
+						srv.reqs = append(srv.reqs, msg)
+						srv.mu.Unlock()
+						out := obj()
+						switch msg.Cmd {
+						case "science.data.refresh":
+							out = allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", int64(8000000), "level", 3))
+						case "al.science.refreshNum":
+							out = obj("errorCode", c.code)
+						}
+						if v, ok := msg.Params.Get("_id"); ok {
+							out.PutValue("_id", v)
+						}
+						if err := server.SendExtension(msg.Cmd, out); err != nil {
+							return
+						}
+					}
+				}()
+				in := inAllianceInit()
+				errCore := donateRecommendedAllianceTech(client, in)
+				if (errCore != nil) != c.wantErr {
+					t.Errorf("core donation error = %v, want error %v", errCore, c.wantErr)
+				}
+				if err := donateAllAllianceTech(client, in); err != nil {
+					t.Errorf("donateAllAllianceTech() = %v", err)
+				}
+				want := []string{"science.data.refresh", "al.science.refreshNum"}
+				if got := srv.cmds(); !slices.Equal(got, want) {
+					t.Errorf("requests = %v, want %v", got, want)
+				}
+			})
+		})
+	}
+}
+
+// TestDonationReReadRefusedAfterATimeout: the core's donation times out, so alliance-donate-all
+// reads the charges again first; a reset refusal (120836) of that re-read ends the run's donations
+// before another al.science.donate, although the first read still says charges are left.
+func TestDonationReReadRefusedAfterATimeout(t *testing.T) {
+	const id = 10011900
+	synctest.Test(t, func(t *testing.T) {
+		client, server := session.NewPipeGameConnPair(t)
+		srv := &scriptedServer{}
+		go func() {
+			reads, donates := 0, 0
+			for {
+				msg, err := session.ReadNextExtension(server)
+				if err != nil {
+					return
+				}
+				srv.mu.Lock()
+				srv.reqs = append(srv.reqs, msg)
+				srv.mu.Unlock()
+				out := obj()
+				switch msg.Cmd {
+				case "science.data.refresh":
+					out = allianceScienceRefreshResponse(techEntry(id, "currentPro", 0, "needPro", int64(8000000), "level", 3))
+				case "al.science.refreshNum":
+					reads++
+					out = obj("scienceId", id, "useNum", 5, "maxNum", 30)
+					if reads > 1 {
+						out = obj("errorCode", "120836")
+					}
+				case "al.science.donate":
+					donates++
+					if donates == 1 {
+						continue // the core's donation gets no reply: a timeout
+					}
+					out = obj("scienceId", id, "useNum", 3, "maxNum", 30)
+				}
+				if v, ok := msg.Params.Get("_id"); ok {
+					out.PutValue("_id", v)
+				}
+				if err := server.SendExtension(msg.Cmd, out); err != nil {
+					return
+				}
+			}
+		}()
+		in := inAllianceInit()
+		if err := donateRecommendedAllianceTech(client, in); err == nil {
+			t.Error("core donation error = nil, want the timeout")
+		}
+		if err := donateAllAllianceTech(client, in); err != nil {
+			t.Errorf("donateAllAllianceTech() = %v, want nil (the refusal is no run error)", err)
+		}
+		want := []string{"science.data.refresh", "al.science.refreshNum", "al.science.donate", "al.science.refreshNum"}
+		if got := srv.cmds(); !slices.Equal(got, want) {
+			t.Errorf("requests = %v, want %v", got, want)
+		}
+	})
 }
 
 // donateStep is the fake server's answer to one al.science.donate: pushes sent before the reply,

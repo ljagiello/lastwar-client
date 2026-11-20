@@ -2,6 +2,8 @@ package session
 
 import (
 	"errors"
+	"net"
+	"strings"
 	"testing"
 
 	"lastwar-client/internal/sfs"
@@ -77,8 +79,13 @@ func TestLoginRejectionNotBlocked(t *testing.T) {
 		want error
 	}{
 		{"rotated token", []string{"E011"}, ErrTokenRejected},
-		{"identity mismatch", []string{"E005"}, ErrAuthRejected},
+		{"identity mismatch or maintenance", []string{"E005"}, ErrLoginMaintenanceOrIdentity},
 		{"deletion pending is an E code", []string{"E010"}, ErrAuthRejected},
+		// E013 and E014 wipe the client's user data (Assembly-CSharp.decompiled.cs:13463-13473,
+		// 13492-13495), E001/E002 its auth (13335-13339): all stay "recapture".
+		{"season registration ban", []string{"E013"}, ErrAuthRejected},
+		{"old uid, new refresh token", []string{"E014"}, ErrAuthRejected},
+		{"account does not exist", []string{"E001"}, ErrAuthRejected},
 		{"unlisted number", []string{"40"}, ErrAuthRejected},
 		{"empty ep", []string{}, ErrAuthRejected},
 		{"no ep", nil, ErrAuthRejected},
@@ -89,7 +96,47 @@ func TestLoginRejectionNotBlocked(t *testing.T) {
 			if err != c.want {
 				t.Errorf("LoginRejection(%q) = %v, want %v", c.ep, err, c.want)
 			}
+			if !errors.Is(err, ErrAuthRejected) {
+				t.Errorf("errors.Is(%v, ErrAuthRejected) = false; main.go would not exit 2", err)
+			}
 		})
+	}
+}
+
+// TestLoginRejectionE005StaysExit2 (B67): E005 keeps exit 2 until the owner decides (MASTER 6.1),
+// and its text says the client shows it as maintenance (LoginState.OnLoginResponse maps it to E109,
+// Assembly-CSharp.decompiled.cs:13627-13628).
+func TestLoginRejectionE005StaysExit2(t *testing.T) {
+	err := LoginRejection(loginReject("E005"))
+	if !errors.Is(err, ErrAuthRejected) || errors.Is(err, ErrSeasonWindow) {
+		t.Errorf("LoginRejection(E005) = %v, want an ErrAuthRejected and not a season window", err)
+	}
+	if !strings.Contains(err.Error(), "maintenance") || !strings.Contains(err.Error(), "E109") {
+		t.Errorf("LoginRejection(E005) = %q, want it to say the client shows it as maintenance (E109)", err)
+	}
+}
+
+// TestLoginRejectionSeasonWindow (B67): E015 (ERROR_SEASON_WILL_START) and E016
+// (ERROR_SEASON_STOP_MAINTENANCE) are a server state the client meets with a reload-or-quit box
+// and keeps every credential (Assembly-CSharp.decompiled.cs:13474-13491, 13648-13653,
+// 220289-220291). They must not read as an auth rejection (exit 2, "recapture"), nor as a net
+// error that would send main.go's connectFailed to GSL for another address.
+func TestLoginRejectionSeasonWindow(t *testing.T) {
+	for _, code := range []string{"E015", "E016"} {
+		err := LoginRejection(loginReject(code))
+		if !errors.Is(err, ErrSeasonWindow) {
+			t.Errorf("LoginRejection(%s) = %v, want ErrSeasonWindow", code, err)
+		}
+		if errors.Is(err, ErrAuthRejected) || errors.Is(err, ErrTokenRejected) || errors.Is(err, ErrAccountBlocked) {
+			t.Errorf("LoginRejection(%s) = %v wraps an auth sentinel; main.go would exit 2 or 4", code, err)
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			t.Errorf("LoginRejection(%s) = %v is a net.Error; connectFailed would look the server up again", code, err)
+		}
+		if !strings.Contains(err.Error(), code) {
+			t.Errorf("LoginRejection(%s) = %q, want the code in the text", code, err)
+		}
 	}
 }
 

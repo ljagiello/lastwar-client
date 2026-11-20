@@ -370,6 +370,21 @@ func TestClassifyResponse(t *testing.T) {
 			wantCode:    "120471",
 		},
 		{
+			// B33: live on every 02:00 UTC run, right after the day reset.
+			name:        "120836 on al.science.donate (day-reset window) -> benign",
+			cmd:         "al.science.donate",
+			errorCode:   "120836",
+			wantOutcome: outcomeBenign,
+			wantCode:    "120836",
+		},
+		{
+			name:        "120836 on any other cmd -> failure",
+			cmd:         "al.science.refreshNum",
+			errorCode:   "120836",
+			wantOutcome: outcomeFailure,
+			wantCode:    "120836",
+		},
+		{
 			name:        "errorCode is not in benignErrorCodes at all -> failure",
 			cmd:         "vip.reward.get",
 			errorCode:   "999999",

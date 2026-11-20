@@ -26,7 +26,7 @@ A stock SFS2X `LoginRequest` (`action=1`, system controller), but every call sit
 | `gameUid` | server-assigned account id (also used as the SFS username) |
 | `serverId` | `zone` string minus its `"APS"` prefix |
 | `at` | the HTTP-obtained access token, only if non-empty |
-| `appVersion` / `versionCode` | the build identity. An access token is bound to the `packageName`/`platform`/`appVersion`/`versionCode` it was issued under (confirmed live). The 1.0.364 Android build is `1.0.364`/`1892`; the iOS app captured on 2026-10-04 still sent `1.0.344`/`786` |
+| `appVersion` / `versionCode` | the build identity. An access token is bound to the `packageName`/`platform`/`appVersion`/`versionCode` it was issued under (confirmed live). The 1.0.370 builds are `1.0.370`/`918` (iOS) and `1.0.370`/`1911` (Android), and `goclient` claims them by default; the iOS app captured on 2026-10-04 still sent `1.0.344`/`786`. A session config without the two fields keeps claiming `1.0.344`/`786` (iOS) or `1.0.364`/`1892` (Android) and the run warns to add them |
 | `SecurityCode` | `MD5(cmdBaseTime + "4d1c383ccbedf3d98320d6ea06d8dedc" + gameUid)`, hardcoded salt |
 | `OneCode` | char-interleave of `MD5(rand32)` and `rand32` itself |
 | `CoreV` | hash chain: `MD5(reverse(base64(rand32)))` then `MD5(that + rand32)`, interleaved |
@@ -103,7 +103,7 @@ A rejected `Login` arrives as SFS2X `ec=28` with a reason string in `ep[0]` (see
 | `E010` | Account deletion pending | Dialog |
 | `E011` | `ERROR_LOGIN_ACCESS_TOKEN` | Clears **only `at`** and keeps `rt`. Shows a dialog and reloads; the reload runs GSL `opt=refresh`, because `at` is now empty. Confirmed live as the whole failure signature of a rotated token |
 | `E012` | Korean real-name authentication | Dialog |
-| `E013`, `E015`, `E016` | Season register ban, season start, season stop or maintenance | `E013` clears all user data |
+| `E013`, `E015`, `E016` | Season register ban, season start, season stop or maintenance | `E013` clears all user data. `E015` and `E016` offer a reload or quit and keep every credential |
 | `E014` | `ERROR_OLD_UID_USE_NEW_RT` | Clears `gameUid`, `at`, `rt`, and `loginKey`, then reloads |
 | `4` (with `;` details) | `ERROR_BANID`: a ban | Ban dialog, see [Reading a ban](#reading-a-ban). The ban view also calls `AccountCredentialManager.ClearAll()` (`UIAccountBanView.lua:223`); when it does isn't recorded |
 | `43`, `44` | IP blacklist, device blacklist | No C# case; falls through to the generic `E117` |
@@ -111,7 +111,7 @@ A rejected `Login` arrives as SFS2X `ec=28` with a reason string in `ep[0]` (see
 | `49` (with `;` details) | `TRAFFIC_CONTROL_BANNED_USER` | UI only |
 | `55`-`58` | Role deletion: applied, deleted, refused, confirmed. New in 1.0.364 | UI only |
 
-None of the numeric codes is a credential problem, and none is worth retrying. The `E1xx` codes (`E101`-`E117`) are client-local loading and network codes; the server never sends them. `goclient` reports `E011` as `session.ErrTokenRejected`, the numeric codes above as `session.ErrAccountBlocked`, and every other rejection as `ErrAuthRejected`. A blocked account, role, device or IP exits with code `4`, because neither a fresh capture nor a token refresh can fix it. The other rejections exit with code `2`.
+None of the numeric codes is a credential problem, and none is worth retrying. The `E1xx` codes (`E101`-`E117`) are client-local loading and network codes; the server never sends them. `goclient` reports `E011` as `session.ErrTokenRejected`, the numeric codes above as `session.ErrAccountBlocked`, `E005` as `session.ErrLoginMaintenanceOrIdentity`, `E015`/`E016` (the season's server window) as `session.ErrSeasonWindow`, and every other rejection as `ErrAuthRejected`. A blocked account, role, device or IP exits with code `4`, because neither a fresh capture nor a token refresh can fix it. `E015`/`E016` exit with code `1`: they are a server state, not a credential problem, so the next run may get in. `E005` still exits with code `2`, like the other rejections; whether it should is still undecided (see [Client 1.0.370](/client-1-0-370#not-done)).
 
 The real client's recovery from `E011` needs the refresh token: clear `at`, run GSL `opt=refresh` with `rt`, store the new pair, and log in again. `goclient` does the same for a session config that holds a refresh token, such as an own-device one (see [Refreshing the access token](#refreshing-the-access-token)). A config captured from the real app has no refresh token, so its recovery is a fresh capture, see [Recovering from a rotated token](/capturing-and-decoding-traffic#recovering-from-a-rotated-token).
 
@@ -146,14 +146,20 @@ When the `Login` response carries `serverInfo`, the real client saves the new ip
 
 ### Looking up the game server
 
-A session config's `ip` and `port` are optional. The game server's address comes from GSL `getserverlist.php`, as it does for the real client on every cold start, so you don't have to copy it from a capture. `goclient`'s session-config reconnect asks GSL in two cases:
+A session config's `ip` and `port` are optional. The game server's address comes from GSL `getserverlist.php`, as it does for the real client on every cold start, so you don't have to copy it from a capture. The client clears its cached server before it connects (`ClearServerNetworkInfo` in `CheckResVersionState.OnEnter`), so it asks GSL every time. Since the 1.0.370 fixes, `goclient`'s session-config reconnect does the same:
 
-- **No address given:** it looks the role's server up before dialing.
-- **The given address doesn't answer:** every gateway refuses the connection, or the `Login` gets no reply. It looks the server up once and, if GSL names a different address, retries there. A rejected `Login`, such as `E011`, never triggers a lookup.
+- **Before every `Login`:** one lookup, unless the run just refreshed its tokens (the refresh was its GSL call) or the address was typed on the command line. With no address saved, this lookup is the only way to find the server, and the run stops if it fails.
+- **It fails open:** with an address saved, a lookup that fails in any way, GSL `211`/`212` included, keeps the configured address and token and changes nothing else.
+- **What it takes from the reply:** the entry that carries the session's `gameUid` (an entry that names another role is refused), its address, and any access or refresh token the reply carries, as the client's `SaveGameLoginToken` stores them. A `-cs-at` typed on the command line is kept. A reply that rotates the refresh token is saved to the session config before the `Login`, so a `Login` that fails afterwards can't lose it.
+- **When the listed server doesn't answer:** every gateway refuses the connection, or the `Login` gets no reply. The `Login` is retried at the configured address, if one is saved, still with the token the lookup handed back.
+- **When a server refuses a handed-back token (`E011`):** it answered, so its address stays, and the `Login` is retried there with the token the lookup replaced: the configured one, or the one this run's refresh issued. The session config keeps that token, not the refused one. This holds after every lookup, the one after an address stops answering included.
+- **When the address doesn't answer and no lookup has worked yet** (the pre-`Login` one failed, or none was made): `goclient` looks the server up once and, if GSL names a different address, retries there. A rejected `Login`, such as `E011`, never triggers a lookup.
 
-A working address costs no GSL call. Either way, `goclient` saves the address it connected to back into the session config.
+`goclient` saves the address it connected to back into the session config. On the first run after the 1.0.370 fixes, GSL's gateway host names will likely replace the captured IPs.
 
-The lookup sends no `opt` field, the request the real app makes on a cold start while it holds a fresh `at` and an `rt`. It sends the session's device, `zone` and `gameUid`, and `platform=iOS` for a session the iOS app issued. It takes only the address from the reply, picking the entry that carries the session's `gameUid` and refusing an entry that names another role. It keeps the session's `at` and logs whether the reply carried a different one.
+The lookup sends no `opt` field, the request the real app makes on a cold start while it holds a fresh `at` and an `rt`. It sends the session's device, `zone` and `gameUid`, and `platform=iOS` for a session the iOS app issued.
+
+Before the 1.0.370 fixes, the lookup ran only with no address saved or after the address stopped answering, and it took only the address from the reply and kept the session's `at`. The live checks below ran on that version.
 
 Confirmed live on 2026-10-10 against a session captured from the iOS app, with the Android check-version reply's gate host and RSA key:
 
@@ -180,7 +186,7 @@ The gate was `ta`. `goclient` filled `ta` only for iOS and sent `{}` on Android.
 | `{}` | `ec=28`, `ep=[E005]` |
 | `#os` = `Android`, `#bundle_id` = `com.fun.lastwar.gp`, `lw_platform` = `market_global`, the build in `#app_version`/`lw_version`/`lw_buildcode`, `lw_zone` = `APS783` | `Login` accepted, `init` arrived |
 
-The `deviceId`, account, and server were the same in both runs, so the 2026-10-04 suspects don't block this `Login`: the Go-generated `deviceId`'s shape, the Android identity itself, and, nine days after binding, trust in the device. `ta`'s `lw_device_id`, `lw_shumei_id`, and `lw_airKey` stayed blank, as they are for iOS. A missing `shumeiBoxId` isn't the cause either, since the accepted `Login` sent none.
+The `deviceId`, account, and server were the same in both runs, so the 2026-10-04 suspects don't block this `Login`: the Go-generated `deviceId`'s shape, the Android identity itself, and, nine days after binding, trust in the device. `ta`'s `lw_device_id`, `lw_shumei_id`, and `lw_airKey` stayed blank, as they were for iOS then (blank before the 1.0.370 follow-up; the iOS `ta` now fills them, Android's still doesn't). A missing `shumeiBoxId` isn't the cause either, since the accepted `Login` sent none.
 
 What the test settles and what it doesn't:
 
@@ -201,17 +207,17 @@ LASTWAR_STATE_DIR=~/.lastwar_own_device ./lastwar-client -config ~/own_device_se
 
 The run logs in as a guest, verifies the email, and logs the account's roles: each role's server, zone, `gameUid`, level, and power. Then it trades the account's `loginKey` for the device's own `at`/`rt` through GSL `opt=login` and writes the session config. A device that already holds a `loginKey` skips the email and trades it.
 
-`-cs-ios` on that command, or on a plain `-email` login, uses the iOS identity for the whole run: check-version, GSL `platform=iOS`, the guest `Login` (`com.lastwar.ios` and the iOS `psh`), and `account.login.new` `pf=AppStore`. The written session config has `iosMode` true and the iOS build (`1.0.344`/`786`). Without `-cs-ios` the same run stays Android.
+`-cs-ios` on that command, or on a plain `-email` login, uses the iOS identity for the whole run: check-version, GSL `platform=iOS`, the guest `Login` (`com.lastwar.ios` and the iOS `psh`), and `account.login.new` `pf=AppStore`. The written session config has `iosMode` true and the iOS build (`1.0.370`/`918` since the 1.0.370 fixes; `1.0.344`/`786` before). Without `-cs-ios` the same run stays Android.
 
 A third party ran this iOS bind against production on 2026-10-28 and reported it working ([discussion #56](https://github.com/ljagiello/lastwar-client/discussions/56)), on one established account in one run. It hasn't been reproduced here. Per that report:
 
 - **The bind:** the fresh device's iOS guest `Login` was accepted and its `init` arrived. Email verification and the `loginKey` trade then wrote a config with `iosMode` true and `1.0.344`/`786`.
-- **A `Login` with that config** was accepted with `shumeiBoxId` empty and loaded the account's buildings. It sent the filled iOS `ta`: `#os` = `iOS`, `#bundle_id` = `com.lastwar.ios`, `lw_platform` = `AppStore`, the build and `lw_zone`, with `lw_device_id`, `lw_shumei_id` and `lw_airKey` blank. `ta` = `{}` wasn't tried.
+- **A `Login` with that config** was accepted with `shumeiBoxId` empty and loaded the account's buildings. It sent the filled iOS `ta`: `#os` = `iOS`, `#bundle_id` = `com.lastwar.ios`, `lw_platform` = `AppStore`, the build and `lw_zone`, with `lw_device_id`, `lw_shumei_id` and `lw_airKey` blank (blank before the 1.0.370 follow-up; the iOS `ta` now fills them). `ta` = `{}` wasn't tried.
 - **One `opt=refresh`** with the config's refresh token, a few minutes after the bind, returned code `0`, the current `at` with its original `at.time`, and no `rt`. The Android pair returned the same eight days after issue (see [Refreshing the access token](#refreshing-the-access-token)), so on iOS too an early refresh rotates neither token.
 
 `-server` picks the role to bind, by its server number (`783`) or zone (`APS783`), from the roles the run logs; a value that names no server number is refused before the code is requested. Without it, the role `push.account.login.new` names at its top level is bound. A server the account has no role on, or two roles on one server, fails after verification without saving the binding. By then the code is spent, so bind again from a fresh `LASTWAR_STATE_DIR` with a server from the logged list. If GSL's `opt=login` reply doesn't list the picked role, the trade fails rather than writing another role's server into the config.
 
-Binding a role other than the top-level one is static analysis only: the real account has one role, so it was never tried live. The 1.0.364 role picker (`UIRoleLoginView.OnClickLogin`) takes the picked entry's `loginKey` and `gameUid`. The live entry carried no `loginKey`, so `goclient` uses an entry's own `loginKey` when it has one and the account's otherwise.
+Binding a role other than the top-level one is static analysis only: the real account has one role, so it was never tried live. The role picker binds every role with the account's top-level `loginKey` and the picked entry's `gameUid` (`AccountManager.lua:207-215`, 1.0.370), so `goclient` does too. It keeps the bound role's zone in `.lastwar_goclient_zone` and sends it as the GSL `zone` (`UIRoleLoginView.lua:110-120`).
 
 Confirmed live on 2026-10-13: one run bound a fresh device to the real account's role on 783 and wrote its config, and a `Login` with that config loaded 160 buildings. What the same night showed:
 
@@ -259,7 +265,7 @@ Around and after `init`, the real client sends, in order (observed in the captur
 
 4. Nine `mail.delete.batch {type: "auto", uids}` calls about 4.7 s in. The real client auto-deletes mail older than 30 days once a day, see [Alliance, chat & mail](/alliance-chat-mail).
 
-The server also pushes `push.shumei.id {shumeiId}` about 0.5 s after `Login` (observed live). The client caches that value and reports it as `ta.lw_shumei_id` in its next `Login`. `shumeiId` is the server's own device identifier and is distinct from both `shumeiBoxId` and the `push.shumei.exception.level` risk push; the client also folds it into the analytics super properties (`lw_shumei_id`, `Assembly-CSharp:58829,58940`).
+The server also pushes `push.shumei.id {shumeiId}` about 0.5 s after `Login` (observed live). The client caches that value and reports it as `ta.lw_shumei_id` in its next `Login`. Since the 1.0.370 follow-up `goclient` keeps it in the session config's `shumeiId`: `pcap -session-out` records it (the last `push.shumei.id` after the `Login`, else the captured `ta`'s `lw_shumei_id`), a run saves each one a push brings as it arrives, as the client does in the push handler, so a run that then fails or is kicked keeps it, and the iOS `Login` sends it as `ta` `lw_shumei_id`. It belongs to the config's `deviceId`: a run under another one neither sends nor saves it (static-analysis-only). `shumeiId` is the server's own device identifier and is distinct from both `shumeiBoxId` and the `push.shumei.exception.level` risk push; the client also folds it into the analytics super properties (`lw_shumei_id`, `Assembly-CSharp:58829,58940`).
 
 `login.init` is an active pull that the real client never sent in the capture. The C# sends `dataConfigMd5` with it only when non-empty.
 
@@ -300,8 +306,8 @@ Two different numberings are both called "visitor type" (static-analysis-only):
 
 | Field | Numbering |
 |---|---|
-| `init.visitor.list[].type` | The **queue type**, from `Scene/CityVisitor/Const.lua`: `0` GEN_BY_TIME, `1` CYCLE_REWARD, `2` STAGE, `4` WORKER_LOTTERY, `5` DOMINATOR, `6` AllianceCongratulation, `8` SystemGift, `11` ActivityVisitor, `12` AllianceInvite, `18` S0_ALLIANCE_BOSS, `19` SURVIVOR_PACK_GiFT, `20` ProtectCoverVisitor |
-| `lw_base_visitor_event[eventId].type` | The **behaviour type**, the global `VisitorType` in `Global/EnumType.lua`: `1` MERCHANT, `2` GIFT, `3` RECRUITMENT, `4` BATTLE, `5` WORKER_LOTTERY, `6` NOTIFY, `7` OPEN_PANEL, `8` ALLIANCE_INVITE_MOVE_CITY, `9` DOMINATOR, `10` SeasonDayGift, `11` VisitorActivity, `12` ALLIANCE_INVITE, `13` DOMINATOR_COCKATRICE, `14` AllianceCongratulation, `15` AD_REMINDER, `16` SKY_BATTLE, `17` PLANE_FEATURE, `18`-`20` S0_ALLIANCE_BOSS, SURVIVOR_PACK_GiFT, ProtectCoverVisitor, `30` SystemGift |
+| `init.visitor.list[].type` | The **queue type**, from `Scene/CityVisitor/Const.lua`: `0` GEN_BY_TIME, `1` CYCLE_REWARD, `2` STAGE, `4` WORKER_LOTTERY, `5` DOMINATOR, `6` AllianceCongratulation, `8` SystemGift, `7` OPEN_PANEL, `9` BattlePlanCaptive (Season 7, 1.0.370), `11` ActivityVisitor, `12` AllianceInvite, `18` S0_ALLIANCE_BOSS, `19` SURVIVOR_PACK_GiFT, `20` ProtectCoverVisitor. Queue 1 is types 0, 1, 5, 6, 9, 12, 18 and 20; queue 2 is 2, 4, 7, 8, 11 and 19 (`Scene/CityVisitor/Const.lua:10-44`, 1.0.370) |
+| `lw_base_visitor_event[eventId].type` | The **behaviour type**, the global `VisitorType` in `Global/EnumType.lua`: `1` MERCHANT, `2` GIFT, `3` RECRUITMENT, `4` BATTLE, `5` WORKER_LOTTERY, `6` NOTIFY, `7` OPEN_PANEL, `8` ALLIANCE_INVITE_MOVE_CITY, `9` DOMINATOR, `10` SeasonDayGift, `11` VisitorActivity, `12` ALLIANCE_INVITE, `13` DOMINATOR_COCKATRICE, `14` AllianceCongratulation, `15` AD_REMINDER, `16` SKY_BATTLE, `17` PLANE_FEATURE, `18`-`20` S0_ALLIANCE_BOSS, SURVIVOR_PACK_GiFT, ProtectCoverVisitor, `30` SystemGift, `40` BattlePlanCaptive (Season 7 Battle Plan, event 22001; `goclient` accepts it only with the opt-in `captive-visitors`) |
 
 What `visitor.operate {uid, operate}` does depends on the behaviour type, so look it up through the entry's `eventId`, not its `type`. For a MERCHANT (events 1001 and 1002), `operate: 1` **buys** the offered item with resources and `operate: 0` declines. A SystemGift visitor opens a gift-pack window first. Visitors with event ids 6001, 8001, 12001, and the S0-boss and ProtectCover visitors have client-made uids (`eventId + 100000000`) and never reach the server. Across 326 accepts on the real account over three months, every visitor's behaviour type was 2, 3, or 10 (confirmed live).
 

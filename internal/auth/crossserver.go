@@ -68,12 +68,18 @@ type CrossServerLoginParams struct {
 	AirKey      string
 	AccessTok   string // included as p.at -- confirmed live this IS required, see below
 	ShumeiBoxId string // real anti-fraud device fingerprint, if known
+	ShumeiID    string // the cached push.shumei.id value, ta lw_shumei_id; see LoginParamsInput.ShumeiID
 	AndroidID   string // Settings.Secure.ANDROID_ID (16 hex), ThinkingData's ta #device_id
 	Handshake   bool   // experimental: send the vanilla SFS2X pre-Login Handshake (see conn.go:DoHandshake)
 	IOSMode     bool   // send an iOS-flavored identity instead of Android; see LoginParamsInput.IOSMode
 	AppVersion  string // build the token was issued under, if known; see LoginParamsInput.AppVersion
 	VersionCode string
 	ResVersion  string // see LoginParamsInput.ResVersion and ResVersionFrom; "" sends "0"
+	NoZstd      bool   // see LoginParamsInput.NoZstd
+	// Device is the captured iOS device the Login describes; see LoginParamsInput.Device.
+	Device CapturedDevice
+	// Android is the Android install's values; see LoginParamsInput.Android.
+	Android AndroidInstall
 
 	// DialGame, if non-nil, replaces the package-level dialGame (ultimately session.DialGame) used
 	// to open the game socket -- and is used for every redial in the serverInfo-redirect loop, not
@@ -217,11 +223,15 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 			AccessTok:   p.AccessTok,
 			ServerID:    serverIDFromZone(zone),
 			ShumeiBoxId: p.ShumeiBoxId,
+			ShumeiID:    p.ShumeiID,
 			AndroidID:   p.AndroidID,
 			IOSMode:     p.IOSMode,
 			AppVersion:  p.AppVersion,
 			VersionCode: p.VersionCode,
 			ResVersion:  p.ResVersion,
+			NoZstd:      p.NoZstd,
+			Device:      p.Device,
+			Android:     p.Android,
 		})
 		loginContent := sfs.NewSFSObject()
 		loginContent.PutUtfString("zn", zone)
@@ -286,8 +296,14 @@ func DoCrossServerLogin(p CrossServerLoginParams) (*CrossServerLoginResult, erro
 		}
 		slog.Info("login OK")
 		claimed := loginParams.GetString("appVersion")
-		logLoginUpdateGate(env.Content, "cross-server Login", claimed)
+		if err := checkLoginUpdateGate(env.Content, "cross-server Login", claimed); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
 		conn.SetAppVersion(claimed)
+		// The deviceId the Login sent is the client's DEVICE_ID, which a push.account.device.del
+		// must name to end the session (PushAccountDeviceDelMessage.lua:8-25; 1.0.370 audit B66).
+		conn.SetDeviceID(loginParams.GetString("deviceId"))
 
 		siObj := gsl.FindServerInfo(env.Content)
 		redirectIPVal := ""

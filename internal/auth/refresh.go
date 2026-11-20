@@ -20,6 +20,9 @@ type TokenRefresh struct {
 	Zone       string         // the session's zone, sent as `zone` like the client's cached SERVER_ZONE
 	GameUid    string
 	RefreshTok string
+	// Device is the captured iOS device; its fromCountry/lang fill the form's country/lang
+	// (FormDevice).
+	Device CapturedDevice
 }
 
 func (r TokenRefresh) String() string   { return "[REDACTED TokenRefresh]" }
@@ -52,9 +55,9 @@ func RefreshTokens(r TokenRefresh) (Tokens, error) {
 	if r.RefreshTok == "" {
 		return Tokens{}, errors.New("GSL refresh: no refresh token")
 	}
-	platform := loginBuild(r.IOSMode, "", "").Platform
-	slog.Info("GSL getserverlist: refreshing the access token", "opt", "refresh", "platform", platform, "zone", r.Zone, "gameUid", r.GameUid)
-	lsr, err := gsl.GetServerListAs(r.HTTPClient, r.GateHost, r.RSAPub, platform, r.DeviceID, gsl.GSLOpt{Opt: "refresh", Rt: r.RefreshTok}, r.Zone, r.GameUid)
+	dev := FormDevice(r.IOSMode, r.DeviceID, r.Device)
+	slog.Info("GSL getserverlist: refreshing the access token", "opt", "refresh", "platform", dev.Platform, "zone", r.Zone, "gameUid", r.GameUid)
+	lsr, err := gsl.GetServerListFor(r.HTTPClient, r.GateHost, r.RSAPub, dev, r.DeviceID, gsl.GSLOpt{Opt: "refresh", Rt: r.RefreshTok}, r.Zone, r.GameUid)
 	if err != nil {
 		return Tokens{}, fmt.Errorf("GSL refresh: %w", err)
 	}

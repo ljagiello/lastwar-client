@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,7 +17,7 @@ import (
 	"lastwar-client/internal/sfs"
 )
 
-// Alliance Duel speed-ups (DUEL.md §4.3, §7.2-7.3): apply OWNED speed-up items to RUNNING jobs on
+// Alliance Duel speed-ups (docs/alliance-duel.mdx): apply OWNED speed-up items to RUNNING jobs on
 // the duel days that score them, 50 points per item minute (score type 51; the queue sped up is
 // the score value: 7 build, 6 research, 4 training, 9 heal, EnumType.lua:15739-15744, 15811-15816).
 // Which items go where, by today's theme (hero.event.info.get eventId) AND today's score list:
@@ -63,7 +64,7 @@ import (
 // must not drop; build and queue replies must carry an itemCostArr listing every item sent (proof
 // the items paid); a camp reply, which has no itemCostArr, must carry gold. Otherwise the feature
 // stops for the rest of the process with an ERROR naming the call, and the trip is persisted so
-// later runs refuse every duel and dig spend until it is cleared (tripwire.go). E100173 (already
+// later runs refuse every tripwire-guarded spend until it is cleared (tripwire.go). E100173 (already
 // completed, QueueDataManager.lua:507-508) and 120021 ("Not enough items.") stop just that job.
 // Remaining time is re-read from every reply (buildInfo.uT / finished, queue uT,
 // buildInfo.prodET); a reply without it ends that job. Remaining time is end minus the game time
@@ -90,6 +91,15 @@ const (
 	duelSpeedupsGapLimitMs   = 60_000 // DataConfig speedup_config k1
 	duelSpeedupsPointsPerMin = 50     // score 90201/90301/90501/90601, before tech bonuses
 	duelSpeedupsEndMargin    = 2 * time.Minute
+
+	// duelSpeedupsMaxRemainingMs bounds a job's remaining time: a job ending further out is never
+	// sped up. The client special-cases a queue end of LongMaxValue (QueueDataManager.lua:579,
+	// ConstDefine.lua:147); an end like that, or any absurd one, would otherwise make the picker
+	// take every owned item. The longest real jobs in tables 40413 are the HQ 34 upgrade (building
+	// 10100034 time 12,882,013 s, about 149 days) and research 180011209 (10,568,760 s, about 122
+	// days), both before speed bonuses, which only shorten them (BuildingLevelTemplate.lua:642-644);
+	// a year leaves room above both.
+	duelSpeedupsMaxRemainingMs = 365 * 24 * int64(time.Hour/time.Millisecond)
 
 	duelBuildingFoldUp   = 2 // BuildingStateType (EnumType.lua:3299-3305)
 	duelBuildingPaused   = 3
@@ -241,13 +251,28 @@ type duelSpeedupJob struct {
 
 func (j *duelSpeedupJob) remainingMs(nowMs int64) int64 { return max(0, j.endMs-nowMs) }
 
+// duelSpeedupsSaneEnd reports whether endMs is an end a speed-up may target: not LongMaxValue and
+// at most duelSpeedupsMaxRemainingMs away.
+func duelSpeedupsSaneEnd(endMs, nowMs int64) bool {
+	return endMs != math.MaxInt64 && endMs-nowMs <= duelSpeedupsMaxRemainingMs
+}
+
 func (j *duelSpeedupJob) label() string {
 	return fmt.Sprintf("duel speed-up %s %s", j.kind, j.name)
 }
 
-// duelSpeedupsJobs lists the running jobs a speed-up applies to.
+// duelSpeedupsJobs lists the running jobs a speed-up applies to. A job whose end is not sane
+// (duelSpeedupsSaneEnd) is left out and logged.
 func duelSpeedupsJobs(in *Init, nowMs int64) []*duelSpeedupJob {
 	var jobs []*duelSpeedupJob
+	add := func(j *duelSpeedupJob) {
+		if !duelSpeedupsSaneEnd(j.endMs, nowMs) {
+			slog.Warn("duel-speedups: the job's end time is LongMaxValue or more than a year away; leaving it alone",
+				"job", j.label(), "endMs", j.endMs)
+			return
+		}
+		jobs = append(jobs, j)
+	}
 	for _, b := range in.Objects("building_new") {
 		uuid, ok := claimInt(b, "uuid")
 		if !ok || uuid == 0 {
@@ -257,20 +282,22 @@ func duelSpeedupsJobs(in *Init, nowMs int64) []*duelSpeedupJob {
 		lv, _ := claimInt(b, "lv")
 		name := fmt.Sprintf("%s %d", BuildingNameOf(int32(bID)), uuid)
 		state, _ := claimInt(b, "state")
-		if uT, _ := claimInt(b, "uT"); uT > nowMs {
+		// The build queue on the building, when there is one, carries the upgrade end the client
+		// uses (BuildQueueManager.lua:18-55; 1.0.370 audit B72).
+		if uT, _ := buildingUpgradeTime(in, b); uT > nowMs {
 			switch {
 			case state == duelBuildingFoldUp || state == duelBuildingPaused || state == duelBuildingCrossing:
 			case bID == claimHQBuildingID && lv == finishedTimersShieldHQLevel && finishedTimersShieldUp(in, nowMs):
 				slog.Info("duel-speedups: leaving the HQ 8 upgrade alone while the newbie shield is up", "uuid", uuid)
 			default:
-				jobs = append(jobs, &duelSpeedupJob{kind: duelSpeedupBuild, uuid: uuid, name: name, endMs: uT})
+				add(&duelSpeedupJob{kind: duelSpeedupBuild, uuid: uuid, name: name, endMs: uT})
 			}
 		}
 		if bID == finishedTimersMilitaryCamp && lv > 0 {
 			st, _ := claimInt(b, "prodST")
 			et, ok := claimInt(b, "prodET")
 			if st > 0 && ok && et > nowMs {
-				jobs = append(jobs, &duelSpeedupJob{kind: duelSpeedupTraining, uuid: uuid, name: name, endMs: et})
+				add(&duelSpeedupJob{kind: duelSpeedupTraining, uuid: uuid, name: name, endMs: et})
 			}
 		}
 	}
@@ -281,9 +308,9 @@ func duelSpeedupsJobs(in *Init, nowMs int64) []*duelSpeedupJob {
 		name := fmt.Sprintf("queue %d", q.UUID)
 		switch q.Type {
 		case finishedTimersQueueResearch:
-			jobs = append(jobs, &duelSpeedupJob{kind: duelSpeedupResearch, uuid: q.UUID, name: name, endMs: q.End})
+			add(&duelSpeedupJob{kind: duelSpeedupResearch, uuid: q.UUID, name: name, endMs: q.End})
 		case finishedTimersQueueHospital:
-			jobs = append(jobs, &duelSpeedupJob{kind: duelSpeedupHeal, uuid: q.UUID, name: name, endMs: q.End})
+			add(&duelSpeedupJob{kind: duelSpeedupHeal, uuid: q.UUID, name: name, endMs: q.End})
 		}
 	}
 	return jobs
@@ -401,8 +428,9 @@ var duelSpeedupsAllowedKeys = map[string][]string{
 
 // duelSpeedupsCheckParams is the last check before a speed-up goes on the wire: only the
 // items-only keys, isFixRuins false, and a non-empty item string of known speed-up items whose
-// counts are positive and within owned.
-func duelSpeedupsCheckParams(cmd string, p *sfs.SFSObject, owned map[int64]int64) error {
+// counts are positive and within owned, and whose time is at most remainingMs plus the picker's
+// two allowances (59 s and the 60 s gap limit, duelSpeedupsPick).
+func duelSpeedupsCheckParams(cmd string, p *sfs.SFSObject, owned map[int64]int64, remainingMs int64) error {
 	keys, ok := duelSpeedupsAllowedKeys[cmd]
 	if !ok {
 		return fmt.Errorf("%s is not a speed-up command", cmd)
@@ -426,6 +454,7 @@ func duelSpeedupsCheckParams(cmd string, p *sfs.SFSObject, owned map[int64]int64
 		return fmt.Errorf("%s: refusing an empty %s", cmd, itemKey)
 	}
 	seen := map[int64]bool{}
+	var itemMs int64
 	for _, part := range strings.Split(items, "|") {
 		idStr, nStr, ok := strings.Cut(part, ";")
 		id, err1 := strconv.ParseInt(idStr, 10, 64)
@@ -440,6 +469,10 @@ func duelSpeedupsCheckParams(cmd string, p *sfs.SFSObject, owned map[int64]int64
 			return fmt.Errorf("%s: item %d count %d is outside 1..%d owned", cmd, id, n, owned[id])
 		}
 		seen[id] = true
+		itemMs += n * duelSpeedupItemSecs[id] * 1000
+	}
+	if limit := remainingMs + duelSpeedupsToleranceMs + duelSpeedupsGapLimitMs; itemMs > limit {
+		return fmt.Errorf("%s: %d ms of items for %d ms left (limit %d)", cmd, itemMs, remainingMs, limit)
 	}
 	return nil
 }
@@ -649,12 +682,12 @@ func (r *duelSpeedupsRunner) apply(j *duelSpeedupJob, plan []duelSpeedupUse) {
 	}
 	cmd := j.kind.cmd()
 	params := duelSpeedupsParams(j, plan)
-	if err := duelSpeedupsCheckParams(cmd, params, r.owned); err != nil {
+	nowMs := evNow().UnixMilli()
+	if err := duelSpeedupsCheckParams(cmd, params, r.owned, j.remainingMs(nowMs)); err != nil {
 		r.errs = append(r.errs, fmt.Errorf("%s: %w", j.label(), err))
 		r.halt = true
 		return
 	}
-	nowMs := evNow().UnixMilli()
 	applyMs := duelSpeedupsPlanMs(plan)
 	r.calls++
 	if r.dry {

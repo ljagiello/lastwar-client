@@ -27,8 +27,11 @@ import (
 //     while init golloesData.spyRewardNum / caravanRewardNum > 0 and the camp (10145000) is built
 //     (GolloesCampItem.lua:112-150, 215-222).
 //   - Truck privilege: truck.monthcard.privilege.click.reward {} while the insurance activity (373)
-//     runs and init truckMonthCardPrivilege has freeReward, or vipReward with a running month card
-//     (UITruckRewardInsuranceView.lua:589-598).
+//     runs, the truck function is out of the fog, and init truckMonthCardPrivilege has freeReward,
+//     or vipReward with a running month card (UITruckRewardInsuranceView.lua:613-619). The panel's
+//     entry needs the activity open and the station not fog-locked (IsOpenTruckInsurance,
+//     MonthCardNewManager.lua:242-249; IsTruckFunctionLock, LWMyStationDataManager.lua:792-795,
+//     which railwayOutOfFog mirrors; MASTER 1.0.370 B75).
 //
 // Not here: the season week card's daily (lw.season.week.card.daily.reward, the opt-in
 // season-week-card feature, feature_season_week_card.go); the free chests (free-chests; the
@@ -133,7 +136,8 @@ func runCardDailies(conn *session.GameConn, in *Init) error {
 	if !b.dead {
 		priv := in.Object("truckMonthCardPrivilege")
 		open := len(Activities(conn, in).Open(actTypeMonthCardInsure)) > 0
-		if priv != nil && open && (evNonEmpty(priv, "freeReward") || (monthCardOwned && evNonEmpty(priv, "vipReward"))) {
+		if priv != nil && open && railwayOutOfFog(in) &&
+			(evNonEmpty(priv, "freeReward") || (monthCardOwned && evNonEmpty(priv, "vipReward"))) {
 			b.send("truck month card privilege", truckPrivilegeCmd, sfs.NewSFSObject())
 		}
 	}
