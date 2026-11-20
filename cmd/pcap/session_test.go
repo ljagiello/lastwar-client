@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"os"
@@ -299,5 +300,76 @@ func TestAcceptedLoginRecordsCapturedDevice(t *testing.T) {
 	}
 	if cfg, _ := acceptedLogin(login("1"), reply); cfg == nil || !cfg.Device.IsZero() {
 		t.Error("an Android capture recorded device fields")
+	}
+}
+
+// shumeiPush frames a server push.shumei.id extension message (c=1) with the given params.
+func shumeiPush(t *testing.T, params *sfs.SFSObject) []byte {
+	t.Helper()
+	msg := sfs.NewSFSObject()
+	msg.PutUtfString("c", "push.shumei.id")
+	msg.PutSFSObject("p", params)
+	return framedEnvelope(t, 1, 13, msg)
+}
+
+// TestAcceptedLoginRecordsTaAndShumeiID: an iOS capture's ta is recorded with its device, and the
+// shumeiId the client will report next is the last push.shumei.id after the Login reply that
+// carries no errorCode and a non-empty shumeiId (PushShumeiIdMessage.lua:10-18), else the
+// captured ta's lw_shumei_id. An Android capture records the shumeiId too, but no device.
+func TestAcceptedLoginRecordsTaAndShumeiID(t *testing.T) {
+	const ta = `{"#os":"iOS","lw_device_id":"secret-device-id_n3d","lw_shumei_id":"cached-shumei-id"}`
+	login := func(platform string) []byte {
+		params := sfs.NewSFSObject()
+		params.PutUtfString("deviceId", testDevice)
+		params.PutUtfString("gameUid", "1000000000000783")
+		params.PutUtfString("platform", platform)
+		params.PutUtfString("at", testToken)
+		params.PutUtfString("phone_model", "iPhone99,9")
+		params.PutUtfString("ta", ta)
+		req := sfs.NewSFSObject()
+		req.PutUtfString("zn", "APS783")
+		req.PutSFSObject("p", params)
+		return framedEnvelope(t, 0, 1, req)
+	}
+	ok := sfs.NewSFSObject()
+	ok.PutShort("rs", 0)
+	reply := framedEnvelope(t, 0, 1, ok)
+	push := func(id string, errorCode bool) []byte {
+		p := sfs.NewSFSObject()
+		p.PutUtfString("shumeiId", id)
+		if errorCode {
+			p.PutUtfString("errorCode", "100001")
+		}
+		return shumeiPush(t, p)
+	}
+	cat := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+
+	cases := []struct {
+		name, platform string
+		server         []byte
+		want           string
+	}{
+		{"the last good push", "0", cat(reply, push("first-pushed", false), push("pushed-shumei-id", false), push("refused", true), push("", false)), "pushed-shumei-id"},
+		{"no push: the ta's cached id", "0", reply, "cached-shumei-id"},
+		{"only refused pushes", "0", cat(reply, push("refused", true)), "cached-shumei-id"},
+		{"a push before the Login reply is not this Login's", "0", cat(push("before", false), reply), "cached-shumei-id"},
+		{"Android", "1", cat(reply, push("pushed-shumei-id", false)), "pushed-shumei-id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, reason := acceptedLogin(login(tc.platform), tc.server)
+			if cfg == nil {
+				t.Fatalf("acceptedLogin: %s", reason)
+			}
+			if cfg.ShumeiID != tc.want {
+				t.Errorf("shumeiId = %q, want %q", cfg.ShumeiID, tc.want)
+			}
+			if wantTa := map[string]string{"0": ta, "1": ""}[tc.platform]; cfg.Device.Ta != wantTa {
+				t.Errorf("platform %s: device ta = %q, want %q", tc.platform, cfg.Device.Ta, wantTa)
+			}
+		})
+	}
+	if cfg, _ := acceptedLogin(login("0"), reply); cfg == nil || strings.Join(capturedDeviceFields(cfg.Device), ",") != "phone_model,ta" {
+		t.Error("the summary should name phone_model and ta")
 	}
 }

@@ -1,13 +1,16 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"lastwar-client/internal/gsl"
 	"lastwar-client/internal/sfs"
 	"lastwar-client/internal/shumei"
@@ -596,6 +599,12 @@ type LoginParamsInput struct {
 	ShumeiBoxId string // anti-fraud device-fingerprint token, if a real one is known
 	AndroidID   string // Settings.Secure.ANDROID_ID (16 hex), ThinkingData's ta #device_id
 
+	// ShumeiID is the ShuMei id the server pushed to this device (push.shumei.id), which the
+	// client caches as LW_CacheShumeiDeviceId and reports as ta lw_shumei_id in every later Login
+	// (Net/Msgs/PushShumeiIdMessage.lua:14-18; Assembly-CSharp.decompiled.cs:59117-59125, 1.0.370).
+	// It is not the shumeiBoxId. "" is what a client sends before its first push.
+	ShumeiID string
+
 	// IOSMode switches PackageName/packageSign/Platform/pf/psh (and adds the
 	// iOS-only idfa/idfv/phone_native_screen fields) to match a real iOS
 	// client instead of the default Android identity. Confirmed live: an
@@ -760,9 +769,6 @@ func availOfTotal(avail, total float64) string {
 	return fmt.Sprintf("%.1f/%.1f", round(avail), round(total))
 }
 
-// BuildLoginParams builds the full ~50-field sfs.SFSObject for the base SFS zone login (dossier §05 /
-// §2.3). uid is empty on a brand-new device (the server assigns one back via GSL's
-// serverList[].gameUid, which the caller should pass in as gameUid once known).
 // thinkingDataCarriers is ThinkingData's own carrier name table, keyed by getSimOperator()
 // (cn/thinkingdata/android/j.java:51-65): mainland China operators only.
 var thinkingDataCarriers = map[string]string{
@@ -781,6 +787,101 @@ func thinkingDataCarrier(simOperator, simOperatorName string) string {
 	return simOperatorName
 }
 
+// taKey is one ta key a replayed capture takes from this Login (taRefresh).
+type taKey struct{ key, val string }
+
+// taRefresh lists the ta keys a replayed iOS capture takes from this Login instead of the
+// capture, each with the 1.0.370 client line that sets it (Assembly-CSharp.decompiled.cs). The
+// Login's ta is ThinkingData's preset properties followed by the game's super properties
+// (GetTaPresetProp, :59270-59279, sent at :83072). Every other key keeps the captured value.
+//   - #app_version: the ThinkingData preset app version, the build this Login claims.
+//   - lw_version, lw_res_version, lw_buildcode: GameEntry.Sdk.Version, Resource.GetResVersion()
+//     and Sdk.VersionCode, which LoginTracking writes after every Login (:59190-59201).
+//   - lw_device_id, lw_airKey, lw_shumei_id: SetDeviceIdSuperProperty writes them on entering
+//     check-version, before every Login (:9334, 59117-59125): GetDeviceUid() and
+//     GetDeviceUid_Transcoding(), the Login's own deviceId and airKey (:83092-83093), and the
+//     cached push.shumei.id value (PlayerPrefs LW_CacheShumeiDeviceId, :59119).
+//
+// An empty val keeps the captured value: this Login doesn't know it (no resVersion from
+// check-version, no shumeiId pushed yet), and the client's cache keeps the last one it had.
+func taRefresh(appVersion, versionCode, resVersion, deviceID, airKey, shumeiID string) []taKey {
+	return []taKey{
+		{"#app_version", appVersion},
+		{"lw_version", appVersion},
+		{"lw_res_version", resVersion},
+		{"lw_buildcode", versionCode},
+		{"lw_device_id", deviceID},
+		{"lw_airKey", airKey},
+		{"lw_shumei_id", shumeiID},
+	}
+}
+
+// replayTa returns the captured ta blob with each refresh key's value replaced, keeping the
+// captured key order and the raw bytes of every other value. A refresh key the capture lacks is
+// appended (a super property the client sets after the capture's Login). It fails when captured
+// is not one JSON object.
+func replayTa(captured string, refresh []taKey) (string, error) {
+	enc := func(s string) []byte {
+		var b bytes.Buffer
+		e := json.NewEncoder(&b)
+		e.SetEscapeHTML(false)
+		_ = e.Encode(s) // a string always encodes
+		return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
+	}
+	byKey := make(map[string]int, len(refresh))
+	for i, r := range refresh {
+		if r.val != "" {
+			byKey[r.key] = i
+		}
+	}
+	dec := json.NewDecoder(strings.NewReader(captured))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return "", errors.New("the captured ta is not a JSON object")
+	}
+	var out bytes.Buffer
+	out.WriteByte('{')
+	put := func(key string, val []byte) {
+		if out.Len() > 1 {
+			out.WriteByte(',')
+		}
+		out.Write(enc(key))
+		out.WriteByte(':')
+		out.Write(val)
+	}
+	seen := make(map[string]bool, len(byKey))
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return "", fmt.Errorf("the captured ta: %w", err)
+		}
+		key, _ := tok.(string) // an object's keys are always strings
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return "", fmt.Errorf("the captured ta: %w", err)
+		}
+		if i, ok := byKey[key]; ok {
+			raw, seen[key] = enc(refresh[i].val), true
+		}
+		put(key, raw)
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return "", errors.New("the captured ta is not a JSON object")
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return "", errors.New("the captured ta has data after its object")
+	}
+	for _, r := range refresh {
+		if _, ok := byKey[r.key]; ok && !seen[r.key] {
+			put(r.key, enc(r.val))
+		}
+	}
+	out.WriteByte('}')
+	return out.String(), nil
+}
+
+// BuildLoginParams builds the full ~50-field sfs.SFSObject for the base SFS zone login (dossier §05 /
+// §2.3). uid is empty on a brand-new device (the server assigns one back via GSL's
+// serverList[].gameUid, which the caller should pass in as gameUid once known).
 func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	now := time.Now().Unix()
 	cmdBaseTime := strconv.FormatInt(now, 10)
@@ -865,17 +966,18 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// likely ones. Every Android E005 this project recorded before also sent "{}", which the
 	// platform-binding reading in crossserver.go never separated out.
 	//
-	// LwDeviceID/LwShumeiID/LwAirKey were originally set from the same in.DeviceID/
-	// in.ShumeiBoxId/in.AirKey values used for the top-level request fields elsewhere in
-	// this function. That leaked those live secrets in cleartext: this whole blob gets
-	// JSON-marshaled and stored as a single opaque string under the "ta" key, and
-	// sfs.SFSObject.StringRedacted() only masks known-sensitive *keys* -- it has no way to see
-	// or sfs.Redact secrets embedded inside another field's string value. sfs.SensitiveSFSKeys now
-	// also lists "ta" itself (see sfsobject.go) as defense-in-depth, but the real fix is
-	// here: never put a live credential into a field that isn't itself a redacted key.
-	// These three fields are placeholders (empty string, matching this struct's existing
-	// pattern for telemetry we have no way to observe, e.g. Carrier/LwLine below); the server
-	// accepts them blank, and their keys stay in case some check depends on them existing.
+	// lw_device_id, lw_airKey and lw_shumei_id: before every Login the client sets them to its
+	// deviceId, its airKey and the shumeiId the server last pushed (SetDeviceIdSuperProperty,
+	// Assembly-CSharp.decompiled.cs:9334, 59117-59125, 1.0.370; see taRefresh). The iOS blob
+	// fills them that way (1.0.370 audit B15, the user's decision of 2026-11-19). They were blank
+	// because the raw blob once reached a log: ta is now itself a redacted key
+	// (sfs.SensitiveSFSKeys), and no code logs or stores the raw value. lw_shumei_id is never the
+	// shumeiBoxId. The Android blob keeps them blank: the same lines run on Android
+	// (AND-CS:59196-59204), but the decision covers the iOS identity.
+	var lwDeviceID, lwAirKey, lwShumeiID string
+	if in.IOSMode {
+		lwDeviceID, lwAirKey, lwShumeiID = in.DeviceID, in.AirKey, in.ShumeiID
+	}
 	blob := analyticsBlob{
 		OS: osName, Disk: blobDisk, DeviceID: blobDeviceID,
 		OSVersion: blobOSVersion, SystemLanguage: "en", BundleID: build.PackageName, Carrier: blobCarrier,
@@ -886,8 +988,8 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 		PdDl: 0, LwAb: "0", LwPlatform: storefrontPF(in.IOSMode),
 		LwGameSessionID: "00000000-0000-0000-0000-000000000000", LwFirstLaunch: false,
 		LwAllianceID: "00000000000000000000000000000000",
-		LwDeviceID:   "", LwDeviceLevel: 0, LwMainLevel: 0,
-		LwShumeiID: "", LwAirKey: "",
+		LwDeviceID:   lwDeviceID, LwDeviceLevel: 0, LwMainLevel: 0,
+		LwShumeiID: lwShumeiID, LwAirKey: lwAirKey,
 		LwVersion: lwVersion, LwPower: 0, LwZone: "APS" + in.ServerID,
 	}
 	// lw_zone repeats the zone, which DoCrossServerLogin accepts up to the full string cap; a blob
@@ -900,6 +1002,20 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	} else {
 		slog.Warn("ta: the analytics blob is too long to encode; sending {}, which an established account rejected with E005 (seen on Android)",
 			"len", len(b), "max", sfs.MaxUtfStringBytes, "zoneLen", len(in.ServerID))
+	}
+	// An iOS session captured from the real app replays that app's own ta, with the keys the client
+	// rewrites per build or per Login taken from this one (taRefresh). A captured blob this can't
+	// use leaves the one built above.
+	if dev.Ta != "" {
+		refresh := taRefresh(effectiveAppVersion, effectiveVersionCode, in.ResVersion, in.DeviceID, in.AirKey, in.ShumeiID)
+		switch replayed, err := replayTa(dev.Ta, refresh); {
+		case err != nil:
+			slog.Warn("ta: the session config's captured ta can't be replayed; sending the built blob. Recapture with cmd/pcap -session-out", "error", err)
+		case len(replayed) > sfs.MaxUtfStringBytes:
+			slog.Warn("ta: the replayed capture is too long to encode; sending the built blob", "len", len(replayed), "max", sfs.MaxUtfStringBytes)
+		default:
+			ta = replayed
+		}
 	}
 	p.PutUtfString("ta", ta)
 	// distinct_id and afuid are local SDK values a real Android install always has (AndroidInstall);

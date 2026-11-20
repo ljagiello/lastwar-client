@@ -313,7 +313,7 @@ func Run() {
 	if !*noConfig {
 		cfg, cfgSource = loadEffectiveConfig(*configPath)
 	}
-	var cfgAppVersion, cfgVersionCode string
+	var cfgAppVersion, cfgVersionCode, cfgShumeiID string
 	var cfgDevice auth.CapturedDevice
 	var cfgFeatures map[string]bool
 	var cfgDuelPolicy map[string]string
@@ -364,6 +364,7 @@ func Run() {
 		if deviceIDExplicitlyEmpty {
 			slog.Warn("-cs-deviceid was explicitly given as empty; not falling back to the session config's deviceId (pass a non-empty -cs-deviceid, or omit the flag entirely to use the config's value)")
 		}
+		cfgShumeiID = configShumeiID(cfg, *csDeviceID)
 		*csShumei, shumeiExplicitlyEmpty = mergeExplicitOrConfigString(*csShumei, csShumeiSetExplicitly, cfg.ShumeiBoxId)
 		if shumeiExplicitlyEmpty {
 			slog.Warn("-cs-shumei was explicitly given as empty; not falling back to the session config's shumeiBoxId (pass a non-empty -cs-shumei, or omit the flag entirely to use the config's value)")
@@ -421,7 +422,7 @@ func Run() {
 		o := crossServerTestOpts{
 			ip: *csIP, port: *csPort, zone: *csZone, gameUid: *csGameUid,
 			deviceID: *csDeviceID, shumeiBoxId: *csShumei, rt: *csRt, at: *csAt,
-			iosMode: *csIOS, appVersion: appVersion, versionCode: versionCode, device: cfgDevice,
+			iosMode: *csIOS, appVersion: appVersion, versionCode: versionCode, device: cfgDevice, shumeiID: cfgShumeiID,
 			features: cfgFeatures, duelPolicy: cfgDuelPolicy, runFeature: *runFeature, runAnyway: *runAnyway,
 			interactive: *interactive, handshake: *handshake,
 			collect: *collect, listBuildings: *listBuildings, configSavePath: cfgSource,
@@ -1209,6 +1210,7 @@ type crossServerTestOpts struct {
 	ip, zone, gameUid, deviceID, shumeiBoxId, rt, at, interactive string
 	appVersion, versionCode                                       string              // session config only; see SessionConfig.AppVersion
 	device                                                        auth.CapturedDevice // session config only; see SessionConfig.Device
+	shumeiID                                                      string              // session config only, for its own device; see SessionConfig.ShumeiID
 	features                                                      map[string]bool     // session config only; see SessionConfig.Features
 	duelPolicy                                                    map[string]string   // session config only; see SessionConfig.DuelPolicy
 	runFeature                                                    string              // -run: run just this feature, then exit
@@ -1806,7 +1808,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 	params := auth.CrossServerLoginParams{
 		IP: ip, Port: port, Zone: zone, GameUid: gameUid,
 		DeviceID: deviceID, AirKey: airKey,
-		AccessTok: accessTok, ShumeiBoxId: shumeiBoxId,
+		AccessTok: accessTok, ShumeiBoxId: shumeiBoxId, ShumeiID: o.shumeiID,
 		AndroidID: androidID,
 		Handshake: o.handshake, IOSMode: o.iosMode,
 		AppVersion: o.appVersion, VersionCode: o.versionCode,
@@ -1816,9 +1818,16 @@ func runCrossServerTest(o crossServerTestOpts) {
 		Android:    androidInstallFor(ident.Android, shumeiInstall, deviceID),
 		DialGame:   o.dialGame,
 	}
-	if o.iosMode && o.device.PhoneModel == "" {
+	switch {
+	case !o.iosMode:
+	case o.device.PhoneModel == "":
 		slog.Warn("the session config has no captured device (phone_model, osVersion, mt, idfv, ...), so the iOS Login sends this client's placeholders, " +
 			"phone_model \"GoClient\" among them; recapture the real app with cmd/pcap -session-out to replay its own")
+	case o.device.Ta == "":
+		// A device recorded before -session-out kept the ta: the Login describes the real phone at
+		// top level and this client's placeholder device ("unknown", "0.0") inside ta.
+		slog.Warn("the session config's captured device has no ta, so the iOS Login sends this client's placeholder ta (#device_model \"unknown\") beside the captured device; " +
+			"recapture the real app with cmd/pcap -session-out to replay its own")
 	}
 	result, err := auth.DoCrossServerLogin(params)
 	// tokenRefused: a Login of this run got E011, so the refresh below is due even when the Login
@@ -1951,7 +1960,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 						ShumeiBoxId: o.shumeiBoxId, AccessToken: result.AccessTok,
 						AccessTokenTime: accessTokTime, RefreshToken: refreshTok, RefreshTokenTime: refreshTokTime,
 						IOSMode: o.iosMode, AppVersion: o.appVersion, VersionCode: o.versionCode,
-						Device:   o.device,
+						Device: o.device, ShumeiID: o.shumeiID,
 						Features: o.features, DuelPolicy: o.duelPolicy, ShumeiInstall: savedInstall,
 					}
 					if err := SaveSessionConfig(updated, o.configSavePath); err != nil {

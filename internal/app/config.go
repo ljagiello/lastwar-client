@@ -40,6 +40,13 @@ type SessionConfig struct {
 	// idfv, ...; auth.CapturedDevice). cmd/pcap -session-out records it from an iOS capture, and an
 	// iOS-mode Login replays it instead of placeholders. Ignored in Android mode.
 	Device auth.CapturedDevice `json:"device,omitzero"`
+	// ShumeiID is the ShuMei id the server pushed to this device (push.shumei.id). The client keeps
+	// it (PlayerPrefs LW_CacheShumeiDeviceId, written by Net/Msgs/PushShumeiIdMessage.lua:14-18
+	// through SettingManager.SetString, Assembly-CSharp.decompiled.cs:79563-79566) and reports it as
+	// ta lw_shumei_id in every later Login (:59117-59125). cmd/pcap -session-out records it from the
+	// capture. It belongs to DeviceID: a run under another deviceId doesn't send it. It is not the
+	// shumeiBoxId.
+	ShumeiID string `json:"shumeiId,omitempty"`
 	// RefreshToken (with GSL's at.time/rt.time, unix seconds of issue) is present for the client's
 	// own device (-own-device-session), or after a -cs-rt run. As in the real client, a run refreshes
 	// with it (GSL opt=refresh) when the access token is missing or 30 days old, and once after a
@@ -246,6 +253,48 @@ func configRefreshToken(cfg *SessionConfig, runDeviceID string) (string, int64) 
 		return "", 0
 	}
 	return cfg.RefreshToken, cfg.RefreshTokenTime
+}
+
+// configShumeiID returns cfg's shumeiId for a run under runDeviceID (the deviceId after the
+// -cs-deviceid merge): the server pushed it to the config's device, so a run under another one
+// sends none, as configRefreshToken does for the refresh token. A config without a deviceId names
+// no device, so its shumeiId goes nowhere (the run's deviceId is then the identity's own).
+func configShumeiID(cfg *SessionConfig, runDeviceID string) string {
+	if cfg == nil || cfg.DeviceID == "" || runDeviceID != cfg.DeviceID {
+		return ""
+	}
+	return cfg.ShumeiID
+}
+
+// saveShumeiID stores the shumeiId the server pushed to deviceID (push.shumei.id) in the session
+// config at path, re-reading the file first so every other field stays as it is on disk, as the
+// client caches every non-empty one it gets (Net/Msgs/PushShumeiIdMessage.lua:14-18). It belongs
+// to the device it was pushed to, so it isn't saved into a config made for another one (the owner
+// rule saveSessionTokens uses), and an empty or unchanged one writes nothing. A failure is only
+// logged: the next run sends the old one, as a client whose cache write failed would.
+func saveShumeiID(path, deviceID, shumeiID string) {
+	if path == "" || shumeiID == "" {
+		return
+	}
+	cfg, err := LoadSessionConfig(path)
+	if err != nil {
+		slog.Warn("could not re-read the session config to save the pushed shumeiId", "path", path, "error", err)
+		return
+	}
+	if cfg.DeviceID != deviceID {
+		slog.Warn("not saving the pushed shumeiId; the session config holds another device's", "path", path,
+			"configDeviceIdLen", len(cfg.DeviceID), "runDeviceIdLen", len(deviceID))
+		return
+	}
+	if cfg.ShumeiID == shumeiID {
+		return
+	}
+	cfg.ShumeiID = shumeiID
+	if err := SaveSessionConfig(cfg, path); err != nil {
+		slog.Warn("could not save the pushed shumeiId to the session config", "path", path, "error", err)
+		return
+	}
+	slog.Info("saved the pushed shumeiId to the session config", "path", path, "shumeiIdLen", len(shumeiID))
 }
 
 // mergeDeviceIDAndRefreshToken merges -cs-deviceid with cfg's deviceId (mergeExplicitOrConfigString)
