@@ -2,6 +2,9 @@ package game
 
 import (
 	"log/slog"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"lastwar-client/internal/session"
@@ -28,8 +31,11 @@ import (
 // card_id is table data, not a field of the init entry: ParseActivityData copies no `para` from the
 // server (ActivityInfoData.lua:124-192). FetchActivityConfigData takes table activity's `para`
 // and, for type 228, swaps in condition_giftbag's card once the activity's startTime falls on or
-// after that server date (ActivityInfoData.lua:200-222, 351-357). seasonWeekCards holds those
-// columns. An open 228 activity missing from it is skipped and logged.
+// after that server date (GetConditionGiftbagCardId, ActivityInfoData.lua:200-222, 351-357). Both
+// cells come from the generated activity table (Activity.Para, Activity.ConditionGiftbag), so a
+// new card activity such as Season 7's 1201008 (para 10014, no condition_giftbag, so no swap)
+// needs no hand-copied row (MASTER B19). A card id that is not above 0 is skipped, as the login
+// request is (SeasonDataManager.lua:251-252).
 //
 // No error code is registered as benign: the first replies are logged and an error stops that
 // claim.
@@ -40,28 +46,9 @@ const (
 	seasonWeekCardFreeCmd  = "lw.season.week.card.free.reward"
 )
 
-// seasonWeekCardRow is the part of a type-228 row of table activity the card id comes from: para,
-// and condition_giftbag "y-m-d|card".
-type seasonWeekCardRow struct {
-	card     int32     // para
-	swapOn   time.Time // condition_giftbag's date, as UTC midnight of that calendar day
-	swapCard int32     // condition_giftbag's card
-}
-
-// seasonWeekCardSwapDate is the condition_giftbag date of every type-228 row ("2026-7-29").
-var seasonWeekCardSwapDate = time.Date(2026, time.July, 29, 0, 0, 0, 0, time.UTC)
-
-// seasonWeekCards are the six type-228 rows of table activity (tables 39879), seasons 1 to 6.
-// Every card they name has a season_weekcard row (10001-10013), the client's last gate
-// (SeasonDataManager.lua:251-253).
-var seasonWeekCards = map[int32]seasonWeekCardRow{
-	1000021: {10002, seasonWeekCardSwapDate, 10008},
-	1000043: {10003, seasonWeekCardSwapDate, 10009},
-	1000068: {10004, seasonWeekCardSwapDate, 10010},
-	1200008: {10005, seasonWeekCardSwapDate, 10011},
-	1200052: {10006, seasonWeekCardSwapDate, 10012},
-	1200111: {10007, seasonWeekCardSwapDate, 10013},
-}
+// seasonWeekCardGiftbagRE is GetConditionGiftbagCardId's pattern for condition_giftbag:
+// "y-m-d|card" (ActivityInfoData.lua:204).
+var seasonWeekCardGiftbagRE = regexp.MustCompile(`^\s*(\d+)-(\d+)-(\d+)\s*\|\s*(\d+)\s*$`)
 
 func init() {
 	registerFeature(Feature{
@@ -83,19 +70,27 @@ func seasonServerOffset(dayStart time.Time) time.Duration {
 	return -tod
 }
 
-// seasonWeekCardID is the card id the client derives for a (GetConditionGiftbagCardId): the
-// swapped card when a's startTime is on or after the swap date in server time, else para. ok is
-// false when seasonWeekCards lacks a.
+// seasonWeekCardID is the card id the client derives for a: table activity's para, or
+// condition_giftbag's card when a's startTime (above 0) falls on or after its date in server time
+// (GetConditionGiftbagCardId, ActivityInfoData.lua:200-222, 351-357). An empty or unparsable
+// condition_giftbag means no swap. ok is false unless table activity has a as a type-228 row whose
+// card id is above 0.
 func seasonWeekCardID(a Activity, dayStart time.Time) (int32, bool) {
-	row, ok := seasonWeekCards[a.ID]
-	if !ok {
+	row, ok := activityRowOf(a.ID)
+	if !ok || row.typ != actTypeSeasonPeriodicCard {
 		return 0, false
 	}
-	start := a.StartTime()
-	if start > 0 && !time.UnixMilli(start).UTC().Add(seasonServerOffset(dayStart)).Before(row.swapOn) {
-		return row.swapCard, true
+	card, _ := strconv.ParseInt(strings.TrimSpace(row.para), 10, 32)
+	if m := seasonWeekCardGiftbagRE.FindStringSubmatch(row.conditionGiftbag); m != nil && a.StartTime() > 0 {
+		y, _ := strconv.Atoi(m[1])
+		mo, _ := strconv.Atoi(m[2])
+		d, _ := strconv.Atoi(m[3])
+		sy, sm, sd := time.UnixMilli(a.StartTime()).UTC().Add(seasonServerOffset(dayStart)).Date()
+		if y < sy || y == sy && (mo < int(sm) || mo == int(sm) && d <= sd) {
+			card, _ = strconv.ParseInt(m[4], 10, 32)
+		}
 	}
-	return row.card, true
+	return int32(card), card > 0
 }
 
 func runSeasonWeekCard(conn *session.GameConn, in *Init) error {
@@ -120,8 +115,8 @@ func runSeasonWeekCard(conn *session.GameConn, in *Init) error {
 	a := open[0] // GetOneOpenActivityByType
 	cardID, ok := seasonWeekCardID(a, dayStart)
 	if !ok {
-		slog.Info(seasonWeekCardFeature+": activity is not in the season week card table; skipping until it is added",
-			"activity", a.ID, "tableVersion", activityTableVersion)
+		slog.Info(seasonWeekCardFeature+": activity has no card id in table activity; skipping",
+			"activity", a.ID, "para", a.Para(), "tableVersion", activityTableVersion)
 		return nil
 	}
 	b := &evBatch{conn: conn}

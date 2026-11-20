@@ -2,6 +2,7 @@ package game
 
 import (
 	"fmt"
+	"slices"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -12,10 +13,17 @@ import (
 //
 //   - City output (S5, S6): lw.season.alliance.city.occupy.info {} -> rewardInfo[{leftNum}];
 //     batch.get.city.output {} when any leftNum > 0 (UILWSeasonCityOccupyListS6View.lua:214-221).
-//   - Stronghold output (S2-S6): lw.season.city.stronghold.occupy.info {} -> rewardInfo[{id,
+//   - Stronghold output (S2-S7): lw.season.city.stronghold.occupy.info {} -> rewardInfo[{id,
 //     serverId, leftNum}]; get.stronghold.output {serverId: Int, strongholdId: Int} per entry with
-//     leftNum > 0, the S5/S6 per-item path (S5Item.lua:44-50). Its handler treats
-//     season_s2_tips_004 as "refresh the list" (CollectStrongholdResourceMessage.lua:12-15).
+//     leftNum > 0, the per-item path. The S5/S6 items send the entry's serverId
+//     (UILWSeasonCityOccupyListS5Item.lua:50, S6Item.lua:50); the S2, S3, S4 and S7 items send the
+//     player's source server (UILWSeasonCityOccupyListS2Item.lua:40, S3Item.lua:40, S4Item.lua:41,
+//     S7Item.lua:40, LuaEntry.Player:GetSourceServerId()), so in those seasons an entry without
+//     serverId is claimed for the source server rather than skipped (MASTER B63, the minimal
+//     variant). Their views' collect-all, batch.get.stronghold.output {serverId: Int}
+//     (S7View.lua:452; BatchCollectStrongholdResourceMessage.lua:6), is not sent: it is a command
+//     this ON feature has never sent. The handler treats season_s2_tips_004 as "refresh the list"
+//     (CollectStrongholdResourceMessage.lua:12-15).
 //   - City attachments (S1): city.attachment.list {} -> rewardList[{leftNum}];
 //     city.attachment.rec.all.output {} when they sum above 0 and the SeasonFarmer activity (239)
 //     runs (SeasonFarmerManager.lua:67-117).
@@ -43,10 +51,14 @@ const (
 	seasonStrongholdRefresh = "season_s2_tips_004"
 )
 
+// seasonStrongholdSourceServerSeasons are the seasons whose occupy-list items claim a stronghold
+// for the player's source server, not the entry's (see above).
+var seasonStrongholdSourceServerSeasons = []int64{2, 3, 4, 7}
+
 func init() {
 	registerFeature(Feature{
 		Name:    "season-output",
-		Summary: "in season: collect alliance city/stronghold output, S1 attachments, S6 faction production; static-only",
+		Summary: "in season: collect alliance city (S5/S6) and stronghold (S2-S7) output, S1 attachments, S6 faction production; static-only",
 		Run:     runSeasonOutput,
 	})
 	session.RegisterBenignErrorCode(evAlreadyExecuted, seasonCityOutputCmd, seasonStrongholdCmd,
@@ -76,11 +88,15 @@ func runSeasonOutput(conn *session.GameConn, in *Init) error {
 		}
 	}
 	if inAlliance && season >= 2 && !b.dead {
+		source, sourceOK := ghostReconSourceServer(in)
 		if msg := b.send("season stronghold info", seasonStrongholdInfoCmd, sfs.NewSFSObject()); msg != nil {
 			for _, r := range evObjects(msg.Params, "rewardInfo") {
 				left, _ := evNum(r, "leftNum")
 				server, ok1 := evNum(r, "serverId")
 				id, ok2 := evNum(r, "id")
+				if !ok1 && sourceOK && slices.Contains(seasonStrongholdSourceServerSeasons, season) {
+					server, ok1 = source, true
+				}
 				if left <= 0 || !ok1 || !ok2 || b.dead {
 					continue
 				}
