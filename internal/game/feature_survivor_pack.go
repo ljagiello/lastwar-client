@@ -240,7 +240,9 @@ func survivorItemCount(in *Init, id string) int64 {
 		if got != id {
 			continue
 		}
-		if c, ok := claimFirstInt(it, "count", "num", "itemLeftCnt"); ok {
+		// ItemInfo:UpdateInfo applies count, num, then itemLeftCnt: the last present one is the
+		// stack's count (ItemInfo.lua:52-66).
+		if c, ok := claimFirstInt(it, "itemLeftCnt", "num", "count"); ok {
 			n = max(n, c)
 		}
 	}
