@@ -84,6 +84,96 @@ func TestExclusionSet(t *testing.T) {
 	}
 }
 
+// TestDeviceDataExclusions checks a cached config's exclusions gate the slots
+// the way the collector's checks of a85's set do (l111l1111llIl.java): by a
+// group name or the slot's own key; one name of a coupled gate drops its whole
+// group; a primitive slot goes out as its zero. a85 lists the names either way.
+func TestDeviceDataExclusions(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef_n3d"
+	withConfig := func(excluded string) map[string]any {
+		t.Helper()
+		d := testDevice()
+		d.WiFi = &WiFi{SSID: "Home", BSSID: "aa:bb:cc:dd:ee:ff", IP: "192.168.1.50"}
+		d.Install.CloudConfMD5 = strings.Repeat("ab", 16)
+		d.Install.CloudConfExcluded = excluded
+		return decodeDeviceData(t, mustDeviceData(t, id, d))
+	}
+
+	// A config that turns nothing off fills every slot these cases gate.
+	all := withConfig("")
+	gatedHere := []string{"a19", "a30", "a31", "a72", "a45", "a131", "a132", "a143", "a34", "a32", "a56", "a57", "a69", "a70", "a71", "a85"}
+	for _, key := range gatedHere {
+		if _, ok := all[key]; !ok {
+			t.Fatalf("%s is absent with nothing turned off; the cases below need it filled", key)
+		}
+	}
+
+	// Wi-Fi's ssid and bssid groups and a72's own key: a85 lists the three
+	// names and the slots they gate are left out; wifiip isn't off, so a31 stays.
+	m := withConfig("ssid,bssid,a72")
+	for _, key := range []string{"a19", "a30", "a72"} {
+		if v, ok := m[key]; ok {
+			t.Errorf("%s = %v with ssid,bssid,a72 turned off, want it absent", key, v)
+		}
+	}
+	if m["a31"] != "192.168.1.50" {
+		t.Errorf("a31 = %v, want it kept: wifiip isn't turned off", m["a31"])
+	}
+	if want := []any{"input", "bssid", "protect", "ssid", "a72"}; !reflect.DeepEqual(m["a85"], want) {
+		t.Errorf("a85 = %v, want %v", m["a85"], want)
+	}
+
+	for _, c := range []struct {
+		excluded      string
+		absent, kept  []string
+		zero, nonzero []string
+	}{
+		// One key of a coupled gate turns off the whole group.
+		{excluded: "a131", absent: []string{"a45", "a131", "a132"}},
+		{excluded: "operator", absent: []string{"a45", "a131", "a132"}},
+		{excluded: "a33", absent: []string{"a143", "a34"}, kept: []string{"a32"}},
+		{excluded: "cpuinfo", absent: []string{"a143", "a34"}, kept: []string{"a32"}},
+		{excluded: "a57", absent: []string{"a56", "a57"}},
+		{excluded: "a70", absent: []string{"a69", "a70", "a71"}},
+		// A group name inside the operator gate turns off only its own slot.
+		{excluded: "simCountryISO", absent: []string{"a131"}, kept: []string{"a45", "a132"}},
+		{excluded: "networkCountryIso", absent: []string{"a132"}, kept: []string{"a45", "a131"}},
+		{excluded: "wifiip,network,sensor,launcherInfo,drmId,adid,virtualUid", absent: []string{"a31", "a44", "a47", "a154", "a84", "a24", "a60"}, kept: []string{"a19", "a30"}},
+		// a85 is gated by its own key; a primitive goes out as its zero.
+		{excluded: "a85,a170,a174", absent: []string{"a85"}, zero: []string{"a170", "a174"}, nonzero: []string{"a171"}},
+	} {
+		m := withConfig(c.excluded)
+		for _, key := range c.absent {
+			if v, ok := m[key]; ok {
+				t.Errorf("%s off: %s = %v, want it absent", c.excluded, key, v)
+			}
+		}
+		for _, key := range c.kept {
+			if _, ok := m[key]; !ok {
+				t.Errorf("%s off: %s is absent, want it kept", c.excluded, key)
+			}
+		}
+		for _, key := range c.zero {
+			if got := fmt.Sprint(m[key]); got != "0" {
+				t.Errorf("%s off: %s = %s, want the primitive's 0", c.excluded, key, got)
+			}
+		}
+		for _, key := range c.nonzero {
+			if jsonInt(t, m[key]) == 0 {
+				t.Errorf("%s off: %s = 0, want it filled", c.excluded, key)
+			}
+		}
+	}
+
+	// The built-in config's gps and tel gate no slot: only a85 differs.
+	builtin := withConfig("gps,tel")
+	delete(builtin, "a85")
+	delete(all, "a85")
+	if !reflect.DeepEqual(builtin, all) {
+		t.Errorf("gps,tel off changed a slot besides a85:\n%v\nwant\n%v", builtin, all)
+	}
+}
+
 // TestCloudConfRequest pins the request body: JSONObject's insertion order,
 // the built-in config's md5 and an empty bb on a first start, and pri wrapping
 // the reply key.

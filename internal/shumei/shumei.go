@@ -344,7 +344,9 @@ func protect(pub *rsa.PublicKey, innerJSON string) (data, ep, tn string, err err
 // default (l11l111l1lll), which excludes "gps" and "tel". So a fresh install
 // sends {"input", "tel", "gps", "protect"}, in Java's HashSet order. Register
 // fetches the cloud config and caches it in the install, so a later start
-// reports the server's exclusions.
+// reports the server's exclusions. The collector checks that same set before
+// it fills each slot, so deviceData leaves out every slot the set gates
+// (gateSlots); none of the four names above gates a slot it fills.
 //
 // a88 is left as it was: the SDK reports the class names of the "location" and
 // "phone" service binders (l1111l111111Il.java:389-403), whose runtime value is
@@ -560,7 +562,8 @@ func deviceData(deviceID string, d Device) (string, error) {
 	m["a133"] = d.CollectTime.Milliseconds()
 	m["a38"] = d.AppVersion
 	m["a90"] = TargetSDKVersion
-	m["a85"] = exclusionSet(in.cloudExcluded())
+	excluded := exclusionSet(in.cloudExcluded())
+	m["a85"] = excluded
 	m["a56"], m["a57"] = appCertSubject, appCertHash
 
 	// The device-specific half, from the catalog entry this deviceId selects.
@@ -622,6 +625,8 @@ func deviceData(deviceID string, d Device) (string, error) {
 		}
 		m["a31"] = w.IP
 	}
+	// The set a85 reports is the one the collector checks before each slot.
+	gateSlots(m, excluded)
 
 	for k, v := range m {
 		if isEmpty(v) {

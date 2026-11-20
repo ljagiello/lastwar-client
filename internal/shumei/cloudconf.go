@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -257,6 +258,82 @@ func javaTrue(v json.RawMessage) bool {
 func exclusionSet(cloud []string) []string {
 	merged := append(javaHashSetOrder(cloud), javaHashSetOrder(notCollect)...)
 	return javaHashSetOrder(merged)
+}
+
+// slotGates are the collector's gates (l111l1111llIl.java) that turn a slot
+// off under a group name, or turn several slots off together. Every gate also
+// checks each slot's own aNN key, which gateSlots does without a table. Only
+// the gates of slots deviceData fills are listed. The other names a config or
+// notCollect may hold (gps, tel, protect among them) gate none of those slots.
+var slotGates = []struct{ names, slots []string }{
+	{[]string{"oaid"}, []string{"a103"}},                                                 // :64
+	{[]string{"drmId"}, []string{"a84"}},                                                 // :69
+	{[]string{"xpApp"}, []string{"a102"}},                                                // :87
+	{[]string{"hookJava"}, []string{"a107"}},                                             // :90
+	{[]string{"bssid"}, []string{"a19"}},                                                 // :93
+	{[]string{"ssid"}, []string{"a30"}},                                                  // :96
+	{[]string{"wifiip"}, []string{"a31"}},                                                // :99
+	{[]string{"network"}, []string{"a44"}},                                               // :102
+	{[]string{"battery"}, []string{"a72"}},                                               // :106
+	{[]string{"oaidCheck", "a103"}, []string{"a162"}},                                    // :136
+	{[]string{"operator", "a45", "a131", "a132"}, []string{"a45", "a131", "a132"}},       // :300-315
+	{[]string{"simCountryISO"}, []string{"a131"}},                                        // :306
+	{[]string{"networkCountryIso"}, []string{"a132"}},                                    // :311
+	{[]string{"adid"}, []string{"a24"}},                                                  // :322
+	{[]string{"cpuinfo", "a33", "a143", "a34"}, []string{"a33", "a143", "a34"}},          // :337-342
+	{[]string{"sensor"}, []string{"a47"}},                                                // :385
+	{[]string{"a56", "a57"}, []string{"a56", "a57"}},                                     // :395-398
+	{[]string{"a69", "a70", "a71"}, []string{"a69", "a70", "a71"}},                       // :411-415
+	{[]string{"locationCls"}, []string{"a116"}},                                          // :443
+	{[]string{"launcherInfo"}, []string{"a154"}},                                         // :513
+	{[]string{"virtualUid"}, []string{"a60"}},                                            // :775
+	{[]string{"sysEnv"}, []string{"a115"}},                                               // :798
+	{[]string{"screenRecord", "a141", "a156", "a157"}, []string{"a141", "a156", "a157"}}, // :837-844
+}
+
+// primitiveSlots are the slots the SDK's data holder (l11l1111lIIl.java)
+// declares as a primitive int, long or boolean, with that zero. The serializer
+// drops only null and empty strings, collections and maps
+// (l1l1l11Ill.java:231-254, 633-647), so a gated primitive still goes out, as
+// its zero.
+var primitiveSlots = map[string]any{
+	"a113": 0, "a117": false, "a121": 0, "a127": 0, "a130": 0, "a133": 0,
+	"a135": 0, "a139": 0, "a141": 0, "a142": 0, "a155": 0, "a157": 0,
+	"a160": 0, "a161": 0, "a164": 0, "a165": 0, "a167": 0, "a168": 0,
+	"a170": 0, "a171": 0, "a173": 0, "a174": 0,
+}
+
+// gateSlots applies the exclusion set (a85) to the filled slots m the way the
+// collector does: it checks the same set it reports (l111l1111llIl.java:
+// 224-253) before filling each slot, by the slot's own key or by a group name
+// (slotGates). A gated slot is dropped, or sent as its zero when the SDK holds
+// it in a primitive.
+func gateSlots(m map[string]any, set []string) {
+	off := make(map[string]bool, len(set))
+	for _, name := range set {
+		off[name] = true
+	}
+	var gated []string
+	for slot := range m {
+		if off[slot] {
+			gated = append(gated, slot)
+		}
+	}
+	for _, g := range slotGates {
+		if slices.ContainsFunc(g.names, func(name string) bool { return off[name] }) {
+			gated = append(gated, g.slots...)
+		}
+	}
+	for _, slot := range gated {
+		if _, filled := m[slot]; !filled {
+			continue
+		}
+		if zero, ok := primitiveSlots[slot]; ok {
+			m[slot] = zero
+		} else {
+			delete(m, slot)
+		}
+	}
 }
 
 // javaHashSetOrder returns the distinct strings of insertion as a new

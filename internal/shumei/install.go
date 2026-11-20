@@ -77,7 +77,8 @@ type Install struct {
 	// cached from its last /v3/cloudconf reply ("cloudms.conf" prefs,
 	// l11l111l1Il.java): the md5 of its text, which the next request sends
 	// back, and the names its "sensitive" switches turn off, comma-separated
-	// in document order, which join notCollect in a85. An empty CloudConfMD5
+	// in document order, which join notCollect in a85 and turn off the slots
+	// they gate (gateSlots). An empty CloudConfMD5
 	// means nothing is cached, so the SDK's built-in config is in force.
 	CloudConfMD5      string `json:"cloudConfMd5,omitempty"`
 	CloudConfExcluded string `json:"cloudConfExcluded,omitempty"`
