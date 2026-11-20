@@ -3,6 +3,7 @@ package game
 import (
 	"fmt"
 	"log/slog"
+	"math"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -23,7 +24,8 @@ import (
 //
 // The features, one per game, each with a -plan twin:
 //
-//   - season-dig: the S3 Archaeologist vaults, activity type 241 (id 1000070). The client sends
+//   - season-dig: the Archaeologist vaults, activity type 241 (1000070 in S3, 1201010 in S7, map
+//     group 7000: maps 17001-17062, tables 40413). The client sends
 //     season.dig.activity.info {} once the activity is open (ActivityListDataManager.lua:517-521,
 //     DiggingDataManager.lua:24-34), which returns mapList[{uuid, mapConfigId, startTime, endTime,
 //     rewardState}]. The client also requires the season map type to be Mummy
@@ -43,9 +45,9 @@ import (
 //     activity, which the client ignores (AllianceBossActInfoMessage.lua:10-14).
 //
 // A vault opens only between startTime and endTime (DiggingInfoItem.lua:129-146,
-// OffSeasonDiggingInfoItem.lua:135-152). mapConfigId decides the vault kind from
-// lw_season_digging_game.type: the season's types 1 and 3 are single-player vaults
-// (DiggingInfoData.lua:25-32), and types 2, 10 and 11 are alliance vaults.
+// OffSeasonDiggingInfoItem.lua:135-152). mapConfigId decides the layout and the vault kind from its
+// lw_season_digging_game row (digVaultMapOf): the season's types 1 and 3 are single-player vaults
+// (DiggingInfoData.lua:30-34), and types 2, 10 and 11 are alliance vaults.
 //
 // Alliance vaults. Each member opens one stone, for free: OpenBrick checks only rewardState == 0
 // and no item (DiggingDataManager.lua:203-209, OffSeasonDiggingDataManager.lua:159-173,
@@ -99,34 +101,38 @@ const (
 	digVaultMaxMaps  = 50
 )
 
-// digVaultMap is a vault layout from lw_season_digging_game (table 39432).
+// digVaultMap is a vault layout: the num_width x num_height grid of its lw_season_digging_game row
+// and whether the row is an alliance vault.
 type digVaultMap struct {
 	alliance      bool
 	width, height int64
 }
 
-// digVaultMapOf returns the layout of mapConfigId, for the map groups these games use: season
-// 1000 (type 1), 1001 (type 2) and 1002 (type 3), off-season 1501 (type 10) and plague boss 1601
-// (type 11).
+// digVaultMapOf returns the layout of mapConfigId from its lw_season_digging_game row (digLevels,
+// dig_tables_gen.go), as the client reads any mapConfigId the server sends from the table
+// (DiggingDataTemplateManager.lua:12-28) and takes the vault kind from the row's type
+// (DiggingInfoData.lua:30-34). Types 2 (season, groups 1001 and 7000's 17043-17052), 10
+// (off-season) and 11 (plague boss) are alliance vaults; 1 and 3 are single-player vaults
+// (DiggingInfoData turns every type >= 3 of the season game into SeasonDigGameType.Single). The
+// table's other types are the treasure-digs boards (5-8), which no vault list carries: ok is false
+// for them and for an id the table lacks.
 func digVaultMapOf(id int64) (digVaultMap, bool) {
-	switch {
-	case id >= 10001 && id <= 10042, id >= 10053 && id <= 10062:
-		return digVaultMap{alliance: false, width: 4, height: 7}, true
-	case id >= 10043 && id <= 10052, id >= 15001 && id <= 15010, id >= 16001 && id <= 16010:
-		return digVaultMap{alliance: true, width: 10, height: 12}, true
+	if id <= 0 || id > math.MaxInt32 {
+		return digVaultMap{}, false
 	}
-	return digVaultMap{}, false
-}
-
-// digVaultBlockSize is lw_season_block size_width x size_height (table 39432) for the relics of
-// the alliance vaults: 10011-10020 (season), 60011-60020 (off-season), 70001-70010 (plague boss).
-var digVaultBlockSize = map[int64][2]int64{
-	10011: {2, 2}, 10012: {1, 2}, 10013: {1, 1}, 10014: {4, 1}, 10015: {3, 2},
-	10016: {1, 4}, 10017: {2, 3}, 10018: {3, 3}, 10019: {3, 4}, 10020: {3, 4},
-	60011: {2, 2}, 60012: {1, 2}, 60013: {1, 1}, 60014: {4, 1}, 60015: {3, 2},
-	60016: {1, 4}, 60017: {2, 3}, 60018: {3, 3}, 60019: {3, 4}, 60020: {3, 4},
-	70001: {1, 1}, 70002: {1, 2}, 70003: {2, 2}, 70004: {1, 4}, 70005: {4, 1},
-	70006: {3, 2}, 70007: {2, 3}, 70008: {3, 3}, 70009: {3, 4}, 70010: {3, 4},
+	l, ok := digLevels[int32(id)]
+	if !ok {
+		return digVaultMap{}, false
+	}
+	m := digVaultMap{width: int64(l.w), height: int64(l.h)}
+	switch l.typ {
+	case 1, 3:
+	case 2, 10, 11:
+		m.alliance = true
+	default:
+		return digVaultMap{}, false
+	}
+	return m, true
 }
 
 // digVaultGame is one vault game's commands.
@@ -195,18 +201,21 @@ func parseDigVault(reply *sfs.SFSObject) (*digVault, error) {
 	return v, nil
 }
 
-// cells is a relic's footprint on the grid (GetBrickListByBlock, DiggingDataManager.lua:116-133);
-// nil for a relic of unknown size.
+// cells is a relic's footprint on the grid (GetBrickListByBlock, DiggingDataManager.lua:116-133),
+// its size from lw_season_block (digBlockSizes, dig_tables_gen.go); nil for a relic of unknown size.
 func (v *digVault) cells(b digVaultBlock) []int64 {
-	size, ok := digVaultBlockSize[b.bid]
-	if !ok || b.pos < 1 {
+	if b.bid <= 0 || b.bid > math.MaxInt32 || b.pos < 1 || v.layout.width <= 0 {
+		return nil
+	}
+	size, ok := digBlockSizes[int32(b.bid)]
+	if !ok {
 		return nil
 	}
 	w := v.layout.width
 	x, y := (b.pos-1)%w, (b.pos-1)/w
 	var out []int64
-	for j := y; j < y+size[1] && j < v.layout.height; j++ {
-		for i := x; i < x+size[0] && i < w; i++ {
+	for j := y; j < y+int64(size.h) && j < v.layout.height; j++ {
+		for i := x; i < x+int64(size.w) && i < w; i++ {
 			out = append(out, j*w+i+1)
 		}
 	}
@@ -339,7 +348,7 @@ func init() {
 		name, summary string
 		run           func(*session.GameConn, *Init, bool) error
 	}{
-		{"season-dig", "OPT-IN: S3 Archaeologist vaults: open the free alliance-vault stone and claim alliance-relic " +
+		{"season-dig", "OPT-IN: Archaeologist vaults (S3, S7): open the free alliance-vault stone and claim alliance-relic " +
 			"and personal-vault rewards (never spends hammers); static-only", runSeasonDigs},
 		{"offseason-dig", "OPT-IN: off-season Street Rush alliance vaults: open the free stone and claim the relic reward; static-only",
 			runOffSeasonDigs},
@@ -515,7 +524,15 @@ func (g *digVaultGame) process(r *digsRun, l digVaultListed, me string, strictEn
 		slog.Info(r.feature+": vault outside its open window", "uuid", l.uuid)
 		return
 	}
-	if m, ok := digVaultMapOf(l.mapConfigID); ok && !m.alliance {
+	m, known := digVaultMapOf(l.mapConfigID)
+	if !known && g == seasonDigGame {
+		// The client would send season.dig.game.info with type 0 for a map its table lacks
+		// (DiggingInfoData.lua:30-34); this sends no request with a guessed type.
+		slog.Warn(r.feature+": listed vault map is not a vault row of lw_season_digging_game; skipped until the table is regenerated",
+			"uuid", l.uuid, "mapConfigId", l.mapConfigID)
+		return
+	}
+	if known && !m.alliance {
 		g.personal(r, l, me)
 		return
 	}

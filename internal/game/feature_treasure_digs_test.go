@@ -1,9 +1,13 @@
 package game
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -202,6 +206,18 @@ func TestDigTablesGenerated(t *testing.T) {
 	}
 	if got := digBlockSizes[20001]; got != (digBlockSize{w: 2, h: 4}) {
 		t.Errorf("block 20001 = %+v", got)
+	}
+	// Tables 40413 add the 62 Season 7 maps of group 7000 (season-dig, B17).
+	for id, want := range map[int32]digLevel{
+		17001: {w: 4, h: 7, typ: 1}, 17042: {w: 4, h: 7, typ: 1}, 17043: {w: 10, h: 12, typ: 2},
+		17052: {w: 10, h: 12, typ: 2}, 17053: {w: 4, h: 7, typ: 3}, 17062: {w: 4, h: 7, typ: 3},
+	} {
+		if got := digLevels[id]; got != want {
+			t.Errorf("Season 7 map %d = %+v, want %+v", id, got, want)
+		}
+	}
+	if len(digLevels) != 508 || len(digBlockSizes) != 100 {
+		t.Errorf("tables: %d maps and %d blocks, want 508 and 100 (40413)", len(digLevels), len(digBlockSizes))
 	}
 }
 
@@ -815,6 +831,183 @@ func TestTreasureDigsChestTrack(t *testing.T) {
 	checkDigSent(t, f)
 	if n := len(f.only(digTrackChestCmd)); n != 1 {
 		t.Errorf("chest track claims = %d, want 1 (only target 100 is reached and unclaimed)", n)
+	}
+}
+
+// TestTreasureDigsSeason7OffSeasonActivities: the client gates the vault and the chest track by
+// activity type (DigTreasureManager.lua:22-36), so the S7 off-season rows of tables 40413 (type
+// 252: 2300011-2300015, 2300017; type 261: 2300018-2300021) open them as the S3 rows do.
+func TestTreasureDigsSeason7OffSeasonActivities(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		act   int32
+		read  string
+		claim string
+	}{
+		{"vault 2300011", 2300011, digVaultInfoCmd, digVaultStageChestCmd},
+		{"vault 2300017", 2300017, digVaultInfoCmd, digVaultStageChestCmd},
+		{"chest track 2300018", 2300018, digTrackInfoCmd, digTrackChestCmd},
+		{"chest track 2300021", 2300021, digTrackInfoCmd, digTrackChestCmd},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, f := startDigFake(t, radarScoringDay(), nil, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+				switch cmd {
+				case digVaultInfoCmd:
+					return vaultInfo(nil, nil, map[int32]int64{11001: digCanGet})
+				case digVaultStageChestCmd:
+					return vaultInfo(nil, nil, map[int32]int64{11001: digHaveGot})
+				case digTrackInfoCmd, digTrackChestCmd:
+					e := sfs.NewSFSObject()
+					e.PutInt("target", 50)
+					e.PutInt("isReward", map[bool]int32{true: 1}[cmd == digTrackChestCmd])
+					list := sfs.NewSFSArray()
+					list.AddSFSObject(e)
+					r := sfs.NewSFSObject()
+					r.PutSFSArray("rewardList", list)
+					return r
+				}
+				return nil
+			})
+			if err := runTreasureDigs(conn, digTestInit(map[string]int32{digTrackScore: 60}, evActivity(tc.act))); err != nil {
+				t.Fatal(err)
+			}
+			checkDigSent(t, f)
+			if len(f.only(tc.read)) != 1 || len(f.only(tc.claim)) != 1 {
+				t.Errorf("sent %v, want one %s and one %s", f.cmds(), tc.read, tc.claim)
+			}
+		})
+	}
+}
+
+// TestDigTrackScoreIsEveryChestTrackRowsPara3 pins digTrackScore against the table dump: the
+// client reads the chest track's score item from the open type-261 activity's para_3
+// (DigTreasureBoxRewardManager.lua:53-69), which the generated activity table does not carry.
+// Skipped without LASTWAR_TABLES.
+func TestDigTrackScoreIsEveryChestTrackRowsPara3(t *testing.T) {
+	dir := os.Getenv("LASTWAR_TABLES")
+	if dir == "" {
+		t.Skip("LASTWAR_TABLES is not set")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "activity.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tab struct {
+		Index map[string][]json.RawMessage `json:"index"`
+		Rows  [][]json.RawMessage          `json:"rows"`
+	}
+	if err := json.Unmarshal(data, &tab); err != nil {
+		t.Fatal(err)
+	}
+	col := func(name string) int {
+		var pos int
+		if spec := tab.Index[name]; len(spec) == 0 || json.Unmarshal(spec[0], &pos) != nil || pos < 1 {
+			t.Fatalf("no %s column", name)
+		}
+		return pos - 1
+	}
+	typ, para3 := col("type"), col("para_3")
+	rows := 0
+	for _, row := range tab.Rows {
+		var vals []any
+		if len(row) != 2 || json.Unmarshal(row[1], &vals) != nil || len(vals) <= max(typ, para3) {
+			continue
+		}
+		if fmt.Sprint(vals[typ]) != strconv.Itoa(int(actTypeDigTreasureV2)) {
+			continue
+		}
+		rows++
+		if got := fmt.Sprint(vals[para3]); got != digTrackScore {
+			t.Errorf("activity %s (type 261): para_3 %q, want %s", row[0], got, digTrackScore)
+		}
+	}
+	if rows == 0 {
+		t.Error("no type-261 row in the dump")
+	}
+}
+
+// TestDigRecheckIsLuaTruthiness:the client re-reads the vault when the open reply's checkOpenAll
+// is truthy in Lua (DigTreasureGameOpenBlockMessage.lua:22-27), so a numeric 0 asks for it too.
+func TestDigRecheckIsLuaTruthiness(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		put  func(*sfs.SFSObject)
+		want bool
+	}{
+		{"absent", func(*sfs.SFSObject) {}, false},
+		{"false", func(o *sfs.SFSObject) { o.PutBool("checkOpenAll", false) }, false},
+		{"true", func(o *sfs.SFSObject) { o.PutBool("checkOpenAll", true) }, true},
+		{"0", func(o *sfs.SFSObject) { o.PutInt("checkOpenAll", 0) }, true},
+		{"1", func(o *sfs.SFSObject) { o.PutInt("checkOpenAll", 1) }, true},
+		{"empty string", func(o *sfs.SFSObject) { o.PutUtfString("checkOpenAll", "") }, true},
+	} {
+		o := sfs.NewSFSObject()
+		tc.put(o)
+		if got := digRecheck(o); got != tc.want {
+			t.Errorf("%s: digRecheck = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestTreasureDigsTimedStageRecheckRereadsTheVault: a timed-stage open reply carrying checkOpenAll
+// makes the client drop it and re-read the vault; Go did not re-read and would reopen the same
+// brick with the next hammer.
+func TestTreasureDigsTimedStageRecheckRereadsTheVault(t *testing.T) {
+	timed := func(state int64) *sfs.SFSObject {
+		o := digBoardSFS(601, 12001, state, nil, nil)
+		o.PutLong("endTime", evTestNow.Add(time.Minute).UnixMilli())
+		return o
+	}
+	reads := 0
+	conn, f := startDigFake(t, radarScoringDay(), nil, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		switch cmd {
+		case digVaultInfoCmd:
+			reads++
+			if reads == 1 {
+				return vaultInfo(nil, timed(digCanNotGet), nil)
+			}
+			return vaultInfo(nil, timed(digCanGet), nil)
+		case digVaultOpenCmd:
+			r := sfs.NewSFSObject()
+			r.PutLong("uuid", p.GetLong("uuid"))
+			r.PutInt("checkOpenAll", 0)
+			return r
+		}
+		return nil
+	})
+	if err := runTreasureDigs(conn, digTestInit(map[string]int32{digVaultHammer: 3}, evActivity(2200011))); err != nil {
+		t.Fatal(err)
+	}
+	checkDigSent(t, f)
+	if got := digPositions(f, digVaultOpenCmd); !slices.Equal(got, []int{1}) {
+		t.Errorf("timed-stage bricks opened = %v, want only brick 1 before the re-read", got)
+	}
+	if n := len(f.only(digVaultInfoCmd)); n != 2 {
+		t.Errorf("vault info reads = %d, want 2 (the re-read after checkOpenAll)", n)
+	}
+	if n := len(f.only(digVaultTimedChestCmd)); n != 1 {
+		t.Errorf("timed chest claims = %d, want 1 from the re-read state", n)
+	}
+}
+
+// TestTreasureDigsRuinIgnoresCheckOpenAll: only the vault's open message reads checkOpenAll; a ruin
+// open reply that carries it is applied like any other.
+func TestTreasureDigsRuinIgnoresCheckOpenAll(t *testing.T) {
+	board := newDigFakeBoard(12501, map[int32]int{20009: 1, 20001: 3})
+	ruin := digRuinEvent(900, radarStateNotFinish, evTestNow.Add(4*time.Hour), digBoardSFS(9001, 12501, digCanNotGet, nil, nil))
+	conn, f := startDigFake(t, radarScoringDay(), []*sfs.SFSObject{ruin}, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == digRadarOpenCmd {
+			r := board.open(9001, int(p.GetInt("pos")))
+			r.PutInt("checkOpenAll", 0)
+			return r
+		}
+		return nil
+	})
+	if err := runTreasureDigs(conn, digTestInit(map[string]int32{digRuinHammer: 16})); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.only(digRadarOpenCmd)); n != 12 {
+		t.Errorf("ruin bricks opened = %d, want all 12 the two blocks cover", n)
 	}
 }
 

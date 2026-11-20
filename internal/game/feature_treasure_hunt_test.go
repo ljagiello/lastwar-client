@@ -295,6 +295,31 @@ func TestTreasureHuntTierClaimStopsOnEmptyReward(t *testing.T) {
 	}
 }
 
+// TestTreasureHuntSeason7UsesItsOwnDigRow: the client picks the activity_dig row from the
+// activity's tableInfoType (ActivityTreasureHuntNewManager.lua:259-265). S7's 1071012 has 6
+// (tables 40413), whose tiers fall every 5 levels; with no primaryPrize in the reply, tier 15 is due
+// at level 15, which row 5 (5, 10, 20, ...) does not have.
+func TestTreasureHuntSeason7UsesItsOwnDigRow(t *testing.T) {
+	withEvNow(t, evTestNow)
+	f := &thFake{v2: true, id: 1071012, level: 14, big: 1, grandAt: 99, claimed: []int64{5, 10}}
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == treasureHuntTierCmd {
+			f.mu.Lock()
+			f.claimed = append(f.claimed, 15)
+			f.mu.Unlock()
+		}
+		return f.reply(cmd, p)
+	})
+	if err := runTreasureHunt(conn, digsInit(0, evActivity(1071012))); err != nil {
+		t.Fatal(err)
+	}
+	tiers := fake.only(treasureHuntTierCmd)
+	if len(tiers) != 1 || tiers[0].Params.GetInt("aid") != 1071012 {
+		t.Errorf("sent %v, want one progress claim for 1071012 (tier 15 of activity_dig row 6)", fake.cmds())
+	}
+	digsAssertSafe(t, fake)
+}
+
 func TestTreasureHuntPlanIsReadOnly(t *testing.T) {
 	withEvNow(t, evTestNow)
 	f := &thFake{v2: true, id: 1000289, level: 4, grandAt: 3, prize: "5;510026;2000", stored: 2}
