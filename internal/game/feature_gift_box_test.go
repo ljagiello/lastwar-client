@@ -106,6 +106,67 @@ func TestGiftBoxFreeDrawOncePerRun(t *testing.T) {
 	}
 }
 
+// G4, refused twins of the 98001 draw in TestGiftBoxFreeDrawGates, each run alone so no earlier
+// draw ends the run first: a type-132 activity without an activity_boxopen row never has a free
+// single draw (RefreshCostOne reads the row's cost_1_free, UIGiftBoxNew.lua:393-410, and leaves
+// isFree 0 without one), so nothing is read or drawn; and a refused info read gives no
+// useFreeTimes to check, so no draw follows it.
+func TestGiftBoxFreeDrawNeedsTheRowAndTheRead(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withActivityRows(t, map[int32]activityRow{777132: {typ: 132}})
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "get.activity.gift.box.info" {
+			return giftBoxReply(0, 0, 0)
+		}
+		return evOK()
+	})
+	if err := runGiftBoxFreeDraw(conn, evInit(30, evActivity(777132))); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.cmds(); len(got) != 0 {
+		t.Errorf("no activity_boxopen row: sent %v, want nothing", got)
+	}
+
+	conn, fake = startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject { return evErr("E_GIFT_INFO") })
+	if err := runGiftBoxFreeDraw(conn, evInit(30, evActivity(98001))); err == nil || !strings.Contains(err.Error(), "E_GIFT_INFO") {
+		t.Errorf("refused read: err = %v, want the E_GIFT_INFO failure", err)
+	}
+	if got := strings.Join(fake.cmds(), ","); got != "get.activity.gift.box.info" {
+		t.Errorf("refused read: sent %s, want the read only", got)
+	}
+}
+
+// G4: a scoreArr entry is a box only with its state, targetScore and index (ActGiftBoxScoreInfo.
+// lua:19-31): entries missing one of them are not claimed; the complete one next to them is.
+func TestGiftBoxScoreBoxesNeedEveryField(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "get.activity.gift.box.info" {
+			r := giftBoxReply(1, 0, 500, [3]int32{4, 100, 0})
+			arr, _ := r.Get("scoreArr")
+			for _, e := range []*sfs.SFSObject{
+				obj("index", 1, "targetScore", 50), // no state
+				obj("index", 2, "state", 0),        // no targetScore
+				obj("targetScore", 50, "state", 0), // no index
+			} {
+				arr.Val.(*sfs.SFSArray).AddSFSObject(e)
+			}
+			return r
+		}
+		return evOK()
+	})
+	if err := runGiftBoxScoreBoxes(conn, evInit(30, evActivity(98001))); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range fake.only("gift.box.receive") {
+		got = append(got, evString(r.Params, "index"))
+	}
+	if strings.Join(got, ",") != "4" {
+		t.Errorf("claimed boxes %v, want only 4", got)
+	}
+}
+
 // G4: score boxes with state 0 and score >= targetScore send gift.box.receive {activityId: Int,
 // index: Int <entry index>} (GiftBoxRewardBoxItemNew.lua:82-86); a draw first refreshes the reply.
 func TestGiftBoxScoreBoxesAfterTheDraw(t *testing.T) {

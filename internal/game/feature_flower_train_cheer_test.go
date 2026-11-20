@@ -36,7 +36,8 @@ func cheerInit(entries ...*sfs.SFSObject) *Init {
 // collect_reward entry of type 21 whose contentId names an ice_supplies type-7 row (180-187 in
 // 40413) makes the panel send flower.train.cheer.box.batch with no params
 // (UICollectRewardView.lua:176-197, 349-367; FlowerTrainCheerBoxBatchMessage.lua:4-6). Other
-// supplies, other entry types and expired entries do not.
+// supplies, other entry types and expired entries do not, nor one expiring this millisecond: the
+// panel lists expireTime > now only (GetRewardListBySort, CollectRewardDataManager.lua:132-133).
 func TestFlowerTrainCheerClaimsWhenACheerBoxIsListed(t *testing.T) {
 	withEvNow(t, evTestNow)
 	later, earlier := evTestNow.Add(time.Hour), evTestNow.Add(-time.Minute)
@@ -54,6 +55,7 @@ func TestFlowerTrainCheerClaimsWhenACheerBoxIsListed(t *testing.T) {
 		"another supply type (121 is type 6)": {[]*sfs.SFSObject{cheerEntry(2, 21, "121|1203|9001", later)}, nil},
 		"type 7 supply on another entry type": {[]*sfs.SFSObject{cheerEntry(2, 22, "183|1203|9001", later)}, nil},
 		"expired cheer box":                   {[]*sfs.SFSObject{cheerEntry(2, 21, "183|1203|9001", earlier)}, nil},
+		"cheer box expiring now":              {[]*sfs.SFSObject{cheerEntry(2, 21, "183|1203|9001", evTestNow)}, nil},
 		"supply id newer than the table":      {[]*sfs.SFSObject{cheerEntry(2, 21, "190|1203|9001", later)}, nil},
 		"no contentId":                        {[]*sfs.SFSObject{cheerEntry(2, 21, "", later)}, nil},
 		"empty panel":                         {nil, nil},

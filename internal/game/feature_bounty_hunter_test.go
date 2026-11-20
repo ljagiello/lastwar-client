@@ -90,6 +90,67 @@ func TestBountyMilestonesRowAndErrors(t *testing.T) {
 	}
 }
 
+// G25, refused twin of TestBountyMilestones: the client builds milestones only from the
+// activity_hunter row named by tableInfoType (UpdateData, BountyHunterActData.lua:62-79), and 40413
+// has rows 1-17. Activities with tableInfoType 0 or 18 get no read and no claim; 98800 (row 1) on the
+// same fake claims 1000 and 1800.
+func TestBountyMilestonesNeedAKnownHunterRow(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withActivityRows(t, map[int32]activityRow{777350: {typ: 350}, 777351: {typ: 350, subType: 18}})
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		if cmd == "bounty.hunter.get.info" {
+			return bountyInfo(2000, []int32{300})
+		}
+		return evOK()
+	})
+	if err := runBountyMilestones(conn, evInit(30, evActivity(98800), evActivity(777350), evActivity(777351))); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range fake.requests() {
+		got = append(got, r.Cmd+" "+evString(r.Params, "activityId")+" "+evString(r.Params, "phaseId"))
+	}
+	want := []string{
+		"bounty.hunter.get.info 98800 ",
+		"bounty.hunter.receive.phase.reward 98800 1000",
+		"bounty.hunter.receive.phase.reward 98800 1800",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("sent %q\nwant %q", got, want)
+	}
+}
+
+// G25: a chest without a uuid is not tapped: the click sends tostring(uuid)
+// (BountyHunterClickChestRewardMessage.lua:7), so it would carry targetId "". The chest next to it,
+// and the stash its reply fills, are still claimed.
+func TestBountyChestsSkipAChestWithoutUUID(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		switch cmd {
+		case "bounty.hunter.get.info":
+			r := bountyInfo(0, nil, "8800000000002")
+			sk := evObject(r, "stageKey")
+			sk.PutSFSArray("chestArray", bObjArray(obj("id", 1), evObjects(sk, "chestArray")[0]))
+			return r
+		case "bounty.hunter.click.chest.reward":
+			r := sfs.NewSFSObject()
+			r.PutSFSArray("stashReward", freebieReward())
+			return r
+		}
+		return evOK()
+	})
+	if err := runBountyChests(conn, evInit(30, evActivity(98800))); err != nil {
+		t.Fatal(err)
+	}
+	clicks := fake.only("bounty.hunter.click.chest.reward")
+	if len(clicks) != 1 || clicks[0].Params.GetString("targetId") != "8800000000002" {
+		t.Errorf("clicks %v, want one for 8800000000002", clicks)
+	}
+	if n := len(fake.only("bounty.hunter.receive.drop.reward")); n != 1 {
+		t.Errorf("stash claims %d, want 1", n)
+	}
+}
+
 // G25: each scene chest sends bounty.hunter.click.chest.reward {activityId: Int, targetId:
 // UtfString uuid} (BountyHunterClickChestRewardMessage.lua:4-8), then a non-empty stash is claimed.
 func TestBountyChests(t *testing.T) {

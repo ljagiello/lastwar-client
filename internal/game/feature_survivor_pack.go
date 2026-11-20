@@ -228,8 +228,8 @@ func survivorScoresDue(scores []int64, count int64, claimed []int64) []int64 {
 	return due
 }
 
-// survivorItemCount is the bag count of item id in init items (the largest stack, as GetItemById
-// returns one ItemInfo per id).
+// survivorItemCount is the bag count of item id in init items: the largest stack (one ItemInfo per
+// id), whose count is its last present count, num or itemLeftCnt field (ItemInfo.lua:52-66).
 func survivorItemCount(in *Init, id string) int64 {
 	var n int64
 	for _, it := range claimObjectsOrMap(in.Raw, "items") {
@@ -240,7 +240,7 @@ func survivorItemCount(in *Init, id string) int64 {
 		if got != id {
 			continue
 		}
-		if c, ok := claimFirstInt(it, "count", "num", "itemLeftCnt"); ok {
+		if c, ok := claimFirstInt(it, "itemLeftCnt", "num", "count"); ok {
 			n = max(n, c)
 		}
 	}

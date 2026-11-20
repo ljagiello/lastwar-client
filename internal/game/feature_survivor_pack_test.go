@@ -110,13 +110,96 @@ func TestSurvivorPackGates(t *testing.T) {
 	other := evInit(30, evActivity(99152))
 	noTomorrow := survivorInit(48*time.Hour, nil, nil, 0)
 	noTomorrow.Raw.PutLong("tomorrow", 0)
-	for name, in := range map[string]*Init{"not started": notStarted, "ended": ended, "no type 188": other, "no tomorrow": noTomorrow} {
+	// tableInfoType 3: activity_survivor 40413 has rows 1 and 2 only, so the client has no config
+	// (SurvivorPackManager.lua:74-86) and not even the info read is sent
+	noConfig := survivorInit(48*time.Hour, nil, nil, 0)
+	evObject(evObject(noConfig.Raw, "activity"), "1110002").PutInt("tableInfoType", 3)
+	for name, in := range map[string]*Init{"not started": notStarted, "ended": ended, "no type 188": other, "no tomorrow": noTomorrow,
+		"no activity_survivor row": noConfig} {
 		conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
 		if err := runSurvivorPack(conn, in); err != nil {
 			t.Fatal(err)
 		}
 		if got := fake.cmds(); len(got) != 0 {
 			t.Errorf("%s: sent %v, want nothing", name, got)
+		}
+	}
+}
+
+// bSurvivorInit is survivorInit with the given init items in place of its score-item stack.
+func bSurvivorInit(startAgo time.Duration, ids, free []int32, items ...*sfs.SFSObject) *Init {
+	in := survivorInit(startAgo, ids, free, 0)
+	in.Raw.PutSFSArray("items", bObjArray(items...))
+	return in
+}
+
+// bSurvivorSeq is 1..n as Int32s.
+func bSurvivorSeq(n int32) []int32 {
+	out := make([]int32, 0, n)
+	for i := int32(1); i <= n; i++ {
+		out = append(out, i)
+	}
+	return out
+}
+
+// Refused twins of TestSurvivorPackClaimsFreeThenBubbleAndScoreStages: one input changed each, and
+// only the info read goes out.
+//   - Config row 2 (the entry's own subType, ActivityInfoData.lua:231) lists activity_survivor
+//     list_group "2", and every activity_survivor_list row of 40413 is group "1"
+//     (SurvivorPackManager.lua:74-139): no survivor is due.
+//   - The score bar counts activity_survivor score_item 993113 (tables 40413, rows 1 and 2) only:
+//     a bigger stack of another item reaches no stage (:157-178).
+//   - The init activitySurvivorVisitor arrays hold until a reply carries new ones (ParseInfo,
+//     :195-211): an info reply without them leaves survivors 1-3 claimed.
+//   - activity_survivor_list 40413 ends at id 30 (day 30): with 1-30 claimed, day 32 has nothing.
+func TestSurvivorPackClaimsNothingMore(t *testing.T) {
+	withEvNow(t, evTestNow)
+	score := func(id string, n int32) *sfs.SFSObject { return obj("itemId", id, "count", n) }
+	group2 := bSurvivorInit(48*time.Hour, nil, nil, score("993113", 4))
+	evObject(evObject(group2.Raw, "activity"), "1110002").PutInt("subType", 2)
+	for name, in := range map[string]*Init{
+		"config row 2, list group 2":      group2,
+		"score of another item":           bSurvivorInit(48*time.Hour, bSurvivorSeq(3), bSurvivorSeq(3), score("993114", 50), score("993113", 4)),
+		"init state, info without arrays": bSurvivorInit(48*time.Hour, bSurvivorSeq(3), bSurvivorSeq(3), score("993113", 4)),
+		"day 32, list ends at 30":         bSurvivorInit(31*24*time.Hour, bSurvivorSeq(30), bSurvivorSeq(30), score("993113", 4)),
+	} {
+		conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+		if err := runSurvivorPack(conn, in); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := fake.cmds(); !slices.Equal(got, []string{"survivor.visitor.info"}) {
+			t.Errorf("%s: sent %v, want the info read only", name, got)
+		}
+	}
+}
+
+// TestSurvivorPackScoreItemCountIsTheLastField: the bar counts itemInfo.count of score_item 993113
+// (SurvivorPackManager.lua:245-251, ItemData.GetItemById). ItemInfo:UpdateInfo sets count from
+// count, then num, then itemLeftCnt (ItemInfo.lua:52-66), so the last present field is the count.
+// Stage 0 (5) is claimed in the init state; bar_reward row 1 is 5|10|20|40|50.
+func TestSurvivorPackScoreItemCountIsTheLastField(t *testing.T) {
+	withEvNow(t, evTestNow)
+	for _, c := range []struct {
+		name string
+		item *sfs.SFSObject
+		want []int32 // the score stages sent
+	}{
+		{"count 50, itemLeftCnt 0", obj("itemId", "993113", "count", 50, "itemLeftCnt", 0), nil},
+		{"count 50, num 0", obj("itemId", "993113", "count", 50, "num", 0), nil},
+		{"count 0, num 10", obj("itemId", "993113", "count", 0, "num", 10), []int32{1}},
+		{"num 0, itemLeftCnt 20", obj("itemId", "993113", "num", 0, "itemLeftCnt", 20), []int32{1, 2}},
+		{"count 20 alone", obj("itemId", "993113", "count", 20), []int32{1, 2}},
+	} {
+		conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+		if err := runSurvivorPack(conn, bSurvivorInit(48*time.Hour, bSurvivorSeq(3), bSurvivorSeq(3), c.item)); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		var got []int32
+		for _, r := range fake.only("survivor.visitor.receive.score") {
+			got = append(got, r.Params.GetInt("index"))
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: score stages sent %v, want %v", c.name, got, c.want)
 		}
 	}
 }

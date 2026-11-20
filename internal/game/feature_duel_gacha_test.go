@@ -1,6 +1,7 @@
 package game
 
 import (
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -121,6 +122,48 @@ func TestDuelGachaClaimsNothingElse(t *testing.T) {
 			t.Errorf("%s: sent %v, want %v", name, got, c.sent)
 		}
 	}
+}
+
+// TestDuelGachaClaimsOnlyAnIntConfigID: the pity claim sends the info reply's configId as an Int
+// (AlDuelLotteryGetProtectRewardMessage.lua:6; AllyDuelScoreGachaManager.lua:212). Next to a full
+// pity with configId 1 or MaxInt32 (claimed), a configId of 0 (no gacha unlocked server-side) or
+// one above MaxInt32 (an Int cannot carry it) gets the info read only.
+func TestDuelGachaClaimsOnlyAnIntConfigID(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		id   any
+		sent []string
+	}{
+		{"configId 1", int32(1), []string{"al.duel.lottery.get.info", "al.duel.lottery.get.protect.reward"}},
+		{"configId MaxInt32 as a Long", int64(math.MaxInt32), []string{"al.duel.lottery.get.info", "al.duel.lottery.get.protect.reward"}},
+		{"configId 0", int32(0), []string{"al.duel.lottery.get.info"}},
+		{"configId above MaxInt32", int64(math.MaxInt32) + 1, []string{"al.duel.lottery.get.info"}},
+	} {
+		reqs, err := runDuelGachaFake(t, duelGachaInit(nil), bDuelGachaConfig(c.id), false)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+		}
+		var got []string
+		for _, r := range reqs {
+			got = append(got, r.Cmd)
+		}
+		if !slices.Equal(got, c.sent) {
+			t.Errorf("%s: sent %v, want %v", c.name, got, c.sent)
+		}
+	}
+}
+
+// bDuelGachaConfig is a full-pity duelGachaInfo whose configId is id, an Int (int32) or a Long
+// (int64).
+func bDuelGachaConfig(id any) *sfs.SFSObject {
+	r := duelWithoutKey(duelGachaInfo(0, 50, 50, 1), "configId")
+	switch v := id.(type) {
+	case int32:
+		r.PutInt("configId", v)
+	case int64:
+		r.PutLong("configId", v)
+	}
+	return r
 }
 
 // duelGachaSeason1 puts season 1, started daysAgo days before evTestNow (its day daysAgo+1).
