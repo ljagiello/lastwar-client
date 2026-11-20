@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"lastwar-client/internal/sfs"
 )
@@ -26,7 +27,42 @@ func skyChapter(chapter int32, rewarded []int32, stars ...int32) *sfs.SFSObject 
 	return c
 }
 
+// skyBattleWindow sets init skyBattle {st, et} (ms), the normal mode's open window
+// (LWSkyBattleChapterManager.lua:43-48).
+func skyBattleWindow(in *Init, st, et time.Time) *Init {
+	sb := sfs.NewSFSObject()
+	sb.PutLong("st", st.UnixMilli())
+	sb.PutLong("et", et.UnixMilli())
+	in.Raw.PutSFSObject("skyBattle", sb)
+	return in
+}
+
+// skyBattleGrowthTestID is a type-371 row added to the generated table for a test (tables 40413
+// have none), the way TestThemeNoticeClaimsBeforeTheStart adds a type-30 row.
+const skyBattleGrowthTestID int32 = 777371
+
+func withSkyBattleGrowthRow(t *testing.T) {
+	t.Helper()
+	activityTable[skyBattleGrowthTestID] = activityRow{typ: skyBattleGrowthType}
+	t.Cleanup(func() { delete(activityTable, skyBattleGrowthTestID) })
+}
+
+// skyBattleReads lists the stageType of every lw.get.sky.battle.stage request, after checking
+// each asks all chapters.
+func skyBattleReads(t *testing.T, f *evFake) []int32 {
+	t.Helper()
+	var out []int32
+	for _, r := range f.only(skyBattleStageCmd) {
+		if ch := r.Params.GetInt("chapter"); ch != skyBattleAllChapters {
+			t.Errorf("stage read chapter = %d, want -1", ch)
+		}
+		out = append(out, r.Params.GetInt("stageType"))
+	}
+	return out
+}
+
 func TestSkyBattleBoxesClaimUntilTheReachedBoxesAreTaken(t *testing.T) {
+	withEvNow(t, evTestNow)
 	claims := 0
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		r := evOK()
@@ -54,7 +90,8 @@ func TestSkyBattleBoxesClaimUntilTheReachedBoxesAreTaken(t *testing.T) {
 		}
 		return r
 	})
-	if err := runSkyBattleBoxes(conn, evInit(10)); err != nil {
+	in := skyBattleWindow(evInit(10), evTestNow.Add(-time.Hour), evTestNow.Add(time.Hour))
+	if err := runSkyBattleBoxes(conn, in); err != nil {
 		t.Fatal(err)
 	}
 	var sent []int32
@@ -69,15 +106,17 @@ func TestSkyBattleBoxesClaimUntilTheReachedBoxesAreTaken(t *testing.T) {
 	if !slices.Equal(sent, []int32{1, 2, 2}) {
 		t.Errorf("claimed chapters %v, want 1 once and 2 twice", sent)
 	}
-	stages := fake.only(skyBattleStageCmd)
-	if len(stages) != 2 || stages[0].Params.GetInt("chapter") != -1 || stages[1].Params.GetInt("stageType") != 1 {
-		t.Errorf("stage reads = %+v, want chapter -1 for stageType 0 and 1", stages)
+	if got := skyBattleReads(t, fake); !slices.Equal(got, []int32{0}) {
+		t.Errorf("stage reads %v, want stageType 0 only (no type-371 activity open)", got)
 	}
 }
 
-// TestSkyBattleBoxesClaimTheGrowthChapters: a stageType-1 reply's reached chapters, chapter 4
-// included, send {chapter, stageType: 1} claims until each reached box is taken.
+// TestSkyBattleBoxesClaimTheGrowthChapters: with a type-371 activity open, a stageType-1 reply's
+// reached chapters, chapter 4 included, send {chapter, stageType: 1} claims until each reached box
+// is taken.
 func TestSkyBattleBoxesClaimTheGrowthChapters(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withSkyBattleGrowthRow(t)
 	rewarded := map[int32][]int32{1: {6, 12, 18, 24}, 3: {6}}
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		r := evOK()
@@ -103,8 +142,11 @@ func TestSkyBattleBoxesClaimTheGrowthChapters(t *testing.T) {
 		}
 		return r
 	})
-	if err := runSkyBattleBoxes(conn, evInit(14)); err != nil {
+	if err := runSkyBattleBoxes(conn, evInit(14, evActivity(skyBattleGrowthTestID))); err != nil {
 		t.Fatal(err)
+	}
+	if got := skyBattleReads(t, fake); !slices.Equal(got, []int32{1}) {
+		t.Errorf("stage reads %v, want stageType 1 only (no init skyBattle window)", got)
 	}
 	var sent []int32
 	for _, r := range fake.only(skyBattleBoxCmd) {
@@ -174,6 +216,11 @@ func TestSkyBattleModesMatchTheChapterTables(t *testing.T) {
 }
 
 func TestSkyBattleBoxesStopWhenAClaimChangesNothing(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withSkyBattleGrowthRow(t)
+	open := func(hq int32) *Init {
+		return skyBattleWindow(evInit(hq, evActivity(skyBattleGrowthTestID)), evTestNow.Add(-time.Hour), evTestNow.Add(time.Hour))
+	}
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
 		r := evOK()
 		switch cmd {
@@ -188,18 +235,115 @@ func TestSkyBattleBoxesStopWhenAClaimChangesNothing(t *testing.T) {
 		}
 		return r
 	})
-	if err := runSkyBattleBoxes(conn, evInit(10)); err != nil {
+	if err := runSkyBattleBoxes(conn, open(10)); err != nil {
 		t.Fatal(err)
 	}
 	if got := fake.only(skyBattleBoxCmd); len(got) != 1 {
 		t.Errorf("claims = %d, want 1 (the reply showed no change)", len(got))
 	}
 	conn, fake = startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
-	if err := runSkyBattleBoxes(conn, evInit(5)); err != nil {
+	if err := runSkyBattleBoxes(conn, open(5)); err != nil {
 		t.Fatal(err)
 	}
 	if got := fake.cmds(); len(got) != 0 {
-		t.Errorf("HQ 5 sent %v, want nothing", got)
+		t.Errorf("HQ 5 with both modes open sent %v, want nothing", got)
+	}
+}
+
+// TestSkyBattleBoxesReadOnlyOpenModes: a mode is read only while the client could open its chapter
+// view: stageType 0 inside the init skyBattle {st, et} window (both ends inclusive, both fields
+// needed), stageType 1 with an open type-371 activity (CheckIsSend), each from its lowest HQ.
+func TestSkyBattleBoxesReadOnlyOpenModes(t *testing.T) {
+	withEvNow(t, evTestNow)
+	withSkyBattleGrowthRow(t)
+	hour := time.Hour
+	growth := func(end time.Time) *sfs.SFSObject {
+		a := evActivity(skyBattleGrowthTestID)
+		a.PutLong("endTime", end.UnixMilli())
+		return a
+	}
+	open := growth(evTestNow.Add(48 * hour))
+	for _, c := range []struct {
+		name   string
+		in     func() *Init
+		stages []int32
+	}{
+		{"neither open (40413: no type-371 row in init)", func() *Init { return evInit(14) }, nil},
+		{"normal window open", func() *Init { return skyBattleWindow(evInit(14), evTestNow.Add(-hour), evTestNow.Add(hour)) }, []int32{0}},
+		{"growth activity open", func() *Init { return evInit(14, open) }, []int32{1}},
+		{"both open", func() *Init {
+			return skyBattleWindow(evInit(14, open), evTestNow.Add(-hour), evTestNow.Add(hour))
+		}, []int32{0, 1}},
+		{"normal window starts now", func() *Init { return skyBattleWindow(evInit(14), evTestNow, evTestNow.Add(hour)) }, []int32{0}},
+		{"normal window ends now", func() *Init { return skyBattleWindow(evInit(14), evTestNow.Add(-hour), evTestNow) }, []int32{0}},
+		{"normal window ended 1 ms ago", func() *Init {
+			return skyBattleWindow(evInit(14), evTestNow.Add(-hour), evTestNow.Add(-time.Millisecond))
+		}, nil},
+		{"normal window starts in 1 ms", func() *Init {
+			return skyBattleWindow(evInit(14), evTestNow.Add(time.Millisecond), evTestNow.Add(hour))
+		}, nil},
+		{"normal window without et", func() *Init {
+			in := evInit(14)
+			sb := sfs.NewSFSObject()
+			sb.PutLong("st", evTestNow.Add(-hour).UnixMilli())
+			in.Raw.PutSFSObject("skyBattle", sb)
+			return in
+		}, nil},
+		{"normal window without st", func() *Init {
+			in := evInit(14)
+			sb := sfs.NewSFSObject()
+			sb.PutLong("et", evTestNow.Add(hour).UnixMilli())
+			in.Raw.PutSFSObject("skyBattle", sb)
+			return in
+		}, nil},
+		{"growth activity ended past the tolerance", func() *Init { return evInit(14, growth(evTestNow.Add(-2*time.Second))) }, nil},
+		{"HQ 7: growth below its lowest chapter", func() *Init {
+			return skyBattleWindow(evInit(7, open), evTestNow.Add(-hour), evTestNow.Add(hour))
+		}, []int32{0}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+			if err := runSkyBattleBoxes(conn, c.in()); err != nil {
+				t.Fatal(err)
+			}
+			if got := skyBattleReads(t, fake); !slices.Equal(got, c.stages) {
+				t.Errorf("stage reads %v, want %v", got, c.stages)
+			}
+			if got := fake.cmds(); len(got) != len(c.stages) {
+				t.Errorf("sent %v, want only the %d stage reads", got, len(c.stages))
+			}
+		})
+	}
+}
+
+// TestSkyBattleWindowOpenIsLuaIsOpen: st and et must both be present, and a 0 counts as present
+// (Lua-truthy), like LWSkyBattleChapterManager:IsOpen (LWSkyBattleChapterManager.lua:307-313).
+func TestSkyBattleWindowOpenIsLuaIsOpen(t *testing.T) {
+	window := func(st, et int64) *sfs.SFSObject {
+		o := sfs.NewSFSObject()
+		o.PutLong("st", st)
+		o.PutLong("et", et)
+		return o
+	}
+	for _, c := range []struct {
+		name string
+		sb   *sfs.SFSObject
+		now  int64
+		want bool
+	}{
+		{"absent", nil, 5, false},
+		{"empty", sfs.NewSFSObject(), 5, false},
+		{"zero start counts", window(0, 10), 5, true},
+		{"zero window", window(0, 0), 5, false},
+		{"inside", window(1, 10), 5, true},
+		{"at start", window(5, 10), 5, true},
+		{"at end", window(1, 5), 5, true},
+		{"after end", window(1, 4), 5, false},
+		{"before start", window(6, 10), 5, false},
+	} {
+		if got := skyBattleWindowOpen(c.sb, c.now); got != c.want {
+			t.Errorf("%s: open = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 

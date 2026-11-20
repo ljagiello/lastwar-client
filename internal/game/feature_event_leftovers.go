@@ -24,9 +24,18 @@ import (
 //     reach sends lw.sky.battle.chapter.box.reward {chapter: Int, stageType: Int}
 //     (ChapterContentComponent.lua:292-302; LwSkyBattleChapterBoxRewardMessage.lua:4-7). The claim
 //     names no box, so each reply's rewardedTarget is read and the claim repeats only while it
-//     changed and a reached box is left, at most once per box. The info is asked only from the
-//     lowest chapter's main_building_level (6 and 8 in 40413), an extra guard. Stage fights report
-//     client results: never.
+//     changed and a reached box is left, at most once per box. The chapter view's open path is the
+//     command's only sender (LWUIStageSkyBattleChapterView.lua:156-196), and the view opens only
+//     while its mode is open, so a mode is read only then: stageType 0 while the init skyBattle
+//     {st, et} window holds, st <= now <= et in ms with both present (IsOpen,
+//     LWSkyBattleChapterManager.lua:43-48, 307-313, fed by InitMessage.lua:568; the city bubble,
+//     BuildBubbleManager.lua:3773-3783, and OnEnterCity, :370-375, check it), and stageType 1 while
+//     an activity of type 371 (ActSkyBattleGrowth, EnumType.lua:6499) is open (IsOpen is
+//     GetOneOpenActivityByType then CheckIsSend, LWSkyBattleGrowthChapterManager.lua:717-724;
+//     ActivityListDataManager.lua:1853-1864, 969-981). Tables 40413 have no type-371 row, so the
+//     growth mode stays dormant until a regenerated table has one. The lowest chapter's
+//     main_building_level (6 and 8 in 40413) is an extra guard. Stage fights report client
+//     results: never.
 //   - newbie-arena-rewards (G47, cov-ui-store F6 and its verdict): the new-server arenas, types 140
 //     (ArenaNewbie) and 143 (ArenaNewbieV2) (EnumType.lua:6400, 6404). activity.arena.reward.preview
 //     / activity.arena.v2.reward.preview {activityId: Int} answer achieveRewards[{id, state,
@@ -71,6 +80,9 @@ const (
 	skyBattleStageCmd     = "lw.get.sky.battle.stage"
 	skyBattleBoxCmd       = "lw.sky.battle.chapter.box.reward"
 	skyBattleAllChapters  = -1
+	skyBattleNormalMode   = 0
+	skyBattleGrowthMode   = 1
+	skyBattleGrowthType   = 371 // EnumActivity.ActSkyBattleGrowth (EnumType.lua:6499)
 	newbieArenaFeature    = "newbie-arena-rewards"
 	newbieArenaType       = 140
 	newbieArenaV2Type     = 143
@@ -98,10 +110,10 @@ var skyBattleModes = []struct {
 	minHQ      int32
 	thresholds map[int64][]int64 // chapter -> star thresholds
 }{
-	{0, "chapters", 6, map[int64][]int64{
+	{skyBattleNormalMode, "chapters", 6, map[int64][]int64{
 		1: {6, 12, 18}, 2: {6, 12, 18}, 3: {6, 12, 18}, 4: {6, 12, 18}, 5: {6, 12, 18}, 6: {6, 12, 18}, 7: {6, 12, 18},
 	}},
-	{1, "growth chapters", 8, map[int64][]int64{
+	{skyBattleGrowthMode, "growth chapters", 8, map[int64][]int64{
 		1: {6, 12, 18, 24}, 2: {6, 12, 18, 24}, 3: {6, 12, 18, 24}, 4: {6, 12, 18, 24},
 	}},
 }
@@ -146,6 +158,10 @@ func runSkyBattleBoxes(conn *session.GameConn, in *Init) error {
 		if hq < m.minHQ {
 			continue
 		}
+		if !skyBattleModeOpen(conn, in, m.stageType) {
+			slog.Debug(skyBattleBoxesFeature+": mode closed, not read", "stageType", m.stageType)
+			continue
+		}
 		p := sfs.NewSFSObject()
 		p.PutInt("chapter", skyBattleAllChapters)
 		p.PutInt("stageType", m.stageType)
@@ -172,6 +188,27 @@ func runSkyBattleBoxes(conn *session.GameConn, in *Init) error {
 		}
 	}
 	return b.err()
+}
+
+// skyBattleModeOpen is the mode's IsOpen, without which the client never opens the chapter view
+// that sends lw.get.sky.battle.stage: the init skyBattle window for stageType 0, an open type-371
+// activity for stageType 1.
+func skyBattleModeOpen(conn *session.GameConn, in *Init, stageType int32) bool {
+	switch stageType {
+	case skyBattleNormalMode:
+		return skyBattleWindowOpen(in.Object("skyBattle"), evNow().UnixMilli())
+	case skyBattleGrowthMode:
+		return len(Activities(conn, in).Open(skyBattleGrowthType)) > 0
+	}
+	return false
+}
+
+// skyBattleWindowOpen is LWSkyBattleChapterManager:IsOpen over init skyBattle {st, et} (ms): both
+// present (Lua-truthy, so a 0 counts) and st <= nowMs <= et.
+func skyBattleWindowOpen(sb *sfs.SFSObject, nowMs int64) bool {
+	st, sok := evNum(sb, "st")
+	et, eok := evNum(sb, "et")
+	return sok && eok && nowMs >= st && nowMs <= et
 }
 
 // claimSkyBattleChapter claims one chapter's reached boxes; false when a claim failed.
