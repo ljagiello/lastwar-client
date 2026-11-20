@@ -361,7 +361,7 @@ its commands stops that feature for the run. The duel ones are in the table abov
 
 Two features that are on by default changed in a way to check on the first runs: `season-dailies`
 now sends the power-milestone pair only in a Desert (type 1) season, as the client does, so in
-Seasons 2 to 7 the achievement grades wait for `season-achievements`; and `quests` leaves the
+any other season the achievement grades wait for `season-achievements`; and `quests` leaves the
 Season 7 Lockhart quest 2400008 to `stage-quests`. See docs/client-1-0-370.mdx for the full list.
 
 Every run with a feature enabled logs one `alliance duel` line (theme, score, next chest, day end),

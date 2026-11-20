@@ -169,7 +169,7 @@ A cold-start capture of the real iOS / Mac Catalyst app (1.0.344, hot-updated) w
 | Opens every gateway in the zone's list in parallel, sends an `a=29` probe on each, and sends `Login` about 45 ms after the first pong | Dials the list in order, sends no probe, sends `Login` straight after connecting | Tolerated live, see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe) |
 | Sets header bit `0x04` plus a 2-byte id (`0x030F`, the zone's server id 783 in this one sample) on every client-to-server frame | Never sets it | Tolerated live |
 | Heartbeat payload nested one level deeper: `p={p={clientTime}}` | Flat: `p={clientTime}` | Tolerated live |
-| A monotonic `_id` on every extension request | The same since the 1.0.364 fixes; since 1.0.370 each reply is also paired with its request by that `_id` | Match |
+| A monotonic `_id` on every extension request | The same now; since the 1.0.370 fixes each reply is also paired with its request by that `_id` | Match |
 | No SFS2X `Handshake` (`a=0`) | None by default (`-handshake` is an experiment) | Match |
 | `netType=1` on Wi-Fi (`1` = Wi-Fi, `2` = mobile, `Assembly-CSharp.decompiled.cs:73295-73303`) | `netType=1` since the 1.0.370 fixes (it sent `2` before, which was tolerated live) | Match |
 | `resVersion` = `2159.1505_821F_39516.23570` | Derived from that platform's check-version reply; `"0"` when a part is missing. Under `-cs-ios` the reply is the iOS build's | `"0"` was tolerated live for months |
