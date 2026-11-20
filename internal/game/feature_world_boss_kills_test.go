@@ -75,6 +75,53 @@ func TestWorldBossKillsClaimsDeadBossesThePlayerHit(t *testing.T) {
 	}
 }
 
+// G9: a boss is tapped for its chest only when it is dead (curHp <= 0, UIUtil.lua:851-871) and its
+// uuid matches an init hit entry; next to dead, hit boss 11 (claimed), a boss one hp from death, a
+// march without curHp, a march without uuid and a hit entry without uuid claim nothing.
+func TestWorldBossKillsSkipsLiveAndIncompleteBosses(t *testing.T) {
+	withEvNow(t, evTestNow)
+	march := func(kv ...any) *sfs.SFSObject { return obj(append([]any{"bossId", 7, "maxHp", int64(1000)}, kv...)...) }
+	for name, c := range map[string]struct {
+		hits    []*sfs.SFSObject
+		marches []*sfs.SFSObject
+	}{
+		"one hp left, no curHp": {
+			[]*sfs.SFSObject{obj("uuid", int64(21), "times", 1), obj("uuid", int64(22), "times", 1)},
+			[]*sfs.SFSObject{march("uuid", int64(21), "curHp", int64(1)), march("uuid", int64(22))},
+		},
+		"hit entry without uuid": {
+			[]*sfs.SFSObject{obj("times", 1)},
+			[]*sfs.SFSObject{march("uuid", int64(0), "curHp", int64(0))},
+		},
+		"march without uuid": {
+			[]*sfs.SFSObject{obj("uuid", int64(0), "times", 1)},
+			[]*sfs.SFSObject{march("curHp", int64(0))},
+		},
+	} {
+		in := worldBossInit([3]int64{11, 2, 0})
+		for _, h := range c.hits {
+			arr, _ := evObject(in.Raw, "actBerserkBoss").Get("array")
+			arr.Val.(*sfs.SFSArray).AddSFSObject(h)
+		}
+		conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+			if cmd == "user.get.all.berserk.boss.march" {
+				return obj("marches", append([]*sfs.SFSObject{march("uuid", int64(11), "curHp", int64(0))}, c.marches...))
+			}
+			return evOK()
+		})
+		if err := runWorldBossKills(conn, in); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var got []string
+		for _, r := range fake.only("berserk.boss.reward") {
+			got = append(got, evString(r.Params, "uuid"))
+		}
+		if strings.Join(got, ",") != "11" {
+			t.Errorf("%s: claimed %v, want 11 only", name, got)
+		}
+	}
+}
+
 // G9: no type-307 activity, or away from home, sends nothing; an errorCode on the claim stops it.
 func TestWorldBossKillsGates(t *testing.T) {
 	withEvNow(t, evTestNow)
@@ -91,7 +138,14 @@ func TestWorldBossKillsGates(t *testing.T) {
 	u.PutInt("serverId", 1500)
 	u.PutInt("crossFightSrcServerId", 1200)
 	away.Raw.PutSFSObject("user", u)
-	for name, in := range map[string]*Init{"no activity": noActivity, "away from home": away} {
+	// IsLoginSourceServer is crossFightSrcServerId < 0 or == serverId (PlayerInfo.lua:832-834):
+	// a source server 0 is away from 1200, and without a serverId home is not known
+	awayZero := worldBossInit([3]int64{11, 1, 0})
+	awayZero.Raw.PutSFSObject("user", obj("serverId", 1200, "crossFightSrcServerId", 0))
+	noServer := worldBossInit([3]int64{11, 1, 0})
+	noServer.Raw.PutSFSObject("user", obj("crossFightSrcServerId", 0))
+	for name, in := range map[string]*Init{"no activity": noActivity, "away from home": away, "source server 0": awayZero,
+		"source server 0, no serverId": noServer} {
 		conn, fake := startEvFake(t, reply)
 		if err := runWorldBossKills(conn, in); err != nil || len(fake.requests()) != 0 {
 			t.Errorf("%s: err %v, sent %v; want nothing", name, err, fake.cmds())

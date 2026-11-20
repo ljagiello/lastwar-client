@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"lastwar-client/internal/session"
 	"lastwar-client/internal/sfs"
@@ -72,6 +73,92 @@ func TestS0AllianceBossFirstRewards(t *testing.T) {
 	if out := logs.String(); strings.Contains(out, fwAllyA) || !strings.Contains(out, "levelStates") {
 		t.Errorf("log names a player or lacks the level states:\n%s", out)
 	}
+}
+
+// A claimable (state 1) first-kill entry is claimed with its difficultyLevel as an Int
+// (ReceiveAllianceBossS0FirstRewardMessage.lua:6; ParseFirstRewardList, S0AllianceBossDataManager.
+// lua:218-232). Next to claimable level 2, a state-1 entry without a level, with a negative one or
+// with one an Int cannot carry is not claimed. A refused info read is an error and claims nothing.
+func TestS0AllianceBossClaimsOnlyUsableLevels(t *testing.T) {
+	withEvNow(t, evTestNow)
+	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
+		switch cmd {
+		case "alliance.boss.s0.act.info":
+			return obj("firstRewardList", []*sfs.SFSObject{
+				obj("difficultyLevel", 2, "state", 1),
+				obj("state", 1),
+				obj("difficultyLevel", -1, "state", 1),
+				obj("difficultyLevel", int64(1)<<31, "state", 1),
+			})
+		case "receive.alliance.boss.s0.first.reward":
+			return fwClaimOK(p)
+		}
+		return evErr("unexpected command")
+	})
+	if err := runS0AllianceBoss(conn, s0BossInit()); err != nil {
+		t.Fatal(err)
+	}
+	var levels []int32
+	for _, c := range fake.only("receive.alliance.boss.s0.first.reward") {
+		levels = append(levels, c.Params.GetInt("difficultyLevel"))
+	}
+	if !slices.Equal(levels, []int32{2}) {
+		t.Errorf("claimed levels %v, want [2]", levels)
+	}
+
+	conn, fake = startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evErr("E_S0_INFO") })
+	if err := runS0AllianceBoss(conn, s0BossInit()); err == nil || !strings.Contains(err.Error(), "E_S0_INFO") {
+		t.Errorf("refused info: err = %v, want the E_S0_INFO failure", err)
+	}
+	if got := fake.cmds(); !slices.Equal(got, []string{"alliance.boss.s0.act.info"}) {
+		t.Errorf("refused info: sent %v, want the read only", got)
+	}
+}
+
+// TestS0AllianceBossStopsAfterAClaimTimesOut: a first-kill claim the server leaves unanswered
+// (fwRequest's DefaultCmdTimeout wait) is an error that ends the claims, as a refused one does. With
+// levels 2 and 3 claimable, only 2 is sent. It runs in a synctest bubble, so the 8 s timeout passes
+// on the fake clock.
+func TestS0AllianceBossStopsAfterAClaimTimesOut(t *testing.T) {
+	withEvNow(t, evTestNow)
+	synctest.Test(t, func(t *testing.T) {
+		client, server := session.NewPipeGameConnPair(t)
+		srv := &scriptedServer{}
+		go func() {
+			for {
+				msg, err := session.ReadNextExtension(server)
+				if err != nil {
+					return
+				}
+				srv.mu.Lock()
+				srv.reqs = append(srv.reqs, msg)
+				srv.mu.Unlock()
+				out := s0BossInfo()
+				if msg.Cmd == "receive.alliance.boss.s0.first.reward" {
+					if len(srv.requests(msg.Cmd)) == 1 {
+						continue // the first claim gets no reply
+					}
+					out = fwClaimOK(msg.Params)
+				}
+				if v, ok := msg.Params.Get("_id"); ok {
+					out.PutValue("_id", v)
+				}
+				if err := server.SendExtension(msg.Cmd, out); err != nil {
+					return
+				}
+			}
+		}()
+		if err := runS0AllianceBoss(client, s0BossInit()); err == nil {
+			t.Error("err = nil, want the claim's timeout")
+		}
+		var levels []int32
+		for _, m := range srv.requests("receive.alliance.boss.s0.first.reward") {
+			levels = append(levels, m.Params.GetInt("difficultyLevel"))
+		}
+		if !slices.Equal(levels, []int32{2}) {
+			t.Errorf("claimed levels %v, want [2]: a timed-out claim ends the run", levels)
+		}
+	})
 }
 
 func TestS0AllianceBossGatesAndErrors(t *testing.T) {

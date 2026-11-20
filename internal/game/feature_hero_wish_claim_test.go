@@ -84,6 +84,38 @@ func TestHeroWishClaimClaimsOnlyFullPitiesWithAChosenHero(t *testing.T) {
 	}
 }
 
+// TestHeroWishClaimSkipsUnlistedAndClosedPools: refused twins of a full pool with a chosen hero
+// inside its window (221501, claimed), each with one field changed. The client lists no pool of type
+// 2 or 3 (LotteryDataManager.lua:125-127), and a pool with a window is open only while
+// startTime < now < endTime (IsOpen, LotteryInfo.lua:329-335), so not at either edge. A pool
+// without an id is not claimed either (the claim sends it, HeroLotteryClaimWishMessage.lua:7).
+func TestHeroWishClaimSkipsUnlistedAndClosedPools(t *testing.T) {
+	withEvNow(t, evTestNow)
+	now := evTestNow.Unix()
+	full := func(id string, poolType int32, start, end int64) wishPool {
+		return wishPool{id: id, poolType: poolType, wishSwitch: true, need: 200, cur: 200, hero: "100005", start: start, end: end}
+	}
+	in := wishInit(
+		full("221501", 0, now-3600, now+3600), // open: claimed
+		full("221801", 3, 0, 0),               // type 3: not listed
+		full("221802", 0, now-7200, now-3600), // ended an hour ago
+		full("221803", 0, now-3600, now),      // ends now
+		full("221804", 0, now, now+3600),      // starts now
+		full("", 0, 0, 0),                     // no id
+	)
+	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return rewardOK() })
+	if err := runHeroWishClaim(conn, in); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range fake.only("hero.lottery.receive.wish") {
+		ids = append(ids, r.Params.GetString("id"))
+	}
+	if !slices.Equal(ids, []string{"221501"}) || len(fake.cmds()) != 1 {
+		t.Errorf("sent %v, claimed %q; want only 221501", fake.cmds(), ids)
+	}
+}
+
 // TestHeroWishClaimLogsAndStopsOnError: the first reply is logged at Info; an errorCode stops the
 // claims (no benign code is registered for a never-sent command); no init sends nothing.
 func TestHeroWishClaimLogsAndStopsOnError(t *testing.T) {
