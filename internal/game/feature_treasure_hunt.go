@@ -83,12 +83,13 @@ const (
 
 	treasureHuntCards       = 12
 	treasureHuntRecommended = 1
-	treasureHuntV2SubType   = 5 // every type-139 row's tableInfoType
 )
 
-// treasureHuntDig is one activity_dig row (table 39432), keyed by id. The activity's
-// tableInfoType (its subType, ActivityInfoData.lua:225) picks the row (DigActivityManager.lua:
-// 157-167; ActivityTreasureHuntNewManager.lua:157-171, 234-240).
+// treasureHuntDig is one activity_dig row (tables 39432, unchanged in 40413), keyed by id. The
+// activity's tableInfoType (its subType, ActivityInfoData.lua:231; Activity.SubType) picks the row
+// in both versions (DigActivityManager.lua:178-192; ActivityTreasureHuntNewManager.lua:176-182,
+// 259-265). Type-139 rows mostly use row 5; S7's 1071012 uses row 6 (tables 40413), whose 20 tiers
+// (every 5 levels) and progress_type 3 differ from row 5's 8 tiers.
 type treasureHuntDig struct {
 	pickaxe   string  // cost_goods
 	maxLevel  int64   // activity_dig_para rows with dig_id = id
@@ -105,12 +106,6 @@ var treasureHuntDigs = map[int64]treasureHuntDig{
 	6: {pickaxe: "620002", maxLevel: 100, stopLevel: 100, tiers: []int64{
 		5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
 	}},
-}
-
-// treasureHuntV1SubTypes is activity.tableInfoType for the type-130 ids (table 39432).
-var treasureHuntV1SubTypes = map[int32]int64{
-	3009: 1, 5104: 1, 6004: 3, 6006: 4, 14003: 2, 94304: 4, 1000228: 4, 1000229: 4, 1000230: 4,
-	1000274: 4, 1000275: 4, 8130001: 4, 8130002: 4, 8130003: 4,
 }
 
 func init() {
@@ -195,13 +190,10 @@ func treasureHuntParse(info *sfs.SFSObject) treasureHuntState {
 
 func (th *treasureHunt) run(a Activity) {
 	v2 := a.Type == actTypeTreasureHuntNew
-	sub, ok := treasureHuntV1SubTypes[a.ID]
-	if v2 {
-		sub, ok = treasureHuntV2SubType, true
-	}
+	sub := int64(a.SubType())
 	dig, known := treasureHuntDigs[sub]
-	if !ok || !known {
-		slog.Info(th.r.feature+": activity has no known activity_dig row; skipping", "activity", a.ID)
+	if sub == 0 || !known {
+		slog.Info(th.r.feature+": activity has no known activity_dig row; skipping", "activity", a.ID, "tableInfoType", sub)
 		return
 	}
 	c := th.cmds(v2)

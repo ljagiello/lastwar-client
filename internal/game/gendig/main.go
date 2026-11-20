@@ -52,7 +52,7 @@ type block struct {
 func main() {
 	maps := flag.String("maps", "", "path to the lw_season_digging_game table's JSON dump")
 	blocks := flag.String("blocks", "", "path to the lw_season_block table's JSON dump")
-	version := flag.String("version", "", "table version the dumps came from, recorded in the header (e.g. 39432)")
+	version := flag.String("version", "", "table version the dumps came from, recorded in the header (e.g. 40413)")
 	out := flag.String("out", "dig_tables_gen.go", "output file")
 	flag.Parse()
 	if *maps == "" || *blocks == "" || *version == "" {
@@ -84,14 +84,17 @@ func main() {
 	log.Printf("gendig: wrote %d maps and %d blocks to %s", len(lvs), len(bls), *out)
 }
 
-// knownLevels are rows of the 1.0.364 table the dump must reproduce, one per game the feature
-// plays: 11001 secret vault stage 1 (type 5), 12001 its timed stage (type 6, 25 hammers), 12501 a
-// radar ruin (type 7, 16 hammers for 16 bricks), 13501 the city ruin's first stage (type 8).
+// knownLevels are rows the dump must reproduce, one per game the features play: 11001 secret
+// vault stage 1 (type 5), 12001 its timed stage (type 6, 25 hammers), 12501 a radar ruin (type 7,
+// 16 hammers for 16 bricks), 13501 the city ruin's first stage (type 8) (all from the 1.0.364
+// table and unchanged in 40413), and 17043, the first Season 7 alliance vault (type 2, 10x12),
+// new in tables 40413.
 var knownLevels = []level{
 	{id: 11001, w: 6, h: 6, typ: 5},
 	{id: 12001, w: 6, h: 6, typ: 6, hammers: 25},
 	{id: 12501, w: 4, h: 4, typ: 7, hammers: 16},
 	{id: 13501, w: 4, h: 4, typ: 8},
+	{id: 17043, w: 10, h: 12, typ: 2},
 }
 
 // knownBlocks are lw_season_block rows the dump must reproduce.

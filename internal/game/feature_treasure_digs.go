@@ -21,10 +21,11 @@ import (
 // :134-148). One open costs one owned hammer (Treasure_map_hummer k2 and early_digging_hummer
 // k2 = 1, table item). The boards:
 //
-//   - Secret Vault (DigTreasureManager; activity type 252, ids 2200011-2200015 and 2200021, Dig
-//     Hammer 771030 = Treasure_map_hummer k1). State is `hero.dispatch.get.dig.game.info {}`, which
-//     the client sends at login while the activity is open (InitMessage.lua:695;
-//     DigTreasureManager.lua:13-24) and on opening the vault (UIDigTreasureView.lua:15). The reply
+//   - Secret Vault (DigTreasureManager; any open activity of type 252: 2200011-2200015 and 2200021
+//     in S3, 2300011-2300015 and 2300017 in the S7 off-season, tables 40413; Dig Hammer 771030 =
+//     Treasure_map_hummer k1). State is `hero.dispatch.get.dig.game.info {}`, which the client
+//     sends at login while the activity is open (InitMessage.lua:695; DigTreasureManager.lua:16-28,
+//     IsActivityOpen by type) and on opening the vault (UIDigTreasureView.lua:15). The reply
 //     carries levelMap (the stage), timeLimitMap (a timed stage), mapBoxList (the stage chests
 //     {mapConfigId, rewardState}), helpInfo and isHammerGetMax (:86-112). A timed stage that isn't
 //     HaveGot, or whose endTime hasn't passed, replaces the stage (IsHaveTimeLimitMap, :140-152):
@@ -44,7 +45,8 @@ import (
 //     replace the boards (:69-80). A stage chest is `hero.dispatch.get.level.dig.game.reward {}`
 //     while a mapBoxList entry is CanGet (UIDigTreasureView.lua:451-469); its reply carries
 //     mapBoxList and newMap (DigTreasureGameGetRewardMessage.lua).
-//   - Secret Vault chest track (DigTreasureBoxRewardManager; activity type 261, ids 2200030-2200033):
+//   - Secret Vault chest track (DigTreasureBoxRewardManager; any open activity of type 261,
+//     IsNewActivityOpen, DigTreasureManager.lua:30-36: 2200030-2200033 in S3, 2300018-2300021 in S7):
 //     `hero.dispatch.treasure.v2.get.info {}` returns rewardList {target, isReward, ...}; the
 //     client sends `hero.dispatch.treasure.v2.reward {}` for a chest with isReward != 1 and
 //     target <= the count of the activity's para_3 item, 771051 (boxRewardComponent.lua:47-53;
@@ -107,9 +109,11 @@ const (
 	digRadarOpenCmd       = "detect.event.dig.game.open.block"
 	digRadarChestCmd      = "detect.event.get.dig.game.reward"
 
-	digVaultHammer  = "771030" // Dig Hammer (Treasure_map_hummer k1)
-	digRuinHammer   = "771050" // Explorer's Hammer (early_digging_hummer k1)
-	digTrackScore   = "771051" // the chest track's score item (activity 2200030-2200033 para_3)
+	digVaultHammer = "771030" // Dig Hammer (Treasure_map_hummer k1)
+	digRuinHammer  = "771050" // Explorer's Hammer (early_digging_hummer k1)
+	// digTrackScore is the chest track's score item, the open type-261 activity's para_3
+	// (DigTreasureBoxRewardManager.lua:53-69): 771051 in all eight type-261 rows of tables 40413.
+	digTrackScore   = "771051"
 	digCityBuilding = 10226000 // BuildingTypes.LW_BUILD_DIG_GAME (EnumType.lua:3764)
 	// detect_event.type of the radar ruins (image Detect_Event_DigGame): 30, and 39 for ids
 	// 501001-501105.
@@ -130,13 +134,9 @@ const (
 	digTapPause = 300 * time.Millisecond
 )
 
-// digVaultActivities and digTrackActivities are the type-252 (DigTreasure) and type-261
-// (OFF_SEASON_Treasure_V2) rows of table activity; neither has a needMainCityLevel.
-var (
-	digVaultActivities = []int32{2200011, 2200012, 2200013, 2200014, 2200015, 2200021}
-	digTrackActivities = []int32{2200030, 2200031, 2200032, 2200033}
-)
-
+// The Secret Vault's activity types, DigTreasure and OFF_SEASON_Treasure_V2 (EnumType.lua:6479,
+// 6488). The client gates both halves by type, never by id (DigTreasureManager.lua:22-36), so they
+// go through the activity sweep.
 const (
 	actTypeDigTreasure   int32 = 252
 	actTypeDigTreasureV2 int32 = 261
@@ -641,7 +641,7 @@ func (r *digRun) dig(b digBoard, m *digMap) (last *sfs.SFSObject, failed bool) {
 		}
 		last = reply
 		r.grants(reply)
-		if digRecheck(reply) {
+		if b.openCmd == digVaultOpenCmd && digRecheck(reply) {
 			slog.Warn(r.name+": the server asked to re-check "+b.label+"; re-reading it", "brick", pos)
 			return reply, false
 		}
@@ -659,14 +659,20 @@ func (r *digRun) dig(b digBoard, m *digMap) (last *sfs.SFSObject, failed bool) {
 	return last, r.dead
 }
 
-// digRecheck reports whether an open reply carries checkOpenAll, the server's "re-read the board"
-// (DigTreasureGameOpenBlockMessage.lua:19-25): true or a non-zero number.
+// digRecheck reports whether a Secret Vault open reply asks for a re-read of the vault. The client
+// drops the reply and re-reads whenever `t.checkOpenAll` is truthy in Lua, which is any present
+// value but boolean false, a numeric 0 included (DigTreasureGameOpenBlockMessage.lua:16-27). Only
+// the vault's open message reads it; the ruins' open replies never do. The re-reads are bounded by
+// digMaxRounds.
 func digRecheck(reply *sfs.SFSObject) bool {
-	if v, ok := claimBool(reply, "checkOpenAll"); ok {
-		return v
+	v, ok := reply.Get("checkOpenAll")
+	if !ok || v.Val == nil {
+		return false
 	}
-	n, ok := claimInt(reply, "checkOpenAll")
-	return ok && n != 0
+	if b, isBool := v.Val.(bool); isBool {
+		return b
+	}
+	return true
 }
 
 // radarRuins digs the radar ruins in get.detect.info, soonest to expire first.
@@ -839,32 +845,11 @@ func (r *digRun) cityRuins() {
 	}
 }
 
-// digActivityOpen reports whether one of ids is in init activity, keyed by id or as an array, and
-// open (ActivityListDataManager:CheckIsSend, as Activity.open).
-func digActivityOpen(in *Init, typ int32, ids []int32) bool {
-	type entry struct {
-		key string
-		obj *sfs.SFSObject
-	}
-	var entries []entry
-	if acts := in.Object("activity"); acts != nil {
-		for _, k := range acts.Keys() {
-			if o := evObject(acts, k); o != nil {
-				entries = append(entries, entry{k, o})
-			}
-		}
-	}
-	for _, o := range in.Objects("activity") {
-		entries = append(entries, entry{"", o})
-	}
-	now, hq := evNow().UnixMilli(), activityHQLevel(in)
-	for _, e := range entries {
-		id, ok := activityEntryID(e.obj, e.key)
-		if ok && slices.Contains(ids, id) && (Activity{ID: id, Type: typ, Raw: e.obj}).open(now, hq) {
-			return true
-		}
-	}
-	return false
+// digActivityOpen reports whether an activity of type typ is open (CheckIsSend), as
+// DigTreasureManager:IsActivityOpen and IsNewActivityOpen ask by type (DigTreasureManager.lua:
+// 22-36): through the activity sweep, which types each init entry from table activity.
+func (r *digRun) digActivityOpen(typ int32) bool {
+	return len(Activities(r.conn, r.in).Open(typ)) > 0
 }
 
 // digVaultState is a hero.dispatch.get.dig.game.info reply.
@@ -904,7 +889,7 @@ func (r *digRun) vaultBoard(m *digMap, timed bool) digBoard {
 
 // vault plays the Secret Vault while its activity is open.
 func (r *digRun) vault() {
-	if !digActivityOpen(r.in, actTypeDigTreasure, digVaultActivities) {
+	if !r.digActivityOpen(actTypeDigTreasure) {
 		slog.Info(r.name + ": Secret Vault activity not open")
 		return
 	}
@@ -985,6 +970,15 @@ func (r *digRun) vault() {
 				if failed {
 					return
 				}
+				if reply != nil && digRecheck(reply) {
+					// As on the stage: the client drops the reply and re-reads the vault.
+					fresh := r.read("secret vault info", digVaultInfoCmd, sfs.NewSFSObject())
+					if fresh == nil {
+						return
+					}
+					s = parseVault(fresh)
+					continue
+				}
 				progressed = reply != nil
 			case t.state == digCanGet:
 				if _, ok := r.claim(label+" chest", digVaultTimedChestCmd, digIDParams("uuid", t.uuid)); ok || r.dry {
@@ -1041,7 +1035,7 @@ func (r *digRun) vault() {
 
 // chestTrack claims the vault chest track's reached chests.
 func (r *digRun) chestTrack() {
-	if !digActivityOpen(r.in, actTypeDigTreasureV2, digTrackActivities) {
+	if !r.digActivityOpen(actTypeDigTreasureV2) {
 		slog.Info(r.name + ": vault chest track not open")
 		return
 	}

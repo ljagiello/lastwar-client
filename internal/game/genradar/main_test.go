@@ -6,14 +6,15 @@ import (
 	"testing"
 )
 
-// eventsFixture is a minimal detect_event.json: the known rows plus a run of three type-6 ids, and
+// eventsFixture is a minimal detect_event.json: the known rows (the Season 7 cave exploration
+// 700001 among them) plus a run of three type-6 ids, and
 // the known treasure rows plus 25002 (same cap as 25001) and 25003 (another cap), with type and
 // the linked para2 in the live table's positions (id 1, type 2, para2 17).
 const eventsFixture = `{"name":"detect_event","index":{"id":[1,"number"],"type":[2,"number"],"para2":[17,"string",true]},"link":null,"rows":[
 [100,[100,6]],[101,[101,6]],[102,[102,6]],
 [199,[199,11]],[205,[205,2]],[15000,[15000,8]],[20000,[20000,14]],[21001,[21001,16]],
 [24000,[24000,18,null,null,null,null,null,null,null,null,null,null,null,null,null,null,"1;1"]],
-[400000,[400000,26]],[410000,[410000,35]],[601001,[601001,44]],
+[400000,[400000,26]],[410000,[410000,35]],[601001,[601001,44]],[700001,[700001,25]],
 [25001,[25001,19,null,null,null,null,null,null,null,null,null,null,null,null,null,null,"105123001;20"]],
 [25002,[25002,19,null,null,null,null,null,null,null,null,null,null,null,null,null,null,"105123002;20"]],
 [25003,[25003,19,null,null,null,null,null,null,null,null,null,null,null,null,null,null,"105123003;15"]],
@@ -30,8 +31,8 @@ func TestParseAndRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 18 || ranges[0] != (typeRange{lo: 100, hi: 102, typ: 6}) {
-		t.Fatalf("n=%d ranges=%+v, want 18 ids with 100-102 merged", n, ranges)
+	if n != 19 || ranges[0] != (typeRange{lo: 100, hi: 102, typ: 6}) {
+		t.Fatalf("n=%d ranges=%+v, want 19 ids with 100-102 merged", n, ranges)
 	}
 	wantCaps := []capRange{{25001, 25002, 20}, {25003, 25003, 15}, {27015, 27015, 50}, {505601, 505601, 100}, {1025001, 1025001, 10}}
 	if !slices.Equal(caps, wantCaps) {
@@ -41,11 +42,11 @@ func TestParseAndRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, err := render(ranges, caps, n, lvs, "39432")
+	code, err := render(ranges, caps, n, lvs, "40413")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"table version 39432", "{lo: 100, hi: 102, typ: 6}", "{lo: 24000, hi: 24000, typ: 18}",
+	for _, want := range []string{"table version 40413", "{lo: 100, hi: 102, typ: 6}", "{lo: 24000, hi: 24000, typ: 18}", "{lo: 700001, hi: 700001, typ: 25}",
 		"{lo: 25001, hi: 25002, cap: 20}", "16: {show: 12, max: 40, refreshMin: 360, refreshN: 13}"} {
 		if !strings.Contains(string(code), want) {
 			t.Errorf("generated code missing %q", want)
@@ -56,6 +57,9 @@ func TestParseAndRender(t *testing.T) {
 func TestParseRejectsWrongTable(t *testing.T) {
 	if _, _, _, err := parseEvents([]byte(strings.Replace(eventsFixture, `[24000,[24000,18,`, `[24000,[24000,2,`, 1))); err == nil {
 		t.Error("a known event with the wrong type must be rejected")
+	}
+	if _, _, _, err := parseEvents([]byte(strings.Replace(eventsFixture, `,[700001,[700001,25]]`, ``, 1))); err == nil {
+		t.Error("a dump without the Season 7 events (tables older than 40413) must be rejected")
 	}
 	if _, _, _, err := parseEvents([]byte(strings.Replace(eventsFixture, `"name":"detect_event"`, `"name":"detect_event_new"`, 1))); err == nil {
 		t.Error("another table must be rejected")
