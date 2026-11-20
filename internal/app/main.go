@@ -1796,24 +1796,36 @@ func runCrossServerTest(o crossServerTestOpts) {
 			"phone_model \"GoClient\" among them; recapture the real app with cmd/pcap -session-out to replay its own")
 	}
 	result, err := auth.DoCrossServerLogin(params)
-	// The configured address and token stay the fallback (1.0.370 audit B40): a Login that the
-	// address a lookup listed couldn't take, or that refused the token it handed back, is tried once
-	// more with what the session had, before any other recovery. A refresh token the lookup rotated
-	// stays: it is the newest one, and already on disk. An access token the lookup handed back and
-	// adoptLookup saved is replaced on disk by the configured one again, so the next run doesn't
-	// start from a token this one has just seen refused.
-	if c := configured; err != nil && c != nil &&
-		((c.addressChanged && connectFailed(err)) || (c.tokenChanged && errors.Is(err, session.ErrTokenRejected))) {
-		slog.Warn("cross-server login: the Login with what the GSL lookup listed failed; trying the configured address and token", "error", err)
-		ip, port, zone = c.ip, c.port, c.zone
-		if c.tokenChanged {
+	// tokenRefused: a Login of this run got E011, so the refresh below is due even when the Login
+	// after it failed for another reason.
+	tokenRefused := errors.Is(err, session.ErrTokenRejected)
+	// The configured address and token stay the fallback (1.0.370 audit B40), and only the part that
+	// failed is put back, before any other recovery. A listed address that can't be reached is
+	// replaced by the configured one, keeping the token the lookup handed back, which no server has
+	// refused yet. A server that refuses that token (E011) answered, so its address stays and the
+	// configured token is tried there: the client's E011 clears only the at and keeps the server it
+	// saved and connected to (Assembly-CSharp.decompiled.cs:13637-13641, 12812, 1.0.370). The address
+	// goes first, as a configured address that answers can still refuse the lookup's token. A
+	// refresh token the lookup rotated stays: it is the newest one, and already on disk. An access
+	// token the lookup handed back and adoptLookup saved is replaced on disk by the configured one
+	// again, so the next run doesn't start from a token this one has just seen refused.
+	if c := configured; c != nil {
+		if err != nil && c.addressChanged && connectFailed(err) {
+			slog.Warn("cross-server login: the game server the GSL lookup listed did not answer; trying the configured address", "error", err)
+			ip, port, zone = c.ip, c.port, c.zone
+			params.IP, params.Port, params.Zone = ip, port, zone
+			result, err = auth.DoCrossServerLogin(params)
+			tokenRefused = tokenRefused || errors.Is(err, session.ErrTokenRejected)
+		}
+		if err != nil && c.tokenChanged && errors.Is(err, session.ErrTokenRejected) {
+			slog.Warn("cross-server login: the game server refused the access token the GSL lookup handed back (E011); trying the configured token at the same address", "error", err)
 			accessTok, accessTokTime = c.accessTok, c.accessTokTime
 			if lookupAtSaved {
 				restoreAccessToken(o.configSavePath, deviceID, accessTok, accessTokTime)
 			}
+			params.AccessTok = accessTok
+			result, err = auth.DoCrossServerLogin(params)
 		}
-		params.IP, params.Port, params.Zone, params.AccessTok = ip, port, zone, accessTok
-		result, err = auth.DoCrossServerLogin(params)
 	}
 	if err != nil && lookup != nil && !lookedUp && connectFailed(err) {
 		slog.Warn("cross-server login: the game server did not answer; looking it up with GSL getserverlist", "error", err)
@@ -1828,8 +1840,11 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 	// On E011 the real client clears only at, refreshes it with rt, and logs in again
-	// (csharp-native §2.3). Once per run: a token rejected right after a refresh won't improve.
-	if err != nil && errors.Is(err, session.ErrTokenRejected) && refreshTok != "" && !refreshed {
+	// (csharp-native §2.3; Assembly-CSharp.decompiled.cs:13637-13641). Once per run: a token
+	// rejected right after a refresh won't improve. An E011 whose retry with the configured token
+	// then couldn't reach the server still stands; any other answer to that retry (a ban, a kick, a
+	// forced update) ends the run below as it would have.
+	if err != nil && (errors.Is(err, session.ErrTokenRejected) || (tokenRefused && connectFailed(err))) && refreshTok != "" && !refreshed {
 		slog.Warn("cross-server login: access token rejected (E011); refreshing it with the session config's refresh token and logging in again", "error", err)
 		if refreshErr := refreshWithConfigToken(); refreshErr != nil {
 			// 211/212 means the device's credentials are gone (exit 2). Anything else (network,
