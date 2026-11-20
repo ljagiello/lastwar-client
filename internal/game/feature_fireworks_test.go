@@ -273,6 +273,11 @@ func fwRequestRect(r fwBlockRequest) fwRect {
 	return fwRect{lx / fwBlockSize, ly / fwBlockSize, (rx+fwBlockSize-1)/fwBlockSize - 1, (ry+fwBlockSize-1)/fwBlockSize - 1}
 }
 
+// clientMaxBlocksPerRequest is the client's cap on one world.get.block: it sends at most 160 of
+// the blocks it wants, `_addViewIndex.GetRange(0, 160)` (A-CS:179830-179843, 179934-179947). A
+// literal, so the test does not compare fwMaxBlocksPerRequest with itself.
+const clientMaxBlocksPerRequest = 160
+
 // checkFwPlan checks MASTER B34's invariants: every wanted block is read exactly once, each
 // request reads at most 160 blocks of its own rectangle, row by row, with the camera tile inside.
 func checkFwPlan(t *testing.T, name string, points []int64, radius int, reqs []fwBlockRequest) {
@@ -293,7 +298,7 @@ func checkFwPlan(t *testing.T, name string, points []int64, radius int, reqs []f
 	seen := map[int32]bool{}
 	for i, r := range reqs {
 		rc := fwRequestRect(r)
-		if len(r.Index) == 0 || len(r.Index) > fwMaxBlocksPerRequest || rc.area() > fwMaxBlocksPerRequest {
+		if len(r.Index) == 0 || len(r.Index) > clientMaxBlocksPerRequest || rc.area() > clientMaxBlocksPerRequest {
 			t.Errorf("%s: request %d reads %d blocks of a %d-block rectangle", name, i, len(r.Index), rc.area())
 		}
 		if !slices.IsSorted(r.Index) {
@@ -336,24 +341,30 @@ func TestFireworksPlanIsViewportShaped(t *testing.T) {
 	for i := range 12 {
 		spread = append(spread, int64(fwTileIndex(i*83%1000, i*157%1000)))
 	}
+	var grid []int64 // 36 HQs 3 blocks apart: radius 3 wants one 22x22 area of 484 blocks
+	for i := range 36 {
+		grid = append(grid, int64(fwTileIndex(405+(i%6)*30, 405+(i/6)*30)))
+	}
 	for _, c := range []struct {
 		name    string
 		points  []int64
 		radius  int
+		minReqs int
 		maxReqs int
 	}{
-		{"one HQ", []int64{347513}, 3, 1},
-		{"two HQs in one block", []int64{347513, 347520}, 3, 1},
-		{"a row of 161 blocks", row, 0, 2},
-		{"a town", town, 3, 4},
-		{"a town, own blocks only", town, 0, 2},
-		{"spread over the map", spread, 3, 12},
-		{"corners", []int64{1, 1000, 999001, 1000000}, 3, 4},
+		{"one HQ", []int64{347513}, 3, 1, 1},
+		{"two HQs in one block", []int64{347513, 347520}, 3, 1, 1},
+		{"a row of 161 blocks", row, 0, 2, 2},
+		{"a town", town, 3, 1, 4},
+		{"a town, own blocks only", town, 0, 1, 2},
+		{"spread over the map", spread, 3, 1, 12},
+		{"corners", []int64{1, 1000, 999001, 1000000}, 3, 4, 4},
+		{"a dense 6x6 grid", grid, 3, 4, 4},
 	} {
 		reqs := fwPlanBlocksAround(c.points, c.radius)
 		checkFwPlan(t, c.name, c.points, c.radius, reqs)
-		if len(reqs) > c.maxReqs {
-			t.Errorf("%s: %d requests, want at most %d", c.name, len(reqs), c.maxReqs)
+		if len(reqs) < c.minReqs || len(reqs) > c.maxReqs {
+			t.Errorf("%s: %d requests, want %d to %d", c.name, len(reqs), c.minReqs, c.maxReqs)
 		}
 	}
 }

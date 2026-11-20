@@ -71,10 +71,10 @@ const (
 	fireworksBlockCmd = "world.get.block"
 	fireworksGiftCmd  = "get.fireworks.gift"
 
-	fwMapTiles            = 1000                     // the normal map (UpdateLWAoi_Normal, A-CS:179042)
+	fwMapTiles            = 1000                     // the normal map (UpdateLWAoi_Normal, A-CS:179761)
 	fwBlockSize           = 10                       // LWAoiBlockSizeArray[viewLvl 0] (ConstDefine.lua:290-294)
-	fwBlockCount          = fwMapTiles / fwBlockSize // RecalculateBlockArg (A-CS:182711-182716)
-	fwMaxBlocksPerRequest = 160                      // per world.get.block (A-CS:179114-179128)
+	fwBlockCount          = fwMapTiles / fwBlockSize // RecalculateBlockArg (A-CS:183435-183440)
+	fwMaxBlocksPerRequest = 160                      // per world.get.block, GetRange(0, 160) (A-CS:179830-179843)
 
 	fwBoxLifetime     = 120 * time.Minute // DataConfig fireworks.k2
 	fwMaxClaimsPerRun = 20
