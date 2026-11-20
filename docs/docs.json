@@ -58,6 +58,7 @@
         "group": "Building the Client",
         "pages": [
           "go-client-roadmap",
+          "client-1-0-370",
           "capturing-and-decoding-traffic",
           "live-validation",
           "findings"

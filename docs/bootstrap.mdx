@@ -14,12 +14,12 @@ Cold start walks an 18-state machine from splash screen to a live game connectio
 | 3 | `CheckResVersion` | **Version check**: races N hosts in parallel, first success wins |
 | 4–5 | `DownloadManifest` / `DownloadUpdate` | Downloads/patches asset bundles, table data, and the Lua bundle |
 | 6 | `LoadDataTable` | Loads config tables + localization into memory |
-| 7 | `GetServerList` | **GSL request**: RSA+AES hybrid handshake ([Gate-server RSA+AES handshake](/gate-server-crypto)), on every cold start in 1.0.364 |
+| 7 | `GetServerList` | **GSL request**: RSA+AES hybrid handshake ([Gate-server RSA+AES handshake](/gate-server-crypto)), on every cold start in 1.0.370 (as in 1.0.364) |
 | 9 | `ConnectGame` | Races every gateway in the zone's list and keeps the first to answer (see [SFS2X wire protocol](/wire-protocol#gateway-race-and-the-pre-login-probe)) |
 | 10 | `Login` | SFS2X `Login` request (see [Identity, login & session](/auth)) |
 | 12 | `LoadScene` → `EnterGame` | Loads the actual game scene |
 
-In 1.0.364, `CheckResVersion` clears the cached server IP, port, and connection type on every cold start, so `StartConnect` never finds a cached server and the GSL (Gate Server List) call always runs (static-analysis-only). The cached `ip/port/zone` short-cut from state 6 to state 9 still exists, but only a mid-session reconnect, such as following a `serverInfo` redirect, takes it. See [Identity, login & session](/auth#token-lifecycle) for what the GSL call does with the stored tokens.
+In 1.0.370, as in 1.0.364, `CheckResVersion` clears the cached server IP, port, and connection type on every cold start, so `StartConnect` never finds a cached server and the GSL (Gate Server List) call always runs (static-analysis-only, `Assembly-CSharp.decompiled.cs:9332`). Since the 1.0.370 fixes `goclient` does the same on every reconnect: one GSL lookup with no `opt` before the `Login`, unless the run just refreshed its tokens or the address was typed on the command line. It fails open (any error, 211/212 included, keeps the configured address and token), adopts a token the reply carries, saves a rotated refresh token before the `Login`, and falls back to the configured address or token when the listed server can't be reached or refuses the handed-back token (static-analysis-only). The cached `ip/port/zone` short-cut from state 6 to state 9 still exists, but only a mid-session reconnect, such as following a `serverInfo` redirect, takes it. See [Identity, login & session](/auth#token-lifecycle) for what the GSL call does with the stored tokens.
 
 ## Check-version endpoint
 
@@ -30,7 +30,7 @@ GET {host}/gameservice/getlsu3dversion.php
 &returnJson=1&unityVersion=440
 ```
 
-In 1.0.364, `table_env` is `table_online` and `server` carries the cached zone (static-analysis-only). `goclient` now sends the same: `table_env=table_online`, and the session zone in `server` on the cross-server path. Earlier versions sent both empty, and the server answered anyway (confirmed live). The empty `table_env` had one visible cost: the server returns `table_version` and `locale` only when the request carries `table_env=table_online`. Four anonymous check-version GETs on 2026-10-05, Android 1.0.364 and iOS 1.0.344 each with and without `table_online`, showed both fields (plus an empty `x_table_version`) only in the `table_online` variants, with every other field identical (confirmed live).
+In 1.0.370, as in 1.0.364, `table_env` is `table_online` and `server` carries the cached zone (static-analysis-only). `goclient` now sends the same: `table_env=table_online`, and the session zone in `server` on the cross-server path. Earlier versions sent both empty, and the server answered anyway (confirmed live). The empty `table_env` had one visible cost: the server returns `table_version` and `locale` only when the request carries `table_env=table_online`. Four anonymous check-version GETs on 2026-10-05, Android 1.0.364 and iOS 1.0.344 each with and without `table_online`, showed both fields (plus an empty `x_table_version`) only in the `table_online` variants, with every other field identical (confirmed live).
 
 Host list (requests go out to every host in parallel and the first success wins; on total failure the client retries the same list once). About 5% of devices are A/B-bucketed to the `ea-` hosts by `GrayUtils.GetPercentageFromMd5`: `MD5(deviceId)` read as a little-endian uint64, `mod 100 + 1 <= 5`.
 
@@ -48,7 +48,7 @@ https://lastwar-serverlist-ea-us-gcp.lastwargame.com
 
 Whichever host answers becomes the base URL for every subsequent call in this bootstrap (`getserverlist.php`, `getnotice.php`, `probe.php`); there is no separate "gate server" discovery step.
 
-A response counts as valid when it has a non-empty `code` (which the client treats as an error), or when `updateType` is in `0`..`3` and `hotUpdateMsg` is non-empty. The 1.0.364 parser (`CheckResVersionState`) reads these fields:
+A response counts as valid when it has a non-empty `code` (which the client treats as an error), or when `updateType` is in `0`..`3` and `hotUpdateMsg` is non-empty. The 1.0.370 parser (`CheckResVersionState`, unchanged from 1.0.364) reads these fields:
 
 | Response field | Meaning |
 |---|---|
@@ -67,22 +67,22 @@ A response counts as valid when it has a non-empty `code` (which the client trea
 
 That's every field the parser handles. A live response carries fewer: the iOS check-version response for 1.0.344 (786), fetched on 2026-10-04, held only `client_config`, `downloadurl`, `firstLaunchForceUpdateMsg`, `hotUpdateMsg`, `lwfile2`, `resMsg`, `updateType`, and `warmup`. With `table_env=table_online`, the 2026-10-05 responses also carried `table_version`, `locale`, and an empty `x_table_version` (confirmed live).
 
-`updateType` meanings (1.0.364 C#):
+`updateType` meanings (1.0.370 C#, `Assembly-CSharp.decompiled.cs:9617-9639`):
 
 | Value | Meaning |
 |---|---|
 | `0` | Proceed to download and hot-update |
 | `1` | Optional store-update dialog: update or continue |
-| `2` | Forced update, blocking. The server no longer accepts this build |
+| `2` | Forced update, blocking. The server no longer accepts this build. `goclient` stops before GSL with exit code 5 |
 | `3` | Falls into the `default` branch, so it behaves exactly like `0`. The `Login` response handler also rewrites `3` to `0` |
 
-The `Login` response can carry `updateType` too; with `2`, the client enters its app-update state instead of waiting for `init`, and a cross-server `Login` fails with error 9 (1.0.367 C#). On 2026-10-04 the iOS 1.0.344 app got `updateType=3` from both check-version and `Login`, with the `Login` response naming `new_version` `1.0.350` (observed live). `goclient` logs a warning when check-version returns `updateType=2`, since `Login`s claiming that build are likely to start failing too.
+The `Login` response can carry `updateType` too; with `2`, the client enters its app-update state instead of waiting for `init`, and a cross-server `Login` fails with error 9 (1.0.367 C#). On 2026-10-04 the iOS 1.0.344 app got `updateType=3` from both check-version and `Login`, with the `Login` response naming `new_version` `1.0.350` (observed live). `goclient` stops when check-version returns `updateType` 2 (read as the client's `ToInt`, so `"2"` too, and before `code`), without asking another host, and exits with code 5.
 
-`goclient` also reads the `Login` response's `updateType` (an SFS Int) and `new_version` (a UtfString) on every `Login`, from the same object that holds `serverInfo`: the response itself, else its `p`. It logs both at Info with the `appVersion` the `Login` claimed. With `updateType=2` it logs a warning that a real client would stop there, but it doesn't enforce that yet: the run carries on. A `new_version` above the claimed build is no warning. The real client uses `new_version` only to refuse creating a new role when the gap is too large (`ShumeiSdkManager.IsForbidCreateRole`, static-analysis-only).
+`goclient` also reads the `Login` response's `updateType` (an SFS Int) and `new_version` (a UtfString) on every `Login`, from the same object that holds `serverInfo`: the response itself, else its `p`. It logs both at Info with the `appVersion` the `Login` claimed. With `updateType=2` it closes the connection before `init` and exits with code 5, as the real client stops there (`Assembly-CSharp.decompiled.cs:13666-13669, 71486-71494`). A `new_version` above the claimed build is no warning. The real client uses `new_version` only to refuse creating a new role when the gap is too large (`ShumeiSdkManager.IsForbidCreateRole`, static-analysis-only).
 
 ## resVersion
 
-`Login`'s `resVersion` is `GetResVersion()` in the 1.0.364 C# (static-analysis-only):
+`Login`'s `resVersion` is `GetResVersion()` in the 1.0.364 C#, unchanged in 1.0.370 (static-analysis-only):
 
 ```text
 {GameRes}.{DllRes}_{lwfile2 version}F_{table_version}.{locale}

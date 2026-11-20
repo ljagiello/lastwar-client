@@ -27,8 +27,8 @@ code 4, see "Running unattended (cron)".
   decompression), SFSObject codec, brand-new-guest-account login, email-verification account
   binding, resource collection across 14 confirmed building types (Farmland, Iron Mine, Gold Mine,
   Smelter, Material Workshop, Training Base, Oil Well, Drone Parts Workshop, Component Factory,
-  Tactical Institute, and the four Season 6 Spore Factory tiers; the 1.0.364 Crystal Factory and
-  Season 6 week-card building are wired in but unconfirmed), and a growing set of account-level
+  Tactical Institute, and the four Season 6 Spore Factory tiers; the Crystal Factory and the
+  Season 6 and Season 7 week-card buildings are wired in but unconfirmed), and a growing set of account-level
   automations: the "Armed Truck"/"Overlord" idle rewards, greeting city visitors, bulk-helping alliance
   members, claiming all mail and alliance gifts, donating to the alliance's currently-recommended
   tech, and both once-a-day VIP claims.
@@ -56,6 +56,13 @@ code 4, see "Running unattended (cron)".
   refresh worked in a third-party report on 2026-10-28 ([discussion
   #56](https://github.com/ljagiello/lastwar-client/discussions/56): one established account, one
   run); it hasn't been reproduced here.
+
+- **Follows the 1.0.370 client (iOS build 918, Android 1911) and its data tables 40413.** The
+  November 2026 audit of that build was fixed in place: login, GSL and transport details, the
+  ShuMei fingerprint, every generated table, and the features' gates. Its fixes and the 58 opt-in
+  features it added are static analysis only and haven't been sent live yet; see
+  [docs/client-1-0-370.mdx](docs/client-1-0-370.mdx) for what changed and what to check on the
+  first runs.
 
 ## Scope
 
@@ -95,8 +102,8 @@ whatever the config file says, for one-off tests.
   "shumeiBoxId": "your-real-shumei-fingerprint-token",
   "accessToken": "your-real-access-token-from-a-captured-login",
   "iosMode": true,
-  "appVersion": "1.0.344",
-  "versionCode": "786"
+  "appVersion": "1.0.370",
+  "versionCode": "918"
 }
 ```
 
@@ -117,19 +124,24 @@ registers when one is set, and a captured config usually has one.
 
 **The game server address is looked up, not typed in.** `ip` (a `|`-delimited gateway list) and
 `port` are optional. The real client asks GSL `getserverlist.php` for its role's server on every
-cold start, and this client does the same when it needs to:
+cold start, and since the 1.0.370 fixes this client does too:
 
-- With no `ip`/`port` in the config or on the command line, it looks the role's server up before
-  dialing (no `opt` field, the config's `deviceId`, `zone` and `gameUid`, and `platform=iOS` under
-  `iosMode`).
-- With an address saved, it dials it directly and makes no GSL call. If every gateway refuses the
-  connection, or the `Login` gets no reply (the August 2026 port move looked like this), it looks
-  the server up once and retries there. An `E011` or other rejection never triggers a lookup.
-- Either way, the address it connected to is saved back into the config, so later runs dial it
-  directly.
+- Every reconnect makes one GSL lookup (no `opt` field, the config's `deviceId`, `zone` and
+  `gameUid`, and `platform=iOS` under `iosMode`) before the `Login`, unless the run just refreshed
+  its tokens or the address was typed on the command line. With no `ip`/`port` saved, the lookup
+  is the only way to find the server.
+- The lookup fails open: an error, GSL 211/212 included, keeps the configured address and token.
+  It dials the listed server and adopts any access or refresh token the reply carries. A reply
+  that rotates the refresh token is saved to the config before the `Login`.
+- When the listed server can't be reached, the `Login` is retried at the configured address. When
+  it refuses a token the lookup handed back (`E011`), the `Login` is retried with the configured
+  token. If every gateway refuses the connection, or the `Login` gets no reply, the client looks
+  the server up once more and retries there.
+- The address it connected to is saved back into the config. On the first run after an update,
+  GSL's gateway host names will likely replace the captured IPs.
 
-`pcap -session-out` still writes the captured `ip`/`port`, which saves the first lookup. The lookup
-takes only the address from the reply and keeps the config's `accessToken`. Confirmed live on
+`pcap -session-out` still writes the captured `ip`/`port`. Before the 1.0.370 fixes the lookup
+ran only when needed and took only the address from the reply. Confirmed live on
 2026-10-10 with a captured iOS session: the lookup returned the role's server and no tokens, and
 configs with no address and with the pre-August port `17783` both logged in through it. `opt=fix`
 is rejected for such a session with GSL code 212, which is why the lookup sends no `opt`.
@@ -167,10 +179,15 @@ go run ./cmd/pcap -in login.pcap -session-out ~/.lastwar_goclient_session.json
 several gateways with `a=29` probes; those are skipped), writes `zone`/`gameUid`/`deviceId`/
 `shumeiBoxId`/`accessToken`/`iosMode` plus the `appVersion`/`versionCode` the token was issued
 under, and the captured `ip`/`port` as a starting address, with mode 0600, and prints only field
-lengths, never values. Recording the build
-matters: a token is bound to it, so once the real app updates, a fresh token only works if the
-Login claims that same build (without these two fields, iOS mode falls back to the 1.0.344/786
-build the original capture showed).
+lengths, never values. From an iOS capture it also records the `Login`'s device fields
+(`phone_model`, `osVersion`, `mt`, `idfv`, `distinct_id`, `fromCountry`, `lang`, `phone_screen`,
+`afuid`, `firebaseId`) under `device`; an iOS reconnect sends them again, `fromCountry`/`lang` in
+the GSL form too. Without them the `Login` keeps the placeholder `GoClient` model and the run warns
+to recapture. Recording the build matters: a token is bound to it, so once the real app updates, a
+fresh token only works if the Login claims that same build. A config without these two fields
+keeps claiming the build such configs always had, 1.0.344/786 on iOS or 1.0.364/1892 on Android,
+and the run warns to add them. Fresh binds, `-own-device-session` and runs without a config claim
+the current release, 1.0.370 (918 on iOS, 1911 on Android).
 
 **This file contains live credentials for a real account, keep it out of version control** (it's
 already outside the repo, in your home directory, and `chmod 600`'d above; don't move it into
@@ -225,7 +242,9 @@ this repo or commit it anywhere).
 # ones -- pass -collect to suppress it, or -list-buildings to make the print explicit).
 # Only flat scalar params (strings/bools/numbers) are supported over this control FIFO --
 # nested/array-shaped params (e.g. the "heroes" array docs/military-battle.mdx documents for
-# StartArenaBattleMessage) can't be exercised this way today:
+# StartArenaBattleMessage) can't be exercised this way today. Integers that fit 32 bits go out
+# as SFS Int, larger ones as Long; a key suffix :i, :l, :d, :s or :b picks the type, e.g.
+# {"uuid:l":42} (the command catalog names each param's type):
 mkfifo /tmp/lw_cmd_pipe
 ./lastwar-client -interactive /tmp/lw_cmd_pipe &
 echo 'building.production.collect {"uuid":123}' > /tmp/lw_cmd_pipe
@@ -278,8 +297,13 @@ rest of the process if a reply shows the diamond balance falling. See
 |---|---|
 | `duel-speedups` | Applies owned speed-up items (`build.ccd.m.new`, `queue.ccd.m.new`, `building.camp.accel`, items-only form) to running jobs whose queue today's entry lists under score type 51 |
 | `duel-speedups-plan` | Read-only: logs the speed-up calls `duel-speedups` would send |
-| `duel-recruit-tickets` | Spends held hero or survivor recruit tickets (`lottery.hero.card` / `lottery.worker.card`, `useFree: 0`) on days whose entry lists recruit types 42 / 120 |
-| `duel-troop-training` | Starts `building.camp.training` in idle Military Camps, at the highest unlocked tier and a count the food and iron in `init` cover, on Total Mobilization / Enemy Buster days |
+| `duel-recruit-tickets` | Spends held hero or survivor recruit tickets (`lottery.hero.card` / `lottery.worker.card`, `useFree: 0`) on days whose entry lists recruit types 42 / 120. It keeps the tickets of a pool where the recruit window would first ask about the wish hero (no wish hero chosen, or the chosen one owned at max rank or max honor while another wish-list hero isn't) |
+| `duel-troop-training` | Starts `building.camp.training` in idle Military Camps, at the highest unlocked tier and a count the food and iron in `init` cover, on Total Mobilization / Enemy Buster days. On Enemy Buster a batch starts only with a training speed-up item held and a later run left in the day. T11 trains in season 4 from day 64 on |
+| `duel-gacha` / `-plan` | OPT-IN, 1.0.370: reads the duel score gacha (`al.duel.lottery.get.info`) and claims its full pity reward; never draws. The plan only reads |
+| `secret-task-assist-plan` | Read-only, 1.0.370: lists the allies' finished Secret Tasks the client would offer to assist and today's assist count; never assists |
+| `explorer-treasure-plan` | Read-only, 1.0.370: logs the held Explorer Treasure keys and key boxes; sends nothing |
+| `radar-rescue-claims` | OPT-IN, 1.0.370, held for type 82: `receive.detect.event.reward` for finished rescue tasks whose rescued soldiers fit the stock |
+| `supplies-search` | OPT-IN, 1.0.370: the one risk-free (level 1) step of a radar or building supplies search, then its reward; radar searches only on radar-scoring duel days, building searches every day |
 | `secret-tasks-start` | Starts not-yet-started UR Secret Tasks (`hero.dispatch.start`) with idle heroes picked the way the client's Quick Join does; never refreshes a task |
 | `secret-tasks-start-plan` | Read-only: logs which task it would start with which heroes |
 | `radar-execute` | Runs the client's Quick Execute flows for march-free radar tasks (sampling, visitor, Help Teammates above a stamina reserve) and leaves them finished; the talk flow, which claims as it finishes, only on days whose entry lists type 82 |
@@ -291,17 +315,17 @@ All are off by default. Every dig write passes a per-command key allowlist that 
 
 | Feature | What it does |
 |---|---|
-| `fireworks-scan` | Read-only: lists the firework chests on alliance members' HQ tiles (`al.rank`, then `world.get.block`), with other players shown only as `member#<rank index>` |
+| `fireworks-scan` | Read-only: lists the firework chests on alliance members' HQ tiles (`al.rank`, then `world.get.block`), with other players shown only as `member#<rank index>`. Since 1.0.370 the fireworks and treasure features share one scan per run: three blocks around each member HQ, read in viewport-shaped requests of at most 160 blocks, 0.5 s apart |
 | `fireworks` | The same scan, then `get.fireworks.gift` for each eligible chest: under 120 minutes old, not full, from a current member; 1 s apart; stops at the daily cap |
 | `alliance-treasures-plan` | Read-only: reads the world blocks around every member HQ (at least 30 tiles each way) and lists the radar treasures allies dug (the alliance chat's "treasure ... has been dug up!"), each with its verdict and its distance from the owner's HQ |
 | `alliance-treasures` | The same scan, then `detect.event.claim.treasure` for each treasure that is dug, not expired, from your alliance, not yours, not full and not already claimed by you; 1 s apart; stops on any unexpected error |
 | `treasure-digs` / `-plan` | Radar-ruin, city-ruin and Secret Vault dig boards: claims the free hammer when the board offers it, opens bricks with owned hammers only, and claims the chests |
 | `treasure-hunt` / `-plan` | Treasure Hunt events (v1/v2): digs with owned pickaxes only and claims the tier and stored rewards |
-| `season-dig`, `offseason-dig`, `alliance-boss-dig` / `-plan` | Alliance dig vaults: opens your one free stone and claims relic and personal rewards |
+| `season-dig`, `offseason-dig`, `alliance-boss-dig` / `-plan` | Alliance dig vaults: opens your one free stone and claims relic and personal rewards. `season-dig` covers the Season 3 and Season 7 vaults; `treasure-digs` also covers the S7 off-season vault and chest track |
 
 ### Railway features
 
-Both are off by default and static-analysis-only: their requests come from the 1.0.364 client and haven't been sent live yet. Before each truck send or truck attack they save the squad with `formation.save.template`, and before each train attack they fetch the train lineup with `alliance.train.formation`, as the client does. They skip a run while the city is in another warzone, while the station is still fogged, before its opening reward is taken, and when the station doesn't report today's count. A timeout or any refusal stops the run, except a target someone else just looted (`E400207`).
+Both are off by default and static-analysis-only: their requests come from the 1.0.370 client and haven't been sent live yet. Before each truck send or truck attack they save the squad with `formation.save.template`, and before each train attack they fetch the train lineup with `alliance.train.formation`, as the client does. They skip a run while the city is in another warzone, while the station is still fogged, before its opening reward is taken (a `trainData` without `openReward` counts as taken, as in the game), and when the station doesn't report today's count. They ask for `train.data` only while the truck activity is open, and otherwise use the login's `trainData`, as the game does. A timeout or any refusal stops the run, except a target someone else just looted (`E400207`).
 
 | Feature | What it does |
 |---|---|
@@ -313,11 +337,32 @@ Both are off by default and static-analysis-only: their requests come from the 1
 - **Never your own server.** The target's `serverId` must differ from init `user.serverId` and from `user.crossFightSrcServerId`. Without a known `user.serverId`, it plunders nothing. The game doesn't enforce this: it only checks the server-sent `trainServers`, and your own server can be in that list.
 - **Trucks: UR only**, the sleigh included.
 - **Weaker than you.** The target's defensive power must be known and below the attacking power. A truck's power is its `marchInfo.power`. A train's is the sum of its defending teams, unknown if any team lacks a power.
-  - The attacking power is your strongest attack squad for a truck. For a train it's the three teams of the lineup the server returns, or your three strongest attack squads when it returns none.
+  - The attacking power is your strongest attack squad for a truck. For a train it's the three teams of the lineup the server returns, or your three strongest attack squads when it returns no lineup at all; a lineup with an empty team, a hero in two teams or a repeated team buff leaves trains alone.
   - It's a lower bound on what the game shows: hero power plus the virtual soldiers' power from the game's own formula. It leaves out the tactical weapon, chip set, T11 and Overlord terms.
   - It's built only from fresh `hero.init.detail.get` stats. Without them, or with a hero missing, nothing is plundered.
 
 After those come the game's own gates: 4 plunders a day shared by trucks and trains, 2 per truck and 1 per sleigh, the train cap and its protection time, matched servers, travelling targets only, and never your own alliance's.
+
+### Claims added for 1.0.370
+
+The 1.0.370 audit added these claims. Each is its own feature, off by default, and static-only:
+its summary in `-list-features` ends "(static-only, not validated live)". None spends anything,
+marches, or sends a chat message. Each logs its first reply at Info, and an error code from one of
+its commands stops that feature for the run. The duel ones are in the table above.
+
+| Area | Features |
+|---|---|
+| City | `city-soldiers` (count-battle and Civilization Spark soldiers), `captive-visitors` (Season 7 Battle Plan captives, type 40), `cockatrice-visitors` (type 13), `hero-countdown-reward`, `city-garbage` |
+| Dailies and mail | `flower-train-cheer-boxes`, `hero-wish-claim` (a full wish pity's chosen hero), `mail-single-claims-plan` (read-only: logs the type-112 mail Claim All leaves out) |
+| Alliance | `base-bubbles` (Thanksgiving on members' HQs, Valentine on your own; the base's owner may see the claim), `city-first-occupation`, `s0-alliance-boss`, `alliance-star-emoji`, `zone-mobilization-tasks` |
+| Events | `sunrise-foundation`, `gift-box-free-draw` (the free single draw only), `gift-box-score-boxes`, `hero-exchange-reward`, `world-boss-kill-rewards`, `food-event-boxes` / `-plan`, `banquet-v2-claims` / `-plan`, `bounty-hunter-milestones`, `bounty-hunter-chests`, `event-milestone-boxes` (Lucky Roll, Blue Store, slot machine), `decoration-gacha-boxes` |
+| More events | `tactical-card-box-points`, `tactical-card-collection`, `offseason-tasks`, `survivor-pack` (free half only), `doomsday-quests`, `parkour-tasks`, `front-break-tasks`, `leading-quest-tasks`, `hero-trial-stage`, `sand-worm-tasks`, `crazy-rock-tasks`, `letters`, `sky-battle-boxes`, `newbie-arena-rewards`, `birthday-set-reward`, `mastery-newbie-reward`, `counter-attack-rounds`, `theme-prenotice` |
+| Season | `season-achievements`, `military-rank-up`, `season-trends`, `season-outpost-boxes`, `cross-throne-rewards`, `bloody-night-tasks`, `jungle-trial-rewards`, `gold-tree-prayer` |
+
+Two features that are on by default changed in a way to check on the first runs: `season-dailies`
+now sends the power-milestone pair only in a Desert (type 1) season, as the client does, so in
+Seasons 2 to 7 the achievement grades wait for `season-achievements`; and `quests` leaves the
+Season 7 Lockhart quest 2400008 to `stage-quests`. See docs/client-1-0-370.mdx for the full list.
 
 Every run with a feature enabled logs one `alliance duel` line (theme, score, next chest, day end),
 and every `push.act.score.obtain` the server sends is logged as `activity score obtained` with the
@@ -368,11 +413,14 @@ Two things worth checking after setup, not just once but as ongoing habits:
   (both the plain-login and cross-server-reconnect paths) exit `2` specifically, distinct from
   the generic exit `1` used for other failures -- a cron wrapper can check `$?` directly and
   know to recapture a fresh session (see "Session config" above) without needing to grep the log
-  at all. GSL codes 211/212 ("re-auth needed") also exit `2`. A blocked account, role, device or
-  IP exits `4` instead, see below.
+  at all. GSL codes 211/212 ("re-auth needed") also exit `2`, and so does a
+  `push.account.device.del` that removes this run's device from the account: bind it again or
+  recapture. A blocked account, role, device or IP exits `4` instead, see below. A `Login` refused
+  because the season's server window is closed (`E015`/`E016`) exits `1`: the next run may get in.
 - **Exit code 3 means the server ended the session on purpose.** `push.user.off` (the account
-  logged in on another device), `push.server.stop` (maintenance) and `init.error` stop the run
-  without reconnecting, as the real client does. Nothing needs fixing: the next scheduled run
+  logged in on another device), `push.server.stop` (maintenance), `init.error`,
+  `push.user.gm.off` (a GM kick) and `push.refund.restart` stop the run without reconnecting, as
+  the real client does. Nothing needs fixing: the next scheduled run
   starts a fresh session. Playing on another device during a cron run is the usual cause.
 - **Exit code 4 means the server refused the account, role, device or IP.** A ban, an IP or
   device blacklist, or an account or role deletion state (the numeric `ep` codes in
@@ -380,6 +428,10 @@ Two things worth checking after setup, not just once but as ongoing habits:
   don't recapture: stop the cron until it's resolved. The log's error line names the code, and for
   a ban, whether it is permanent and its reason code. For a ban or a deletion, the real app on that
   account shows why.
+- **Exit code 5 means the server demands a forced update.** Check-version or the `Login` reply
+  said `updateType` 2, so the run stopped before the GSL lookup or `init`, as the real client
+  does. Move the session config's `appVersion`/`versionCode` to the current release (recapture
+  with `pcap -session-out`).
 - **`-log-level` controls the JSON log verbosity** (`debug`, `warn`, or its alias `warning`, or `error`; default `info`) --
   handy for trimming a noisy cron log down to warnings/errors only, or turning on `debug` output
   while chasing down a problem run.

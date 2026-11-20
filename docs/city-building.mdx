@@ -71,13 +71,13 @@ Game-data rows are keyed `id = base_type_id + level`, where `base_type_id` is al
 
 ## Which buildings are production lines
 
-The real client sends `building.production.collect` only for buildings in `Global/EnumType.lua`'s `ProductLineBuilds`, plus the current season week card's farm building (1.0.364 Lua, `ProductLineManager:GetAllBuildIds`; static-analysis-only):
+The real client sends `building.production.collect` only for buildings in `Global/EnumType.lua`'s `ProductLineBuilds`, plus the current season week card's farm buildings (1.0.370 Lua, `ProductLineManager.lua:57-80`, `GetAllBuildIds`; static-analysis-only):
 
 - **Core:** 10201000 Farmland, 10202000 Iron Mine, 10207000 Gold Mine, 10209000 Smelter, 10210000 Training Base, 10211000 Material Workshop, 10214000 Component Factory, 10221000 Oil Well, 10233000 Drone Parts Workshop, 10235000 Tactical Institute, and **10310000 Crystal Factory**, new in 1.0.364.
 - **Season buildings in `ProductLineBuilds`:** 761000-765000, 771000-775000, 781000-785000 (Blessing Fountain), 801000-805000, and 822000-826000.
-- **The current season week card's buildings**, from the `season_weekcard` table's `farm_building` and `farm_building_weekcard` columns. For Season 6, that's the four Spore Factory tiers (842000-845000) plus the Spore Factory week-card building (846000), which exists only if the card was bought.
+- **The current season week card's buildings**, from the `season_weekcard` table's `farm_building` and `farm_building_weekcard` columns. For Season 6, that's the four Spore Factory tiers (842000-845000) plus the Spore Factory week-card building (846000), which exists only if the card was bought. For Season 7 (`season_weekcard` row 10014, tables 40413) it's the four Blessing Fountain farms 853000-856000 plus the week-card farm 857000.
 
-Each season's set includes one week-card building: 764000, 775000, 785000, 805000, 826000, and 846000.
+Each season's set includes one week-card building: 764000, 775000, 785000, 805000, 826000, 846000, and 857000 (Season 7, new in 1.0.370; `BuildingUtils.lua:379-387`).
 
 Crystal Factory (`LW_BUILD_CRYSTAL_STONE`) is the only `BuildingTypes` entry 1.0.364 added: 299 → 300, with nothing removed or renumbered. It belongs to the new Crystal system, and the client shows it only while `CrystalBuyDataManager:IsOpen` is true.
 

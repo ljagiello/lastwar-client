@@ -1,0 +1,72 @@
+---
+title: "Client 1.0.370"
+description: "What the Go client changed to follow Last War 1.0.370 (iOS 918, Android 1911) and tables 40413: login and transport, the Android identity, every feature's gates, 58 new opt-in features, and what to check on the first runs."
+---
+
+`goclient` follows Last War **1.0.370** (iOS build 918, Android build 1911) and the data tables it bundles, **version 40413**. Live servers were already on tables 40460 when the client was audited, and no dump of 40460 exists. A November 2026 audit compared the client with the decompiled 1.0.370 Lua, C# and Java, and the fixes below came out of it. **All of it is static analysis: none of these changes has been sent to a live server yet.**
+
+## Build and tables
+
+- The built-in builds are 1.0.370/918 (iOS) and 1.0.370/1911 (Android). Fresh binds, `-own-device-session` and runs without a session config claim them. A session config that names no `appVersion`/`versionCode` keeps claiming the build such configs always had, 1.0.344/786 (iOS) or 1.0.364/1892 (Android), and the run warns to add the fields.
+- Every generated table is regenerated from tables 40413: activities (1,451 rows, now with `tableInfoType`, `showUiType`, the group columns, `para`, `para_1`, `para_3`, `para_5`, `condition` and `condition_giftbag`), production, visitor types, duel scores (with `lw_hero` and `officer_recruit`), alliance science (with its tab), dig maps, radar events, mail groups, and the new season tables. One constant, `tableVersion` in `internal/game/tables.go`, names the version, and a test holds every generated file's header to it.
+- With `LASTWAR_TABLES` pointing at a table dump, `go test ./internal/game` reruns every generator and fails on any difference, and checks the lists still copied from a table by hand. An activity id the table lacks is now logged at Warn.
+
+## The production login (iOS)
+
+These change what the scheduled iOS run does. Give them one config-copy test login before the cron uses them.
+
+- **GSL lookup before every reconnect.** As the real client does on every cold start, the run asks GSL `getserverlist.php` (no `opt`) for the role's server before the `Login`. It fails open: any lookup error keeps the configured address and token. A token the reply carries is used, and a rotated refresh token is saved before the `Login`. If the listed server can't be reached, the `Login` goes to the configured address; if it refuses a handed-back token (`E011`), the configured token is tried. GSL's gateway host names will likely replace the captured IPs on the first run.
+- **The `Login`:** `netType` is 1 (Wi-Fi). The `ta` field `lw_version` is the claimed app version. From an iOS capture, `cmd/pcap -session-out` records the device fields (`phone_model`, `osVersion`, `mt`, `idfv`, `distinct_id`, `fromCountry`, `lang`, `phone_screen`, `afuid`, `firebaseId`) under `device`, and an iOS reconnect sends them again; without them the run warns to recapture. `isUseLz4` goes out only while check-version's switches 4 and 5 are off. With switch 25 off, no `shumeiBoxId` is sent. About 5 % of device ids are bucketed to the `ea-` check-version hosts, as in the client.
+- **Forced update:** check-version or a `Login` reply with `updateType` 2 stops the run before GSL or `init`, exit code **5**.
+- **Ends of a session:** `push.user.gm.off` and `push.refund.restart` end the run with exit 3, like `push.user.off`. A `push.account.device.del` that names this run's device ends it with exit 2: bind again or recapture. `E015`/`E016` (the season's server window) exit 1. `E005` is unchanged (exit 2).
+- **Transport:** each reply is paired with its request by `_id`, so a late reply to a timed-out request is no longer taken for the next one. Once the server has answered a ping, 12 s with no frame at all counts as a dead connection. A request body over 1,000,000 bytes is refused, the big-size flag follows the uncompressed length, and a pong is timed by the socket read that delivered it.
+- `login.init` is sent with only its `_id`. An empty server list in a GSL reply is error E120 for every `opt`.
+
+## Bind, guest and Android identity
+
+- `-interactive` sends integers that fit 32 bits as SFS Int and larger ones as Long; a key suffix `:i`, `:l`, `:d`, `:s` or `:b` picks the type.
+- The role picker binds every role with the account's top-level `loginKey`, and the bound role's zone is kept in `.lastwar_goclient_zone` and sent as the GSL `zone`. A `push.account.login.new` without a `gameUid` fails the bind.
+- A new Android identity's deviceId is its Android ID plus `_n3d`. It keeps an install record in `.lastwar_goclient_android_install` (install time, AppsFlyer-style `afuid`, ThinkingData `distinct_id`), sent in the Android `Login`. The Android `Login` also sends `google_available` 1, the catalog phone's `simOp` and `simOpName`, `lat` 0, and a `ta` with `#device_type`, `#install_time`, `#ram`, `#disk` and `#carrier` as ThinkingData builds them. `gcmRegisterId` and `referrer` are Android-only.
+- **ShuMei** (Android only): the fingerprint's slots follow the 1.0.370 SDK, the device catalog carries US SIMs, and a registration sends the SDK's `/v3/cloudconf` request before the device profile, keeping its counters and the cached cloud config in `shumeiInstall`. See [ShuMei](/shumei).
+
+## Features that changed in place
+
+- **City:** the Season 7 Blessing Fountain farms 853000-856000 and the week-card farm 857000 are collected. Visitor queue 1 counts type 9. `finished-timers` leaves finished upgrades alone while the account's confirm-before-finish setting is on (HQ 16 and up), and reads a building's upgrade end from its build queue, as do `alliance-call-help` and `duel-speedups`. The idle reward is not claimed when the peek shows both pools empty.
+- **Dailies:** `quests` leaves the Season 7 Lockhart quest 2400008 to `stage-quests`, which also knows the 40413 stage rows. The free weekly package needs HQ 8. The week-card gift is claimed when the info reply has no `dailyFree`. The truck privilege waits until the station is out of the fog. `free-recruits` warns about a wish pool with no wish hero and still pulls.
+- **Alliance Duel:** `duel-recruit-tickets` keeps a ticket where the recruit window would ask a wish confirmation (alert 1, 2 or 5) and reads `officer_recruit` 40413; a pool newer than the tables is pulled unless the wish question applies. `duel-speedups` leaves jobs that end more than a year out. `duel-troop-training` holds on Enemy Buster unless a training speed-up is held and a later run is left in the day, and trains T11 in season 4 from day 64. `secret-tasks-start` reads hero quality from the generated `lw_hero` and skips a placement the server refuses. `arms-race-chests` claims only before the stage ends. Item counts follow the client's field precedence.
+- **Alliance:** the tech donation reads the charges (`al.science.refreshNum`) before donating and stops quietly on 120471 or 120836. Tab-3 techs are not donated out of season. `alliance-salary` skips only when init shows its activity closed, and the officer box only below rank 4. Fireworks of type 1 need the building's alliance, not a member. The fireworks and treasure features share one scan per run (three blocks around each member HQ, viewport-shaped requests of at most 160 blocks).
+- **Events:** the crystal boss follows the client's window, HQ condition and march reply. Seven-day boxes ignore the VIP flag except on the claim-all views. A bought battle pass also claims its state-2 tasks and high-tier rows. The T11 idle features check the camp level and season first. A `hero.event.info.get` reply that carries `success` is dropped, as the client drops it, and the Torch Relay pack needs its table row. Lucky Roll and Bargain Shop need `lastReceiveFreeTime` in the reply. LuckyShop, BattlePass_new, BargainShop and the season preview send the entry's own id.
+- **Season:** `season-dailies` sends the power-milestone pair only in a Desert (type 1) season, as the client does; Seasons 2 to 7 use achievements v2, claimed by the new `season-achievements`. Military salary reads `para_1` (Season 7 included), the week card reads the row's card id, the Season 7 mummy yard is 858000, and `ghost-recon` sends the source server where an entry has none (Seasons 2, 3, 4 and 7).
+- **Radar and dig:** the dig and radar tables include Season 7 (maps 17001-17062, cave exploration 700001-700033). The vault and chest track open by activity type, Treasure Hunt reads its dig row from `tableInfoType`, and a vault open whose reply asks for a re-check re-reads the vault (any `checkOpenAll` but `false`).
+- **Railway** (opt-in): a squad's present `soldierType` is kept, squads fill slots in wire order, the squad is saved before every truck attack, `train.data` is read only while the truck activity is open, a lineup the client would refuse leaves trains alone, and the attack log names the outcome.
+
+## New opt-in features
+
+58 features, each off by default with a summary ending "(static-only, not validated live)". None spends anything, marches or chats. Each logs its first reply at Info, registers no benign error code, and stops on the first refusal. The read-only `-plan` features send only reads.
+
+| Area | Features |
+|---|---|
+| City | `city-soldiers`, `captive-visitors`, `cockatrice-visitors`, `hero-countdown-reward`, `city-garbage` |
+| Dailies and mail | `flower-train-cheer-boxes`, `hero-wish-claim`, `mail-single-claims-plan` |
+| Alliance Duel | `duel-gacha`, `duel-gacha-plan`, `explorer-treasure-plan`, `secret-task-assist-plan` |
+| Alliance | `base-bubbles`, `city-first-occupation`, `s0-alliance-boss`, `alliance-star-emoji`, `zone-mobilization-tasks` |
+| Events | `sunrise-foundation`, `gift-box-free-draw`, `gift-box-score-boxes`, `hero-exchange-reward`, `world-boss-kill-rewards`, `food-event-boxes`, `food-event-boxes-plan`, `banquet-v2-claims`, `banquet-v2-claims-plan`, `bounty-hunter-milestones`, `bounty-hunter-chests`, `event-milestone-boxes`, `decoration-gacha-boxes` |
+| More events | `tactical-card-box-points`, `tactical-card-collection`, `offseason-tasks`, `survivor-pack`, `doomsday-quests`, `parkour-tasks`, `front-break-tasks`, `leading-quest-tasks`, `hero-trial-stage`, `sand-worm-tasks`, `crazy-rock-tasks`, `letters`, `sky-battle-boxes`, `newbie-arena-rewards`, `birthday-set-reward`, `mastery-newbie-reward`, `counter-attack-rounds`, `theme-prenotice` |
+| Season | `season-achievements`, `military-rank-up`, `season-trends`, `season-outpost-boxes`, `cross-throne-rewards`, `bloody-night-tasks`, `jungle-trial-rewards`, `gold-tree-prayer` |
+| Radar | `radar-rescue-claims`, `supplies-search` |
+
+The progress claims among them run in the last phase, after the actions, so a run claims what its own actions earned.
+
+## What to check on the first runs
+
+- The GSL lookup line before the `Login`, and whether the saved address changed.
+- `season-dailies`: the logged season config and type; in a non-Desert season no power-milestone pair goes out.
+- `alliance-salary`: the gate depends on init listing activity 28 (the only type-372 row in 40413). Revert the gate if it skips an account that used to claim.
+- `card-dailies`: the truck privilege claim needs init `monopolyStageInfo.stageId`; without it nothing is claimed.
+- `free-chests`: no weekly package below HQ 8, and a Warn each run while init has no `weekFreeReward`.
+- `treasure-digs`: a vault open reply with `checkOpenAll` now re-reads the vault, at most 12 rounds a run.
+- The tech donation logs `useNum`, `donateAvailable` and `maxdonate.count` before donating; 120836 after the day reset is a Warn, not a run error.
+
+## Not done
+
+Decided, to be built in a follow-up: the duel gacha draw, Secret Task assists, the free truck reroll, holding finished timers and the free research finish for their duel day, and filling the `Login`'s `ta` device fields. Still waiting for a decision: the `E005` exit code, GSL 211/212 during the pre-login refresh, the alliance challenge box, Ghost Recon actions, other alliances' shared treasures, alliance treasure boxes of types 2/5/8, supplies search past level 1, arena attacks, survey mail 146, AllianceCongratulation visitors, expired-item exchange, treasure-map digs, joining an alliance train, opening Explorer Treasure chests. The chat reader (red packets, treasure-dug cards) is built on a separate branch. Waiting for a capture or a live retest: `isSimulator` and the Android sensor lists, the ShuMei service class name, the forwarded-send framing (switch 29), the guest path's stored tokens, and a pong that waits in the kernel buffer.
