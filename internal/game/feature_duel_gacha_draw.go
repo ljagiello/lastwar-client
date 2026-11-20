@@ -47,9 +47,11 @@ import (
 // once the draws filled the counter (the surplus carries over: the wish red dot counts
 // floor(protectNum / num), :282-296).
 //
-// No duel score: no score row of table score 40413 is a gacha draw (the duel themes 110000-110005
-// score types 1, 4, 6, 7, 20, 23, 42, 51, 79, 82, 83, 86, 87, 95-99, 108, 119 and 120; 42 is a hero
-// recruit, 20 a shop spend), so it is not duel-held. Static-only, not validated live.
+// No duel score: the duel themes 110000-110005 (heroevent 40413, score and condition_score) score
+// types 1, 4, 6, 7, 20, 23, 42, 51, 79, 82, 83, 86, 87, 95-99, 108, 118, 119, 120, 126, 156 and 157.
+// None is a gacha draw (42 is ScoreType.Recruit, 20 ScoreType.Shop, EnumType.lua:15799-15809), and
+// the item-valued rows (118, 119) name none of the gacha's prize items (al_duel_infinity_box_reward
+// group 1001), so it is not duel-held. Static-only, not validated live.
 const (
 	duelGachaDrawFeature = "duel-gacha-draw"
 	duelGachaDrawCmd     = "al.duel.lottery.lottery"
