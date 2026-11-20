@@ -50,9 +50,11 @@ func newAndroidInstall(now time.Time) AndroidInstall {
 }
 
 // loadOrCreateAndroidInstall returns the persisted AndroidInstall, creating and persisting one on
-// first use. An unreadable or corrupt file is an error rather than a silent replacement: the values
-// describe an install the server has already seen.
-func loadOrCreateAndroidInstall() (AndroidInstall, error) {
+// first use as of created: the time this device's identity was created, so an identity older than
+// this state file (one made before it existed) doesn't report an install after Logins the server
+// has already seen. An unreadable or corrupt file is an error rather than a silent replacement: the
+// values describe an install the server has already seen.
+func loadOrCreateAndroidInstall(created time.Time) (AndroidInstall, error) {
 	raw, err := readTrimmed(androidInstallStatePath())
 	if err != nil {
 		return AndroidInstall{}, fmt.Errorf("read android install state: %w", err)
@@ -64,7 +66,7 @@ func loadOrCreateAndroidInstall() (AndroidInstall, error) {
 		}
 		return a, nil
 	}
-	a := newAndroidInstall(time.Now())
+	a := newAndroidInstall(created)
 	b, _ := json.Marshal(a) // a time and two strings: Marshal can't fail
 	if err := AtomicWriteStateFile(androidInstallStatePath(), string(b)); err != nil {
 		return AndroidInstall{}, fmt.Errorf("persist android install state: %w", err)

@@ -274,6 +274,66 @@ func TestRunCrossServerTestAdoptsLookupTokens(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestFallsBackToTheConfiguredLogin: the configured address and token stay the
+// fallback. When every gateway the pre-Login lookup listed refuses, the Login goes to the configured
+// address; when the server refuses the token the lookup handed back (E011), the configured token is
+// tried. Either way the run succeeds and the session config is left as it was.
+func TestRunCrossServerTestFallsBackToTheConfiguredLogin(t *testing.T) {
+	cases := []struct {
+		name       string
+		reply      gsl.LoginServerListRespon
+		handlers   func(seen *loginAts) map[string]func(*session.GameConn)
+		wantDialed string
+		wantLogins string
+	}{
+		{"listed gateways refuse", lookupReply(), func(seen *loginAts) map[string]func(*session.GameConn) {
+			return map[string]func(*session.GameConn){
+				"gw-a.example:10783": nil, "gw-b.example:10783": nil, "gw-c.example:10783": nil,
+				"10.0.0.1:17783": tokenCheckingServer("at-1", seen),
+			}
+		}, "[gw-a.example:10783 gw-b.example:10783 gw-c.example:10783 10.0.0.1:17783]", "[at-1]"},
+		{"handed-back token refused", gsl.LoginServerListRespon{
+			Code:       "0",
+			ServerList: []gsl.LoginServerInfo{{ID: "783", IP: "10.0.0.1", Port: testutil.FlexPort(17783), Zone: lookupZone, GameUid: lookupGameUid}},
+			At:         &gsl.LoginToken{Token: "at-gsl", Time: "1791900000"},
+		}, func(seen *loginAts) map[string]func(*session.GameConn) {
+			return map[string]func(*session.GameConn){"10.0.0.1:17783": tokenCheckingServer("at-1", seen)}
+		}, "[10.0.0.1:17783 10.0.0.1:17783]", "[at-gsl at-1]"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			client := testutil.UseInMemoryGSL(t, c.reply)
+			var seen loginAts
+			dial, dialed := recordingDial(c.handlers(&seen))
+			cfg := SessionConfig{IP: "10.0.0.1", Port: 17783, Zone: lookupZone, GameUid: lookupGameUid, AccessToken: "at-1"}
+			cfgPath := writeSessionConfig(t, cfg)
+			before, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			synctest.Test(t, func(t *testing.T) {
+				runCrossServerTest(crossServerTestOpts{
+					ip: "10.0.0.1", port: 17783, zone: lookupZone, gameUid: lookupGameUid, at: "at-1",
+					configSavePath: cfgPath, httpClient: client, dialGame: dial,
+				})
+				synctest.Wait()
+			})
+
+			if got := fmt.Sprint(dialed()); got != c.wantDialed {
+				t.Errorf("dialed %s, want %s", got, c.wantDialed)
+			}
+			if got := fmt.Sprint(seen.get()); got != c.wantLogins {
+				t.Errorf("Login access tokens = %s, want %s", got, c.wantLogins)
+			}
+			if after, err := os.ReadFile(cfgPath); err != nil || !bytes.Equal(after, before) {
+				t.Errorf("session config changed (err %v):\n%s", err, after)
+			}
+		})
+	}
+}
+
 // TestRunCrossServerTestNoLookupWithExplicitAddress: an address typed on the command line is used
 // as given, with no lookup before the Login.
 func TestRunCrossServerTestNoLookupWithExplicitAddress(t *testing.T) {

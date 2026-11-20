@@ -1247,6 +1247,19 @@ func (o crossServerTestOpts) GoString() string { return o.String() }
 // rationale, shared across every credential-bearing type in this codebase.
 func (o crossServerTestOpts) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
+// configuredLogin is the address and tokens a reconnect had before its pre-Login GSL lookup, and
+// what the lookup changed.
+type configuredLogin struct {
+	ip, zone, accessTok, refreshTok string
+	port                            int
+	accessTokTime, refreshTokTime   int64
+	addressChanged, tokenChanged    bool
+}
+
+func (c configuredLogin) String() string       { return "[REDACTED configuredLogin]" }
+func (c configuredLogin) GoString() string     { return c.String() }
+func (c configuredLogin) LogValue() slog.Value { return slog.StringValue(c.String()) }
+
 // androidInstallFor is the Android install a Login describes: the identity's, with the ShuMei
 // install's app install time when the session keeps one for this deviceId, so ta #install_time and
 // the ShuMei fingerprint (a125) report the same PackageInfo.firstInstallTime.
@@ -1565,6 +1578,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 	lookedUp := false
+	// configured is what the session had before a pre-Login lookup replaced any of it: the fallback
+	// for a Login the looked-up address can't take or the looked-up token can't pass.
+	var configured *configuredLogin
 	addressGiven := gsl.FirstHost(ip) != "" && port > 0
 	switch {
 	case lookup == nil || o.ipExplicit || o.portExplicit:
@@ -1590,12 +1606,19 @@ func runCrossServerTest(o crossServerTestOpts) {
 		if srv, err := lookup(); err != nil {
 			slog.Warn("GSL server lookup failed; logging in at the configured address", "error", err)
 		} else {
+			before := configuredLogin{ip: ip, port: port, zone: zone, accessTok: accessTok, accessTokTime: accessTokTime,
+				refreshTok: refreshTok, refreshTokTime: refreshTokTime}
 			if !sameGameServer(srv, ip, port, zone) {
 				slog.Info("GSL lists a different game server than the configured one; logging in there", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone,
 					"configuredIP", ip, "configuredPort", port, "configuredZone", zone)
 			}
 			adoptLookup(srv)
 			lookedUp = true
+			before.addressChanged = !sameGameServer(srv, before.ip, before.port, before.zone)
+			before.tokenChanged = accessTok != before.accessTok
+			if before.addressChanged || before.tokenChanged {
+				configured = &before
+			}
 		}
 	}
 
@@ -1728,6 +1751,17 @@ func runCrossServerTest(o crossServerTestOpts) {
 			"phone_model \"GoClient\" among them; recapture the real app with cmd/pcap -session-out to replay its own")
 	}
 	result, err := auth.DoCrossServerLogin(params)
+	// The configured address and token stay the fallback (1.0.370 audit B40): a Login that the
+	// address a lookup listed couldn't take, or that refused the token it handed back, is tried once
+	// more with what the session had, before any other recovery.
+	if c := configured; err != nil && c != nil &&
+		((c.addressChanged && connectFailed(err)) || (c.tokenChanged && errors.Is(err, session.ErrTokenRejected))) {
+		slog.Warn("cross-server login: the Login with what the GSL lookup listed failed; trying the configured address and token", "error", err)
+		ip, port, zone = c.ip, c.port, c.zone
+		accessTok, accessTokTime, refreshTok, refreshTokTime = c.accessTok, c.accessTokTime, c.refreshTok, c.refreshTokTime
+		params.IP, params.Port, params.Zone, params.AccessTok = ip, port, zone, accessTok
+		result, err = auth.DoCrossServerLogin(params)
+	}
 	if err != nil && lookup != nil && !lookedUp && connectFailed(err) {
 		slog.Warn("cross-server login: the game server did not answer; looking it up with GSL getserverlist", "error", err)
 		if srv, lookupErr := lookup(); lookupErr != nil {

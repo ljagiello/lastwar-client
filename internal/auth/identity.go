@@ -358,6 +358,12 @@ func loadOrCreateAndroidID() (string, error) {
 // Assembly-CSharp.decompiled.cs:73491-73506 of the Android build), and an Android identity gets its
 // AndroidInstall. An existing deviceId is never rewritten: the server already knows it.
 func LoadOrCreateDeviceIdentity(iosMode bool) (*deviceIdentity, error) {
+	// created is when this identity was made: now for a new one, else when its device-id file was
+	// written (the anchor of a new AndroidInstall, see loadOrCreateAndroidInstall).
+	created := time.Now()
+	if fi, err := os.Stat(deviceIDStatePath()); err == nil && fi.Size() > 0 {
+		created = fi.ModTime()
+	}
 	id, err := readTrimmed(deviceIDStatePath())
 	if err != nil {
 		// A non-ENOENT failure reading an EXISTING device-id file must never be treated as "no
@@ -447,7 +453,7 @@ func LoadOrCreateDeviceIdentity(iosMode bool) (*deviceIdentity, error) {
 	}
 	var android AndroidInstall
 	if !iosMode {
-		if android, err = loadOrCreateAndroidInstall(); err != nil {
+		if android, err = loadOrCreateAndroidInstall(created); err != nil {
 			slog.Warn("failed to load or create the android install state file", "path", androidInstallStatePath(), "error", err)
 			return nil, err
 		}

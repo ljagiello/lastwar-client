@@ -160,3 +160,27 @@ func TestFormDeviceAndroidSimOp(t *testing.T) {
 		t.Errorf("iOS form device = %+v, want no SIM operator", f)
 	}
 }
+
+// TestExistingAndroidIdentityInstallPredatesIt: an Android identity made before its install state
+// existed gets an install time from when its deviceId was written, not from today, so it never
+// reports an install after Logins the server has seen.
+func TestExistingAndroidIdentityInstallPredatesIt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := os.WriteFile(deviceIDStatePath(), []byte("0123456789abcdef0123456789abcdef_n3d"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	made := time.Now().Add(-100 * 24 * time.Hour)
+	if err := os.Chtimes(deviceIDStatePath(), made, made); err != nil {
+		t.Fatal(err)
+	}
+	ident, err := LoadOrCreateDeviceIdentity(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ident.DeviceID != "0123456789abcdef0123456789abcdef_n3d" {
+		t.Errorf("deviceId rewritten to %q", ident.DeviceID)
+	}
+	if it := ident.Android.InstallTime; !it.Before(made) || made.Sub(it) > time.Hour {
+		t.Errorf("install time %v, want minutes before the identity was made (%v)", it, made)
+	}
+}
