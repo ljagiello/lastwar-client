@@ -24,31 +24,50 @@ func duelGachaDrawReply(score, protectNum int64) *sfs.SFSObject {
 	return r
 }
 
-// runDuelGachaDrawFake runs duel-gacha-draw against a fake server that answers the info read with
-// info and the n-th draw (from 0) with draw(n). It records the pauses between draws.
+// duelGachaDrawSundayNow is a Sunday clock: 2026-10-11 12:00 UTC, 10:00 server time on the server
+// day that init tomorrow (evTestTomorrow, 02:00 UTC) anchors, so GetNowWeekdayIndex is 7 and the
+// Sunday tab opens the draw view. evTestNow is the Monday after the previous Sunday (2026-10-05).
+var duelGachaDrawSundayNow = time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+
+// runDuelGachaDrawFake runs duel-gacha-draw on a Sunday (duelGachaDrawSundayNow) with no duel
+// event read; see runDuelGachaDrawFakeAt.
 func runDuelGachaDrawFake(t *testing.T, in *Init, info *sfs.SFSObject, draw func(n int) *sfs.SFSObject) ([]evReq, []time.Duration, error) {
 	t.Helper()
-	withEvNow(t, evTestNow)
+	return runDuelGachaDrawFakeAt(t, duelGachaDrawSundayNow, in, info, nil, draw)
+}
+
+// runDuelGachaDrawFakeAt runs duel-gacha-draw at now against a fake server that answers the info
+// read with info, hero.event.info.get {activityId: "70000"} (the duel's) with event, and the n-th
+// draw (from 0) with draw(n). A nil event means no event read may be sent. It records the pauses
+// between draws.
+func runDuelGachaDrawFakeAt(t *testing.T, now time.Time, in *Init, info, event *sfs.SFSObject, draw func(n int) *sfs.SFSObject) ([]evReq, []time.Duration, error) {
+	t.Helper()
+	withEvNow(t, now)
 	var slept []time.Duration
 	saved := duelGachaDrawSleep
 	duelGachaDrawSleep = func(d time.Duration) { slept = append(slept, d) }
 	t.Cleanup(func() { duelGachaDrawSleep = saved })
 	n := 0
 	conn, fake := startEvFake(t, func(cmd string, p *sfs.SFSObject) *sfs.SFSObject {
-		switch cmd {
-		case duelGachaInfoCmd:
+		switch {
+		case cmd == duelGachaInfoCmd:
 			return info
-		case duelGachaDrawCmd:
+		case cmd == duelGachaDrawCmd:
 			r := draw(n)
 			n++
 			return r
+		case cmd == "hero.event.info.get" && p.GetString("activityId") == "70000" && event != nil:
+			return event
 		}
 		return evErr("999999")
 	})
 	err := runDuelGachaDraw(conn, in)
 	for _, r := range fake.requests() {
-		if r.Cmd != duelGachaInfoCmd && r.Cmd != duelGachaDrawCmd {
-			t.Errorf("sent %s: only the gacha read and the draw may be sent", r.Cmd)
+		switch {
+		case r.Cmd == duelGachaInfoCmd, r.Cmd == duelGachaDrawCmd:
+		case r.Cmd == "hero.event.info.get" && event != nil:
+		default:
+			t.Errorf("sent %s %v: only the gacha read, the draw and (on the Activity tab path) the duel's event read may be sent", r.Cmd, r.Params)
 		}
 	}
 	return fake.requests(), slept, err
@@ -213,7 +232,7 @@ func TestDuelGachaDrawGates(t *testing.T) {
 		"no effect":       {duelGachaInit(func(raw *sfs.SFSObject) { raw.PutSFSObject("effect", sfs.NewSFSObject()) }), duelGachaInfo(30_000_000, 50, 0, 1), []string{"al.duel.lottery.get.info"}},
 		"no alliance":     {duelGachaInit(func(raw *sfs.SFSObject) { raw.PutSFSObject("alliance", duelObj("uid", "")) }), duelGachaInfo(30_000_000, 50, 0, 1), nil},
 		"switch off":      {duelGachaInit(func(raw *sfs.SFSObject) { raw.PutSFSObject("dataConfig", duelObj("alliance_duel_zhuanpan", 0)) }), duelGachaInfo(30_000_000, 50, 0, 1), nil},
-		"season 1 day 56": {duelGachaInit(duelGachaSeason1(55)), duelGachaInfo(30_000_000, 50, 0, 1), nil},
+		"season 1 day 56": {duelGachaInit(duelGachaDrawSeason1Day(56)), duelGachaInfo(30_000_000, 50, 0, 1), nil},
 	} {
 		reqs, _, err := runDuelGachaDrawFake(t, c.in, c.info, never)
 		if err != nil {
@@ -284,6 +303,152 @@ func TestDuelGachaDrawInfoErrorStops(t *testing.T) {
 func TestDuelGachaDrawNoInit(t *testing.T) {
 	if err := runDuelGachaDraw(nil, nil); err != nil {
 		t.Errorf("nil init: %v", err)
+	}
+}
+
+// duelGachaDrawSeason1Day puts season 1 on its given day at duelGachaDrawSundayNow
+// ((now - seasonStartTime) // 86400000 + 1, SeasonUtil.lua:308-316).
+func duelGachaDrawSeason1Day(day int) func(raw *sfs.SFSObject) {
+	return func(raw *sfs.SFSObject) {
+		start := duelGachaDrawSundayNow.Add(-time.Duration(day-1) * 24 * time.Hour).UnixMilli()
+		raw.PutSFSObject("playerServerSeasonInfo", duelObj("seasonId", 1, "seasonStartTime", start))
+	}
+}
+
+// duelGachaDrawDuel puts the Alliance Duel's init entry into init: id 55000 (ActId "55000",
+// EnumType.lua:6301-6305) with activityid "70000", open from two days before to two days after
+// evTestNow, edited by edit.
+func duelGachaDrawDuel(edit func(entry *sfs.SFSObject)) func(raw *sfs.SFSObject) {
+	return func(raw *sfs.SFSObject) {
+		a := duelActivity()
+		if edit != nil {
+			edit(a)
+		}
+		evObject(raw, "activity").PutSFSObject("55000", a)
+	}
+}
+
+// duelGachaDrawEvent is the duel's hero.event.info.get {activityId: "70000"} reply with the top
+// level confirmed live (docs/alliance-duel.mdx, "The reply"): activityId "70000", type 15 and an
+// eventList with today's entry, edited by edit.
+func duelGachaDrawEvent(edit func(r *sfs.SFSObject)) *sfs.SFSObject {
+	r := duelInfo(duelEntry(110000, "90402", evTestNow.Add(-time.Hour), evTestNow.Add(time.Hour)))
+	r.PutUtfString("activityId", "70000")
+	r.PutInt("type", 15)
+	if edit != nil {
+		edit(r)
+	}
+	return r
+}
+
+// TestDuelGachaDrawView: a draw needs a draw view the 1.0.370 client can open. The Sunday tab
+// needs server weekday 7 (UIAllyDuelCtrl.lua:21-26; the date of UTC plus the server offset, here
+// UTC-2 from init tomorrow at 02:00 UTC); the Activity tab needs the duel activity (55000) not
+// finished and its event info filed (UIAllyDuelCtrl.lua:15-20). Monday to Saturday outside a
+// running duel only the info read is sent. A failed event read stops with no draw.
+func TestDuelGachaDrawView(t *testing.T) {
+	const (
+		infoCmd  = "al.duel.lottery.get.info"
+		eventCmd = "hero.event.info.get"
+		drawCmd  = "al.duel.lottery.lottery"
+	)
+	monday := evTestNow // 2026-10-05 12:00 UTC, 10:00 Monday server time
+	sunday := duelGachaDrawSundayNow
+	duel := func(edit func(entry *sfs.SFSObject)) *Init { return duelGachaInit(duelGachaDrawDuel(edit)) }
+	noTomorrow := func(in *Init) *Init {
+		in.Raw = duelWithoutKey(in.Raw, "tomorrow")
+		return in
+	}
+	hq9 := func(in *Init) *Init {
+		in.Buildings = []Building{NewTestBuilding(1, activityHQBuildingID, 9)} // the duel needs HQ 10
+		return in
+	}
+	event := duelGachaDrawEvent(nil)
+	for name, c := range map[string]struct {
+		now     time.Time
+		in      *Init
+		event   *sfs.SFSObject
+		sent    []string
+		wantErr string
+	}{
+		"Monday, no duel activity: only the info read": {monday, duelGachaInit(nil), nil, []string{infoCmd}, ""},
+		"Sunday, no duel activity: the Sunday tab":     {sunday, duelGachaInit(nil), nil, []string{infoCmd, drawCmd}, ""},
+		"Monday, the duel with event info: the Activity tab": {monday, duel(nil), event,
+			[]string{infoCmd, eventCmd, drawCmd}, ""},
+		"Sunday with the duel open: no event read": {sunday, duel(func(e *sfs.SFSObject) {
+			e.PutLong("endTime", sunday.Add(48*time.Hour).UnixMilli())
+		}), event, []string{infoCmd, drawCmd}, ""},
+		// The server day starts at 02:00 UTC: the weekday is the date of UTC-2.
+		"Sunday 01:00 UTC is Saturday 23:00 server time": {time.Date(2026, 10, 11, 1, 0, 0, 0, time.UTC), duelGachaInit(nil), nil,
+			[]string{infoCmd}, ""},
+		"Monday 01:00 UTC is Sunday 23:00 server time": {time.Date(2026, 10, 12, 1, 0, 0, 0, time.UTC), duelGachaInit(nil), nil,
+			[]string{infoCmd, drawCmd}, ""},
+		// CheckIsSubmitting (weekday 7, first server hour) hides only the Activity tab.
+		"Sunday 00:30 server time, submitting": {time.Date(2026, 10, 11, 2, 30, 0, 0, time.UTC), duelGachaInit(nil), nil,
+			[]string{infoCmd, drawCmd}, ""},
+		"no init tomorrow on a Sunday: weekday unknown": {sunday, noTomorrow(duelGachaInit(nil)), nil, []string{infoCmd}, ""},
+		"no init tomorrow, the duel with event info":    {monday, noTomorrow(duel(nil)), event, []string{infoCmd, eventCmd, drawCmd}, ""},
+		"the duel below its HQ level is not open":       {monday, hq9(duel(nil)), event, []string{infoCmd}, ""},
+		"init finish true": {monday, duel(func(e *sfs.SFSObject) { e.PutBool("finish", true) }), event,
+			[]string{infoCmd, eventCmd}, ""},
+		"init finish 0, true in Lua": {monday, duel(func(e *sfs.SFSObject) { e.PutInt("finish", 0) }), event,
+			[]string{infoCmd, eventCmd}, ""},
+		"init finish false": {monday, duel(func(e *sfs.SFSObject) { e.PutBool("finish", false) }), event,
+			[]string{infoCmd, eventCmd, drawCmd}, ""},
+		"reply finish true": {monday, duel(nil), duelGachaDrawEvent(func(r *sfs.SFSObject) { r.PutBool("finish", true) }),
+			[]string{infoCmd, eventCmd}, ""},
+		"reply finish false replaces init finish true": {monday, duel(func(e *sfs.SFSObject) { e.PutBool("finish", true) }),
+			duelGachaDrawEvent(func(r *sfs.SFSObject) { r.PutBool("finish", false) }), []string{infoCmd, eventCmd, drawCmd}, ""},
+		"empty eventList": {monday, duel(nil), duelGachaDrawEvent(func(r *sfs.SFSObject) { r.PutSFSArray("eventList", sfs.NewSFSArray()) }),
+			[]string{infoCmd, eventCmd}, ""},
+		"no eventList":       {monday, duel(nil), duelWithoutKey(event, "eventList"), []string{infoCmd, eventCmd}, ""},
+		"reply type 14":      {monday, duel(nil), duelGachaDrawEvent(func(r *sfs.SFSObject) { r.PutInt("type", 14) }), []string{infoCmd, eventCmd}, ""},
+		"reply without type": {monday, duel(nil), duelWithoutKey(event, "type"), []string{infoCmd, eventCmd}, ""},
+		"reply for activity 55000": {monday, duel(nil), duelGachaDrawEvent(func(r *sfs.SFSObject) { r.PutUtfString("activityId", "55000") }),
+			[]string{infoCmd, eventCmd}, ""},
+		"reply success, no data": {monday, duel(nil), evOK(), []string{infoCmd, eventCmd}, ""},
+		"reply errorCode":        {monday, duel(nil), evErr("E200"), []string{infoCmd, eventCmd}, "E200"},
+	} {
+		reqs, _, err := runDuelGachaDrawFakeAt(t, c.now, c.in, duelGachaInfo(10_000_000, 50, 0, 1), c.event, duelGachaDrawSpending(10_000_000))
+		switch {
+		case c.wantErr == "" && err != nil:
+			t.Errorf("%s: err %v, want none", name, err)
+		case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
+			t.Errorf("%s: err %v, want the %s failure", name, err, c.wantErr)
+		}
+		var got []string
+		for _, r := range reqs {
+			got = append(got, r.Cmd)
+		}
+		if !slices.Equal(got, c.sent) {
+			t.Errorf("%s: sent %v, want %v", name, got, c.sent)
+		}
+	}
+}
+
+// TestDuelGachaDrawViewIsTheDuelActivity: the Activity tab reads the activity the client looks up
+// by ActId "55000" (UIAllyDuelCtrl.lua:16; EnumType.lua:6301-6305), not any type-14 entry. Table
+// activity has one type-14 row today, so the test adds a second for its run.
+func TestDuelGachaDrawViewIsTheDuelActivity(t *testing.T) {
+	const other = 55001
+	if _, ok := activityTable[other]; ok {
+		t.Fatalf("table activity has a row %d; pick another id", other)
+	}
+	activityTable[other] = activityRow{typ: 14, needHQ: 10}
+	t.Cleanup(func() { delete(activityTable, other) })
+	entry := evActivity(other)
+	entry.PutUtfString("activityid", "70000")
+	in := duelGachaInit(func(raw *sfs.SFSObject) { evObject(raw, "activity").PutSFSObject("55001", entry) })
+	reqs, _, err := runDuelGachaDrawFakeAt(t, evTestNow, in, duelGachaInfo(10_000_000, 50, 0, 1), duelGachaDrawEvent(nil), duelGachaDrawSpending(10_000_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range reqs {
+		got = append(got, r.Cmd)
+	}
+	if want := []string{"al.duel.lottery.get.info"}; !slices.Equal(got, want) {
+		t.Errorf("sent %v, want %v: a type-14 activity other than 55000 opens no Activity tab", got, want)
 	}
 }
 

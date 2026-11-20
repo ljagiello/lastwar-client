@@ -1,6 +1,7 @@
 package game
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -16,9 +17,28 @@ import (
 //
 // The gate and the info read are duel-gacha's (feature_duel_gacha.go): in an alliance, switch
 // alliance_duel_zhuanpan on and science 90010200's time condition (IsScienceOpen,
-// AllyDuelScoreGachaManager.lua:298-305), then `al.duel.lottery.get.info {}`. The draw view sits on
-// the duel Today page under the same two conditions (AllyDuelToday.lua:77-81) and on the Sunday tab
-// (UIAllyDuelCtrl.lua:21-26).
+// AllyDuelScoreGachaManager.lua:298-305), then `al.duel.lottery.get.info {}`.
+//
+// A draw also needs a draw view the client can open now (duelGachaDrawView). Every draw button
+// sits in one of two views, and each opens only from a tab of the duel window, which never shows
+// a hidden tab (UIAllyDuelView.lua:296-345):
+//   - the Sunday tab (UIAllyDuelScoreGachaSunday): server weekday 7, IsScienceOpen, IsUnlock and
+//     the switch (UIAllyDuelCtrl.lua:21-26). The weekday is GetNowWeekdayIndex, the date of UTC
+//     plus changeDeltaTime, Monday 1 to Sunday 7 (UITimeManager.lua:638-646, 667-690); the client
+//     sets changeDeltaTime from init real_timezone_offset (GlobalData.lua:97-102), and Go reads
+//     the same offset off init tomorrow, the server-day anchor (goldTreeWeekday);
+//   - the Activity tab (UIAllyDuelView.lua:24-26), whose Today page shows the gacha under
+//     IsScienceOpen and the switch (AllyDuelToday.lua:77-81) and opens UIAllyDuelScoreGacha
+//     (AllyDuelTodayGacha.lua:128-130): the AllianceCompete activity (ActId "55000",
+//     EnumType.lua:6301-6305) exists, is not finished, has event info and is not submitting
+//     (UIAllyDuelCtrl.lua:15-20). Go needs the activity open (Activities().Open: its window and
+//     HQ level, stricter than the client's "exists") and its event info read (duelGachaActivityTab).
+//
+// Submitting (LeagueMatchManager:CheckIsSubmitting, LeagueMatchManager.lua:410-421) is a clock
+// check: weekday 7 and the server day's first hour. It hides the Activity tab only on a Sunday,
+// when the Sunday tab already opens a draw view, so the union of the two tabs does not depend on
+// it. The other conditions both views share are the gate above and duelGachaDrawDue. So from
+// Monday to Saturday outside a running duel no 1.0.370 UI sends a draw, and neither does this.
 //
 // A draw is `al.duel.lottery.lottery {configId: Int, num: Int}` (AlDuelLotteryLotteryMessage.lua:
 // 4-8: those two keys only; no currency or item in the request). Every send is a button of the two
@@ -59,6 +79,8 @@ const (
 	// duelGachaDrawMaxPerRun bounds one run's draws (at the pace below, under a minute); a larger
 	// balance waits for the next run.
 	duelGachaDrawMaxPerRun = 50
+	duelGachaDrawSunday    = 7     // GetWeekdayIndex of a Sunday (UITimeManager.lua:638-646)
+	duelGachaDrawDuelActID = 55000 // EnumActivity.AllianceCompete.ActId "55000" (EnumType.lua:6301-6305)
 )
 
 // duelGachaDrawPace is the gap between draws, a human tap rate.
@@ -71,7 +93,8 @@ func init() {
 	registerFeature(Feature{
 		Name: duelGachaDrawFeature,
 		Summary: "OPT-IN: draw the Alliance Duel score gacha one at a time (al.duel.lottery.lottery, num 1) while its own " +
-			"score balance pays 10,000,000 a draw; spends only that score, never diamonds or items (static-only, not validated live)",
+			"score balance pays 10,000,000 a draw, on a Sunday or while an Alliance Duel runs (the client's draw views); spends only " +
+			"that score, never diamonds or items (static-only, not validated live)",
 		DefaultOn: false,
 		Run:       runDuelGachaDraw,
 	})
@@ -105,13 +128,96 @@ func duelGachaDrawStop(before, after int64, hasAfter bool) string {
 	return ""
 }
 
+// duelLuaTruthy reports whether o[key] is true in Lua, and whether it is there at all: present and
+// neither null nor false. A 0 or "" is true in Lua.
+func duelLuaTruthy(o *sfs.SFSObject, key string) (truthy, present bool) {
+	v, ok := o.Get(key)
+	if !ok || v.Type == sfs.SFSNull {
+		return false, false
+	}
+	if b, ok := v.Val.(bool); ok {
+		return b, true
+	}
+	return true, true
+}
+
+// duelGachaActivityTab says why the duel Activity tab is hidden (UIAllyDuelCtrl.lua:15-20), or ""
+// when it shows, given the duel's activity and its hero.event.info.get reply.
+//   - finish: the client's actInfo.finish is the init entry's finish, replaced by the reply's when
+//     it has one (ActivityScoreInfo.lua:40-42, through AddOneActivity and RetEventData,
+//     ActivityListDataManager.lua:170-173, 1205-1208), and any Lua-true value hides the tab.
+//   - event info: RetEventData files the reply only when its activityId names the activity and its
+//     type is 15 (:1205-1208), and GetEventInfo is set by each eventList element
+//     (ActAllianceBattleInfo.lua:29-37, 44-46), with no day window.
+func duelGachaActivityTab(a Activity, info *sfs.SFSObject) string {
+	finish, _ := duelLuaTruthy(a.Raw, "finish")
+	if f, ok := duelLuaTruthy(info, "finish"); ok {
+		finish = f
+	}
+	typ, hasType := evNum(info, "type")
+	switch {
+	case finish:
+		return "the duel activity is finished"
+	case evString(info, "activityId") != a.IDString():
+		return fmt.Sprintf("the event info names activity %q, not the duel's %q", evString(info, "activityId"), a.IDString())
+	case !hasType || typ != allianceDuelEventType:
+		return "the event info is not of the duel event type 15"
+	case len(evObjects(info, "eventList")) == 0:
+		return "the event info has no eventList entry"
+	}
+	return ""
+}
+
+// duelGachaDrawView returns the duel tab a draw view opens from now ("Sunday" or "Activity"), or
+// why neither does. err is a failed read of the duel's event info: no draw. The Sunday tab is
+// checked first, so it needs no request.
+func duelGachaDrawView(conn *session.GameConn, in *Init, now time.Time) (tab, why string, err error) {
+	weekday := "unknown (init has no tomorrow)"
+	if dayStart, ok := in.ServerDayStart(now); ok {
+		wd := goldTreeWeekday(now, dayStart)
+		if wd == duelGachaDrawSunday {
+			return "Sunday", "", nil
+		}
+		weekday = fmt.Sprint(wd)
+	}
+	s := Activities(conn, in)
+	for _, a := range s.Open(actTypeAllianceCompete) {
+		if a.ID != duelGachaDrawDuelActID {
+			continue
+		}
+		info, err := s.EventInfo(a)
+		if errors.Is(err, errEventInfoNoData) {
+			return "", "the duel's event info answered with no data, so the Activity tab is hidden", nil
+		}
+		if err != nil {
+			return "", "", err
+		}
+		// The raw finish values, for the first live run: the tab reads them as Lua truthiness.
+		finish := func(o *sfs.SFSObject) any {
+			if v, ok := o.Get("finish"); ok {
+				return v.Val
+			}
+			return "absent"
+		}
+		slog.Info(duelGachaDrawFeature+": duel activity", "activity", a.ID, "requestId", a.IDString(),
+			"initFinish", finish(a.Raw), "replyFinish", finish(info), "replyActivityId", evString(info, "activityId"),
+			"replyType", evString(info, "type"), "eventList", len(evObjects(info, "eventList")))
+		if why := duelGachaActivityTab(a, info); why != "" {
+			return "", "the Activity tab is hidden: " + why, nil
+		}
+		return "Activity", "", nil
+	}
+	return "", "no Alliance Duel activity is open, and the server weekday is " + weekday + " (the Sunday tab needs 7)", nil
+}
+
 func runDuelGachaDraw(conn *session.GameConn, in *Init) error {
 	const name = duelGachaDrawFeature
 	if in == nil || in.Raw == nil {
 		slog.Info(name + ": no init push; skipping")
 		return nil
 	}
-	if why := duelGachaGate(in, evNow()); why != "" {
+	now := evNow()
+	if why := duelGachaGate(in, now); why != "" {
 		slog.Info(name + ": the client would not read the gacha: " + why)
 		return nil
 	}
@@ -129,6 +235,15 @@ func runDuelGachaDraw(conn *session.GameConn, in *Init) error {
 		slog.Info(name + ": no draw: " + why)
 		return nil
 	}
+	tab, why, err := duelGachaDrawView(conn, in, now)
+	if err != nil {
+		return fmt.Errorf("%s: no draw: the duel's event info could not be read: %w", name, err)
+	}
+	if tab == "" {
+		slog.Info(name + ": no draw: no draw view opens now: " + why)
+		return nil
+	}
+	slog.Info(name+": the draw view opens from the duel's "+tab+" tab", "tab", tab)
 	planned := min(st.score/(duelGachaDrawNum*duelGachaDrawCost), duelGachaDrawMaxPerRun)
 	if st.score/(duelGachaDrawNum*duelGachaDrawCost) > duelGachaDrawMaxPerRun {
 		slog.Info(name+": the score pays for more draws than one run makes; the rest wait for the next run",
