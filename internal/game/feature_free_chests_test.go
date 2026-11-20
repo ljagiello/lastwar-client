@@ -2,6 +2,7 @@ package game
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,23 +49,34 @@ func freeChestsInit(hq int32, store, weekly time.Time) *Init {
 
 func freeChestsServer(t *testing.T, weekCard time.Time, claimReply func(cmd string) *sfs.SFSObject) (*rewardFake, func(*Init) error) {
 	t.Helper()
+	return freeChestsServerInfo(t, func() *sfs.SFSObject {
+		resp := sfs.NewSFSObject()
+		free := sfs.NewSFSObject()
+		free.PutLong("lastRewardTime", weekCard.UnixMilli())
+		resp.PutSFSObject("dailyFree", free)
+		return resp
+	}, claimReply)
+}
+
+// freeChestsServerInfo is freeChestsServer with the whole get.week.card.info reply given.
+func freeChestsServerInfo(t *testing.T, info func() *sfs.SFSObject, claimReply func(cmd string) *sfs.SFSObject) (*rewardFake, func(*Init) error) {
+	t.Helper()
 	conn, fake := startRewardFake(t, func(cmd string, _ *sfs.SFSObject) *sfs.SFSObject {
 		if cmd == weekCardInfoCmd {
-			resp := sfs.NewSFSObject()
-			free := sfs.NewSFSObject()
-			free.PutLong("lastRewardTime", weekCard.UnixMilli())
-			resp.PutSFSObject("dailyFree", free)
-			return resp
+			return info()
 		}
 		return claimReply(cmd)
 	})
 	return fake, func(in *Init) error { return runFreeChests(conn, in) }
 }
 
+// freeChestsHQ is above every free-chests unlock (store HQ 2, weekly package HQ 8).
+const freeChestsHQ = 20
+
 func TestFreeChestsClaimsAllThreeWhenDue(t *testing.T) {
 	yesterday := rewardDayStart(time.Now()).Add(-time.Hour)
 	fake, run := freeChestsServer(t, yesterday, func(string) *sfs.SFSObject { return rewardOK() })
-	if err := run(freeChestsInit(5, yesterday, yesterday)); err != nil {
+	if err := run(freeChestsInit(freeChestsHQ, yesterday, yesterday)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	want := []string{freeChestsStoreCmd, freeChestsWeeklyCmd, weekCardInfoCmd, freeChestsWeekCardCmd}
@@ -90,7 +102,7 @@ func TestFreeChestsSkipsWhatWasClaimedToday(t *testing.T) {
 		earlier = time.Now()
 	}
 	fake, run := freeChestsServer(t, earlier, func(string) *sfs.SFSObject { return rewardOK() })
-	if err := run(freeChestsInit(5, earlier, earlier)); err != nil {
+	if err := run(freeChestsInit(freeChestsHQ, earlier, earlier)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if got := fake.cmds(); !slices.Equal(got, []string{weekCardInfoCmd}) {
@@ -109,8 +121,12 @@ func TestFreeChestsGates(t *testing.T) {
 			raw.PutSFSObject("weekFreeReward", sfs.NewSFSObject())
 		}), nil},
 		"HQ below the store unlock": {freeChestsInit(1, yesterday, yesterday),
-			[]string{freeChestsWeeklyCmd, weekCardInfoCmd, freeChestsWeekCardCmd}},
-		"no store entry or weekly package in init": {rewardInitWithDay(5, func(*sfs.SFSObject) {}),
+			[]string{weekCardInfoCmd, freeChestsWeekCardCmd}},
+		"HQ below the weekly package unlock (8)": {freeChestsInit(7, yesterday, yesterday),
+			[]string{freeChestsStoreCmd, weekCardInfoCmd, freeChestsWeekCardCmd}},
+		"HQ at the weekly package unlock": {freeChestsInit(8, yesterday, yesterday),
+			[]string{freeChestsStoreCmd, freeChestsWeeklyCmd, weekCardInfoCmd, freeChestsWeekCardCmd}},
+		"no store entry or weekly package in init": {rewardInitWithDay(freeChestsHQ, func(*sfs.SFSObject) {}),
 			[]string{weekCardInfoCmd, freeChestsWeekCardCmd}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -128,7 +144,7 @@ func TestFreeChestsGates(t *testing.T) {
 func TestFreeChestsBenignAndFailure(t *testing.T) {
 	yesterday := rewardDayStart(time.Now()).Add(-time.Hour)
 	_, run := freeChestsServer(t, yesterday, func(string) *sfs.SFSObject { return rewardErr("120289") })
-	if err := run(freeChestsInit(5, yesterday, yesterday)); err != nil {
+	if err := run(freeChestsInit(freeChestsHQ, yesterday, yesterday)); err != nil {
 		t.Errorf("run = %v, want nil for 120289", err)
 	}
 
@@ -138,7 +154,7 @@ func TestFreeChestsBenignAndFailure(t *testing.T) {
 		}
 		return rewardOK()
 	})
-	if err := run(freeChestsInit(5, yesterday, yesterday)); err == nil {
+	if err := run(freeChestsInit(freeChestsHQ, yesterday, yesterday)); err == nil {
 		t.Error("run = nil, want the store claim failure")
 	}
 	if n := len(fake.cmds()); n != 4 {
@@ -153,7 +169,7 @@ func TestFreeChestsBenignAndFailure(t *testing.T) {
 func TestFreeChestsSwitchGate(t *testing.T) {
 	yesterday := rewardDayStart(time.Now()).Add(-time.Hour)
 	withSwitch := func(v *sfs.SFSValue) *Init {
-		in := freeChestsInit(5, yesterday, yesterday)
+		in := freeChestsInit(freeChestsHQ, yesterday, yesterday)
 		if v != nil {
 			dc := sfs.NewSFSObject()
 			dc.PutValue(freeChestSwitch, *v)
@@ -180,6 +196,85 @@ func TestFreeChestsSwitchGate(t *testing.T) {
 			}
 			if got := fake.cmds(); !slices.Equal(got, c.want) {
 				t.Errorf("sent %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestFreeChestsWeeklyPackageSwitch is MASTER 1.0.370 B49 (aud-dailies F8, cov-ui-store F10): the
+// new weekly package, the only 1.0.370 screen offering receive.week.free.reward, opens only with
+// switch weekgift_new_switch on (CheckIfNewWeeklyPackageOpen, GiftPackManager.lua:406-417). An init
+// dataConfig carrying it off drops that claim alone; an absent key keeps it.
+func TestFreeChestsWeeklyPackageSwitch(t *testing.T) {
+	yesterday := rewardDayStart(time.Now()).Add(-time.Hour)
+	withSwitch := func(v *sfs.SFSValue) *Init {
+		in := freeChestsInit(freeChestsHQ, yesterday, yesterday)
+		if v != nil {
+			dc := sfs.NewSFSObject()
+			dc.PutValue(freeChestsWeeklySwitch, *v)
+			in.Raw.PutSFSObject("dataConfig", dc)
+		}
+		return in
+	}
+	all := []string{freeChestsStoreCmd, freeChestsWeeklyCmd, weekCardInfoCmd, freeChestsWeekCardCmd}
+	noWeekly := []string{freeChestsStoreCmd, weekCardInfoCmd, freeChestsWeekCardCmd}
+	for name, c := range map[string]struct {
+		v    *sfs.SFSValue
+		want []string
+	}{
+		"absent":      {nil, all},
+		"on (\"1\")":  {&sfs.SFSValue{Type: sfs.SFSUtfString, Val: "1"}, all},
+		"off (\"0\")": {&sfs.SFSValue{Type: sfs.SFSUtfString, Val: "0"}, noWeekly},
+		"off (Int 0)": {&sfs.SFSValue{Type: sfs.SFSInt, Val: int32(0)}, noWeekly},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, run := freeChestsServer(t, yesterday, func(string) *sfs.SFSObject { return rewardOK() })
+			if err := run(withSwitch(c.v)); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got := fake.cmds(); !slices.Equal(got, c.want) {
+				t.Errorf("sent %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestFreeChestsWeekCardGiftWithoutDailyFree is MASTER 1.0.370 B47 (aud-dailies F4, cov-dc-world
+// F2): the client's lastRecvFreeTime starts at 0 and get.week.card.info updates it only when the
+// reply carries dailyFree (WeekCardManager.lua:7; GetWeekCardListMessage.lua:26-28), so a reply
+// without it shows the gift as claimable and Go claims it. A dailyFree that is not an object, or a
+// refused info read, still skips the gift. A missing init weekFreeReward stays a skip, at Warn.
+func TestFreeChestsWeekCardGiftWithoutDailyFree(t *testing.T) {
+	for name, c := range map[string]struct {
+		info    func() *sfs.SFSObject
+		want    []string
+		wantErr bool
+	}{
+		"no dailyFree": {sfs.NewSFSObject, []string{weekCardInfoCmd, freeChestsWeekCardCmd}, false},
+		"dailyFree without lastRewardTime": {func() *sfs.SFSObject {
+			r := sfs.NewSFSObject()
+			r.PutSFSObject("dailyFree", sfs.NewSFSObject())
+			return r
+		}, []string{weekCardInfoCmd, freeChestsWeekCardCmd}, false},
+		"dailyFree not an object": {func() *sfs.SFSObject {
+			r := sfs.NewSFSObject()
+			r.PutLong("dailyFree", 1)
+			return r
+		}, []string{weekCardInfoCmd}, false},
+		"info refused": {func() *sfs.SFSObject { return rewardErr("E42") }, []string{weekCardInfoCmd}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureRewardLogs(t)
+			fake, run := freeChestsServerInfo(t, c.info, func(string) *sfs.SFSObject { return rewardOK() })
+			// No store entry and no weekFreeReward in init: only the week-card gift is left.
+			if err := run(rewardInitWithDay(freeChestsHQ, func(*sfs.SFSObject) {})); (err != nil) != c.wantErr {
+				t.Fatalf("run = %v, want error %v", err, c.wantErr)
+			}
+			if got := fake.cmds(); !slices.Equal(got, c.want) {
+				t.Errorf("sent %v, want %v", got, c.want)
+			}
+			if !strings.Contains(logs.String(), `level=WARN msg="free-chests: init has no weekFreeReward`) {
+				t.Errorf("a missing weekFreeReward is not logged at Warn:\n%s", logs.String())
 			}
 		})
 	}

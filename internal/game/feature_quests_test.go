@@ -108,3 +108,24 @@ func TestQuestsBenignFailureAndNoInit(t *testing.T) {
 		t.Errorf("no init: %v", err)
 	}
 }
+
+// TestQuestsLeavesTheS7LockhartQuestToItsActivity is MASTER 1.0.370 B18 (aud-dailies F2): tables
+// 40413 list 2400008 as the stage quest of the S7 Lockhart activity 1201025 (activity_stage row
+// 16), which the client claims only from that activity's panel (LockhartActivityMain.lua:187-197,
+// 282-284). The quests feature claims init task[] ids with no activity check, so it must leave
+// 2400008 to stage-quests, as it already did 2400000-2400007; the next id is an ordinary quest.
+func TestQuestsLeavesTheS7LockhartQuestToItsActivity(t *testing.T) {
+	if !questIsStageQuest("2400008") || questIsStageQuest("2400009") {
+		t.Fatalf("questIsStageQuest: 2400008 = %v, 2400009 = %v; want true, false",
+			questIsStageQuest("2400008"), questIsStageQuest("2400009"))
+	}
+	in := questInit([]*sfs.SFSObject{questTask("2400008", 1), questTask("1001", 1)}, "1", "", nil)
+	conn, fake := startEvFake(t, func(string, *sfs.SFSObject) *sfs.SFSObject { return evOK() })
+	if err := runQuests(conn, in); err != nil {
+		t.Fatal(err)
+	}
+	reqs := fake.requests()
+	if len(reqs) != 1 || reqs[0].Params.GetString("id") != "1001" {
+		t.Errorf("sent %v, want only quest 1001 (2400008 belongs to stage-quests)", fake.cmds())
+	}
+}

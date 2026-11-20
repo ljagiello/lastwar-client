@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Mail is one inbox entry. Confirmed live via a real packet capture of the
@@ -518,7 +519,9 @@ func ClaimAllMail(conn *session.GameConn) error {
 	var errs []error
 
 	mail, err := ListMail(conn)
-	if err != nil {
+	if err == nil {
+		rememberMailList(conn, mail) // for mail-single-claims-plan (mailListFor)
+	} else {
 		errs = append(errs, fmt.Errorf("list mail: %w", err))
 		// A NON-TIMEOUT net.Error here means the underlying connection is already known-dead --
 		// ListMail's own pagination loop hit it mid-fetch (see ListMail's doc comment: it returns
@@ -662,6 +665,41 @@ rewardLoop:
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// mailListCache holds the last complete mailbox ListMail returned to ClaimAllMail on a connection,
+// so a read-only feature that runs after the core actions (mail-single-claims-plan) reads the same
+// list instead of paging chat.get.system.mails again. Keyed by connection only: one login is one
+// connection. A failed or partial listing is not kept.
+var (
+	mailListMu    sync.Mutex
+	mailListCache struct {
+		conn *session.GameConn
+		mail []Mail
+	}
+)
+
+func rememberMailList(conn *session.GameConn, mail []Mail) {
+	mailListMu.Lock()
+	defer mailListMu.Unlock()
+	mailListCache.conn, mailListCache.mail = conn, mail
+}
+
+// mailListFor returns the mailbox ClaimAllMail listed on conn, or lists it once (ListMail) when it
+// has not; a complete listing made here is kept for the next caller on conn.
+func mailListFor(conn *session.GameConn) ([]Mail, error) {
+	mailListMu.Lock()
+	if c := &mailListCache; c.conn != nil && c.conn == conn {
+		mail := c.mail
+		mailListMu.Unlock()
+		return mail, nil
+	}
+	mailListMu.Unlock()
+	mail, err := ListMail(conn)
+	if err == nil {
+		rememberMailList(conn, mail)
+	}
+	return mail, err
 }
 
 // truncateMailBatches caps batches at maxMailBatchesPerLoop, warning and dropping the remainder

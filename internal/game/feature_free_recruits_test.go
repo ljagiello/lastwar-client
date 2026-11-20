@@ -2,6 +2,7 @@ package game
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,5 +216,50 @@ func TestFreeRecruitsBenignAndFailure(t *testing.T) {
 	}
 	if n := len(fake.cmds()); n != 3 {
 		t.Errorf("sent %d requests, want the hero pull, the worker info and the worker draw", n)
+	}
+}
+
+// TestFreeRecruitsWarnsOnWishPoolWithNoWishHero is MASTER 1.0.370 B4 (aud-dailies F1,
+// cov-ui-military F1): on a wish pool with wishSwitch on, wishPityReceiveNum > 0 and no wishHero,
+// the client asks herorecruit_alert1 before the free pull (UIHeroRecruitView.lua:982-1007). Until
+// the user rules on skipping (§6.1 #1), Go keeps pulling and logs a Warn naming the pool. A pool
+// with a wish hero, or one without a table wish list (221500), pulls without the Warn.
+func TestFreeRecruitsWarnsOnWishPoolWithNoWishHero(t *testing.T) {
+	logs := captureRewardLogs(t)
+	due := time.Now().Add(-time.Minute).Unix()
+	in := freeRecruitsInit(nil,
+		heroPool{id: "221501", limit: 1, next: due}, // wish list, no wish hero: warn
+		heroPool{id: "221602", limit: 1, next: due}, // wish list, wish hero chosen
+		heroPool{id: "221500", limit: 1, next: due}, // no wish list in officer_recruit
+	)
+	for _, pool := range in.Objects("lotteryFreeInfo") {
+		pool.PutBool("wishSwitch", true)
+		pool.PutInt("wishPityReceiveNum", 200)
+		pool.PutInt("wishPityCurNum", 12)
+		wishHero := ""
+		if pool.GetString("id") == "221602" {
+			wishHero = "100005"
+		}
+		pool.PutUtfString("wishHero", wishHero)
+	}
+	fake, err := runFreeRecruitsFake(t, in, -1, rewardOK())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var pulled []string
+	for _, r := range fake.requests() {
+		switch r.Cmd {
+		case freeRecruitsHeroCmd:
+			pulled = append(pulled, r.Params.GetString("id"))
+		case "hero.lottery.switch.wish":
+			t.Error("sent hero.lottery.switch.wish: the wish hero is the player's choice")
+		}
+	}
+	if want := []string{"221501", "221602", "221500"}; !slices.Equal(pulled, want) {
+		t.Errorf("pulled %v, want %v (the warning does not skip the pull)", pulled, want)
+	}
+	out := logs.String()
+	if n := strings.Count(out, "level=WARN"); n != 1 || !strings.Contains(out, "pool=221501") {
+		t.Errorf("want exactly one Warn, for pool 221501; logs:\n%s", out)
 	}
 }

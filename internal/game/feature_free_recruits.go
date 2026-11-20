@@ -28,6 +28,13 @@ import (
 // (LWChatAIManager.lua:56-67, 157-165; ai_switch rows 106, 107, 110, 111, 112, all on by default).
 // Whether the server needs either is open (MASTER.md §8.2 #10).
 //
+// On a wish pool with no wish hero chosen (duelRecruitWishUnset) the 1.0.370 client asks
+// herorecruit_alert1 before it sends this free pull (showEmptyWishConfirm,
+// UIHeroRecruitView.lua:982-1007). Go logs a Warn there and still pulls: a free pull does not stack,
+// and nothing in the client ties the wish pity to a chosen hero (LotteryInfo.lua:798-803). Whether
+// to skip the pool instead is the user's call (MASTER 1.0.370 B4, §6.1 #1). The wish hero is never
+// chosen here (hero.lottery.switch.wish is the player's choice).
+//
 // Worker: `worker.lottery.info {officerId: Int}` returns nextFreeTime (ms), and
 // `lottery.worker.card {useFree: 1, isTen: 0, officerId: Int}` draws when now >= nextFreeTime
 // (WorkerLotteryInfoMessage.lua:4-7; LotteryWorkerCardMessage.lua:4-9; WorkerLotteryInfo.lua:31-35;
@@ -102,6 +109,10 @@ func runFreeRecruits(conn *session.GameConn, in *Init) error {
 	var errs []error
 	for _, pool := range freeRecruitsHeroDue(in) {
 		id, _ := claimString(pool, "id")
+		if duelRecruitWishUnset(pool) {
+			slog.Warn("free-recruits: wish pool with no wish hero chosen; the client would ask first (herorecruit_alert1). "+
+				"Pulling anyway; pick a wish hero in the game", "pool", id)
+		}
 		p := freeRecruitsParams()
 		p.PutUtfString("id", id)
 		push := sfs.NewSFSObject()
