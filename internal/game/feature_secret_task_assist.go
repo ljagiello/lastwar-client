@@ -38,9 +38,11 @@ import (
 // targetServer, the fields the client's parser and the tab read, all present; an own list without
 // todayAssistNum assists nothing. An entry is another owner's unless its uuid is in the own list's
 // ls[] or its ownerId (a field of the live own-list entries, docs/live-validation.mdx) is the
-// player's uid. At most 5 - todayAssistNum assists a run, about 1 s apart, colour first (UR before
-// SSR before SR) and then the earliest finished: the colour and completionTime keys of the tab's
-// SortTasks (ActDispatchTaskDataManager.lua:448-497), without its is_special and task_star keys.
+// player's uid. At most 5 - todayAssistNum (the own list's) assists a run, whatever the assist
+// replies' todayAssistNum says (it can only end the run earlier), about 1 s apart, colour first
+// (UR before SSR before SR) and then the earliest finished: the colour and completionTime keys of
+// the tab's SortTasks (ActDispatchTaskDataManager.lua:448-497), without its is_special and
+// task_star keys.
 // The first errorCode stops the run with an error; no code is registered as benign.
 //
 // Never sent: hero.dispatch.steal (the map's action on another alliance's task, UIWorldPointBtn.lua:
@@ -248,10 +250,13 @@ func runSecretTaskAssist(conn *session.GameConn, in *Init) error {
 		return nil
 	}
 
-	assisted := 0
+	// budget bounds the run by the own list's count whatever the replies say; a reply's
+	// todayAssistNum can only end it earlier.
+	budget := secretTaskAssistDailyCap - st.today
+	var assisted int64
 	today := st.today
 	for i, t := range targets {
-		if today >= secretTaskAssistDailyCap {
+		if assisted >= budget || today >= secretTaskAssistDailyCap {
 			break
 		}
 		if i > 0 {

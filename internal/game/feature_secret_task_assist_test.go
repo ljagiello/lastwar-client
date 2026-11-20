@@ -301,6 +301,37 @@ func TestSecretTaskAssistCountsWithoutTodayInReply(t *testing.T) {
 	}
 }
 
+// TestSecretTaskAssistBoundsRunByOwnCount: the own list's todayAssistNum bounds the run at 5 -
+// todayAssistNum whatever the assist replies say. Replies whose todayAssistNum stays at the starting
+// value or goes back (a stale count, or another meaning than the used count) cannot stretch a run
+// to every eligible entry.
+func TestSecretTaskAssistBoundsRunByOwnCount(t *testing.T) {
+	stubAssistSleep(t)
+	done := time.Now().Add(-time.Hour).UnixMilli()
+	var entries []*sfs.SFSObject
+	for uuid := range int64(8) {
+		entries = append(entries, assistEntry(uuid+1, cfgUR, done, 0, 7))
+	}
+	for name, c := range map[string]struct {
+		today, reply int
+		want         []int64
+	}{
+		"3 used, replies stay at 3": {3, 3, []int64{1, 2}},
+		"3 used, replies say 0":     {3, 0, []int64{1, 2}},
+		"0 used, replies stay at 0": {0, 0, []int64{1, 2, 3, 4, 5}},
+		"4 used, replies stay at 4": {4, 4, []int64{1}},
+	} {
+		fake, run := assistServer(t, assistOwnReply(c.today), assistListReply(entries...),
+			func(int, *sfs.SFSObject) *sfs.SFSObject { return duelObj("todayAssistNum", c.reply) })
+		if err := run(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		if uuids, _ := assistSent(t, fake); !slices.Equal(uuids, c.want) {
+			t.Errorf("%s: assisted %v, want %v (5 - %d left today)", name, uuids, c.want, c.today)
+		}
+	}
+}
+
 // TestSecretTaskAssistStopsOnFirstErrorCode: an errorCode (here 456225, the client's cap tip) stops
 // the run with an error; nothing after it is sent.
 func TestSecretTaskAssistStopsOnFirstErrorCode(t *testing.T) {
