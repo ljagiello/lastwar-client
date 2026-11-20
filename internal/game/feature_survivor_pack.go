@@ -48,10 +48,6 @@ const (
 	survivorPackTableVers = "40413"
 )
 
-// survivorActivityConfig maps the type-188 activity ids of table activity 40413 to their
-// tableInfoType, the activity_survivor row (the Go table keeps no tableInfoType).
-var survivorActivityConfig = map[int32]int64{1110002: 1}
-
 // survivorConfigs is table activity_survivor 40413: list_group and the bar_reward scores, sorted.
 var survivorConfigs = map[int64]struct {
 	group  string
@@ -138,15 +134,18 @@ func runSurvivorPack(conn *session.GameConn, in *Init) error {
 }
 
 // survivorConfigID is actData.tableInfoType or subType: the entry's own field when it has one,
-// else the 40413 table's.
+// else the activity row's tableInfoType (Activity.SubType, ActivityInfoData.lua:231), the
+// activity_survivor row.
 func survivorConfigID(a Activity) (int64, bool) {
 	for _, k := range []string{"tableInfoType", "subType"} {
 		if n, ok := evNum(a.Raw, k); ok && n > 0 {
 			return n, true
 		}
 	}
-	id, ok := survivorActivityConfig[a.ID]
-	return id, ok
+	if st := a.SubType(); st > 0 {
+		return int64(st), true
+	}
+	return 0, false
 }
 
 // survivorOpenDay is actOpenDay: max(1, server days from the start's server midnight to today's + 1).

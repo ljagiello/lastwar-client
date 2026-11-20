@@ -143,3 +143,25 @@ func TestSurvivorScoresDue(t *testing.T) {
 		t.Errorf("40 items, 0 and 2 claimed: %v, want [1 3]", got)
 	}
 }
+
+// TestSurvivorConfigIDReadsTheActivityRow: without a tableInfoType or subType on the entry, the
+// activity_survivor row is the activity row's tableInfoType (ActivityInfoData.lua:231), so a
+// type-188 row the old hand-copied map never listed (777188 -> 2) still finds its config.
+func TestSurvivorConfigIDReadsTheActivityRow(t *testing.T) {
+	withActivityRows(t, map[int32]activityRow{777188: {typ: 188, subType: 2}, 777189: {typ: 188}})
+	raw := sfs.NewSFSObject()
+	if got, ok := survivorConfigID(Activity{ID: 777188, Type: 188, Raw: raw}); !ok || got != 2 {
+		t.Errorf("survivorConfigID(777188) = %d, %v; want the row's tableInfoType 2", got, ok)
+	}
+	if got, ok := survivorConfigID(Activity{ID: 1110002, Type: 188, Raw: raw}); !ok || got != 1 {
+		t.Errorf("survivorConfigID(1110002) = %d, %v; want 1 (tables 40413)", got, ok)
+	}
+	if got, ok := survivorConfigID(Activity{ID: 777189, Type: 188, Raw: raw}); ok {
+		t.Errorf("survivorConfigID(777189) = %d, true; want no config for a row without tableInfoType", got)
+	}
+	own := sfs.NewSFSObject()
+	own.PutInt("tableInfoType", 3)
+	if got, ok := survivorConfigID(Activity{ID: 777188, Type: 188, Raw: own}); !ok || got != 3 {
+		t.Errorf("survivorConfigID with the entry's own tableInfoType = %d, %v; want 3", got, ok)
+	}
+}
