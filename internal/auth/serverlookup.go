@@ -115,8 +115,8 @@ func gameServerFrom(lsr *gsl.LoginServerListRespon, gameUid, zone, accessTok str
 		"replyHasAccessToken", s.AccessTok != "", "replyAccessTokenMatches", s.AccessTok != "" && s.AccessTok == accessTok,
 		"replyHasRefreshToken", s.RefreshTok != "")
 	if s.AccessTok != "" && s.AccessTok != accessTok {
-		slog.Warn("GSL server lookup: the reply carries a different access token; the Login uses it, as the real client does (SaveGameLoginToken). " +
-			"If the Login then fails with E011, a session with a refresh token refreshes, a captured one needs a fresh capture")
+		slog.Warn("GSL server lookup: the reply carries a different access token; the Login uses it, as the real client does (SaveGameLoginToken), unless -cs-at was typed. " +
+			"If the Login then fails with E011, it is retried with the token this one replaced")
 	}
 	return s, nil
 }

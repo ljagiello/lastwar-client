@@ -525,6 +525,96 @@ func TestRunCrossServerTestRefusedTokenKeepsTheListedAddress(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestRefusedLookupTokenFallsBackAtEverySite: every lookup that hands back an
+// access token replaces the session's (adoptLookup, as the client's SaveGameLoginToken stores it:
+// Assembly-CSharp.decompiled.cs:12777, 7482-7492, 1.0.370), not only the pre-Login one. When the
+// listed server refuses that token (E011), the Login is retried there with the token it replaced, as
+// the client's E011 clears only the at and keeps the server it connected to (13637-13641, 12812):
+// the session's own token with no address configured, after a typed address or the configured one
+// stopped answering, and the token this run's refresh issued. No refresh token is needed (the
+// production config has none), and with one, a run that already refreshed doesn't end with exit 2.
+// The session config gets the listed server and the token that logged in, with its own time.
+// Re-executes the test binary: a run that fails here exits the process.
+func TestRunCrossServerTestRefusedLookupTokenFallsBackAtEverySite(t *testing.T) {
+	handedBack := lookupReply()
+	handedBack.At = &gsl.LoginToken{Token: "at-gsl", Time: "1791900000"}
+	cases := []struct {
+		name           string
+		ip             string
+		port           int
+		explicit       bool
+		at, rt         string
+		replies        []gsl.LoginServerListRespon
+		good           string
+		wantDialed     string
+		wantLogins     string
+		wantLookups    int // getserverlist requests, a refresh included
+		wantAt         string
+		wantConfigTime bool // the saved at keeps the time the session config gave it
+	}{
+		{"no address configured", "", 0, false, "at-1", "", []gsl.LoginServerListRespon{handedBack}, "at-1",
+			"[gw-a.example:10783 gw-a.example:10783]", "[at-gsl at-1]", 1, "at-1", true},
+		{"typed address does not answer", "10.0.0.1", 17783, true, "at-1", "", []gsl.LoginServerListRespon{handedBack}, "at-1",
+			"[10.0.0.1:17783 gw-a.example:10783 gw-a.example:10783]", "[at-gsl at-1]", 1, "at-1", true},
+		{"pre-Login lookup failed, configured address does not answer", "10.0.0.1", 17783, false, "at-1", "",
+			[]gsl.LoginServerListRespon{{Code: "500"}, handedBack}, "at-1",
+			"[10.0.0.1:17783 gw-a.example:10783 gw-a.example:10783]", "[at-gsl at-1]", 2, "at-1", true},
+		{"refreshed before the Login, configured address does not answer", "10.0.0.1", 17783, false, "", "rt-1",
+			[]gsl.LoginServerListRespon{refreshReply(), handedBack}, refreshedAt,
+			"[10.0.0.1:17783 gw-a.example:10783 gw-a.example:10783]", "[at-gsl " + refreshedAt + "]", 2, refreshedAt, false},
+	}
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		i, _ := strconv.Atoi(os.Getenv("LASTWAR_TEST_CASE"))
+		c := cases[i]
+		client := testutil.UseInMemoryGSL(t, c.replies...)
+		lookups := countGetServerList(client)
+		var seen loginAts
+		dial, dialed := recordingDial(map[string]func(*session.GameConn){
+			"gw-a.example:10783": tokenCheckingServer(c.good, &seen),
+			"10.0.0.1:17783":     nil,
+		})
+		atTime, _ := strconv.ParseInt(os.Getenv("LASTWAR_TEST_AT_TIME"), 10, 64)
+		synctest.Test(t, func(t *testing.T) {
+			runCrossServerTest(crossServerTestOpts{
+				ip: c.ip, port: c.port, ipExplicit: c.explicit, portExplicit: c.explicit,
+				zone: lookupZone, gameUid: lookupGameUid, at: c.at, accessTokTime: atTime, refreshTok: c.rt,
+				configSavePath: os.Getenv("LASTWAR_TEST_CFG"), httpClient: client, dialGame: dial,
+			})
+			synctest.Wait()
+		})
+		fmt.Fprintf(os.Stderr, "dialed=%v logins=%v lookups=%d\n", dialed(), seen.get(), lookups())
+		return
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			atTime := time.Now().Add(-time.Hour).Unix()
+			cfgPath := writeSessionConfig(t, SessionConfig{IP: c.ip, Port: c.port, Zone: lookupZone, GameUid: lookupGameUid,
+				AccessToken: c.at, AccessTokenTime: atTime, RefreshToken: c.rt})
+			code, stderr := runRefreshHelper(t, "TestRunCrossServerTestRefusedLookupTokenFallsBackAtEverySite",
+				"LASTWAR_TEST_CASE="+strconv.Itoa(i), "LASTWAR_TEST_CFG="+cfgPath, "LASTWAR_TEST_AT_TIME="+strconv.FormatInt(atTime, 10))
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 (the listed server takes the token the lookup replaced); stderr=%s", code, stderr)
+			}
+			if want := fmt.Sprintf("dialed=%s logins=%s lookups=%d", c.wantDialed, c.wantLogins, c.wantLookups); !strings.Contains(stderr, want) {
+				t.Errorf("want %q; stderr=%s", want, stderr)
+			}
+			cfg := readSessionConfig(t, cfgPath)
+			if cfg.IP != lookupGateways || cfg.Port != lookupPort || cfg.Zone != lookupZone {
+				t.Errorf("saved %s %s:%d, want the listed %s %s:%d", cfg.Zone, cfg.IP, cfg.Port, lookupZone, lookupGateways, lookupPort)
+			}
+			wantAtTime := int64(refreshedAtTime)
+			if c.wantConfigTime {
+				wantAtTime = atTime
+			}
+			if cfg.AccessToken != c.wantAt || cfg.AccessTokenTime != wantAtTime {
+				t.Errorf("saved at=%q (%d), want %q (%d)", cfg.AccessToken, cfg.AccessTokenTime, c.wantAt, wantAtTime)
+			}
+		})
+	}
+}
+
 // TestRunCrossServerTestRefreshesWhenTheRetryAfterE011CannotConnect: when the listed server refuses
 // the handed-back token (E011) and the retry there with the configured token can't reach it, the
 // E011 still stands: the run refreshes the access token with the refresh token and logs in at the

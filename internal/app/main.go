@@ -1280,8 +1280,9 @@ func (o crossServerTestOpts) GoString() string { return o.String() }
 // rationale, shared across every credential-bearing type in this codebase.
 func (o crossServerTestOpts) LogValue() slog.Value { return slog.StringValue(o.String()) }
 
-// configuredLogin is the address and access token a reconnect had before its pre-Login GSL lookup,
-// and what the lookup changed.
+// configuredLogin is what a reconnect had before a GSL lookup replaced it, and what was replaced:
+// the address before the pre-Login lookup, and the access token (with its time) before the first
+// lookup of the run that handed back another one.
 type configuredLogin struct {
 	ip, zone, accessTok          string
 	port                         int
@@ -1625,8 +1626,15 @@ func runCrossServerTest(o crossServerTestOpts) {
 	// before it connects and as a refresh's tokens are saved above: the old refresh token may be
 	// dead already, and a Login that fails afterwards must not lose the new one. Its access token
 	// goes with it (saveLookupTokens), never a typed -cs-at. A reply with only an access token
-	// reaches the session config through the save-back after a successful Login.
+	// reaches the session config through the save-back after a successful Login. The token it
+	// replaces first in the run, the session's own or the one this run's refresh issued, is kept in
+	// configured: the fallback for a Login that refuses the handed-back one, after any lookup.
 	lookupAtSaved := false
+	// configured is what the session had before a lookup replaced any of it: the fallback for a
+	// Login the looked-up address can't take or the looked-up token can't pass. Its address is the
+	// pre-Login lookup's alone; at the other sites there is no configured address, or it has just
+	// failed.
+	var configured configuredLogin
 	adoptLookup := func(srv auth.GameServer) {
 		ip, port, zone = srv.IP, srv.Port, srv.Zone
 		switch {
@@ -1634,6 +1642,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 		case o.atExplicit:
 			slog.Warn("the GSL lookup reply carries another access token; keeping the -cs-at given on the command line")
 		default:
+			if !configured.tokenChanged {
+				configured.accessTok, configured.accessTokTime, configured.tokenChanged = accessTok, accessTokTime, true
+			}
 			accessTok, accessTokTime = srv.AccessTok, srv.AccessTokTime
 		}
 		if srv.RefreshTok != "" {
@@ -1646,9 +1657,6 @@ func runCrossServerTest(o crossServerTestOpts) {
 		}
 	}
 	lookedUp := false
-	// configured is what the session had before a pre-Login lookup replaced any of it: the fallback
-	// for a Login the looked-up address can't take or the looked-up token can't pass.
-	var configured *configuredLogin
 	addressGiven := gsl.FirstHost(ip) != "" && port > 0
 	switch {
 	case lookup == nil || o.ipExplicit || o.portExplicit:
@@ -1674,18 +1682,13 @@ func runCrossServerTest(o crossServerTestOpts) {
 		if srv, err := lookup(); err != nil {
 			slog.Warn("GSL server lookup failed; logging in at the configured address", "error", err)
 		} else {
-			before := configuredLogin{ip: ip, port: port, zone: zone, accessTok: accessTok, accessTokTime: accessTokTime}
 			if !sameGameServer(srv, ip, port, zone) {
 				slog.Info("GSL lists a different game server than the configured one; logging in there", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone,
 					"configuredIP", ip, "configuredPort", port, "configuredZone", zone)
+				configured.ip, configured.port, configured.zone, configured.addressChanged = ip, port, zone, true
 			}
 			adoptLookup(srv)
 			lookedUp = true
-			before.addressChanged = !sameGameServer(srv, before.ip, before.port, before.zone)
-			before.tokenChanged = accessTok != before.accessTok
-			if before.addressChanged || before.tokenChanged {
-				configured = &before
-			}
 		}
 	}
 
@@ -1825,30 +1828,40 @@ func runCrossServerTest(o crossServerTestOpts) {
 	// failed is put back, before any other recovery. A listed address that can't be reached is
 	// replaced by the configured one, keeping the token the lookup handed back, which no server has
 	// refused yet. A server that refuses that token (E011) answered, so its address stays and the
-	// configured token is tried there: the client's E011 clears only the at and keeps the server it
-	// saved and connected to (Assembly-CSharp.decompiled.cs:13637-13641, 12812, 1.0.370). The address
-	// goes first, as a configured address that answers can still refuse the lookup's token. A
-	// refresh token the lookup rotated stays: it is the newest one, and already on disk. An access
-	// token the lookup handed back and adoptLookup saved is replaced on disk by the configured one
-	// again, so the next run doesn't start from a token this one has just seen refused.
-	if c := configured; c != nil {
-		if err != nil && c.addressChanged && connectFailed(err) {
-			slog.Warn("cross-server login: the game server the GSL lookup listed did not answer; trying the configured address", "error", err)
-			ip, port, zone = c.ip, c.port, c.zone
-			params.IP, params.Port, params.Zone = ip, port, zone
-			result, err = auth.DoCrossServerLogin(params)
-			tokenRefused = tokenRefused || errors.Is(err, session.ErrTokenRejected)
+	// token the lookup replaced is tried there: the client's E011 clears only the at and keeps the
+	// server it saved and connected to (Assembly-CSharp.decompiled.cs:13637-13641, 12812, 1.0.370).
+	// The address goes first, as a configured address that answers can still refuse the lookup's
+	// token. The token step follows any lookup that handed one back: the pre-Login one, the one with
+	// no address configured, and the one after the address stopped answering. A refresh token the
+	// lookup rotated stays: it is the newest one, and already on disk. An access token the lookup
+	// handed back and adoptLookup saved is replaced on disk by the one it replaced again, so the next
+	// run doesn't start from a token this one has just seen refused.
+	retryReplacedToken := func() {
+		if err == nil || !configured.tokenChanged || !errors.Is(err, session.ErrTokenRejected) {
+			return
 		}
-		if err != nil && c.tokenChanged && errors.Is(err, session.ErrTokenRejected) {
-			slog.Warn("cross-server login: the game server refused the access token the GSL lookup handed back (E011); trying the configured token at the same address", "error", err)
-			accessTok, accessTokTime = c.accessTok, c.accessTokTime
-			if lookupAtSaved {
-				restoreAccessToken(o.configSavePath, deviceID, accessTok, accessTokTime)
-			}
-			params.AccessTok = accessTok
-			result, err = auth.DoCrossServerLogin(params)
+		replaced := "the configured token"
+		if refreshed {
+			replaced = "the token this run's refresh issued"
 		}
+		slog.Warn("cross-server login: the game server refused the access token the GSL lookup handed back (E011); trying "+replaced+" at the same address", "error", err)
+		tokenRefused = true
+		accessTok, accessTokTime = configured.accessTok, configured.accessTokTime
+		configured.tokenChanged = false
+		if lookupAtSaved {
+			restoreAccessToken(o.configSavePath, deviceID, accessTok, accessTokTime)
+		}
+		params.AccessTok = accessTok
+		result, err = auth.DoCrossServerLogin(params)
 	}
+	if err != nil && configured.addressChanged && connectFailed(err) {
+		slog.Warn("cross-server login: the game server the GSL lookup listed did not answer; trying the configured address", "error", err)
+		ip, port, zone = configured.ip, configured.port, configured.zone
+		params.IP, params.Port, params.Zone = ip, port, zone
+		result, err = auth.DoCrossServerLogin(params)
+		tokenRefused = tokenRefused || errors.Is(err, session.ErrTokenRejected)
+	}
+	retryReplacedToken()
 	if err != nil && lookup != nil && !lookedUp && connectFailed(err) {
 		slog.Warn("cross-server login: the game server did not answer; looking it up with GSL getserverlist", "error", err)
 		if srv, lookupErr := lookup(); lookupErr != nil {
@@ -1859,6 +1872,7 @@ func runCrossServerTest(o crossServerTestOpts) {
 			adoptLookup(srv)
 			params.IP, params.Port, params.Zone, params.AccessTok = ip, port, zone, accessTok
 			result, err = auth.DoCrossServerLogin(params)
+			retryReplacedToken()
 		}
 	}
 	// On E011 the real client clears only at, refreshes it with rt, and logs in again
