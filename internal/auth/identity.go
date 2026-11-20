@@ -763,6 +763,24 @@ func availOfTotal(avail, total float64) string {
 // BuildLoginParams builds the full ~50-field sfs.SFSObject for the base SFS zone login (dossier §05 /
 // §2.3). uid is empty on a brand-new device (the server assigns one back via GSL's
 // serverList[].gameUid, which the caller should pass in as gameUid once known).
+// thinkingDataCarriers is ThinkingData's own carrier name table, keyed by getSimOperator()
+// (cn/thinkingdata/android/j.java:51-65): mainland China operators only.
+var thinkingDataCarriers = map[string]string{
+	"46000": "中国移动", "46002": "中国移动", "46007": "中国移动", "46008": "中国移动",
+	"46001": "中国联通", "46006": "中国联通", "46009": "中国联通",
+	"46003": "中国电信", "46005": "中国电信", "46011": "中国电信",
+	"46004": "中国卫通", "46020": "中国铁通",
+}
+
+// thinkingDataCarrier is the ta #carrier ThinkingData reports on Android (j.java:225-238): its
+// table's name for the SIM operator, else getSimOperatorName(), else "" (1.0.370 audit B91).
+func thinkingDataCarrier(simOperator, simOperatorName string) string {
+	if name, ok := thinkingDataCarriers[simOperator]; ok && simOperator != "" {
+		return name
+	}
+	return simOperatorName
+}
+
 func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	now := time.Now().Unix()
 	cmdBaseTime := strconv.FormatInt(now, 10)
@@ -782,8 +800,12 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// blob all agree with the aNN profile. iOS Logins carry iOS fields
 	// (idfa/idfv) instead of a build/hardware dump, so hw stays zero there.
 	var hw shumei.Hardware
+	// blobCarrier is ta #carrier: "" on iOS as before; on Android ThinkingData's own carrier name
+	// for the SIM (thinkingDataCarrier), set once hw is known.
+	var blobCarrier string
 	if !in.IOSMode {
 		hw = shumei.HardwareFor(in.DeviceID)
+		blobCarrier = thinkingDataCarrier(hw.SimOperator, hw.SimOperatorName)
 	}
 	// resVersion "0" and ta's lw_res_version "0.0" are what this client sent for months, and the
 	// server accepted them. A derived value goes into both, as in the real client's ta.
@@ -856,7 +878,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// accepts them blank, and their keys stay in case some check depends on them existing.
 	blob := analyticsBlob{
 		OS: osName, Disk: blobDisk, DeviceID: blobDeviceID,
-		OSVersion: blobOSVersion, SystemLanguage: "en", BundleID: build.PackageName, Carrier: "",
+		OSVersion: blobOSVersion, SystemLanguage: "en", BundleID: build.PackageName, Carrier: blobCarrier,
 		AppVersion: effectiveAppVersion, FPS: blobFPS, RAM: blobRAM, Simulator: false, ZoneOffset: 0,
 		Manufacturer: manufacturer, ScreenHeight: screenHeight, NetworkType: "WIFI", DeviceModel: deviceModel,
 		ScreenWidth: screenWidth, InstallTime: blobInstallTime, DeviceType: deviceType,
@@ -1021,16 +1043,15 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	p.PutUtfString("KCPMode", "0")
 	p.PutInt("forbidden_froce_merge", 1)
 	p.PutUtfString("shumeiBoxId", in.ShumeiBoxId)
-	// simOp is TelephonyManager.getSimOperator() of the ready SIM the phone's mt already names
-	// (com/sdkmanager/AppUtilManager.java:639-652; Android Assembly-CSharp.decompiled.cs:83269).
-	// simOpName stays "" until the catalog carries each phone's SIM operator name; iOS sends both
-	// empty as before.
-	simOp := ""
+	// simOp and simOpName are TelephonyManager.getSimOperator() and getSimOperatorName() of the
+	// ready SIM the phone's mt already names (com/sdkmanager/AppUtilManager.java:639-667; Android
+	// Assembly-CSharp.decompiled.cs:83269-83270). iOS sends both empty as before.
+	simOp, simOpName := "", ""
 	if !in.IOSMode {
-		simOp = hw.SimOperator
+		simOp, simOpName = hw.SimOperator, hw.SimOperatorName
 	}
 	p.PutUtfString("simOp", simOp)
-	p.PutUtfString("simOpName", "")
+	p.PutUtfString("simOpName", simOpName)
 	p.PutInt("delete_account_status", 0)
 	// Real client sent true; we now actually implement Zstd decode
 	// (packet.go), so this is both truthful and matches production. The client sends it only

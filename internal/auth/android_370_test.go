@@ -156,10 +156,16 @@ func TestBuildLoginParamsAndroid370(t *testing.T) {
 	if got := p.GetString("simOp"); got != hw.SimOperator || got == "" {
 		t.Errorf("simOp = %q, want the SIM operator %q mt names (B91)", got, hw.SimOperator)
 	}
+	if got := p.GetString("simOpName"); got != hw.SimOperatorName || got == "" {
+		t.Errorf("simOpName = %q, want the SIM operator name %q (B91)", got, hw.SimOperatorName)
+	}
 
 	var ta map[string]any
 	if err := json.Unmarshal([]byte(p.GetString("ta")), &ta); err != nil {
 		t.Fatal(err)
+	}
+	if ta["#carrier"] != hw.SimOperatorName {
+		t.Errorf("ta #carrier = %v, want ThinkingData's name for a US SIM, getSimOperatorName() %q (B91)", ta["#carrier"], hw.SimOperatorName)
 	}
 	if ta["#device_type"] != "Phone" {
 		t.Errorf("ta #device_type = %v, want Phone (B94)", ta["#device_type"])
@@ -186,7 +192,10 @@ func TestBuildLoginParamsAndroid370(t *testing.T) {
 	if s := ios.GetString("ta"); strings.Contains(s, "#device_type") || !strings.Contains(s, `"#install_time":"2000-01-01 00:00:00.000"`) {
 		t.Errorf("iOS ta changed: %s", s)
 	}
-	if ios.GetString("simOp") != "" || ios.GetString("afuid") != "" || ios.GetString("distinct_id") != "" {
+	if s := ios.GetString("ta"); !strings.Contains(s, `"#carrier":""`) {
+		t.Errorf("iOS ta #carrier changed: %s", s)
+	}
+	if ios.GetString("simOp") != "" || ios.GetString("simOpName") != "" || ios.GetString("afuid") != "" || ios.GetString("distinct_id") != "" {
 		t.Error("iOS took the Android install's values")
 	}
 }
@@ -223,5 +232,21 @@ func TestExistingAndroidIdentityInstallPredatesIt(t *testing.T) {
 	}
 	if it := ident.Android.InstallTime; !it.Before(made) || made.Sub(it) > time.Hour {
 		t.Errorf("install time %v, want minutes before the identity was made (%v)", it, made)
+	}
+}
+
+// TestThinkingDataCarrier: ta #carrier is ThinkingData's own name for a mainland-China SIM, else the
+// SIM operator name (cn/thinkingdata/android/j.java:51-65, 225-238).
+func TestThinkingDataCarrier(t *testing.T) {
+	for _, c := range []struct{ op, name, want string }{
+		{"46000", "CMCC", "中国移动"},
+		{"46011", "", "中国电信"},
+		{"310260", "T-Mobile", "T-Mobile"},
+		{"", "AT&T", "AT&T"},
+		{"", "", ""},
+	} {
+		if got := thinkingDataCarrier(c.op, c.name); got != c.want {
+			t.Errorf("thinkingDataCarrier(%q, %q) = %q, want %q", c.op, c.name, got, c.want)
+		}
 	}
 }
