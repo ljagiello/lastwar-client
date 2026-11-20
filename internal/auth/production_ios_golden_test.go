@@ -190,8 +190,9 @@ at 8 [golden-access-token]
 
 // goldenCapturedTa is a made-up ta blob in the shape of the real iOS app's (preset properties, then
 // super properties; none of these values comes from a real device), captured under an older build
-// (1.0.364/900) with the client's cached shumeiId of that time.
-const goldenCapturedTa = `{"#os":"iOS","#disk":"41.2/119.1","#device_id":"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE","#os_version":"99.1","#system_language":"pl","#bundle_id":"com.lastwar.ios","#carrier":"","#app_version":"1.0.364","#fps":120,"#ram":"1.9/5.6","#simulator":false,"#zone_offset":1,"#manufacturer":"Apple","#screen_height":2532,"#network_type":"WIFI","#device_model":"iPhone99,9","#screen_width":1170,"#install_time":"2026-01-02 03:04:05.678","lw_net":"wifi","lw_res_version":"1.0.364.1","lw_buildcode":"900","lw_line":"1","pd_dl":2,"lw_ab":"7","lw_platform":"AppStore","lw_game_session_id":"99999999-8888-7777-6666-555555555555","lw_first_launch":false,"lw_alliance_id":"made-up-alliance-id","lw_device_id":"0123456789ABCDEF0123456789ABCDEF_n3d","lw_device_level":3,"lw_main_level":25,"lw_shumei_id":"made-up-cached-shumei-id","lw_airKey":"lwDid_MDEyMzQ1Njc4OUFCQ0RFRjAxMjM0NTY3ODlBQkNERUZfbjNk","lw_version":"1.0.364","lw_power":12345678,"lw_zone":"APS783"}`
+// (1.0.364/900) with the client's cached shumeiId of that time, on server 781 (before a move to the
+// Login's 783).
+const goldenCapturedTa = `{"#os":"iOS","#disk":"41.2/119.1","#device_id":"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE","#os_version":"99.1","#system_language":"pl","#bundle_id":"com.lastwar.ios","#carrier":"","#app_version":"1.0.364","#fps":120,"#ram":"1.9/5.6","#simulator":false,"#zone_offset":1,"#manufacturer":"Apple","#screen_height":2532,"#network_type":"WIFI","#device_model":"iPhone99,9","#screen_width":1170,"#install_time":"2026-01-02 03:04:05.678","lw_net":"wifi","lw_res_version":"1.0.364.1","lw_buildcode":"900","lw_line":"1","pd_dl":2,"lw_ab":"7","lw_platform":"AppStore","lw_game_session_id":"99999999-8888-7777-6666-555555555555","lw_first_launch":false,"lw_alliance_id":"made-up-alliance-id","lw_device_id":"0123456789ABCDEF0123456789ABCDEF_n3d","lw_device_level":3,"lw_main_level":25,"lw_shumei_id":"made-up-cached-shumei-id","lw_airKey":"lwDid_MDEyMzQ1Njc4OUFCQ0RFRjAxMjM0NTY3ODlBQkNERUZfbjNk","lw_version":"1.0.364","lw_power":12345678,"lw_zone":"APS781"}`
 
 // TestProductionIOSLoginParamsGoldenCapturedTa is TestProductionIOSLoginParamsGolden for a session
 // config recorded by the 1.0.370 follow-up's cmd/pcap -session-out: a captured device with its ta,
@@ -206,8 +207,11 @@ const goldenCapturedTa = `{"#os":"iOS","#disk":"41.2/119.1","#device_id":"AAAAAA
 //   - lw_res_version: 1.0.364.1 -> this Login's resVersion (Resource.GetResVersion(), :59194-59197);
 //   - lw_shumei_id: the cached id -> the pushed one (PlayerPrefs LW_CacheShumeiDeviceId,
 //     :59119-59123);
+//   - lw_zone: APS781 -> APS783, this Login's zone (AccountCredentialManager.ServerInfo.zone,
+//     :59158, written by LoginTracking after every Login, :59189);
 //   - lw_device_id, lw_airKey: the Login's deviceId and airKey (:59121-59122), equal to the
-//     captured ones here, as the capture's deviceId is the session's.
+//     captured ones here, as the capture's deviceId is the session's
+//     (TestBuildLoginParamsReplayedTaTakesTheRunsIDsAndZone pins a capture of another one).
 func TestProductionIOSLoginParamsGoldenCapturedTa(t *testing.T) {
 	in := productionIOSLoginInput()
 	in.Device = goldenCapturedDevice()

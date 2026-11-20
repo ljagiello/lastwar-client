@@ -94,6 +94,35 @@ func TestBuildLoginParamsTaIOSFillsTheDeviceKeys(t *testing.T) {
 	}
 }
 
+// TestBuildLoginParamsReplayedTaTakesTheRunsIDsAndZone: a replayed iOS ta carries this Login's
+// deviceId and airKey (SetDeviceIdSuperProperty, Assembly-CSharp.decompiled.cs:59117-59125,
+// 1.0.370) and its zone (LoginTracking's lw_zone = AccountCredentialManager.ServerInfo.zone,
+// :59158, 59189), in place, with the key order kept. The capture was made under another deviceId
+// (as a -cs-deviceid run has) on server 781 (before a move); its Login's deviceId and airKey
+// would otherwise differ from the ta's. A Login without a serverId keeps the captured zone.
+func TestBuildLoginParamsReplayedTaTakesTheRunsIDsAndZone(t *testing.T) {
+	const captured = `{"#os":"iOS","#app_version":"1.0.370","lw_res_version":"1.0.370.1","lw_buildcode":"918",` +
+		`"lw_device_id":"made-up-captured_n3d","lw_main_level":25,"lw_shumei_id":"cached-1",` +
+		`"lw_airKey":"lwDid_bWFkZS11cC1jYXB0dXJlZF9uM2Q=","lw_version":"1.0.370","lw_zone":"APS781"}`
+	for _, tc := range []struct{ serverID, want string }{
+		{"783", `{"#os":"iOS","#app_version":"1.0.370","lw_res_version":"1.0.370.1","lw_buildcode":"918",` +
+			`"lw_device_id":"dev-1_n3d","lw_main_level":25,"lw_shumei_id":"cached-1",` +
+			`"lw_airKey":"lwDid_ZGV2LTFfbjNk","lw_version":"1.0.370","lw_zone":"APS783"}`},
+		{"", `{"#os":"iOS","#app_version":"1.0.370","lw_res_version":"1.0.370.1","lw_buildcode":"918",` +
+			`"lw_device_id":"dev-1_n3d","lw_main_level":25,"lw_shumei_id":"cached-1",` +
+			`"lw_airKey":"lwDid_ZGV2LTFfbjNk","lw_version":"1.0.370","lw_zone":"APS781"}`},
+	} {
+		in := LoginParamsInput{
+			IOSMode: true, DeviceID: "dev-1_n3d", AirKey: "lwDid_ZGV2LTFfbjNk", ServerID: tc.serverID,
+			AppVersion: "1.0.370", VersionCode: "918",
+		}
+		in.Device.Ta = captured
+		if got := BuildLoginParams(in).GetString("ta"); got != tc.want {
+			t.Errorf("serverId %q: ta =\n %s\nwant\n %s", tc.serverID, got, tc.want)
+		}
+	}
+}
+
 // TestBuildLoginParamsUnusableCapturedTaSendsTheBuiltBlob: a captured ta that isn't one JSON
 // object, or that would no longer fit an SFS string once refreshed, leaves the built blob, with a
 // warning that names no value.

@@ -795,18 +795,27 @@ type taKey struct{ key, val string }
 // Login's ta is ThinkingData's preset properties followed by the game's super properties
 // (GetTaPresetProp, :59270-59279, sent at :83072). Every other key keeps the captured value.
 //   - #app_version: the ThinkingData preset app version, the build this Login claims.
+//   - lw_zone: AccountCredentialManager.ServerInfo.zone (:59158), which LoginTracking writes
+//     after every Login (:59189): the "APS"+serverId zone this Login names (the APS prefix:
+//     :36010, 77629), as the built blob sends. A capture taken before a server move names the
+//     old one.
 //   - lw_version, lw_res_version, lw_buildcode: GameEntry.Sdk.Version, Resource.GetResVersion()
-//     and Sdk.VersionCode, which LoginTracking writes after every Login (:59190-59201).
+//     and Sdk.VersionCode, which LoginTracking writes in the same block (:59190-59201).
 //   - lw_device_id, lw_airKey, lw_shumei_id: SetDeviceIdSuperProperty writes them on entering
 //     check-version, before every Login (:9334, 59117-59125): GetDeviceUid() and
 //     GetDeviceUid_Transcoding(), the Login's own deviceId and airKey (:83092-83093), and the
 //     cached push.shumei.id value (PlayerPrefs LW_CacheShumeiDeviceId, :59119).
 //
-// An empty val keeps the captured value: this Login doesn't know it (no resVersion from
-// check-version, no shumeiId pushed yet), and the client's cache keeps the last one it had.
-func taRefresh(appVersion, versionCode, resVersion, deviceID, airKey, shumeiID string) []taKey {
+// An empty val keeps the captured value: this Login doesn't know it (no serverId, no resVersion
+// from check-version, no shumeiId pushed yet), and the client's cache keeps the last one it had.
+func taRefresh(appVersion, versionCode, resVersion, serverID, deviceID, airKey, shumeiID string) []taKey {
+	zone := ""
+	if serverID != "" {
+		zone = "APS" + serverID
+	}
 	return []taKey{
 		{"#app_version", appVersion},
+		{"lw_zone", zone},
 		{"lw_version", appVersion},
 		{"lw_res_version", resVersion},
 		{"lw_buildcode", versionCode},
@@ -1007,7 +1016,7 @@ func BuildLoginParams(in LoginParamsInput) *sfs.SFSObject {
 	// rewrites per build or per Login taken from this one (taRefresh). A captured blob this can't
 	// use leaves the one built above.
 	if dev.Ta != "" {
-		refresh := taRefresh(effectiveAppVersion, effectiveVersionCode, in.ResVersion, in.DeviceID, in.AirKey, in.ShumeiID)
+		refresh := taRefresh(effectiveAppVersion, effectiveVersionCode, in.ResVersion, in.ServerID, in.DeviceID, in.AirKey, in.ShumeiID)
 		switch replayed, err := replayTa(dev.Ta, refresh); {
 		case err != nil:
 			slog.Warn("ta: the session config's captured ta can't be replayed; sending the built blob. Recapture with cmd/pcap -session-out", "error", err)
