@@ -354,7 +354,8 @@ func handleInteractiveLine(conn *session.GameConn, line string) {
 	// loginKey/accessToken/airKey/shumeiBoxId in cleartext. StringRedacted masks those fields
 	// (see sfsobject.go) instead of dumping everything raw.
 	slog.Info("sending command", "cmd", cmd, "params", params.StringRedacted())
-	if err := conn.SendExtension(cmd, params); err != nil {
+	id, err := conn.SendExtensionID(cmd, params)
+	if err != nil {
 		// See interactiveShuttingDown's own doc comment: a send failure caused by RunInteractive's
 		// own signal-handling goroutine already closing this connection is an expected side effect
 		// of that shutdown, not a new dead-connection discovery -- return quietly instead of racing
@@ -378,7 +379,8 @@ func handleInteractiveLine(conn *session.GameConn, line string) {
 		os.Exit(1)
 	}
 
-	msg, err := session.WaitForCmd(conn, session.DefaultCmdTimeout, cmd, "push."+cmd)
+	// WaitForReply skips a late reply to an earlier command whose wait timed out (paired by _id).
+	msg, err := session.WaitForReply(conn, session.DefaultCmdTimeout, id, cmd, "push."+cmd)
 	if err != nil {
 		// Same net.Error/Timeout() distinction round 21 applied at 6+ other call sites
 		// (buildings.go, mail.go, visitors.go, alliance.go) -- and that's already honored two

@@ -86,19 +86,25 @@ func sendAllianceDonation(conn *session.GameConn, t *allianceTech) (*session.Ext
 	params := sfs.NewSFSObject()
 	params.PutInt("scienceId", t.id)
 	params.PutInt("option", 1)
-	if err := conn.SendExtension(allianceDonateCmd, params); err != nil {
+	id, err := conn.SendExtensionID(allianceDonateCmd, params)
+	if err != nil {
 		wrapped := session.SendStageError{Err: err}
 		slog.Error(label+" send failed", "cmd", allianceDonateCmd, "error", wrapped)
 		return nil, wrapped
 	}
 	var reply *session.ExtensionMessage
-	_, err := session.WaitFor(conn, session.DefaultCmdTimeout, func(e *session.Envelope) bool {
+	_, err = session.WaitFor(conn, session.DefaultCmdTimeout, func(e *session.Envelope) bool {
 		msg, ok := e.AsExtension()
 		if !ok {
 			return false
 		}
 		switch msg.Cmd {
 		case allianceDonateCmd:
+			// A late reply to an earlier donation whose wait timed out is not this one's (the
+			// client pairs replies by _id, Assembly-CSharp.decompiled.cs:82052-82056).
+			if session.StaleReply(msg, id) {
+				return false
+			}
 			reply = msg
 			return true
 		case allianceSciencePushCmd, allianceSciencePushUpdateCmd:

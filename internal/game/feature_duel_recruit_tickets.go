@@ -687,19 +687,23 @@ func newDuelSpendGuard(conn *session.GameConn, in *Init, feature string) (*duelS
 // exchange sends cmd and waits for its reply, passing every message read meanwhile to observe.
 // The error is only a send or wait failure; an errorCode reply is returned as is.
 func (g *duelSpendGuard) exchange(label, cmd string, params *sfs.SFSObject) (*session.ExtensionMessage, error) {
-	if err := g.conn.SendExtension(cmd, params); err != nil {
+	id, err := g.conn.SendExtensionID(cmd, params)
+	if err != nil {
 		wrapped := session.SendStageError{Err: err}
 		slog.Error(label+" send failed", "cmd", cmd, "error", wrapped)
 		return nil, wrapped
 	}
 	var reply *session.ExtensionMessage
-	_, err := session.WaitFor(g.conn, session.DefaultCmdTimeout, func(e *session.Envelope) bool {
+	_, err = session.WaitFor(g.conn, session.DefaultCmdTimeout, func(e *session.Envelope) bool {
 		msg, ok := e.AsExtension()
 		if !ok {
 			return false
 		}
 		g.observe(msg, cmd)
-		if msg.Cmd == cmd {
+		// A late reply to an earlier request whose wait timed out is still observed (its balances
+		// are the server's), but it is not this request's reply (paired by _id,
+		// Assembly-CSharp.decompiled.cs:82052-82056).
+		if msg.Cmd == cmd && !session.StaleReply(msg, id) {
 			reply = msg
 			return true
 		}

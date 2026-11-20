@@ -361,12 +361,14 @@ func fwBlockParams(r fwBlockRequest, serverID int64, first bool, now time.Time) 
 // UIFireworkGiftGotShowItemRender.lua:86), while SendAndWait logs every successful reply in full.
 // code is the reply's errorCode ("" for none); err is a send or wait failure.
 func fwRequest(conn *session.GameConn, label, cmd string, params *sfs.SFSObject) (*sfs.SFSObject, string, error) {
-	if err := conn.SendExtension(cmd, params); err != nil {
+	id, err := conn.SendExtensionID(cmd, params)
+	if err != nil {
 		wrapped := session.SendStageError{Err: err}
 		slog.Error(label+" send failed", "cmd", cmd, "error", wrapped)
 		return nil, "", wrapped
 	}
-	msg, err := session.WaitForCmd(conn, session.DefaultCmdTimeout, cmd)
+	// WaitForReply skips a late reply to an earlier request of cmd whose wait timed out.
+	msg, err := session.WaitForReply(conn, session.DefaultCmdTimeout, id, cmd)
 	if err != nil {
 		slog.Error(label+" no response", "cmd", cmd, "error", err)
 		return nil, "", err
