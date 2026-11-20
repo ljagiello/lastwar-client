@@ -21,7 +21,8 @@ import (
 // capture, checks that the server accepted it, and writes the reconnect credentials it carried
 // (accessToken, shumeiBoxId, deviceId, gameUid, zone, game server ip/port, iOS-vs-Android) as the
 // session config JSON that lastwar-client auto-loads. From an iOS capture it also records the
-// Login's device fields (phone_model, osVersion, mt, idfv, ...), which an iOS reconnect replays.
+// Login's device fields (phone_model, osVersion, mt, idfv, ..., and the ta blob), which an iOS
+// reconnect replays, and from any capture the shumeiId the client caches (capturedShumeiID).
 // This is the whole recovery procedure for the ec=28/E011 "token rotated" failure (README,
 // "Recognizing an expired token"): capture the real app logging in, run this, copy the file into
 // place.
@@ -126,8 +127,8 @@ func runSessionOut(in string, stream int, clientStr, path string) error {
 	fmt.Printf("stream %d: wrote session config to %s (mode 0600)\n", found[0], path)
 	fmt.Printf("  ip=%s port=%d zone=%s iosMode=%t appVersion=%s versionCode=%s\n",
 		cfg.IP, cfg.Port, cfg.Zone, cfg.IOSMode, cfg.AppVersion, cfg.VersionCode)
-	fmt.Printf("  gameUid (%d chars), deviceId (%d chars), shumeiBoxId (%d chars), accessToken (%d chars) -- values not shown\n",
-		len(cfg.GameUid), len(cfg.DeviceID), len(cfg.ShumeiBoxId), len(cfg.AccessToken))
+	fmt.Printf("  gameUid (%d chars), deviceId (%d chars), shumeiBoxId (%d chars), shumeiId (%d chars), accessToken (%d chars) -- values not shown\n",
+		len(cfg.GameUid), len(cfg.DeviceID), len(cfg.ShumeiBoxId), len(cfg.ShumeiID), len(cfg.AccessToken))
 	if cfg.IOSMode {
 		fmt.Printf("  device fields recorded for the Login to replay: %s -- values not shown\n", strings.Join(capturedDeviceFields(cfg.Device), ", "))
 	}
@@ -149,9 +150,11 @@ func acceptedLogin(c2s, s2c []byte) (*app.SessionConfig, string) {
 		return nil, ""
 	}
 	var resp *sfs.SFSObject
-	for _, obj := range decodeAll(s2c) {
+	server := decodeAll(s2c)
+	afterReply := len(server)
+	for i, obj := range server {
 		if isLogin(obj) {
-			resp = sfsObject(obj, "p")
+			resp, afterReply = sfsObject(obj, "p"), i+1
 		}
 	}
 	if resp == nil {
@@ -179,6 +182,7 @@ func acceptedLogin(c2s, s2c []byte) (*app.SessionConfig, string) {
 	if cfg.IOSMode {
 		cfg.Device = capturedDevice(params)
 	}
+	cfg.ShumeiID = capturedShumeiID(server[afterReply:], params.GetString("ta"))
 	// shumeiBoxId is copied when present but not required: a reconnect with it empty was accepted
 	// live (2026-10-04).
 	var missing []string
@@ -197,9 +201,9 @@ func acceptedLogin(c2s, s2c []byte) (*app.SessionConfig, string) {
 
 // capturedDevice records what an iOS Login said about its device, for the next Login to replay
 // (auth.CapturedDevice; the 1.0.370 client asks Unity and native code for each one, LoginMessage
-// .CSSetData, Assembly-CSharp.decompiled.cs:83053-83185). Only an iOS capture is recorded: an
-// Android Login's device fields come from the hardware profile its deviceId selects. The ta blob
-// is not recorded (see auth.CapturedDevice).
+// .CSSetData, Assembly-CSharp.decompiled.cs:83053-83185), its ta blob included (:83072). Only an
+// iOS capture is recorded: an Android Login's device fields come from the hardware profile its
+// deviceId selects.
 func capturedDevice(params *sfs.SFSObject) auth.CapturedDevice {
 	return auth.CapturedDevice{
 		PhoneModel:  params.GetString("phone_model"),
@@ -212,17 +216,56 @@ func capturedDevice(params *sfs.SFSObject) auth.CapturedDevice {
 		PhoneScreen: params.GetString("phone_screen"),
 		Afuid:       params.GetString("afuid"),
 		FirebaseID:  params.GetString("firebaseId"),
+		Ta:          params.GetString("ta"),
 	}
 }
 
+// pushShumeiID is the server push that hands the client its ShuMei id after the Login.
+const pushShumeiID = "push.shumei.id"
+
+// capturedShumeiID is the shumeiId the captured client will report as ta lw_shumei_id in its next
+// Login: the last push.shumei.id the server sent after the Login reply (server holds those
+// messages), which the client caches when it carries no errorCode and a non-empty shumeiId
+// (Net/Msgs/PushShumeiIdMessage.lua:10-18). Without one, the captured Login's own ta lw_shumei_id,
+// the id the client had cached before (Assembly-CSharp.decompiled.cs:59117-59125).
+func capturedShumeiID(server []*sfs.SFSObject, ta string) string {
+	id := ""
+	for _, obj := range server {
+		if obj.GetLong("c") != 1 { // the extension controller
+			continue
+		}
+		msg := sfsObject(obj, "p")
+		if msg == nil || msg.GetString("c") != pushShumeiID {
+			continue
+		}
+		params := sfsObject(msg, "p")
+		if params == nil || params.Has("errorCode") {
+			continue
+		}
+		if v := params.GetString("shumeiId"); v != "" {
+			id = v
+		}
+	}
+	if id != "" {
+		return id
+	}
+	var blob struct {
+		ShumeiID string `json:"lw_shumei_id"`
+	}
+	if json.Unmarshal([]byte(ta), &blob) == nil {
+		return blob.ShumeiID
+	}
+	return ""
+}
+
 // capturedDeviceFields names the captured device fields that are set, for the summary line; their
-// values are never printed (idfv, distinct_id, afuid and firebaseId identify the device).
+// values are never printed (idfv, distinct_id, afuid, firebaseId and ta identify the device).
 func capturedDeviceFields(d auth.CapturedDevice) []string {
 	var names []string
 	for _, f := range []struct{ name, v string }{
 		{"phone_model", d.PhoneModel}, {"osVersion", d.OSVersion}, {"mt", d.HandSetInfo}, {"idfv", d.Idfv},
 		{"distinct_id", d.DistinctID}, {"fromCountry", d.FromCountry}, {"lang", d.Lang},
-		{"phone_screen", d.PhoneScreen}, {"afuid", d.Afuid}, {"firebaseId", d.FirebaseID},
+		{"phone_screen", d.PhoneScreen}, {"afuid", d.Afuid}, {"firebaseId", d.FirebaseID}, {"ta", d.Ta},
 	} {
 		if f.v != "" {
 			names = append(names, f.name)
@@ -272,10 +315,65 @@ func decodeAll(data []byte) []*sfs.SFSObject {
 	}
 }
 
-// writeSessionConfig writes cfg as indented JSON with 0600 permissions, tightening an existing
-// file's mode too since it now holds a live access token.
+// capturedKeys are the session config keys a capture owns: -session-out writes each one the
+// capture has and removes each one it lacks (an Android capture's device, a capture without a
+// shumeiId), since a value left from an older session would describe another Login.
+var capturedKeys = []string{
+	"ip", "port", "zone", "gameUid", "deviceId", "shumeiBoxId", "accessToken", "iosMode",
+	"appVersion", "versionCode", "device", "shumeiId",
+}
+
+// mergedSessionConfig is cfg laid over the session config already at path, so a recapture keeps
+// every key it doesn't write: the features, the duel policy, the ShuMei install, and keys
+// SessionConfig doesn't model. Two kept keys describe what the capture replaces, so they go with
+// it: accessTokenTime with an access token the capture changes (a time 0 is never stale,
+// gsl.ChooseOpt), and the refresh token and its time with a deviceId the capture changes (they
+// were issued to the old device, as configRefreshToken in internal/app has it). No file, or an
+// empty one, is a fresh config; anything else that isn't a JSON object is an error, so it is not
+// written over.
+func mergedSessionConfig(path string, cfg *app.SessionConfig) ([]byte, error) {
+	captured, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(captured, &fields); err != nil {
+		return nil, err
+	}
+	merged := map[string]json.RawMessage{}
+	old, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+	case err != nil:
+		return nil, err
+	case len(bytes.TrimSpace(old)) > 0:
+		var before app.SessionConfig
+		if json.Unmarshal(old, &merged) != nil || merged == nil || json.Unmarshal(old, &before) != nil {
+			return nil, fmt.Errorf("%s exists but is not a session config (a JSON object); move it away or fix it, so its keys aren't lost", path)
+		}
+		if before.AccessToken != cfg.AccessToken {
+			delete(merged, "accessTokenTime")
+		}
+		if before.DeviceID != cfg.DeviceID {
+			delete(merged, "refreshToken")
+			delete(merged, "refreshTokenTime")
+		}
+	}
+	for _, k := range capturedKeys {
+		if v, ok := fields[k]; ok {
+			merged[k] = v
+		} else {
+			delete(merged, k)
+		}
+	}
+	return json.MarshalIndent(merged, "", "  ")
+}
+
+// writeSessionConfig writes cfg over the session config at path (mergedSessionConfig) as indented
+// JSON with 0600 permissions, tightening an existing file's mode too since it now holds a live
+// access token.
 func writeSessionConfig(path string, cfg *app.SessionConfig) error {
-	b, err := json.MarshalIndent(cfg, "", "  ")
+	b, err := mergedSessionConfig(path, cfg)
 	if err != nil {
 		return err
 	}
