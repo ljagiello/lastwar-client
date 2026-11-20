@@ -16,6 +16,14 @@ import (
 
 const rpRoom = "alliance_321_al1"
 
+// No game test may reach the real chat servers (rule 1): the default reader fails loudly unless a
+// test replaces it (withRPChat).
+func init() {
+	chatRead = func(chat.Identity, chat.Options) (*chat.Result, error) {
+		return nil, errors.New("test: the real chat reader is not reachable from the game tests")
+	}
+}
+
 // rpInit is an Init in alliance al1 on server 321 with own uid "me" and a chatToken; edit tweaks
 // the raw init and user.
 func rpInit(edit func(raw, user *sfs.SFSObject)) *Init {

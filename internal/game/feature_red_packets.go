@@ -51,6 +51,11 @@ import (
 //     RedPacketManager:GetIsReceive counts every own packet as received (RedPacketManager.lua:
 //     103-115), and skipping is the safe reading.
 //
+// red_pocket_config.k2 (HQ 4) is not checked: only the bag's send path reads it
+// (RedPacketManager:GetIsOpen, called from UILWBagMainCtrl.lua:896); the card and the window have
+// no level check. Opening a packet scores in no Alliance Duel row (table score, 40413, has no
+// red-packet type, and no row's value is a red_packet goods id), so neither feature declares Duel.
+//
 // At most red_pocket_config.k1 (10; item table, 40413) packets a run, one a second, the one that
 // expires first first. errorCode 400600 is that daily cap (OpenRedPacketMessage.lua:13-19): the
 // run stops claiming, without an error. Any other errorCode stops the run's claims with an error;

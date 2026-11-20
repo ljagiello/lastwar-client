@@ -1,10 +1,12 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"slices"
@@ -86,6 +88,7 @@ func TestReadJoinsTheAllianceRoomReadsHistoryAndKeepsOnlyTargetPosts(t *testing.
 		}
 		return jsonResponse(200, testLinksOK), nil
 	}
+	logs := captureLog(t)
 	dial, servers := fakeDial(t, fullScript)
 	var dialled string
 	opt := testOptions(rt, func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -138,6 +141,21 @@ func TestReadJoinsTheAllianceRoomReadsHistoryAndKeepsOnlyTargetPosts(t *testing.
 		t.Errorf("pongs %d (want 1, the ping answered), close frame sent %v", pongs, closed)
 	}
 
+	out := logs.String()
+	for _, want := range []string{
+		`msg="chat: history page shape" msgs=4 msgKeys="[extra group msg roomId sender seqId serverTime]" extraKeys=[post] postCounts=0:1,600:1,611:1,693:1 withoutPost=0`,
+		`msg="chat: first frame of its kind" cmd=history.roomsv2 keys="[cmd result]" resultKeys=[rooms]`,
+		`msg="chat: discovery reply" code=1 lines=1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("logs lack %s:\n%s", want, out)
+		}
+	}
+	for _, leak := range []string{"hello", testChatTokn, "u3", "415a811ec14c5711533d090baa17513e"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("logs carry %q", leak)
+		}
+	}
 	if res.RoomID != testRoom || !res.Granted || res.HistoryMsgs != 4 || res.Pushes != 2 || res.OldestMs != 1763499000000 {
 		t.Errorf("result %+v", *res)
 	}
@@ -300,6 +318,18 @@ func TestSynPermissionModeWaitsForTheGrantAndNeverJoins(t *testing.T) {
 	}
 }
 
+func TestSynPermissionModeReportsAnotherLogin(t *testing.T) {
+	dial, _ := fakeDial(t, func(s *fakeServer) {
+		s.sendJSON(`{"cmd":"login.success","data":{"uid":"812345678901"}}`)
+		s.sendJSON(`{"cmd":"another.login"}`)
+	})
+	opt := testOptions(linksOK, dial)
+	opt.SynPermission = true
+	if res, err := Read(testIdentity(), opt); err == nil || res != nil {
+		t.Errorf("got %+v, %v; another.login while waiting for the grant is an error, not \"no grant\"", res, err)
+	}
+}
+
 func TestSynPermissionModeWithoutAGrantReadsNothing(t *testing.T) {
 	dial, servers := fakeDial(t, func(s *fakeServer) {
 		s.sendJSON(`{"cmd":"login.success","data":{"uid":"812345678901"}}`)
@@ -392,4 +422,14 @@ func TestDecodeFrameKeepsUnknownFrames(t *testing.T) {
 	if json.Unmarshal(f.raw["result"], &r) != nil || len(r) != 1 {
 		t.Errorf("result %s", f.raw["result"])
 	}
+}
+
+// captureLog routes slog to a buffer for one test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	return &buf
 }

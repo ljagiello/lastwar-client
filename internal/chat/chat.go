@@ -297,8 +297,12 @@ func (r *reader) run() error {
 		return err
 	}
 	if r.opt.SynPermission {
-		if !r.awaitGrant() {
-			slog.Info("chat: room_join_control is on and the server granted no alliance room in time; reading nothing")
+		granted, err := r.awaitGrant()
+		if err != nil {
+			return err
+		}
+		if !granted {
+			slog.Info("chat: room_join_control is on and the server granted no alliance room; reading nothing")
 			return nil
 		}
 	} else {
@@ -426,17 +430,22 @@ func (r *reader) await(cmd string) (*frame, error) {
 	}
 }
 
-// awaitGrant waits for push.room.synPermission granting the alliance room.
-func (r *reader) awaitGrant() bool {
+// awaitGrant waits for push.room.synPermission granting the alliance room. granted is false with
+// a nil error when the step wait runs out or the server denies the room (auth false); a closed
+// connection or another.login is an error.
+func (r *reader) awaitGrant() (granted bool, err error) {
 	until := time.Now().Add(r.opt.StepWait)
 	for {
 		f, err := r.next(until)
+		if errors.Is(err, errTimeout) {
+			return false, nil
+		}
 		if err != nil {
-			return false
+			return false, err
 		}
 		if f.cmd != pushSynPerm {
-			if r.push(f) != nil {
-				return false
+			if err := r.push(f); err != nil {
+				return false, err
 			}
 			continue
 		}
@@ -456,13 +465,13 @@ func (r *reader) awaitGrant() bool {
 			continue
 		}
 		if !g.Auth {
-			return false
+			return false, nil
 		}
 		if g.RoomID != r.room {
 			slog.Info("chat: the server granted another alliance room id than the derived one; reading the granted room")
 			r.room, r.res.RoomID = g.RoomID, g.RoomID
 		}
-		return true
+		return true, nil
 	}
 }
 
@@ -518,10 +527,13 @@ func (r *reader) history(f *frame) {
 		slog.Warn("chat: history reply without a readable result", "error", err)
 		return
 	}
+	rooms := make([]string, 0, len(res.Rooms))
 	for _, room := range res.Rooms {
+		rooms = append(rooms, room.RoomID)
 		if room.RoomID != r.room {
 			continue
 		}
+		r.logHistoryShape(room.Msgs)
 		for _, m := range room.Msgs {
 			r.res.HistoryMsgs++
 			if t := msgTimeMs(m); t > 0 && (r.res.OldestMs == 0 || t < r.res.OldestMs) {
@@ -530,6 +542,45 @@ func (r *reader) history(f *frame) {
 			r.keep(m, false)
 		}
 	}
+	if !slices.Contains(rooms, r.room) {
+		slog.Info("chat: history reply without the alliance room", "rooms", len(rooms))
+	}
+}
+
+// logHistoryShape logs, once, what the history page's messages look like: the first message's
+// keys and its extra's keys, and a count per extra.post. No values: the messages are other
+// players' names and text. A live run that keeps no post can then tell an empty room from a field
+// name this reader gets wrong.
+func (r *reader) logHistoryShape(msgs []map[string]json.RawMessage) {
+	if r.logged["history-shape"] {
+		return
+	}
+	r.logged["history-shape"] = true
+	args := []any{"msgs", len(msgs)}
+	if len(msgs) > 0 {
+		args = append(args, "msgKeys", slices.Sorted(maps.Keys(msgs[0])))
+		var extra map[string]json.RawMessage
+		if json.Unmarshal(msgs[0]["extra"], &extra) == nil && extra != nil {
+			args = append(args, "extraKeys", slices.Sorted(maps.Keys(extra)))
+		}
+	}
+	posts := map[int64]int{}
+	noPost := 0
+	for _, m := range msgs {
+		var extra map[string]json.RawMessage
+		_ = json.Unmarshal(m["extra"], &extra)
+		if p, ok := num(extra["post"]); ok {
+			posts[p]++
+		} else {
+			noPost++
+		}
+	}
+	parts := make([]string, 0, len(posts))
+	for _, p := range slices.Sorted(maps.Keys(posts)) {
+		parts = append(parts, strconv.FormatInt(p, 10)+":"+strconv.Itoa(posts[p]))
+	}
+	args = append(args, "postCounts", strings.Join(parts, ","), "withoutPost", noPost)
+	slog.Info("chat: history page shape", args...)
 }
 
 // keep records m when it is a kept post. An update push carries the message again
