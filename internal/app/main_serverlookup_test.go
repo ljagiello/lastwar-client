@@ -741,6 +741,45 @@ func TestRunCrossServerTestNoLookupWithExplicitAddress(t *testing.T) {
 	}
 }
 
+// TestRunCrossServerTestNoRetryAtAServerWithoutTheRole: when the configured address can't be
+// reached and the retry lookup lists only a server that doesn't carry the role's gameUid (GSL's
+// lastLoggedServer or first entry), the Login is not retried there, and the run fails as before.
+func TestRunCrossServerTestNoRetryAtAServerWithoutTheRole(t *testing.T) {
+	if os.Getenv("LASTWAR_TEST_HELPER_PROCESS") == "1" {
+		t.Setenv("HOME", t.TempDir())
+		other := gsl.LoginServerListRespon{
+			Code:       "0",
+			ServerList: []gsl.LoginServerInfo{{ID: "901", IP: "other.example", Port: testutil.FlexPort(10901), Zone: "APS901"}},
+		}
+		client := testutil.UseInMemoryGSL(t, gsl.LoginServerListRespon{Code: "500"}, other)
+		runCrossServerTest(crossServerTestOpts{
+			ip: "10.0.0.1", port: 17783, zone: lookupZone, gameUid: lookupGameUid, at: "at-1",
+			configSavePath: t.TempDir() + "/session.json", httpClient: client,
+			dialGame: func(addr string, _ time.Duration) (*session.GameConn, error) {
+				fmt.Fprintf(os.Stderr, "dial %s\n", addr)
+				return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+			},
+		})
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunCrossServerTestNoRetryAtAServerWithoutTheRole$")
+	cmd.Env = append(os.Environ(), "LASTWAR_TEST_HELPER_PROCESS=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	if exitErr, ok := runErr.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("subprocess err = %v, want exit 1; stderr=%s", runErr, stderr.String())
+	}
+	log := stderr.String()
+	if !strings.Contains(log, "without this role's gameUid; not retrying there") {
+		t.Errorf("want the not-retrying warning; stderr=%s", log)
+	}
+	if strings.Contains(log, "dial other.example") || strings.Count(log, "dial 10.0.0.1:17783") != 1 {
+		t.Errorf("want one dial of the configured address and none of other.example; stderr=%s", log)
+	}
+}
+
 // TestRunCrossServerTestLooksUpAfterUnreachableAddress: when the configured address refuses every
 // dial, or accepts the connection but never answers the Login (the August 2026 port move), and the
 // pre-Login lookup had failed, one more GSL lookup finds the current server, the Login is retried

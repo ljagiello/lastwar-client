@@ -1891,6 +1891,9 @@ func runCrossServerTest(o crossServerTestOpts) {
 			slog.Warn("GSL server lookup failed; reporting the original login error", "error", lookupErr)
 		} else if sameGameServer(srv, ip, port, zone) {
 			slog.Warn("GSL lists the game server that just failed; not retrying")
+		} else if !srv.RoleNamed {
+			// As before the Login: an entry without this role's gameUid is not the role's server.
+			slog.Warn("GSL lists a game server without this role's gameUid; not retrying there", "ip", srv.IP, "port", srv.Port, "zone", srv.Zone)
 		} else {
 			adoptLookup(srv)
 			params.IP, params.Port, params.Zone, params.AccessTok = ip, port, zone, accessTok
