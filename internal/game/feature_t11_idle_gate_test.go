@@ -21,7 +21,9 @@ func t11OpenInit(switches ...string) *Init {
 func t11GateInit(campLevel int32, season int32, seasonDay int, switches ...string) *Init {
 	in := evAllianceInit(switches...)
 	if campLevel > 0 {
-		in.Buildings = append(in.Buildings, NewTestBuilding(2, t11MilitaryCampID, campLevel-1), NewTestBuilding(3, t11MilitaryCampID, campLevel))
+		// LW_BUILD_MILITARY_CAMP = 10103000 (Global/EnumType.lua:3655); a literal, so a wrong
+		// t11MilitaryCampID fails the gate tests.
+		in.Buildings = append(in.Buildings, NewTestBuilding(2, 10103000, campLevel-1), NewTestBuilding(3, 10103000, campLevel))
 	}
 	if season >= 0 {
 		p := sfs.NewSFSObject()

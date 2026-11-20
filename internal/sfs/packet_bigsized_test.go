@@ -49,8 +49,10 @@ func TestEncodePacketBigSizedThresholdExactBoundary(t *testing.T) {
 		bodyLen     int
 		wantBigSize bool
 	}{
-		{"exactly at cap", shortLengthMax, false},
-		{"one byte over cap", shortLengthMax + 1, true},
+		// Literals (byteArray.Length > 65535, BaseUtils.decompiled.cs:33552-33555), so a wrong
+		// shortLengthMax fails here.
+		{"exactly at cap", 65535, false},
+		{"one byte over cap", 65536, true},
 		{"compresses far below the cap", 70000, true},
 	}
 	for _, tt := range tests {

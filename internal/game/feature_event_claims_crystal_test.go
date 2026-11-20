@@ -40,6 +40,13 @@ func crystalBossFake(t *testing.T, marchID string, progressSeason int32, replyID
 	return fake, func(in *Init) error { return runEventClaims(conn, in) }
 }
 
+// The client's achievement types, CrystalBossAchievementDefine.Type = {Damage = 1, AttackCount = 2}
+// (CrystalBossAchievementDefine.lua:2). Literals, so a wrong redBossAchievement* constant fails.
+const (
+	crystalTypeDamage int32 = 1
+	crystalTypeAttack int32 = 2
+)
+
 func crystalBossTask(typ, id, state, season int32) *sfs.SFSObject {
 	o := sfs.NewSFSObject()
 	o.PutInt("type", typ)
@@ -155,7 +162,7 @@ func TestCrystalBossUsesTheMarchReplysActivityID(t *testing.T) {
 	}
 
 	tasks := sfs.NewSFSArray()
-	tasks.AddSFSObject(crystalBossTask(redBossAchievementDamage, 1, 1, -1))
+	tasks.AddSFSObject(crystalBossTask(crystalTypeDamage, 1, 1, -1))
 	fake, run = crystalBossFake(t, "777", 0, "", tasks)
 	if err := run(crystalBossInit(30, evActivity(80152), 0)); err != nil {
 		t.Fatal(err)
@@ -199,13 +206,13 @@ func TestCrystalBossSeasonAndActivityFilters(t *testing.T) {
 	}{
 		{"progress of another season", 6, "", nil, nil},
 		{"progress of the account's season", 7, "", nil, []int32{1}},
-		{"attack task of another season", 6, "", one(crystalBossTask(redBossAchievementAttack, 3, 1, 6)), nil},
-		{"attack task of this season", 6, "", one(crystalBossTask(redBossAchievementAttack, 3, 1, 7)), []int32{2}},
-		{"damage task, any season", 6, "", one(crystalBossTask(redBossAchievementDamage, 3, 1, -1)), []int32{2}},
+		{"attack task of another season", 6, "", one(crystalBossTask(crystalTypeAttack, 3, 1, 6)), nil},
+		{"attack task of this season", 6, "", one(crystalBossTask(crystalTypeAttack, 3, 1, 7)), []int32{2}},
+		{"damage task, any season", 6, "", one(crystalBossTask(crystalTypeDamage, 3, 1, -1)), []int32{2}},
 		{"unknown task type", 6, "", one(crystalBossTask(5, 3, 1, 7)), nil},
-		{"task without an id", 6, "", one(crystalBossTask(redBossAchievementDamage, 0, 1, -1)), nil},
-		{"reply for another activity", 6, "999", one(crystalBossTask(redBossAchievementDamage, 3, 1, -1)), nil},
-		{"reply naming this activity", 6, "80152", one(crystalBossTask(redBossAchievementDamage, 3, 1, -1)), []int32{2}},
+		{"task without an id", 6, "", one(crystalBossTask(crystalTypeDamage, 0, 1, -1)), nil},
+		{"reply for another activity", 6, "999", one(crystalBossTask(crystalTypeDamage, 3, 1, -1)), nil},
+		{"reply naming this activity", 6, "80152", one(crystalBossTask(crystalTypeDamage, 3, 1, -1)), []int32{2}},
 	} {
 		fake, run := crystalBossFake(t, "80152", c.progress, c.replyID, c.tasks)
 		if err := run(crystalBossInit(30, evActivity(80152), 7)); err != nil {

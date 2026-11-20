@@ -111,13 +111,14 @@ func TestEncodeRequestPacketForwardSid(t *testing.T) {
 // TestEncodeRequestPacketSizeLimit: the client refuses a message body over 1,000,000 bytes before
 // compressing it (BaseUtils.decompiled.cs:33548-33551), however small it would compress.
 func TestEncodeRequestPacketSizeLimit(t *testing.T) {
-	if _, err := EncodeRequestPacket(make([]byte, MaxRequestBodySize), false, 0); err != nil {
-		t.Errorf("EncodeRequestPacket(%d bytes) = %v, want the frame", MaxRequestBodySize, err)
+	const clientMax = 1000000 // a literal, so a wrong MaxRequestBodySize fails here
+	if _, err := EncodeRequestPacket(make([]byte, clientMax), false, 0); err != nil {
+		t.Errorf("EncodeRequestPacket(%d bytes) = %v, want the frame", clientMax, err)
 	}
-	if _, err := EncodeRequestPacket(make([]byte, MaxRequestBodySize+1), false, 0); err == nil {
-		t.Errorf("EncodeRequestPacket(%d bytes) = nil error, want the client's size limit", MaxRequestBodySize+1)
+	if _, err := EncodeRequestPacket(make([]byte, clientMax+1), false, 0); err == nil {
+		t.Errorf("EncodeRequestPacket(%d bytes) = nil error, want the client's size limit", clientMax+1)
 	}
-	if _, err := EncodePacket(make([]byte, MaxRequestBodySize+1)); err != nil {
-		t.Errorf("EncodePacket(%d bytes) = %v; it frames test server frames and has no send limit", MaxRequestBodySize+1, err)
+	if _, err := EncodePacket(make([]byte, clientMax+1)); err != nil {
+		t.Errorf("EncodePacket(%d bytes) = %v; it frames test server frames and has no send limit", clientMax+1, err)
 	}
 }

@@ -37,6 +37,8 @@ func TestGrayPercent(t *testing.T) {
 		"test-device":                          32,
 		"device-12_n3d":                        1,
 		"device-21_n3d":                        4,
+		"device-112_n3d":                       5,
+		"device-38_n3d":                        6,
 	} {
 		if got := GrayPercent(in); got != want {
 			t.Errorf("GrayPercent(%q) = %d, want %d", in, got, want)
@@ -57,6 +59,8 @@ func TestCheckVersionHostsFor(t *testing.T) {
 	}{
 		{"device-21_n3d", true},                         // bucket 4
 		{"device-12_n3d", true},                         // bucket 1
+		{"device-112_n3d", true},                        // bucket 5: the client's bound is <= 5.0
+		{"device-38_n3d", false},                        // bucket 6
 		{"0123456789ABCDEF0123456789ABCDEF_n3d", false}, // bucket 97
 		{"", false},
 	}
